@@ -138,6 +138,14 @@ maintained initially.
 - Release: high optimization, dead-code elimination, LTO where appropriate,
   vectorization and size/memory optimization without altering guarantees.
 
+**Current implementation status:** object emission exposes explicit LLVM
+optimization levels (`None`, `Less`, `Default`, `Aggressive`) for experiments,
+while the CLI compilation path still selects `None`. The optimized levels are
+not release defaults: parity and representative performance gates must pass
+before changing that policy. This distinction is intentional; the target
+policy above describes the desired backend behavior, not a claim that the
+current CLI already applies it.
+
 Inline textual assembly is not implemented. Zirk offers portable intrinsics and
 SIMD vectors; the backend selects instructions per architecture and emits a safe
 fallback when no equivalent instruction exists.

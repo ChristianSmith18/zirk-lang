@@ -50,9 +50,40 @@
 
 use std::alloc::{Layout, dealloc};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
+
+/// Allocation membership is indexed only by allocator-issued addresses. A
+/// compact integer mixer avoids paying the default randomized byte hasher on
+/// every collector edge while HashSet still performs exact key equality.
+#[derive(Default)]
+pub(crate) struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        let mut value = self.0;
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut value = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in bytes {
+            value = (value ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+        self.0 = value;
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.0 = value as u64;
+    }
+}
+
+pub(crate) type AllocationSet = HashSet<usize, std::hash::BuildHasherDefault<AddressHasher>>;
 
 /// Every collector allocation is aligned to at least this many bytes,
 /// regardless of what codegen actually requested for a given class'
@@ -264,6 +295,9 @@ mod heap {
         pub(super) live_bytes: usize,
         /// Bytes of live allocation allowed before a collection runs.
         pub(super) threshold: usize,
+        /// Exact base addresses of current allocations. Membership is checked
+        /// before reading a candidate object's header.
+        pub(super) allocations: super::AllocationSet,
     }
 
     impl HeapState {
@@ -272,6 +306,7 @@ mod heap {
                 head: std::ptr::null_mut(),
                 live_bytes: 0,
                 threshold: super::default_threshold().max(1),
+                allocations: super::AllocationSet::default(),
             }
         }
     }
@@ -386,9 +421,10 @@ pub(crate) use heap::PublishedHeap;
 /// now met eagerly). No marking: at end of run nothing is a root any more.
 pub(crate) fn free_all(heap: &mut heap::PublishedHeap) {
     let state = heap.0.get_mut().unwrap();
-    let _ = sweep(state.head);
+    let _ = sweep(state.head, &mut state.allocations);
     state.head = std::ptr::null_mut();
     state.live_bytes = 0;
+    state.allocations.clear();
 }
 
 /// Test-only: free every object currently on the heap list (none is marked
@@ -396,9 +432,10 @@ pub(crate) fn free_all(heap: &mut heap::PublishedHeap) {
 #[cfg(test)]
 fn heap_hard_reset() {
     with_heap(|heap| {
-        let _ = sweep(heap.head);
+        let _ = sweep(heap.head, &mut heap.allocations);
         heap.head = std::ptr::null_mut();
         heap.live_bytes = 0;
+        heap.allocations.clear();
     });
 }
 
@@ -753,6 +790,7 @@ pub(crate) unsafe fn register(object: *mut c_void, size: usize) {
         }
         heap.head = object;
         heap.live_bytes += size;
+        heap.allocations.insert(object as usize);
     });
 }
 
@@ -796,30 +834,22 @@ fn collect_with(walk_worker_chains: bool) {
     // region) or does not exist (single-threaded / bootstrap), so nothing
     // mutates the list or an object header while mark / weak-clear / sweep run.
     with_heap(|heap| {
-        mark(walk_worker_chains);
+        mark(walk_worker_chains, &heap.allocations);
         clear_dead_weak_cells(heap.head);
-        let (survivors, live_bytes) = sweep(heap.head);
+        let (survivors, live_bytes) = sweep(heap.head, &mut heap.allocations);
         heap.head = survivors;
         heap.live_bytes = live_bytes;
     });
 }
 
-fn mark(walk_worker_chains: bool) {
-    let mark_frame = |frame: &Frame| {
-        for index in 0..frame.count {
-            let root_addr = unsafe { *frame.roots.add(index) };
-            if root_addr.is_null() {
-                continue;
-            }
-            let object = unsafe { *(root_addr as *mut *mut c_void) };
-            mark_object(object);
-        }
-    };
+fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
+    let pending = std::cell::RefCell::new(Vec::new());
+    let mut enqueue = |object| enqueue_candidate(&pending, allocations, object);
 
     // The bootstrap chain (roots held before task 0, or with no task running).
     BOOTSTRAP_FRAMES.with(|frames| {
         for frame in frames.borrow().iter() {
-            mark_frame(frame);
+            mark_frame_roots(frame, &mut enqueue);
         }
     });
 
@@ -834,7 +864,7 @@ fn mark(walk_worker_chains: bool) {
         for chain in chains.iter() {
             let frames = unsafe { &*chain.0 };
             for frame in frames.iter() {
-                mark_frame(frame);
+                mark_frame_roots(frame, &mut enqueue);
             }
         }
     }
@@ -843,7 +873,7 @@ fn mark(walk_worker_chains: bool) {
     // (whose chain `ACTIVE_FRAMES` also points at); marking is idempotent, so
     // visiting it twice is harmless.
     if let Some(walker) = TASK_ROOT_WALKER.get() {
-        walker(&mut mark_object);
+        walker(&mut enqueue);
     }
 
     // `zirk-object-memory`'s own "Deep-clone traversal state is
@@ -854,45 +884,91 @@ fn mark(walk_worker_chains: bool) {
     // top-level result is, once its own instruction result is spilled) —
     // `crate::clone` tracks them itself and this is its own extra root
     // set, walked exactly like the shadow stack above.
-    crate::clone::mark_clone_roots(mark_object);
+    crate::clone::mark_clone_roots(&mut enqueue);
+    let mut visited_exception_edges = HashSet::new();
+    loop {
+        loop {
+            let object = { pending.borrow_mut().pop() };
+            let Some(object) = object else { break };
+            // Every worklist entry was membership-checked by enqueue_candidate.
+            // The heap is stable for the duration of this stop-the-world/inline
+            // collection, so no allocation can be freed between enqueue and
+            // this header read; a second hash lookup here only duplicates the
+            // exact-address safety check.
+            let next_raw = unsafe { get_next_raw(object) };
+            if is_marked(next_raw) {
+                continue;
+            }
+            unsafe { set_next_raw(object, next_raw | MARK_BIT) };
+
+            let descriptor = unsafe { *(object as *mut *mut c_void) };
+
+            // WeakCell is a live object but its target is deliberately weak.
+            if std::ptr::eq(descriptor, weak_cell_descriptor()) {
+                continue;
+            }
+            if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
+                unsafe { crate::channel::mark_queued(object, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(descriptor, crate::map::map_descriptor()) {
+                unsafe { crate::map::mark_entries(object, allocations, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(descriptor, crate::set::set_descriptor()) {
+                unsafe { crate::set::mark_entries(object, allocations, &mut enqueue) };
+                continue;
+            }
+            let offsets = unsafe { gc_field_offsets(descriptor as *const c_void) };
+            for &offset in offsets {
+                let field_addr = (object as usize + offset) as *mut *mut c_void;
+                let child = unsafe { *field_addr };
+                enqueue(child);
+            }
+        }
+
+        let mut added_exception_edge = false;
+        crate::exceptions::visit_owned_edges(|owner, edge| {
+            if allocations.contains(&(owner as usize))
+                && is_marked(unsafe { get_next_raw(owner) })
+                && visited_exception_edges.insert((owner as usize, edge as usize))
+            {
+                enqueue_candidate(&pending, allocations, edge);
+                added_exception_edge = true;
+            }
+        });
+        if pending.borrow().is_empty() && !added_exception_edge {
+            break;
+        }
+    }
 }
 
-fn mark_object(object: *mut c_void) {
+fn mark_frame_roots(frame: &Frame, enqueue: &mut dyn FnMut(*mut c_void)) {
+    for index in 0..frame.count {
+        let root_addr = unsafe { *frame.roots.add(index) };
+        if !root_addr.is_null() {
+            let object = unsafe { *(root_addr as *mut *mut c_void) };
+            enqueue(object);
+        }
+    }
+}
+
+fn enqueue_candidate(
+    pending: &std::cell::RefCell<Vec<*mut c_void>>,
+    allocations: &AllocationSet,
+    object: *mut c_void,
+) {
     if object.is_null() {
         return;
     }
-    let next_raw = unsafe { get_next_raw(object) };
-    if is_marked(next_raw) {
+    if !allocations.contains(&(object as usize)) {
         return;
     }
-    unsafe { set_next_raw(object, next_raw | MARK_BIT) };
-
-    let descriptor = unsafe { *(object as *mut *mut c_void) };
-
-    // A WeakCell is marked as reachable exactly like any other object right
-    // above — but its own single field is never traced as a strong edge
-    // (`fase-4e-weak`, design D2): that is what lets [`clear_dead_weak_cells`]
-    // observe, between this pass and [`sweep`], whether its target survived
-    // on its own merits.
-    if std::ptr::eq(descriptor, weak_cell_descriptor()) {
-        return;
+    let mut pending = pending.borrow_mut();
+    if pending.try_reserve(1).is_err() {
+        crate::failure::zirk_rt_allocation_failed();
     }
-
-    // A channel keeps generic element bytes rather than ordinary object fields.
-    // Its registered element layout identifies the reference slots that must be
-    // traced while queued (and while a backpressured sender owns a copy).
-    if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
-        let mut mark = mark_object;
-        unsafe { crate::channel::mark_queued(object, &mut mark) };
-        return;
-    }
-
-    let offsets = unsafe { gc_field_offsets(descriptor as *const c_void) };
-    for &offset in offsets {
-        let field_addr = (object as usize + offset) as *mut *mut c_void;
-        let child = unsafe { *field_addr };
-        mark_object(child);
-    }
+    pending.push(object);
 }
 
 /// Nulls every live WeakCell's target field whose referent turns out to be
@@ -934,7 +1010,7 @@ fn clear_dead_weak_cells(list_head: *mut c_void) {
     }
 }
 
-fn sweep(list_head: *mut c_void) -> (*mut c_void, usize) {
+fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_void, usize) {
     let mut current = list_head;
     let mut survivors: *mut c_void = std::ptr::null_mut();
     let mut live_bytes = 0usize;
@@ -954,16 +1030,22 @@ fn sweep(list_head: *mut c_void) -> (*mut c_void, usize) {
             let size = unsafe { get_size(current) };
             let descriptor = unsafe { object_descriptor(current) };
             unsafe { release_dynamic_descriptor(descriptor) };
+            crate::exceptions::owner_swept(current);
             // A channel owns Rust collections after its three-word GC header.
             // Run their destructor before freeing the raw collector block.
             if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
                 unsafe { crate::channel::drop_body(current) };
             } else if std::ptr::eq(descriptor, crate::list::list_descriptor()) {
                 unsafe { crate::list::drop_body(current) };
+            } else if std::ptr::eq(descriptor, crate::map::map_descriptor()) {
+                unsafe { crate::map::drop_body(current) };
+            } else if std::ptr::eq(descriptor, crate::set::set_descriptor()) {
+                unsafe { crate::set::drop_body(current) };
             }
             let layout = Layout::from_size_align(size, GC_ALIGN)
                 .expect("this is the exact layout `zirk_rt_alloc` used to allocate it");
             unsafe { dealloc(current as *mut u8, layout) };
+            allocations.remove(&(current as usize));
         }
 
         current = next_object;
@@ -1024,6 +1106,14 @@ pub(crate) mod test_support {
         set_threshold_bytes(bytes);
     }
 
+    pub(crate) fn collect_for_tests() {
+        collect();
+    }
+
+    pub(crate) fn is_live_for_tests(object: *mut c_void) -> bool {
+        with_heap(|heap| heap.allocations.contains(&(object as usize)))
+    }
+
     /// Resets every piece of this thread's own collector state to a fresh
     /// start — everything `mod tests`' own `reset_state` resets except the
     /// process-global WeakCell flag/guard, which `crate::clone`'s own tests
@@ -1038,14 +1128,310 @@ pub(crate) mod test_support {
 }
 #[cfg(test)]
 pub(crate) use test_support::{
-    descriptor_with_fields_for_tests, reset_state_for_tests, set_threshold_for_tests,
-    synthetic_object_for_tests,
+    collect_for_tests, descriptor_with_fields_for_tests, is_live_for_tests, reset_state_for_tests,
+    set_threshold_for_tests, synthetic_object_for_tests,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::alloc::alloc_zeroed;
+
+    #[test]
+    fn invalid_gc_candidate_is_rejected_before_header_access() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        let mut invalid = 0x1234usize as *mut c_void;
+        let mut roots = [&mut invalid as *mut *mut c_void as *mut c_void];
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect));
+        zirk_rt_pop_frame();
+        assert!(
+            result.is_ok(),
+            "invalid candidates must be skipped without dereferencing them"
+        );
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn stale_gc_candidate_is_rejected_after_its_allocation_is_swept() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        let descriptor = descriptor_with_fields(&[]);
+        let stale = unsafe { synthetic_object(descriptor.as_ptr().cast(), 0) };
+        collect();
+        assert!(!test_support::is_live_for_tests(stale));
+        let mut candidate = stale;
+        let mut roots = [&mut candidate as *mut *mut c_void as *mut c_void];
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collect));
+        zirk_rt_pop_frame();
+        assert!(
+            result.is_ok(),
+            "stale candidates must be skipped without dereferencing them"
+        );
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn iterative_marking_handles_a_deep_reference_chain() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        const DEPTH: usize = 25_000;
+        let descriptor = descriptor_with_fields(&[HEADER_BYTES]);
+        let mut objects = Vec::with_capacity(DEPTH);
+        for _ in 0..DEPTH {
+            objects.push(unsafe {
+                synthetic_object(descriptor.as_ptr().cast(), std::mem::size_of::<usize>())
+            });
+        }
+        for pair in objects.windows(2) {
+            unsafe { *((pair[0] as *mut u8).add(HEADER_BYTES) as *mut *mut c_void) = pair[1] };
+        }
+        let root = objects[0];
+        let mut root_slot = root;
+        let mut roots = [&mut root_slot as *mut *mut c_void as *mut c_void];
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
+        collect();
+        assert!(
+            objects
+                .iter()
+                .all(|&object| test_support::is_live_for_tests(object))
+        );
+        zirk_rt_pop_frame();
+        collect();
+        assert!(
+            objects
+                .iter()
+                .all(|&object| !test_support::is_live_for_tests(object))
+        );
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn adversarial_mixed_managed_graph_survives_churn_and_sweeps_unreachable_graphs() {
+        let _guard = reset_state();
+        const WORD: usize = std::mem::size_of::<usize>();
+        // Avoid an incidental collection while assembling deliberately
+        // unrooted test objects. Once the shadow frame is installed, explicit
+        // collections exercise precisely the graph under test.
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+
+        let key = crate::string::alloc_owned("mixed-map-key");
+        let mapped = crate::string::alloc_owned("mixed-map-value");
+        let set_value = crate::string::alloc_owned("mixed-set-value");
+        let array_value = crate::string::alloc_owned("mixed-array-value");
+        let list_value = crate::string::alloc_owned("mixed-list-value");
+        let callable_descriptor = descriptor_with_fields(&[HEADER_BYTES]);
+        let callable = unsafe {
+            crate::zirk_rt_alloc_callable(callable_descriptor.as_ptr().cast(), WORD as u64)
+        };
+        unsafe {
+            *((callable as *mut u8).add(HEADER_BYTES) as *mut usize) = array_value as usize;
+        }
+        // The cached trace is reachable only through the exception side table
+        // while this owner remains reachable through the Set.
+        let exception =
+            unsafe { synthetic_object(crate::array::zirk_rt_array_descriptor.as_ptr().cast(), 0) };
+        let exception_trace = unsafe { crate::exceptions::zirk_rt_stack_trace(exception) };
+        let offsets = [0usize];
+        let map = unsafe {
+            crate::map::zirk_rt_map_new_with_layout(offsets.as_ptr(), 1, offsets.as_ptr(), 1, false)
+        };
+        crate::map::zirk_rt_map_set(map, key as i64, mapped as i64);
+        let set = unsafe { crate::set::zirk_rt_set_new_with_layout(offsets.as_ptr(), 1, false) };
+        crate::set::zirk_rt_set_add(set, set_value as i64);
+
+        // A two-word element models a flattened aggregate/enum payload whose
+        // second field is a managed reference. Arrays and lists must expand
+        // that relative offset for every stored element.
+        let element_size = 2 * WORD;
+        let flat_offsets = [WORD];
+        let array = unsafe {
+            crate::array::zirk_rt_array_new_with_layout(
+                2,
+                element_size,
+                WORD,
+                flat_offsets.as_ptr(),
+                flat_offsets.len(),
+            )
+        };
+        let list = unsafe {
+            crate::list::zirk_rt_list_new_with_layout(
+                element_size,
+                WORD,
+                flat_offsets.as_ptr(),
+                flat_offsets.len(),
+            )
+        };
+        for (index, value) in [callable, map].into_iter().enumerate() {
+            let slot =
+                unsafe { crate::array::zirk_rt_array_element(array, index as i64, element_size) };
+            unsafe {
+                (slot as *mut usize).write(index + 100);
+                (slot as *mut usize).add(1).write(value as usize);
+                crate::list::zirk_rt_list_add(list, slot, element_size, WORD, false);
+            }
+        }
+
+        // Enum-like flattened payload: descriptor offsets point to the
+        // reference-bearing variant field after its scalar tag.
+        let enum_descriptor = descriptor_with_fields(&[HEADER_BYTES + WORD]);
+        let enum_value = unsafe { synthetic_object(enum_descriptor.as_ptr().cast(), 2 * WORD) };
+        unsafe {
+            *((enum_value as *mut u8).add(HEADER_BYTES) as *mut usize) = 1;
+            *((enum_value as *mut u8).add(HEADER_BYTES + WORD) as *mut usize) = list_value as usize;
+        }
+        // Close a real cross-container cycle through the flattened payload:
+        // Map -> Array -> Map. The Map also reaches the enum-like object,
+        // which reaches a String; Set and List add independent edge layouts.
+        crate::map::zirk_rt_map_set(map, enum_value as i64, array as i64);
+        crate::set::zirk_rt_set_add(set, enum_value as i64);
+        crate::set::zirk_rt_set_add(set, exception as i64);
+
+        let mut roots_values = [map, set, list];
+        let mut roots: Vec<*mut c_void> = roots_values
+            .iter_mut()
+            .map(|root| (root as *mut *mut c_void).cast())
+            .collect();
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+
+        for round in 0..8 {
+            test_support::collect_for_tests();
+            for object in [
+                key,
+                mapped,
+                set_value,
+                array_value,
+                callable,
+                list_value,
+                exception,
+                exception_trace,
+                map,
+                set,
+                array,
+                list,
+                enum_value,
+            ] {
+                assert!(
+                    test_support::is_live_for_tests(object),
+                    "reachable allocation {object:p} was reclaimed on collection {round}"
+                );
+            }
+            // Allocation churn between collections pressures the threshold
+            // and ensures dead objects do not accumulate as false survivors.
+            let mut dead = Vec::with_capacity(64);
+            for i in 0..64 {
+                dead.push(crate::string::alloc_owned(&format!("churn-{round}-{i}")));
+            }
+            test_support::collect_for_tests();
+            assert!(
+                dead.iter()
+                    .all(|object| !test_support::is_live_for_tests(*object)),
+                "unreachable churn allocations survived collection {round}"
+            );
+        }
+
+        // Build a second, disconnected mixed subgraph while the reachable
+        // graph remains rooted, then prove every node in it is swept.
+        let dead_text = crate::string::alloc_owned("unreachable-leaf");
+        let dead_array = unsafe {
+            crate::array::zirk_rt_array_new_with_layout(
+                1,
+                element_size,
+                WORD,
+                flat_offsets.as_ptr(),
+                flat_offsets.len(),
+            )
+        };
+        let dead_slot = unsafe { crate::array::zirk_rt_array_element(dead_array, 0, element_size) };
+        unsafe {
+            (dead_slot as *mut usize).write(0);
+            (dead_slot as *mut usize).add(1).write(dead_text as usize);
+        }
+        let dead_list = unsafe {
+            crate::list::zirk_rt_list_new_with_layout(
+                element_size,
+                WORD,
+                flat_offsets.as_ptr(),
+                flat_offsets.len(),
+            )
+        };
+        unsafe {
+            crate::list::zirk_rt_list_add(dead_list, dead_slot, element_size, WORD, false);
+        }
+        let dead_map = crate::map::zirk_rt_map_new();
+        crate::map::zirk_rt_map_set(dead_map, dead_array as i64, dead_list as i64);
+        let dead_set = crate::set::zirk_rt_set_new();
+        crate::set::zirk_rt_set_add(dead_set, dead_map as i64);
+        let dead_exception =
+            unsafe { synthetic_object(crate::array::zirk_rt_array_descriptor.as_ptr().cast(), 0) };
+        let dead_exception_trace =
+            unsafe { crate::exceptions::zirk_rt_stack_trace(dead_exception) };
+        let dead_enum = unsafe { synthetic_object(enum_descriptor.as_ptr().cast(), 2 * WORD) };
+        unsafe {
+            *((dead_enum as *mut u8).add(HEADER_BYTES + WORD) as *mut usize) = dead_set as usize;
+        }
+        test_support::collect_for_tests();
+        for object in [
+            dead_text,
+            dead_array,
+            dead_list,
+            dead_map,
+            dead_set,
+            dead_enum,
+            dead_exception,
+            dead_exception_trace,
+        ] {
+            assert!(
+                !test_support::is_live_for_tests(object),
+                "unreachable node {object:p} survived"
+            );
+        }
+        for object in [
+            key,
+            mapped,
+            set_value,
+            array_value,
+            callable,
+            list_value,
+            exception,
+            exception_trace,
+            map,
+            set,
+            array,
+            list,
+            enum_value,
+        ] {
+            assert!(
+                test_support::is_live_for_tests(object),
+                "rooted graph lost {object:p}"
+            );
+        }
+
+        zirk_rt_pop_frame();
+        test_support::collect_for_tests();
+        assert!(
+            [
+                map,
+                set,
+                array,
+                list,
+                enum_value,
+                key,
+                mapped,
+                set_value,
+                array_value,
+                list_value,
+                callable,
+                exception,
+                exception_trace
+            ]
+            .iter()
+            .all(|object| !test_support::is_live_for_tests(*object)),
+            "the mixed graph should be reclaimable after removing its roots"
+        );
+    }
 
     /// Builds a synthetic object with a caller-chosen descriptor and no
     /// fields beyond the header — enough to exercise the collector without

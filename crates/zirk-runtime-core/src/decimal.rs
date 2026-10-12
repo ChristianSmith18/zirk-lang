@@ -91,16 +91,30 @@ fn pow10_u128(exp: u32) -> Option<u128> {
     Some(result)
 }
 
-fn digit_count(mut magnitude: u128) -> u32 {
-    if magnitude == 0 {
-        return 1;
+const fn decimal_powers() -> [u128; 39] {
+    let mut powers = [1; 39];
+    let mut index = 1;
+    while index < powers.len() {
+        powers[index] = powers[index - 1] * 10;
+        index += 1;
     }
-    let mut count = 0;
-    while magnitude != 0 {
-        magnitude /= 10;
-        count += 1;
+    powers
+}
+
+const POWERS_OF_TEN: [u128; 39] = decimal_powers();
+
+fn digit_count(magnitude: u128) -> u32 {
+    let mut lower = 0;
+    let mut upper = POWERS_OF_TEN.len();
+    while lower + 1 < upper {
+        let middle = lower + (upper - lower) / 2;
+        if magnitude >= POWERS_OF_TEN[middle] {
+            lower = middle;
+        } else {
+            upper = middle;
+        }
     }
-    count
+    lower as u32 + 1
 }
 
 /// Unsigned 256-bit magnitude, used only to retain native decimal semantics
@@ -401,12 +415,31 @@ pub fn div(a: Decimal, b: Decimal) -> Result<Decimal, DecimalError> {
     if a.coef == 0 {
         return Ok(Decimal::ZERO);
     }
-    let ratio = (to_f64(a) / to_f64(b)).abs();
-    let integer_digits = if ratio < 1.0 {
-        1
+    // The quotient's decimal order is either the difference between the
+    // operands' orders or one less. Resolve that final digit by comparing the
+    // exact decimal magnitudes; converting through f64 loses precisely the
+    // information needed around powers of ten.
+    let magnitude_a = a.coef.unsigned_abs();
+    let magnitude_b = b.coef.unsigned_abs();
+    let digits_a = digit_count(magnitude_a);
+    let digits_b = digit_count(magnitude_b);
+    let order_a = digits_a as i32 - 1 - a.scale as i32;
+    let order_b = digits_b as i32 - 1 - b.scale as i32;
+    let candidate = order_a - order_b;
+    let quotient_order = if compare_scaled_magnitude(
+        magnitude_a,
+        digits_a,
+        -(a.scale as i32),
+        magnitude_b,
+        digits_b,
+        candidate - b.scale as i32,
+    ) != core::cmp::Ordering::Less
+    {
+        candidate
     } else {
-        ratio.log10().floor() as u32 + 1
+        candidate - 1
     };
+    let integer_digits = (quotient_order + 1).max(1) as u32;
     let target = MAX_SIGNIFICANT_DIGITS
         .saturating_sub(integer_digits.saturating_sub(1))
         .max(
@@ -418,6 +451,45 @@ pub fn div(a: Decimal, b: Decimal) -> Result<Decimal, DecimalError> {
         );
     let full = div_to_scale(a, b, target, RoundingMode::HalfEven)?;
     reduce_to_digits(full, MAX_SIGNIFICANT_DIGITS, RoundingMode::HalfEven)
+}
+
+/// Compares `a * 10^a_exp` and `b * 10^b_exp` without floating point or
+/// constructing potentially overflowing powers of ten.
+fn compare_scaled_magnitude(
+    a: u128,
+    a_digits: u32,
+    a_exp: i32,
+    b: u128,
+    b_digits: u32,
+    b_exp: i32,
+) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+
+    let order =
+        (i64::from(a_digits) + i64::from(a_exp)).cmp(&(i64::from(b_digits) + i64::from(b_exp)));
+    if order != Ordering::Equal {
+        return order;
+    }
+
+    match (a_digits, b_digits) {
+        (a_digits, b_digits) if a_digits == b_digits => a.cmp(&b),
+        (a_digits, b_digits) if a_digits < b_digits => {
+            let factor = pow10_u128(b_digits - a_digits).expect("u128 decimal width is bounded");
+            let (b_prefix, b_remainder) = (b / factor, b % factor);
+            match a.cmp(&b_prefix) {
+                Ordering::Equal if b_remainder != 0 => Ordering::Less,
+                order => order,
+            }
+        }
+        (a_digits, b_digits) => {
+            let factor = pow10_u128(a_digits - b_digits).expect("u128 decimal width is bounded");
+            let (a_prefix, a_remainder) = (a / factor, a % factor);
+            match a_prefix.cmp(&b) {
+                Ordering::Equal if a_remainder != 0 => Ordering::Greater,
+                order => order,
+            }
+        }
+    }
 }
 
 fn reduce_to_digits(
@@ -439,7 +511,7 @@ fn reduce_to_digits(
 }
 
 /// Raises `base` to an integer exponent, including reciprocal results.
-pub fn pow_int(base: Decimal, exponent: i64) -> Result<Decimal, DecimalError> {
+pub fn pow_int(base: Decimal, exponent: i128) -> Result<Decimal, DecimalError> {
     if exponent == 0 {
         return Ok(Decimal::new(1, 0));
     }
@@ -492,7 +564,7 @@ pub fn sqrt(value: Decimal) -> Result<Decimal, DecimalError> {
 
 pub fn pow(base: Decimal, exponent: Decimal) -> Result<Decimal, DecimalError> {
     if exponent.scale == 0 {
-        return pow_int(base, exponent.coef as i64);
+        return pow_int(base, exponent.coef);
     }
     from_f64_checked(to_f64(base).powf(to_f64(exponent)))
 }
@@ -642,5 +714,37 @@ mod tests {
             "2.36"
         );
         assert_eq!(sqrt(decimal("-1")), Err(DecimalError::Domain));
+    }
+
+    #[test]
+    fn integer_decimal_powers_preserve_i128_exponents() {
+        let exponent = Decimal {
+            coef: i64::MAX as i128 + 1,
+            scale: 0,
+        };
+        assert_eq!(pow(Decimal::ZERO, exponent), Ok(Decimal::ZERO));
+        assert_eq!(
+            pow_int(Decimal::new(-1, 0), i128::MIN),
+            Ok(Decimal::new(1, 0))
+        );
+    }
+
+    #[test]
+    fn division_precision_uses_exact_decimal_order_at_powers_of_ten() {
+        let below_ten = div(
+            decimal("9999999999999999999999999999"),
+            decimal("1000000000000000000000000000"),
+        )
+        .unwrap();
+        assert!(format(below_ten).starts_with("9."));
+        assert_eq!(digit_count(below_ten.coef.unsigned_abs()), 28);
+
+        let above_ten = div(
+            decimal("10000000000000000000000000006"),
+            decimal("1000000000000000000000000000"),
+        )
+        .unwrap();
+        assert!(format(above_ten).starts_with("10."));
+        assert_eq!(digit_count(above_ten.coef.unsigned_abs()), 28);
     }
 }

@@ -24,8 +24,6 @@ use std::ffi::c_void;
 use crate::string::alloc_owned;
 use zirk_runtime_core::temporal as core_temporal;
 
-/// Nanoseconds in one civil day: `24 * 60 * 60 * 1_000_000_000`.
-const NANOS_PER_DAY: i64 = 86_400_000_000_000;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const NANOS_PER_MINUTE: i64 = 60 * NANOS_PER_SECOND;
 const NANOS_PER_HOUR: i64 = 60 * NANOS_PER_MINUTE;
@@ -49,7 +47,15 @@ fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
 /// The civil `year`-`month`-`day` of a day count since 1970-01-01
 /// (Hinnant's `civil_from_days`).
 fn civil_from_days(days: i64) -> (i32, i32, i32) {
-    core_temporal::civil_from_days(days)
+    core_temporal::civil_from_days_checked(days)
+        .unwrap_or_else(|| crate::failure::zirk_rt_overflow())
+}
+
+#[inline]
+fn ensure_public_date(days: i64) {
+    if core_temporal::civil_from_days_checked(days).is_none() {
+        crate::failure::zirk_rt_overflow();
+    }
 }
 
 /// Renders a `Time` as `HH:MM:SS[.fffffffff]` — the fraction is trimmed of
@@ -163,6 +169,7 @@ pub extern "C" fn zirk_rt_date_today() -> i64 {
 /// ISO 8601 `YYYY-MM-DD`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_to_string(days: i64) -> *mut c_void {
+    ensure_public_date(days);
     let (year, month, day) = civil_from_days(days);
     alloc_owned(&format!("{year:04}-{month:02}-{day:02}"))
 }
@@ -217,14 +224,14 @@ pub extern "C" fn zirk_rt_time_nanosecond(nanos: i64) -> i64 {
 /// `Time(1, 30)`, civil-style.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_time_add_nanos(time: i64, delta: i64) -> i64 {
-    (time + delta).rem_euclid(NANOS_PER_DAY)
+    core_temporal::time_add_nanos(time, delta)
 }
 
 /// `Time - Time`: the `Duration` nanoseconds between them, measured
 /// forward around the day (`Time(1, 0) - Time(23, 0)` is `2h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_time_diff(left: i64, right: i64) -> i64 {
-    (left - right).rem_euclid(NANOS_PER_DAY)
+    core_temporal::time_diff(left, right)
 }
 
 /// `Time.now_utc()` — the current UTC clock time.
@@ -251,18 +258,23 @@ pub extern "C" fn zirk_rt_time_to_string(nanos: i64) -> *mut c_void {
 /// `extern "C"` entry point below takes the pointer-based ABI a 128-bit
 /// value needs at the boundary (see that function's own doc for why).
 fn datetime_pack(days: i64, nanos: i64) -> i128 {
+    let _ = civil_from_days(days);
     core_temporal::datetime_pack(days, nanos)
 }
 
 /// The `Date` half of a `DateTime` (its day count) — the by-value Rust
 /// helper every call site in this file uses directly.
 fn datetime_days(value: i128) -> i64 {
-    core_temporal::datetime_days(value)
+    let days = core_temporal::datetime_days_checked(value)
+        .unwrap_or_else(|| crate::failure::zirk_rt_overflow());
+    let _ = civil_from_days(days);
+    days
 }
 
 /// The `Time` half of a `DateTime` (its day's nanoseconds) — see
 /// [`datetime_days`].
 fn datetime_nanos(value: i128) -> i64 {
+    let _ = datetime_days(value);
     core_temporal::datetime_nanos(value)
 }
 
@@ -351,49 +363,36 @@ pub unsafe extern "C" fn zirk_rt_datetime_to_string(value: *const i128) -> *mut 
 /// a Thursday, so `(days + 3) mod 7` counts from Monday.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_day_of_week(days: i64) -> i32 {
-    ((days + 3).rem_euclid(7) + 1) as i32
+    ensure_public_date(days);
+    core_temporal::date_day_of_week(days)
 }
 
 /// The 1-based ordinal day within `days`' year.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_day_of_year(days: i64) -> i32 {
-    let (year, _, _) = civil_from_days(days);
-    (days - days_from_civil(year, 1, 1) + 1) as i32
-}
-
-/// Whether an ISO year holds 53 weeks: it does when January 1 falls on a
-/// Thursday, or on a Wednesday of a leap year.
-fn weeks_in_iso_year(year: i32) -> i32 {
-    core_temporal::weeks_in_iso_year(year)
+    core_temporal::date_day_of_year_checked(days)
+        .unwrap_or_else(|| crate::failure::zirk_rt_overflow())
 }
 
 /// The ISO 8601 week number: week 1 is the week containing the year's
 /// first Thursday.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_week_of_year(days: i64) -> i32 {
-    let (year, _, _) = civil_from_days(days);
-    let week = (i64::from(zirk_rt_date_day_of_year(days))
-        - i64::from(zirk_rt_date_day_of_week(days))
-        + 10)
-        / 7;
-    if week < 1 {
-        weeks_in_iso_year(year - 1)
-    } else if week > i64::from(weeks_in_iso_year(year)) {
-        1
-    } else {
-        week as i32
-    }
+    core_temporal::date_week_of_year_checked(days)
+        .unwrap_or_else(|| crate::failure::zirk_rt_overflow())
 }
 
 /// The quarter of `days`' month, `1..=4`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_quarter(days: i64) -> i32 {
+    ensure_public_date(days);
     (zirk_rt_date_month(days) - 1) / 3 + 1
 }
 
 /// The length of `days`' month.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_days_in_month(days: i64) -> i32 {
+    ensure_public_date(days);
     let (year, month, _) = civil_from_days(days);
     days_in_month(year, month)
 }
@@ -401,6 +400,7 @@ pub extern "C" fn zirk_rt_date_days_in_month(days: i64) -> i32 {
 /// The length of `days`' year — `366` when leap, `365` otherwise.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_days_in_year(days: i64) -> i32 {
+    ensure_public_date(days);
     if is_leap_year(civil_from_days(days).0) {
         366
     } else {
@@ -411,6 +411,7 @@ pub extern "C" fn zirk_rt_date_days_in_year(days: i64) -> i32 {
 /// Whether `days`' year is leap.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_date_is_leap(days: i64) -> bool {
+    ensure_public_date(days);
     is_leap_year(civil_from_days(days).0)
 }
 
@@ -449,6 +450,7 @@ pub unsafe extern "C" fn zirk_rt_date_start_of_ok(unit: *const c_void) -> bool {
 }
 
 fn date_start_of(days: i64, unit: &str) -> i64 {
+    let _ = civil_from_days(days);
     core_temporal::date_start_of(days, unit)
 }
 
@@ -463,6 +465,7 @@ pub unsafe extern "C" fn zirk_rt_date_end_of_ok(unit: *const c_void) -> bool {
 }
 
 fn date_end_of(days: i64, unit: &str) -> i64 {
+    let _ = civil_from_days(days);
     core_temporal::date_end_of(days, unit)
 }
 
@@ -507,6 +510,7 @@ pub unsafe extern "C" fn zirk_rt_datetime_start_of_ok(unit: *const c_void) -> bo
 /// The `DateTime` start-of boundary: date units zero the clock, time units
 /// keep the day.
 fn datetime_start_of(value: i128, unit: &str) -> i128 {
+    let _ = datetime_days(value);
     core_temporal::datetime_start_of(value, unit)
 }
 
@@ -531,6 +535,7 @@ pub unsafe extern "C" fn zirk_rt_datetime_end_of_ok(unit: *const c_void) -> bool
 }
 
 fn datetime_end_of(value: i128, unit: &str) -> i128 {
+    let _ = datetime_days(value);
     core_temporal::datetime_end_of(value, unit)
 }
 
@@ -692,6 +697,7 @@ fn format_pattern(
 /// `pattern` must be a `String` handle produced by this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_date_format(days: i64, pattern: *const c_void) -> *mut c_void {
+    ensure_public_date(days);
     let (year, month, day) = civil_from_days(days);
     alloc_owned(&format_pattern(
         unsafe { unit_str(pattern) },

@@ -78,6 +78,136 @@ fn well_formed_ir_is_accepted() {
     assert!(verify(&module).is_ok());
 }
 
+#[test]
+fn a_managed_slot_missing_from_the_gc_roots_is_rejected() {
+    let module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![Slot {
+            name: "reference".into(),
+            ty: IrType::String,
+            span: S,
+        }],
+    );
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("missing from the GC roots")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_unmanaged_slot_cannot_be_listed_as_a_gc_root() {
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![Slot {
+            name: "number".into(),
+            ty: IrType::Int(IntWidth::I32),
+            span: S,
+        }],
+    );
+    module.functions[0].gc_roots.push(SlotId(0));
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("has unmanaged type Int32")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn a_raw_pointer_slot_cannot_become_a_gc_root() {
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![Slot {
+            name: "raw".into(),
+            ty: IrType::Pointer(0),
+            span: S,
+        }],
+    );
+    module.pointer_types.push(IrType::Int(IntWidth::I32));
+    module.functions[0].gc_roots.push(SlotId(0));
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("has unmanaged type Pointer")),
+        "raw pointers must never be treated as managed roots: {errors:?}"
+    );
+}
+
+#[test]
+fn an_enum_with_an_invalid_flattened_reference_path_is_rejected() {
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![],
+    );
+    module.enums.push(EnumLayout {
+        name: "Broken".into(),
+        fields: vec![ObjectField {
+            name: "payload".into(),
+            ty: IrType::String,
+        }],
+        variants: vec![vec![1]],
+    });
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("out-of-range field index 1")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn an_infinitely_recursive_inline_layout_is_rejected_before_codegen() {
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        vec![],
+    );
+    module.values.push(ValueLayout {
+        name: "Recursive".into(),
+        fields: vec![ObjectField {
+            name: "self_value".into(),
+            ty: IrType::Value(0),
+        }],
+    });
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("infinitely recursive inline field")),
+        "{errors:?}"
+    );
+}
+
 // --- Terminators ------------------------------------------------------------
 
 #[test]

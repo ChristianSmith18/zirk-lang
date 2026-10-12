@@ -50,6 +50,34 @@ pub enum Container {
     Coff,
 }
 
+/// Machine-code optimization selected when LLVM emits an object.
+///
+/// `None` remains the compiler default and correctness oracle. Higher levels
+/// are opt-in experiments until the interpreter/native parity corpus and
+/// representative benchmarks pass; this enum does not change CLI defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodegenOptimizationLevel {
+    /// Emit with LLVM's unoptimized backend.
+    None,
+    /// Ask LLVM for its low optimization level.
+    Less,
+    /// Ask LLVM for its standard optimization level.
+    Default,
+    /// Ask LLVM for its highest optimization level.
+    Aggressive,
+}
+
+impl From<CodegenOptimizationLevel> for OptimizationLevel {
+    fn from(level: CodegenOptimizationLevel) -> Self {
+        match level {
+            CodegenOptimizationLevel::None => Self::None,
+            CodegenOptimizationLevel::Less => Self::Less,
+            CodegenOptimizationLevel::Default => Self::Default,
+            CodegenOptimizationLevel::Aggressive => Self::Aggressive,
+        }
+    }
+}
+
 /// A target supported by Zirk.
 ///
 /// The canonical name is the one in `ZIRK_COMPILER_SPEC.md` section 6; the
@@ -142,7 +170,10 @@ pub fn host_triple() -> String {
 ///
 /// Fails with a diagnostic when the triple is not recognized, instead of
 /// producing an invalid object.
-fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
+fn target_machine(
+    triple: &str,
+    optimization: CodegenOptimizationLevel,
+) -> DiagnosticResult<TargetMachine> {
     trace("initializing targets");
     initialize_targets();
 
@@ -166,7 +197,7 @@ fn target_machine(triple: &str) -> DiagnosticResult<TargetMachine> {
             &target_triple,
             "generic",
             "",
-            OptimizationLevel::None,
+            optimization.into(),
             relocation_model(triple),
             CodeModel::Default,
         )
@@ -187,7 +218,19 @@ pub fn emit_object_for_triple(
     triple: &str,
     output: &Path,
 ) -> DiagnosticResult<()> {
-    let machine = target_machine(triple)?;
+    emit_object_for_triple_with_optimization(module, triple, output, CodegenOptimizationLevel::None)
+}
+
+/// Emits an object file at an explicit LLVM machine-code optimization level.
+/// Higher levels remain experimental; callers must establish corpus parity
+/// and benchmark evidence before selecting them for release builds.
+pub fn emit_object_for_triple_with_optimization(
+    module: &Module<'_>,
+    triple: &str,
+    output: &Path,
+    optimization: CodegenOptimizationLevel,
+) -> DiagnosticResult<()> {
+    let machine = target_machine(triple, optimization)?;
 
     trace("writing object file to disk");
     machine
@@ -222,9 +265,19 @@ pub fn compile_to_object(
     name: &str,
     output: &Path,
 ) -> DiagnosticResult<()> {
+    compile_to_object_with_optimization(module, name, output, CodegenOptimizationLevel::None)
+}
+
+/// Compiles an IR module at an explicit experimental optimization level.
+pub fn compile_to_object_with_optimization(
+    module: &zirk_ir::Module,
+    name: &str,
+    output: &Path,
+    optimization: CodegenOptimizationLevel,
+) -> DiagnosticResult<()> {
     let context = inkwell::context::Context::create();
     let llvm = emit(&context, module, name);
-    emit_object_for_host(&llvm, output)
+    emit_object_for_host_with_optimization(&llvm, output, optimization)
 }
 
 /// Emits an object file for the host.
@@ -233,7 +286,16 @@ pub fn compile_to_object(
 /// already registers every target, the host one included, and doing it through
 /// two different paths reintroduces the race the guard prevents.
 pub fn emit_object_for_host(module: &Module<'_>, output: &Path) -> DiagnosticResult<()> {
-    emit_object_for_triple(module, &host_triple(), output)
+    emit_object_for_host_with_optimization(module, output, CodegenOptimizationLevel::None)
+}
+
+/// Emits an object for the host at an explicit optimization level.
+pub fn emit_object_for_host_with_optimization(
+    module: &Module<'_>,
+    output: &Path,
+    optimization: CodegenOptimizationLevel,
+) -> DiagnosticResult<()> {
+    emit_object_for_triple_with_optimization(module, &host_triple(), output, optimization)
 }
 
 #[cfg(test)]
@@ -264,5 +326,35 @@ mod tests {
     #[test]
     fn an_unknown_name_does_not_resolve() {
         assert!(target_by_name("riscv64-plan9").is_none());
+    }
+
+    #[test]
+    fn each_explicit_optimization_level_emits_a_host_object() {
+        let context = inkwell::context::Context::create();
+        let module = context.create_module("optimization_policy");
+        let function = module.add_function("main", context.i32_type().fn_type(&[], false), None);
+        let block = context.append_basic_block(function, "entry");
+        let builder = context.create_builder();
+        builder.position_at_end(block);
+        builder
+            .build_return(Some(&context.i32_type().const_zero()))
+            .expect("return zero");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("zirk-opt-{}-{nonce}", std::process::id()));
+        for level in [
+            CodegenOptimizationLevel::None,
+            CodegenOptimizationLevel::Less,
+            CodegenOptimizationLevel::Default,
+            CodegenOptimizationLevel::Aggressive,
+        ] {
+            let path = root.with_extension(format!("{level:?}.o"));
+            emit_object_for_host_with_optimization(&module, &path, level)
+                .unwrap_or_else(|error| panic!("{level:?}: {}", error.render()));
+            assert!(path.is_file(), "{level:?} did not emit an object");
+            std::fs::remove_file(path).expect("remove emitted object");
+        }
     }
 }

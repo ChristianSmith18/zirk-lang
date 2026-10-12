@@ -14,7 +14,14 @@ use zirk_runtime_core::duration as core_duration;
 /// Multiplies a `Duration` by an `f64` scalar.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_duration_mul_f64(nanos: i64, scalar: f64) -> i64 {
-    core_duration::multiply(nanos, scalar)
+    match core_duration::multiply(nanos, scalar) {
+        Ok(value) => value,
+        Err(core_duration::ScalarError::Overflow) => crate::failure::zirk_rt_overflow(),
+        Err(core_duration::ScalarError::NonFiniteResult) => crate::failure::zirk_rt_float_nan(),
+        Err(core_duration::ScalarError::DivisionByZero) => {
+            crate::failure::zirk_rt_division_by_zero()
+        }
+    }
 }
 
 /// Divides a `Duration` by an `f64` scalar.
@@ -24,7 +31,14 @@ pub extern "C" fn zirk_rt_duration_mul_f64(nanos: i64, scalar: f64) -> i64 {
 /// `Duration / Duration`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_duration_div_f64(nanos: i64, scalar: f64) -> i64 {
-    core_duration::divide(nanos, scalar)
+    match core_duration::divide(nanos, scalar) {
+        Ok(value) => value,
+        Err(core_duration::ScalarError::Overflow) => crate::failure::zirk_rt_overflow(),
+        Err(core_duration::ScalarError::NonFiniteResult) => crate::failure::zirk_rt_float_nan(),
+        Err(core_duration::ScalarError::DivisionByZero) => {
+            crate::failure::zirk_rt_division_by_zero()
+        }
+    }
 }
 
 /// Divides one `Duration` by another, yielding a `Float64` ratio.
@@ -358,6 +372,22 @@ mod tests {
     fn read(handle: *const c_void) -> String {
         let string = unsafe { borrow(handle) }.expect("a valid string handle");
         unsafe { string.as_str() }.to_string()
+    }
+
+    #[test]
+    fn native_float_scalar_adapters_match_checked_core_results() {
+        for (nanos, scalar) in [(5, 0.5), (-7, 1.5), (i64::MAX, 0.25)] {
+            assert_eq!(
+                zirk_rt_duration_mul_f64(nanos, scalar),
+                core_duration::multiply(nanos, scalar).unwrap()
+            );
+        }
+        for (nanos, scalar) in [(5, 2.0), (-7, 2.0), (i64::MAX, 2.0)] {
+            assert_eq!(
+                zirk_rt_duration_div_f64(nanos, scalar),
+                core_duration::divide(nanos, scalar).unwrap()
+            );
+        }
     }
 
     #[test]

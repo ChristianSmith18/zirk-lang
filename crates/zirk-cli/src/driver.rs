@@ -8,7 +8,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use zirk_codegen_llvm::compile_to_object;
+pub use zirk_codegen_llvm::CodegenOptimizationLevel;
+use zirk_codegen_llvm::{compile_to_object, compile_to_object_with_optimization};
 use zirk_diagnostics::{Diagnostic, DiagnosticSink};
 
 use crate::codes;
@@ -39,6 +40,17 @@ impl Compilation {
 
 /// Compiles a source file into a native executable.
 pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
+    compile_with_optimization(path, output_dir, CodegenOptimizationLevel::None)
+}
+
+/// Compiles a source file at an explicit backend optimization level.
+/// Higher levels are for parity/benchmark experiments; the CLI continues to
+/// call [`compile`] and therefore always selects the unoptimized oracle.
+pub fn compile_with_optimization(
+    path: &Path,
+    output_dir: &Path,
+    optimization: CodegenOptimizationLevel,
+) -> Compilation {
     let mut sink = DiagnosticSink::new();
 
     let Some(crate::frontend::FrontendResult {
@@ -87,7 +99,12 @@ pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
     let object = output_dir.join(format!("{stem}{}", object_extension()));
     let executable = output_dir.join(exe_name(&stem));
 
-    if let Err(diagnostic) = compile_to_object(&ir, &stem, &object) {
+    let emission = if optimization == CodegenOptimizationLevel::None {
+        compile_to_object(&ir, &stem, &object)
+    } else {
+        compile_to_object_with_optimization(&ir, &stem, &object, optimization)
+    };
+    if let Err(diagnostic) = emission {
         sink.emit(*diagnostic);
         return Compilation::failed(sink);
     }

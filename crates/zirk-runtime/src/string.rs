@@ -516,7 +516,7 @@ pub unsafe extern "C" fn zirk_str_hash(handle: *const c_void) -> u64 {
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match unsafe { borrow(handle) } {
-        Some(string) => unsafe { string.as_str() }.hash(&mut hasher),
+        Some(string) => core_text::normalize(unsafe { string.as_str() }, "NFC").hash(&mut hasher),
         None => "".hash(&mut hasher),
     }
     hasher.finish()
@@ -1166,6 +1166,16 @@ mod tests {
         );
 
         assert!(unsafe { zirk_str_eq(build(composed), build(decomposed)) });
+    }
+
+    #[test]
+    fn canonically_equivalent_text_has_the_same_hash() {
+        let composed = build("h\u{f3}");
+        let decomposed = build("ho\u{301}");
+        assert!(unsafe { zirk_str_eq(composed, decomposed) });
+        assert_eq!(unsafe { zirk_str_hash(composed) }, unsafe {
+            zirk_str_hash(decomposed)
+        });
     }
 
     #[test]

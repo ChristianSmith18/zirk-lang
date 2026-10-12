@@ -304,6 +304,24 @@ impl IntegerValue {
     }
 }
 
+fn float_to_integer_bits(value: f64, width: IntWidth) -> Option<u128> {
+    let integer = value.trunc();
+    let (minimum, upper_exclusive) = if width.signed() {
+        let upper = 2.0_f64.powi((width.bits() - 1) as i32);
+        (-upper, upper)
+    } else {
+        (0.0, 2.0_f64.powi(width.bits() as i32))
+    };
+    if !integer.is_finite() || integer < minimum || integer >= upper_exclusive {
+        return None;
+    }
+    Some(if width.signed() {
+        integer as i128 as u128
+    } else {
+        integer as u128
+    })
+}
+
 /// Heap-owned values that can carry browser-local identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeapEntry {
@@ -924,6 +942,7 @@ pub struct Interpreter<'module> {
     /// newline. Pieces written to it continue the same logical event.
     open_output_line: Option<OutputDestination>,
     output_truncated: bool,
+    cancellation_shield_depth: u32,
     pending_exception: Option<HeapId>,
     throwables: HashMap<HeapId, ThrowableInfo>,
     trace: Option<TraceState>,
@@ -952,6 +971,7 @@ impl<'module> Interpreter<'module> {
             output_events: 0,
             open_output_line: None,
             output_truncated: false,
+            cancellation_shield_depth: 0,
             pending_exception: None,
             throwables: HashMap::new(),
             trace: None,
@@ -1024,14 +1044,14 @@ impl<'module> Interpreter<'module> {
                 span: None,
             });
         };
+        if host.is_cancelled() {
+            return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
+        }
         if let Err(failure) = self.push_frame(function, Vec::new(), None) {
             return ExecutionResult::LimitFailure(failure);
         }
 
         loop {
-            if host.is_cancelled() {
-                return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
-            }
             if self.executed_steps >= self.limits.instructions {
                 return ExecutionResult::LimitFailure(LimitFailure::Instructions);
             }
@@ -1132,6 +1152,9 @@ impl<'module> Interpreter<'module> {
                             }
                         }
                     }
+                }
+                Some(Terminator::Cancel) => {
+                    return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
                 }
                 Some(Terminator::Jump(target)) => {
                     self.enter_block(frame_index, target);
@@ -1774,58 +1797,32 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 if source_width == FloatWidth::F128 {
-                    let literal = zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(
-                        &text,
-                    )
-                    .and_then(|value| value.trunc_to_integer(width.bits(), width.signed()))
-                    .map_err(|error| {
-                        ExecutionFault::Internal(format!(
-                            "float-to-integer conversion is outside the target range: {error:?}"
-                        ))
-                    })?;
-                    return Ok(Some(Value::Int(
-                        IntegerValue::from_literal(literal, width)
-                            .map_err(ExecutionFault::Internal)?,
-                    )));
+                    let literal =
+                        zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                            .and_then(|value| {
+                                value.trunc_to_integer_bits(width.bits(), width.signed())
+                            })
+                            .map_err(|error| {
+                                let message = match error {
+                                    zirk_runtime_core::binary_float::Float128Error::NonFinite => {
+                                        "non-finite float cannot be converted to an integer"
+                                    }
+                                    _ => "float-to-integer conversion is outside the target range",
+                                };
+                                ExecutionFault::Runtime {
+                                    category: "CastError".into(),
+                                    message: message.into(),
+                                }
+                            })?;
+                    return Ok(Some(Value::Int(IntegerValue::from_bits(literal, width))));
                 }
                 let value = Self::parse_binary_float(&text)?;
-                let integer = value.trunc();
-                let (minimum, maximum) = if width.signed() {
-                    let minimum = if width.bits() == 128 {
-                        i128::MIN as f64
-                    } else {
-                        -(1_i128 << (width.bits() - 1)) as f64
-                    };
-                    let maximum = if width.bits() == 128 {
-                        i128::MAX as f64
-                    } else {
-                        ((1_i128 << (width.bits() - 1)) - 1) as f64
-                    };
-                    (minimum, maximum)
-                } else {
-                    (
-                        0.0,
-                        if width.bits() == 128 {
-                            u128::MAX as f64
-                        } else {
-                            ((1_u128 << width.bits()) - 1) as f64
-                        },
-                    )
-                };
-                if !integer.is_finite() || integer < minimum || integer > maximum {
-                    return Err(ExecutionFault::Runtime {
+                let bits =
+                    float_to_integer_bits(value, width).ok_or_else(|| ExecutionFault::Runtime {
                         category: "CastError".into(),
                         message: "float-to-integer conversion is outside the target range".into(),
-                    });
-                }
-                let literal = if width.signed() {
-                    integer as i128
-                } else {
-                    integer as u128 as i128
-                };
-                Ok(Some(Value::Int(
-                    IntegerValue::from_literal(literal, width).map_err(ExecutionFault::Internal)?,
-                )))
+                    })?;
+                Ok(Some(Value::Int(IntegerValue::from_bits(bits, width))))
             }
             InstKind::IntToDecimal(operand) => {
                 let Value::Int(value) = self.value(frame_index, *operand)? else {
@@ -2755,7 +2752,17 @@ impl<'module> Interpreter<'module> {
             InstKind::PrintlnStderr(operand) => {
                 self.emit_output(frame_index, *operand, true, OutputDestination::Stderr, host)
             }
-            InstKind::IsCancelled => Ok(Some(Value::Boolean(host.is_cancelled()))),
+            InstKind::IsCancelled => Ok(Some(Value::Boolean(
+                self.cancellation_shield_depth == 0 && host.is_cancelled(),
+            ))),
+            InstKind::CancelShieldEnter => {
+                self.cancellation_shield_depth = self.cancellation_shield_depth.saturating_add(1);
+                Ok(None)
+            }
+            InstKind::CancelShieldExit => {
+                self.cancellation_shield_depth = self.cancellation_shield_depth.saturating_sub(1);
+                Ok(None)
+            }
             InstKind::FlushStdout { enum_id } | InstKind::FlushStderr { enum_id } => {
                 // The bounded host's own sink is in-memory
                 // (`add-stdin-stdout-standard-library`, design D3): flushing
@@ -3190,11 +3197,13 @@ impl<'module> Interpreter<'module> {
             "zirk_rt_duration_mul_f64" => int(zirk_runtime_core::duration::multiply(
                 nanos,
                 self.float64_argument(arguments.get(1))?,
-            )),
+            )
+            .map_err(Self::duration_scalar_fault)?),
             "zirk_rt_duration_div_f64" => int(zirk_runtime_core::duration::divide(
                 nanos,
                 self.float64_argument(arguments.get(1))?,
-            )),
+            )
+            .map_err(Self::duration_scalar_fault)?),
             "zirk_rt_duration_div_duration" => float(zirk_runtime_core::duration::ratio(
                 nanos,
                 self.integer_from_value(arguments.get(1))?,
@@ -3434,6 +3443,19 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    fn duration_scalar_fault(error: zirk_runtime_core::duration::ScalarError) -> ExecutionFault {
+        use zirk_runtime_core::duration::ScalarError;
+        let (category, message) = match error {
+            ScalarError::DivisionByZero => ("DivisionByZeroError", "division by zero"),
+            ScalarError::NonFiniteResult => ("FloatNanError", "Float operation produced NaN"),
+            ScalarError::Overflow => ("ArithmeticOverflowError", "duration scalar overflow"),
+        };
+        ExecutionFault::Runtime {
+            category: category.into(),
+            message: message.into(),
+        }
+    }
+
     /// Allocates `values` as a `List` heap entry.
     fn allocate_value_list(&mut self, values: Vec<Value>) -> Result<Value, ExecutionFault> {
         let bytes = std::mem::size_of::<HeapEntry>()
@@ -3555,7 +3577,7 @@ impl<'module> Interpreter<'module> {
             "zirk_rt_decimal_pow" => value(dec::pow(dec_arg(0)?, dec_arg(1)?)),
             "zirk_rt_decimal_pow_i" => value(dec::pow_int(
                 dec_arg(0)?,
-                self.integer_from_value(arguments.get(1))?,
+                i128::from(self.integer_from_value(arguments.get(1))?),
             )),
             "zirk_rt_decimal_div_ex" => value(dec::div_to_scale(
                 dec_arg(0)?,
@@ -3862,6 +3884,27 @@ impl<'module> Interpreter<'module> {
         let text = |index: usize| self.text_argument(arguments.get(index));
         let int = |value: i64| self.int_result(i128::from(value), ty, name);
         let wide_result = |value: i128| self.int_result(value, ty, name);
+        let check_days = |index: usize| -> Result<i64, ExecutionFault> {
+            let days = int64(index)?;
+            tmp::civil_from_days_checked(days).ok_or_else(|| ExecutionFault::Runtime {
+                category: "ArithmeticOverflowError".into(),
+                message: "date year is outside the public Int32 range".into(),
+            })?;
+            Ok(days)
+        };
+        let check_datetime = |index: usize| -> Result<i128, ExecutionFault> {
+            let value = wide(index)?;
+            let days =
+                tmp::datetime_days_checked(value).ok_or_else(|| ExecutionFault::Runtime {
+                    category: "ArithmeticOverflowError".into(),
+                    message: "datetime day count is outside the public Int64 range".into(),
+                })?;
+            tmp::civil_from_days_checked(days).ok_or_else(|| ExecutionFault::Runtime {
+                category: "ArithmeticOverflowError".into(),
+                message: "date year is outside the public Int32 range".into(),
+            })?;
+            Ok(value)
+        };
         match name {
             "zirk_rt_date_is_valid" => Ok(Value::Boolean(tmp::date_is_valid(
                 int32(0)?,
@@ -3869,30 +3912,30 @@ impl<'module> Interpreter<'module> {
                 int32(2)?,
             ))),
             "zirk_rt_date_days" => int(tmp::days_from_civil(int32(0)?, int32(1)?, int32(2)?)),
-            "zirk_rt_date_year" => int(i64::from(tmp::civil_from_days(int64(0)?).0)),
-            "zirk_rt_date_month" => int(i64::from(tmp::civil_from_days(int64(0)?).1)),
-            "zirk_rt_date_day" => int(i64::from(tmp::civil_from_days(int64(0)?).2)),
+            "zirk_rt_date_year" => int(i64::from(tmp::civil_from_days(check_days(0)?).0)),
+            "zirk_rt_date_month" => int(i64::from(tmp::civil_from_days(check_days(0)?).1)),
+            "zirk_rt_date_day" => int(i64::from(tmp::civil_from_days(check_days(0)?).2)),
             "zirk_rt_date_to_string" => self
-                .allocate_string(tmp::date_to_string(int64(0)?))
+                .allocate_string(tmp::date_to_string(check_days(0)?))
                 .map(Value::Heap),
-            "zirk_rt_date_day_of_week" => int(i64::from(tmp::date_day_of_week(int64(0)?))),
-            "zirk_rt_date_day_of_year" => int(i64::from(tmp::date_day_of_year(int64(0)?))),
-            "zirk_rt_date_week_of_year" => int(i64::from(tmp::date_week_of_year(int64(0)?))),
-            "zirk_rt_date_quarter" => int(i64::from(tmp::date_quarter(int64(0)?))),
-            "zirk_rt_date_days_in_month" => int(i64::from(tmp::date_days_in_month(int64(0)?))),
-            "zirk_rt_date_days_in_year" => int(i64::from(tmp::date_days_in_year(int64(0)?))),
-            "zirk_rt_date_is_leap" => Ok(Value::Boolean(tmp::date_is_leap(int64(0)?))),
+            "zirk_rt_date_day_of_week" => int(i64::from(tmp::date_day_of_week(check_days(0)?))),
+            "zirk_rt_date_day_of_year" => int(i64::from(tmp::date_day_of_year(check_days(0)?))),
+            "zirk_rt_date_week_of_year" => int(i64::from(tmp::date_week_of_year(check_days(0)?))),
+            "zirk_rt_date_quarter" => int(i64::from(tmp::date_quarter(check_days(0)?))),
+            "zirk_rt_date_days_in_month" => int(i64::from(tmp::date_days_in_month(check_days(0)?))),
+            "zirk_rt_date_days_in_year" => int(i64::from(tmp::date_days_in_year(check_days(0)?))),
+            "zirk_rt_date_is_leap" => Ok(Value::Boolean(tmp::date_is_leap(check_days(0)?))),
             "zirk_rt_date_start_of_ok" | "zirk_rt_date_end_of_ok" => {
                 Ok(Value::Boolean(tmp::date_unit_ok(&text(0)?)))
             }
-            "zirk_rt_date_start_of_value" => int(tmp::date_start_of(int64(0)?, &text(1)?)),
-            "zirk_rt_date_end_of_value" => int(tmp::date_end_of(int64(0)?, &text(1)?)),
+            "zirk_rt_date_start_of_value" => int(tmp::date_start_of(check_days(0)?, &text(1)?)),
+            "zirk_rt_date_end_of_value" => int(tmp::date_end_of(check_days(0)?, &text(1)?)),
             "zirk_rt_date_parse_ok" => {
                 Ok(Value::Boolean(tmp::parse_date_text(&text(0)?).is_some()))
             }
             "zirk_rt_date_parse_value" => int(tmp::parse_date_text(&text(0)?).unwrap_or(0)),
             "zirk_rt_date_format" => self
-                .allocate_string(tmp::date_format(int64(0)?, &text(1)?))
+                .allocate_string(tmp::date_format(check_days(0)?, &text(1)?))
                 .map(Value::Heap),
             "zirk_rt_time_is_valid" => Ok(Value::Boolean(tmp::time_is_valid(
                 int32(0)?,
@@ -3924,20 +3967,20 @@ impl<'module> Interpreter<'module> {
             "zirk_rt_time_format" => self
                 .allocate_string(tmp::time_format(int64(0)?, &text(1)?))
                 .map(Value::Heap),
-            "zirk_rt_datetime_new" => wide_result(tmp::datetime_pack(int64(0)?, int64(1)?)),
-            "zirk_rt_datetime_days" => int(tmp::datetime_days(wide(0)?)),
-            "zirk_rt_datetime_nanos" => int(tmp::datetime_nanos(wide(0)?)),
+            "zirk_rt_datetime_new" => wide_result(tmp::datetime_pack(check_days(0)?, int64(1)?)),
+            "zirk_rt_datetime_days" => int(tmp::datetime_days(check_datetime(0)?)),
+            "zirk_rt_datetime_nanos" => int(tmp::datetime_nanos(check_datetime(0)?)),
             "zirk_rt_datetime_to_string" => self
-                .allocate_string(tmp::datetime_to_string(wide(0)?))
+                .allocate_string(tmp::datetime_to_string(check_datetime(0)?))
                 .map(Value::Heap),
             "zirk_rt_datetime_start_of_ok" | "zirk_rt_datetime_end_of_ok" => {
                 Ok(Value::Boolean(tmp::datetime_unit_ok(&text(0)?)))
             }
             "zirk_rt_datetime_start_of_value" => {
-                wide_result(tmp::datetime_start_of(wide(0)?, &text(1)?))
+                wide_result(tmp::datetime_start_of(check_datetime(0)?, &text(1)?))
             }
             "zirk_rt_datetime_end_of_value" => {
-                wide_result(tmp::datetime_end_of(wide(0)?, &text(1)?))
+                wide_result(tmp::datetime_end_of(check_datetime(0)?, &text(1)?))
             }
             "zirk_rt_datetime_parse_ok" => Ok(Value::Boolean(
                 tmp::parse_datetime_text(&text(0)?).is_some(),
@@ -3946,7 +3989,7 @@ impl<'module> Interpreter<'module> {
                 wide_result(tmp::parse_datetime_text(&text(0)?).unwrap_or(0))
             }
             "zirk_rt_datetime_format" => self
-                .allocate_string(tmp::datetime_format(wide(0)?, &text(1)?))
+                .allocate_string(tmp::datetime_format(check_datetime(0)?, &text(1)?))
                 .map(Value::Heap),
             _ => Err(ExecutionFault::Internal(format!(
                 "unsupported browser intrinsic {name}"
@@ -5565,6 +5608,7 @@ pub const fn type_support(ty: IrType) -> BrowserSupport {
 pub const fn terminator_support(terminator: &Terminator) -> BrowserSupport {
     match terminator {
         Terminator::Return(_)
+        | Terminator::Cancel
         | Terminator::Unreachable
         | Terminator::Jump(_)
         | Terminator::Branch { .. } => BrowserSupport::Direct,
@@ -5663,7 +5707,9 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::PrintlnStderr(_)
         | InstKind::FlushStdout { .. }
         | InstKind::FlushStderr { .. }
-        | InstKind::IsCancelled => BrowserSupport::BoundedHost,
+        | InstKind::IsCancelled
+        | InstKind::CancelShieldEnter
+        | InstKind::CancelShieldExit => BrowserSupport::BoundedHost,
         InstKind::FatalError(_)
         | InstKind::Throw(_)
         | InstKind::SetSuppressed { .. }
@@ -5724,6 +5770,213 @@ mod tests {
 
     fn int(width: IntWidth, value: i128) -> Value {
         Value::Int(IntegerValue::from_literal(value, width).unwrap())
+    }
+
+    #[test]
+    fn float_to_integer_rejects_exclusive_power_of_two_bounds() {
+        assert_eq!(
+            float_to_integer_bits(-128.0, IntWidth::I8),
+            Some((-128_i128) as u128)
+        );
+        assert_eq!(float_to_integer_bits(127.0, IntWidth::I8), Some(127));
+        assert_eq!(float_to_integer_bits(128.0, IntWidth::I8), None);
+        assert_eq!(float_to_integer_bits(-129.0, IntWidth::I8), None);
+        assert_eq!(float_to_integer_bits(255.0, IntWidth::U8), Some(255));
+        assert_eq!(float_to_integer_bits(256.0, IntWidth::U8), None);
+        assert_eq!(float_to_integer_bits(-1.0, IntWidth::U8), None);
+        assert_eq!(float_to_integer_bits(f64::INFINITY, IntWidth::I64), None);
+        assert_eq!(
+            float_to_integer_bits(2.0_f64.powi(127), IntWidth::I128),
+            None
+        );
+        assert_eq!(
+            float_to_integer_bits(-2.0_f64.powi(127), IntWidth::I128),
+            Some(1_u128 << 127)
+        );
+        assert_eq!(
+            float_to_integer_bits(2.0_f64.powi(128), IntWidth::U128),
+            None
+        );
+        assert_eq!(
+            float_to_integer_bits(2.0_f64.powi(127), IntWidth::U128),
+            Some(1_u128 << 127)
+        );
+    }
+
+    // Numeric parity regressions use runtime-core as the reference contract:
+    // native runtime adapters call these same pure operations. They exercise
+    // the interpreter dispatch too, but are not an end-to-end LLVM execution.
+    #[test]
+    fn float_to_integer_edges_match_the_defined_native_conversion_domain() {
+        let cases = [
+            (-128.9, IntWidth::I8, Some((-128_i128) as u128)),
+            (127.9, IntWidth::I8, Some(127)),
+            (128.0, IntWidth::I8, None),
+            (-129.0, IntWidth::I8, None),
+            (255.9, IntWidth::U8, Some(255)),
+            (256.0, IntWidth::U8, None),
+            (-0.9, IntWidth::U8, Some(0)),
+            (-1.0, IntWidth::U8, None),
+            (f64::NAN, IntWidth::I32, None),
+            (f64::INFINITY, IntWidth::I32, None),
+            (f64::NEG_INFINITY, IntWidth::I32, None),
+            (2.0_f64.powi(127), IntWidth::I128, None),
+            (-2.0_f64.powi(127), IntWidth::I128, Some(1_u128 << 127)),
+        ];
+        for (input, width, expected) in cases {
+            assert_eq!(
+                float_to_integer_bits(input, width),
+                expected,
+                "{input} as {width:?}"
+            );
+        }
+
+        // LLVM fptosi/fptoui has poison/undefined results out of range and for
+        // NaN/infinities. The cases above pin interpreter rejection, while
+        // native parity is asserted only for the in-range finite cases.
+        for (input, width, expected) in [
+            (-127.75, IntWidth::I8, Some((-127_i128) as u128)),
+            (0.0, IntWidth::U8, Some(0)),
+            (255.0, IntWidth::U8, Some(255)),
+        ] {
+            assert_eq!(float_to_integer_bits(input, width), expected);
+        }
+    }
+
+    #[test]
+    fn decimal_exponents_and_overflow_match_runtime_core_and_native_failure_category() {
+        use zirk_runtime_core::decimal as dec;
+
+        let module = Module::default();
+        let interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        for literal in ["1e30", "-3.125e-12", "6.25e-2"] {
+            let parsed = dec::parse(literal).expect("reference decimal parses");
+            let normalized = dec::format(parsed);
+            let actual = interpreter.parse_decimal(&normalized).unwrap();
+            assert_eq!(actual, parsed, "decimal exponent {literal}");
+        }
+
+        let max = dec::Decimal {
+            coef: i128::MAX,
+            scale: 0,
+        };
+        let one = dec::Decimal::new(1, 0);
+        let native = dec::add(max, one);
+        let interpreted = Interpreter::decimal_fault(native.unwrap_err());
+        assert!(matches!(
+            interpreted,
+            ExecutionFault::Runtime { category, .. } if category == "ArithmeticOverflowError"
+        ));
+
+        let overflow_exp = dec::parse("1e1000000");
+        assert!(overflow_exp.is_none());
+    }
+
+    #[test]
+    fn float_duration_scaling_matches_runtime_core_values_and_failures() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let invoke = |interpreter: &mut Interpreter, name: &str, nanos: i64, scalar: f64| {
+            interpreter.execute_duration_intrinsic(
+                name,
+                &[
+                    int(IntWidth::I64, i128::from(nanos)),
+                    Value::Float {
+                        width: FloatWidth::F64,
+                        text: scalar.to_string(),
+                    },
+                ],
+                IrType::Int(IntWidth::I64),
+            )
+        };
+
+        for (nanos, scalar) in [(3, 2.5), (-9, 0.5), (123_456_789, 2.0)] {
+            let native = zirk_runtime_core::duration::multiply(nanos, scalar).unwrap();
+            assert_eq!(
+                invoke(&mut interpreter, "zirk_rt_duration_mul_f64", nanos, scalar).unwrap(),
+                int(IntWidth::I64, i128::from(native))
+            );
+        }
+        for (nanos, scalar) in [(7, 2.0), (-9, 2.0)] {
+            let native = zirk_runtime_core::duration::divide(nanos, scalar).unwrap();
+            assert_eq!(
+                invoke(&mut interpreter, "zirk_rt_duration_div_f64", nanos, scalar).unwrap(),
+                int(IntWidth::I64, i128::from(native))
+            );
+        }
+
+        for (name, scalar, expected_category) in [
+            ("zirk_rt_duration_mul_f64", f64::NAN, "FloatNanError"),
+            (
+                "zirk_rt_duration_mul_f64",
+                f64::INFINITY,
+                "ArithmeticOverflowError",
+            ),
+            ("zirk_rt_duration_div_f64", 0.0, "DivisionByZeroError"),
+        ] {
+            let err = invoke(&mut interpreter, name, 1, scalar).unwrap_err();
+            assert!(
+                matches!(&err, ExecutionFault::Runtime { category, .. } if category == expected_category),
+                "{name}({scalar}) produced {err:?}"
+            );
+        }
+        let overflow =
+            invoke(&mut interpreter, "zirk_rt_duration_mul_f64", i64::MAX, 2.0).unwrap_err();
+        assert!(
+            matches!(overflow, ExecutionFault::Runtime { category, .. } if category == "ArithmeticOverflowError")
+        );
+    }
+
+    #[test]
+    fn time_duration_wrap_and_date_day_bounds_match_runtime_core() {
+        use zirk_runtime_core::temporal as tmp;
+
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        for (time, delta) in [(0_i64, -1_i64), (tmp::NANOS_PER_DAY - 1, 2), (123, -456)] {
+            let actual = interpreter
+                .execute_temporal_intrinsic(
+                    "zirk_rt_time_add_nanos",
+                    &[
+                        int(IntWidth::I64, i128::from(time)),
+                        int(IntWidth::I64, i128::from(delta)),
+                    ],
+                    IrType::Int(IntWidth::I64),
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                int(IntWidth::I64, i128::from(tmp::time_add_nanos(time, delta)))
+            );
+        }
+
+        let max_days = tmp::days_from_civil(i32::MAX, 12, 31);
+        let min_days = tmp::days_from_civil(i32::MIN, 1, 1);
+        for days in [min_days, max_days] {
+            let expected = tmp::civil_from_days_checked(days).unwrap().0;
+            let actual = interpreter
+                .execute_temporal_intrinsic(
+                    "zirk_rt_date_year",
+                    &[int(IntWidth::I64, i128::from(days))],
+                    IrType::Int(IntWidth::I64),
+                )
+                .unwrap();
+            assert_eq!(actual, int(IntWidth::I64, i128::from(expected)));
+        }
+        for days in [min_days - 1, max_days + 1] {
+            let expected = tmp::civil_from_days_checked(days);
+            assert!(expected.is_none());
+            let err = interpreter
+                .execute_temporal_intrinsic(
+                    "zirk_rt_date_year",
+                    &[int(IntWidth::I64, i128::from(days))],
+                    IrType::Int(IntWidth::I64),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, ExecutionFault::Runtime { category, .. } if category == "ArithmeticOverflowError")
+            );
+        }
     }
 
     #[test]
@@ -6240,7 +6493,7 @@ mod tests {
             }],
             entry: BlockId(0),
             span,
-            gc_roots: Vec::new(),
+            gc_roots: vec![SlotId(0)],
         };
         let module = Module {
             functions: vec![

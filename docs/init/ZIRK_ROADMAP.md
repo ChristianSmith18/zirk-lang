@@ -467,8 +467,11 @@ distinction changes who implements them:
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
   native reference types under the same rule. `Array<T>` (fixed-capacity) and
   `List<T>` (resizable) are implemented in `array-list-tuple-duration-regex`;
-  this phase completes `Map<K,V>` and `Set<T>` plus the wider
-  `std.collections` API.
+  `Map<K,V>` and `Set<T>` currently provide a bounded one-word runtime
+  representation, managed-reference tracing, and the documented basic
+  operations. Semantic analysis rejects collection shapes that cannot be
+  represented safely by that ABI; full generic collection representations and
+  the wider `std.collections` API remain roadmap work.
 
 `String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
 the search/trim/`substring` methods are delivered in

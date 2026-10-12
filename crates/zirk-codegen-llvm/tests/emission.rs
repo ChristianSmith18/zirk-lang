@@ -580,8 +580,8 @@ fn every_return_path_pops_its_own_gc_frame() {
     );
     assert_eq!(
         body.matches("call void @zirk_rt_pop_frame").count(),
-        3,
-        "one pop per return path — three `return` statements, three pops:\n{body}"
+        4,
+        "one pop per return path plus the entry cancellation exit:\n{body}"
     );
 }
 
@@ -652,6 +652,67 @@ fn binary_float_arithmetic_is_still_a_native_fadd() {
 }
 
 #[test]
+fn enum_construction_zero_initializes_inactive_reference_payloads() {
+    let ir = llvm_ir(
+        "enum MaybeText { Some(value: String), None }\n\
+         fn main(): Void { mut value: MaybeText = MaybeText.None; }",
+    );
+    let main = ir
+        .split("define void @zk_main()")
+        .nth(1)
+        .expect("main body exists");
+    assert!(
+        main.contains("{ i32 1, ptr null }"),
+        "the constructed enum must contain the active tag and a null inactive payload:\n{main}"
+    );
+    assert!(
+        !main.contains("undef"),
+        "an inactive managed payload must never be LLVM undef:\n{main}"
+    );
+}
+
+#[test]
+fn float_to_integer_emission_checks_truncated_value_before_fptosi() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+             mut value: Float64 = 7 as Float64;\n\
+             mut result: Int32 = value as Int32;\n\
+         }",
+    );
+    assert!(ir.contains("@llvm.trunc.f64"), "{ir}");
+    assert!(ir.contains("fcmp oge double"), "{ir}");
+    assert!(ir.contains("fcmp olt double"), "{ir}");
+    assert!(ir.contains("@zirk_rt_invalid_cast()"), "{ir}");
+    let cast = ir
+        .split("fptosi")
+        .next()
+        .expect("checked conversion is emitted");
+    assert!(
+        cast.contains("br i1"),
+        "the range checks must branch before the conversion:\n{cast}"
+    );
+}
+
+#[test]
+fn checked_float_to_integer_emission_covers_wide_signed_and_unsigned_bounds() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+             mut wide: Float128 = 7 as Float128;\n\
+             mut signed: Int128 = wide as Int128;\n\
+             mut unsigned: UInt128 = wide as UInt128;\n\
+         }",
+    );
+    assert!(
+        ir.contains("0xL0000000000000000407F000000000000"),
+        "UInt128's exclusive upper bound is exact 2^128, not a rounded UInt128::MAX:\n{ir}"
+    );
+    assert!(ir.contains("fcmp oge fp128"), "{ir}");
+    assert!(ir.contains("fcmp olt fp128"), "{ir}");
+    assert!(ir.contains("fptosi fp128"), "{ir}");
+    assert!(ir.contains("fptoui fp128"), "{ir}");
+}
+
+#[test]
 fn concurrent_block_emits_scope_calls_a_branch_thunk_and_a_spawn() {
     let ir = llvm_ir(
         "fn load(): Int32 { return 1; }\n         fn main(): Void {\n           concurrent {\n             inmut a: Int32 = load();\n           }\n           stdout.println(a);\n         }",
@@ -710,4 +771,89 @@ fn typed_channel_operations_emit_the_channel_abi_and_typed_outcomes() {
         ir.contains("channel is closed") || ir.contains("E_NATIVE_ERROR"),
         "send must route the closed status through the native failure path:\n{ir}"
     );
+}
+
+#[test]
+fn map_and_set_constructors_receive_content_key_semantics_for_string_and_char() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+           mut strings: Map<String, String> = Map();\n\
+           mut chars: Set<Char> = Set();\n\
+           mut words: Map<Int32, Int32> = Map();\n\
+           mut numbers: Set<Int32> = Set();\n\
+         }",
+    );
+    assert!(ir.contains(&format!("@{}", symbols::MAP_NEW_WITH_LAYOUT)));
+    assert!(ir.contains(&format!("@{}", symbols::SET_NEW_WITH_LAYOUT)));
+    let content_map_calls = ir
+        .matches(&format!("call ptr @{}", symbols::MAP_NEW_WITH_LAYOUT))
+        .count();
+    let content_set_calls = ir
+        .matches(&format!("call ptr @{}", symbols::SET_NEW_WITH_LAYOUT))
+        .count();
+    assert_eq!(
+        content_map_calls, 2,
+        "all Map constructors use the typed ABI:\n{ir}"
+    );
+    assert_eq!(
+        content_set_calls, 2,
+        "all Set constructors use the typed ABI:\n{ir}"
+    );
+    assert!(
+        ir.contains("i1 true"),
+        "String/Char constructors pass content mode:\n{ir}"
+    );
+    assert!(
+        ir.contains("i1 false"),
+        "scalar constructors pass word mode:\n{ir}"
+    );
+    assert!(
+        !ir.contains("zk.map.key_offsets."),
+        "snapshotted String keys must not retain the mutable key handle:\n{ir}"
+    );
+    assert!(
+        !ir.contains("zk.set.element_offsets."),
+        "snapshotted Char elements must not retain the mutable handle:\n{ir}"
+    );
+    assert!(
+        ir.contains("zk.map.value_offsets."),
+        "managed Map values must still be traced:\n{ir}"
+    );
+}
+
+#[test]
+fn array_and_list_constructors_emit_nested_aggregate_reference_offsets() {
+    let ir = llvm_ir(
+        "record Inner { text: String; }\n\
+         record Outer { prefix: Int64; inner: Inner; }\n\
+         fn main(): Void {\n\
+           mut arrays: Array<Outer> = Array(2);\n\
+           mut lists: List<Outer> = List();\n\
+         }",
+    );
+    assert!(ir.contains(&format!("@{}", symbols::ARRAY_NEW_WITH_LAYOUT)));
+    assert!(ir.contains(&format!("@{}", symbols::LIST_NEW_WITH_LAYOUT)));
+    assert!(ir.contains("zk.array.offsets."));
+    assert!(ir.contains("zk.list.offsets."));
+    assert!(
+        ir.contains("i64 8"),
+        "nested field path is expressed as an element-relative offset:\n{ir}"
+    );
+}
+
+#[test]
+fn array_clone_and_slice_preserve_nested_aggregate_reference_offsets() {
+    let ir = llvm_ir(
+        "record Inner { text: String; }\n\
+         record Outer { prefix: Int64; inner: Inner; }\n\
+         fn main(): Void {\n\
+           mut arrays: Array<Outer> = Array(2);\n\
+           mut cloned = arrays.clone();\n\
+           mut sliced = arrays[0: 1];\n\
+         }",
+    );
+    assert!(ir.contains(&format!("@{}", symbols::ARRAY_CLONE_WITH_LAYOUT)));
+    assert!(ir.contains(&format!("@{}", symbols::ARRAY_SLICE_WITH_LAYOUT)));
+    assert!(ir.contains("zk.array.clone.offsets."));
+    assert!(ir.contains("zk.array.slice.offsets."));
 }

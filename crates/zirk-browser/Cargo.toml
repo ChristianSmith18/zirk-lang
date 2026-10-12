@@ -22,4 +22,4 @@ zirk-sema.workspace = true
 zirk-format.workspace = true
 
 [dev-dependencies]
-zirk-cli.workspace = true
+zirk-cli = { workspace = true, features = ["backend"] }

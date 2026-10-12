@@ -6020,10 +6020,135 @@ fn valid_map_and_set_types_resolve() {
 }
 
 #[test]
+fn valid_collection_word_layouts_cover_scalars_and_managed_handles() {
+    accepted(
+        "enum Direction { North, East }\n\
+         class User { construct() { } }\n\
+         fn main(): Void {\n\
+             mut integers: Map<String, UInt64> = Map();\n\
+             mut flags: Map<String, Boolean> = Map();\n\
+             mut characters: Map<String, Char> = Map();\n\
+             mut strings: Map<String, String> = Map();\n\
+             mut durations: Map<String, Duration> = Map();\n\
+             mut dates: Map<String, Date> = Map();\n\
+             mut times: Map<String, Time> = Map();\n\
+             mut directions: Map<String, Direction> = Map();\n\
+             mut users: Map<String, User> = Map();\n\
+             mut arrays: Map<String, Array<Int32>> = Map();\n\
+             mut lists: Map<String, List<String>> = Map();\n\
+             mut nested: Map<String, Set<Int32>> = Map();\n\
+             mut keys: Set<Int64> = Set();\n\
+             mut names: Set<String> = Set();\n\
+             mut chars: Set<Char> = Set();\n\
+             mut kinds: Set<Direction> = Set();\n\
+             mut date_set: Set<Date> = Set();\n\
+             mut time_set: Set<Time> = Set();\n\
+         }",
+    );
+}
+
+#[test]
+fn valid_map_set_aggregate_descriptors_remain_semantically_admissible() {
+    accepted(
+        "enum Direction { North }\n\
+         record Point { x: Int32; }\n\
+         fn main(): Void {\n\
+             mut records: List<Point> = List();\n\
+             mut nullable: List<String?> = List();\n\
+             mut tuples: List<Tuple<Int32, String>> = List();\n\
+             mut closures: List<Fn(Int32) => Int32> = List();\
+         }",
+    );
+}
+
+#[test]
 fn invalid_set_of_an_unhashable_element() {
     let output = rejected_body("mut s: Set<List<Int32>> = Set();");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     assert!(output.contains("unhashable"), "{output}");
+}
+
+#[test]
+fn invalid_collection_keys_reject_wide_nullable_and_aggregate_types() {
+    for (source, description) in [
+        ("mut s: Set<Int128> = Set();", "Set<Int128>"),
+        ("mut s: Set<UInt128> = Set();", "Set<UInt128>"),
+        ("mut s: Set<Int32?> = Set();", "Set<Int32?>"),
+        (
+            "mut m: Map<Int128, Boolean> = Map();",
+            "Map<Int128, Boolean>",
+        ),
+        (
+            "mut m: Map<Tuple<Int32, String>, Boolean> = Map();",
+            "tuple key",
+        ),
+        ("mut m: Map<List<Int32>, Boolean> = Map();", "list key"),
+    ] {
+        let output = rejected_body(source);
+        assert!(
+            output.contains(codes::TYPE_MISMATCH.as_str()),
+            "{description}: {output}"
+        );
+        assert!(output.contains("unhashable"), "{description}: {output}");
+    }
+}
+
+#[test]
+fn invalid_map_values_fail_early_when_the_word_abi_cannot_round_trip_them() {
+    for (source, description) in [
+        ("mut m: Map<String, Int128> = Map();", "Int128"),
+        ("mut m: Map<String, UInt128> = Map();", "UInt128"),
+        ("mut m: Map<String, Float64> = Map();", "Float64"),
+        ("mut m: Map<String, Decimal> = Map();", "Decimal"),
+        ("mut m: Map<String, String?> = Map();", "String?"),
+        ("mut m: Map<String, Tuple<Int32, String>> = Map();", "Tuple"),
+        ("mut m: Map<String, Fn(Int32) => Int32> = Map();", "Fn("),
+    ] {
+        let output = rejected_body(source);
+        assert!(
+            output.contains(codes::TYPE_MISMATCH.as_str()),
+            "{description}: {output}"
+        );
+        assert!(
+            output.contains("one-word value representation"),
+            "{description}: {output}"
+        );
+        assert!(output.contains(description), "{description}: {output}");
+    }
+}
+
+#[test]
+fn invalid_map_values_reject_inline_records_and_payload_enums() {
+    let output = rejected(
+        "record Point { x: Int32; }\n\
+         enum Outcome { Success(value: String), Failure }\n\
+         fn main(): Void {\n\
+             mut points: Map<String, Point> = Map();\n\
+         }",
+    );
+    assert!(output.contains("Map<..., Point>"), "{output}");
+    assert!(output.contains("one-word value representation"), "{output}");
+
+    let output = rejected(
+        "enum Outcome { Success(value: String), Failure }\n\
+         fn main(): Void {\n\
+             mut outcomes: Map<String, Outcome> = Map();\n\
+         }",
+    );
+    assert!(output.contains("Map<..., Outcome>"), "{output}");
+    assert!(output.contains("one-word value representation"), "{output}");
+}
+
+#[test]
+fn invalid_map_key_payload_enum_is_rejected_at_its_type_span() {
+    let output = rejected(
+        "enum Outcome { Success(value: String), Failure }\n\
+         fn main(): Void {\n\
+             mut outcomes: Map<Outcome, Int32> = Map();\n\
+         }",
+    );
+    assert!(output.contains("Map<Outcome, ...>"), "{output}");
+    assert!(output.contains("unhashable key type"), "{output}");
 }
 
 #[test]

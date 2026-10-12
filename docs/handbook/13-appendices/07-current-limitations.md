@@ -9,6 +9,16 @@ the `String` mutation/search surface, `Char` classification/normalization, and
 `record`). Their existence in documentation does not imply every pipeline
 stage implements them.
 
+The delivered `Map`/`Set` runtime remains intentionally narrower than the
+generic API contract: entries use a one-word representation, supported managed
+references are traced, mutable text keys/elements are normalized snapshots, and
+aggregate layouts that cannot be represented safely are rejected by semantic
+analysis. The native Regex cache is bounded to 128 entries, 16 KiB per source
+pattern, 256 KiB total retained pattern text, and 256 KiB compiled size per
+pattern; when full, new patterns are rejected instead of evicting handles that
+may still be live. Numeric casts and temporal arithmetic use checked bounds;
+native/interpreter parity coverage includes the documented overflow edges.
+
 Current high-impact delivery limits include:
 
 - Package roots, local/vendored dependency traversal, `share mod`, logical

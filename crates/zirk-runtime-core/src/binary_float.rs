@@ -249,6 +249,35 @@ impl Float128 {
         }
     }
 
+    /// Truncates to an integer and returns its declared-width bit pattern.
+    /// This preserves the upper half of `UInt128`, which cannot be represented
+    /// by the interpreter's signed `i128` transport value.
+    pub fn trunc_to_integer_bits(self, bits: u32, signed: bool) -> Result<u128, Float128Error> {
+        if !(1..=128).contains(&bits) {
+            return Err(Float128Error::Overflow);
+        }
+        let value = self.trunc_to_bigint()?;
+        let (minimum, maximum) = if signed {
+            (
+                -(BigInt::one() << (bits - 1)),
+                (BigInt::one() << (bits - 1)) - 1,
+            )
+        } else {
+            (BigInt::zero(), (BigInt::one() << bits) - 1)
+        };
+        if value < minimum || value > maximum {
+            return Err(Float128Error::Overflow);
+        }
+        if signed {
+            value
+                .to_i128()
+                .map(|value| value as u128)
+                .ok_or(Float128Error::Overflow)
+        } else {
+            value.to_u128().ok_or(Float128Error::Overflow)
+        }
+    }
+
     /// Matches the native runtime's documented display bridge for `Float128`.
     pub fn display_f64(self) -> f64 {
         super::scalar::float128_bits_to_f64(self.0)
@@ -391,6 +420,30 @@ mod tests {
         assert_eq!(
             Float128::from_decimal("65504").unwrap().display_f64(),
             65504.0
+        );
+    }
+
+    #[test]
+    fn integer_conversion_preserves_uint128_bits_and_checks_exclusive_bounds() {
+        let high_bit = Float128::from_decimal("170141183460469231731687303715884105728").unwrap();
+        assert_eq!(
+            high_bit.trunc_to_integer_bits(128, false),
+            Ok(1_u128 << 127)
+        );
+        assert_eq!(
+            high_bit.trunc_to_integer_bits(128, true),
+            Err(Float128Error::Overflow)
+        );
+        let upper = Float128::from_decimal("340282366920938463463374607431768211456").unwrap();
+        assert_eq!(
+            upper.trunc_to_integer_bits(128, false),
+            Err(Float128Error::Overflow)
+        );
+        assert_eq!(
+            Float128::from_decimal("-170141183460469231731687303715884105728")
+                .unwrap()
+                .trunc_to_integer_bits(128, true),
+            Ok(1_u128 << 127)
         );
     }
 }

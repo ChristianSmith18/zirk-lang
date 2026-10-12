@@ -7,15 +7,6 @@
 //! compiler side of the feature is still landing.
 
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Placeholder cancellation token for roadmap Phase 4c.
-///
-/// Real implementation will consult the active concurrency scope once Phase 5
-/// tasks introduce cancellation tokens. Until then the token is always clear,
-/// so `zirk_rt_is_cancelled` returns `false`.
-static CANCELLED: AtomicBool = AtomicBool::new(false);
-
 /// Reports whether the active cancellation token is set.
 ///
 /// # Safety
@@ -24,7 +15,29 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 /// side-effect-free predicate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_is_cancelled() -> bool {
-    CANCELLED.load(Ordering::Relaxed)
+    crate::executor::current_task_is_cancelled()
+}
+
+/// Begins a temporary cancellation shield for generated cleanup code.
+///
+/// # Safety
+///
+/// This internal ABI operation must be paired with exactly one call to
+/// [`zirk_rt_cancel_shield_exit`] on the same task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_cancel_shield_enter() {
+    crate::executor::enter_cancellation_shield();
+}
+
+/// Ends one temporary cancellation shield for generated cleanup code.
+///
+/// # Safety
+///
+/// The current task must previously have entered a cancellation shield that
+/// has not yet been exited.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_cancel_shield_exit() {
+    crate::executor::exit_cancellation_shield();
 }
 
 /// Stub: closes a group of already-acquired resources by calling each

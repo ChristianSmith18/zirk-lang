@@ -254,6 +254,8 @@ pub mod symbols {
     /// Whether an active cancellation token is set (roadmap Phase 4c,
     /// `phase-4c-resources`, design D5) — consulted before resource close.
     pub const IS_CANCELLED: &str = "zirk_rt_is_cancelled";
+    pub const CANCEL_SHIELD_ENTER: &str = "zirk_rt_cancel_shield_enter";
+    pub const CANCEL_SHIELD_EXIT: &str = "zirk_rt_cancel_shield_exit";
     /// Closes a group of acquired resources right-to-left (roadmap Phase 4c,
     /// `phase-4c-resources`, design D1/D5) — `match with` grouped cleanup.
     pub const RESOURCE_CLOSE_GROUP: &str = "zirk_rt_resource_close_group";
@@ -310,12 +312,19 @@ pub mod symbols {
 
     /// `zirk_rt_array_new(capacity, elem_size, elem_align, is_ref) -> *mut c_void`.
     pub const ARRAY_NEW: &str = "zirk_rt_array_new";
+    /// `zirk_rt_array_new_with_layout(capacity, elem_size, elem_align, offsets, count)`.
+    pub const ARRAY_NEW_WITH_LAYOUT: &str = "zirk_rt_array_new_with_layout";
     /// `zirk_rt_list_new(elem_size, elem_align, is_ref) -> *mut c_void`.
     pub const LIST_NEW: &str = "zirk_rt_list_new";
     /// `zirk_rt_list_new_with_layout(elem_size, elem_align, offsets, count) -> *mut c_void`.
     pub const LIST_NEW_WITH_LAYOUT: &str = "zirk_rt_list_new_with_layout";
-    /// `zirk_rt_map_new() -> *mut c_void`.
-    pub const MAP_NEW: &str = "zirk_rt_map_new";
+    /// `zirk_rt_array_clone_with_layout(array, elem_size, elem_align, offsets, count)`.
+    pub const ARRAY_CLONE_WITH_LAYOUT: &str = "zirk_rt_array_clone_with_layout";
+    /// `zirk_rt_array_slice_with_layout(array, start, end, step, elem_size, elem_align, offsets, count)`.
+    pub const ARRAY_SLICE_WITH_LAYOUT: &str = "zirk_rt_array_slice_with_layout";
+    /// `zirk_rt_map_new_with_layout(key_offsets, key_count, value_offsets,
+    /// value_count, string_content_keys) -> *mut c_void`.
+    pub const MAP_NEW_WITH_LAYOUT: &str = "zirk_rt_map_new_with_layout";
     /// `zirk_rt_map_length(map) -> i64`.
     pub const MAP_LENGTH: &str = "zirk_rt_map_length";
     /// `zirk_rt_map_is_empty(map) -> i32`.
@@ -328,8 +337,9 @@ pub mod symbols {
     pub const MAP_GET: &str = "zirk_rt_map_get";
     /// `zirk_rt_map_remove(map, key) -> i32`.
     pub const MAP_REMOVE: &str = "zirk_rt_map_remove";
-    /// `zirk_rt_set_new() -> *mut c_void`.
-    pub const SET_NEW: &str = "zirk_rt_set_new";
+    /// `zirk_rt_set_new_with_layout(element_offsets, count,
+    /// string_content_elements) -> *mut c_void`.
+    pub const SET_NEW_WITH_LAYOUT: &str = "zirk_rt_set_new_with_layout";
     /// `zirk_rt_set_length(set) -> i64`.
     pub const SET_LENGTH: &str = "zirk_rt_set_length";
     /// `zirk_rt_set_is_empty(set) -> i32`.
@@ -393,6 +403,9 @@ pub struct Runtime<'ctx> {
     pub chan_capacity: FunctionValue<'ctx>,
     pub chan_drain: FunctionValue<'ctx>,
     pub list_new_with_layout: FunctionValue<'ctx>,
+    pub array_new_with_layout: FunctionValue<'ctx>,
+    pub array_clone_with_layout: FunctionValue<'ctx>,
+    pub array_slice_with_layout: FunctionValue<'ctx>,
     pub branch_fail: FunctionValue<'ctx>,
     pub shutdown: FunctionValue<'ctx>,
     pub str_from_utf8: FunctionValue<'ctx>,
@@ -431,6 +444,7 @@ pub struct Runtime<'ctx> {
     pub str_concat: FunctionValue<'ctx>,
     pub str_repeat: FunctionValue<'ctx>,
     pub check_cast: FunctionValue<'ctx>,
+    pub invalid_cast: FunctionValue<'ctx>,
     pub fatal_error: FunctionValue<'ctx>,
     pub throw: FunctionValue<'ctx>,
     pub stack_trace: FunctionValue<'ctx>,
@@ -471,6 +485,8 @@ pub struct Runtime<'ctx> {
     /// `zirk_rt_is_cancelled` (roadmap Phase 4c, `phase-4c-resources`,
     /// design D5) — checked before resource close.
     pub is_cancelled: FunctionValue<'ctx>,
+    pub cancel_shield_enter: FunctionValue<'ctx>,
+    pub cancel_shield_exit: FunctionValue<'ctx>,
     /// `zirk_rt_resource_close_group` (roadmap Phase 4c,
     /// `phase-4c-resources`, design D1/D5) — grouped `match with` cleanup.
     pub resource_close_group: FunctionValue<'ctx>,
@@ -934,6 +950,16 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         context.bool_type().fn_type(&[], false),
         external,
     );
+    let cancel_shield_enter = module.add_function(
+        symbols::CANCEL_SHIELD_ENTER,
+        void.fn_type(&[], false),
+        external,
+    );
+    let cancel_shield_exit = module.add_function(
+        symbols::CANCEL_SHIELD_EXIT,
+        void.fn_type(&[], false),
+        external,
+    );
     // `zirk_rt_resource_close_group(resources, close) -> *mut c_void`
     // (roadmap Phase 4c, `phase-4c-resources`, design D1/D5): right-to-left
     // grouped cleanup; the stub returns `null` and does not block.
@@ -1096,6 +1122,14 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ),
         external,
     );
+    let array_new_with_layout = module.add_function(
+        symbols::ARRAY_NEW_WITH_LAYOUT,
+        ptr.fn_type(
+            &[i64.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
     let list_new = module.add_function(
         symbols::LIST_NEW,
         ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
@@ -1106,7 +1140,45 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), ptr.into(), i64.into()], false),
         external,
     );
-    let map_new = module.add_function(symbols::MAP_NEW, ptr.fn_type(&[], false), external);
+    let array_clone_with_layout = module.add_function(
+        symbols::ARRAY_CLONE_WITH_LAYOUT,
+        ptr.fn_type(
+            &[ptr.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let array_slice_with_layout = module.add_function(
+        symbols::ARRAY_SLICE_WITH_LAYOUT,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let map_new = module.add_function(
+        symbols::MAP_NEW_WITH_LAYOUT,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
     let map_length = module.add_function(
         symbols::MAP_LENGTH,
         i64.fn_type(&[ptr.into()], false),
@@ -1141,7 +1213,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
-    let set_new = module.add_function(symbols::SET_NEW, ptr.fn_type(&[], false), external);
+    let set_new = module.add_function(
+        symbols::SET_NEW_WITH_LAYOUT,
+        ptr.fn_type(&[ptr.into(), i64.into(), context.bool_type().into()], false),
+        external,
+    );
     let set_length = module.add_function(
         symbols::SET_LENGTH,
         i64.fn_type(&[ptr.into()], false),
@@ -1449,6 +1525,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         chan_capacity,
         chan_drain,
         list_new_with_layout,
+        array_new_with_layout,
+        array_clone_with_layout,
+        array_slice_with_layout,
         branch_fail,
         shutdown,
         str_from_utf8,
@@ -1487,6 +1566,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_concat,
         str_repeat,
         check_cast,
+        invalid_cast,
         fatal_error,
         throw,
         stack_trace,
@@ -1509,6 +1589,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         journal_rollback,
         native_slice_validate,
         is_cancelled,
+        cancel_shield_enter,
+        cancel_shield_exit,
         resource_close_group,
         resource_transfer,
         pin_object,

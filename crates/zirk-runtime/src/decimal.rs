@@ -315,7 +315,7 @@ fn rem(a: Decimal, b: Decimal) -> Decimal {
 }
 
 fn pow_int(base: Decimal, exponent: i64) -> Decimal {
-    native_result(core_decimal::pow_int(base, exponent))
+    native_result(core_decimal::pow_int(base, i128::from(exponent)))
 }
 
 fn to_f64(value: Decimal) -> f64 {

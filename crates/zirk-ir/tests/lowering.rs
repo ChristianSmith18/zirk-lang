@@ -175,11 +175,24 @@ fn native_failure_codes_then<const N: usize>(rest: [&str; N]) -> Vec<String> {
 // --- Function shape ---------------------------------------------------------
 
 #[test]
-fn an_empty_function_has_one_block_with_a_return() {
+fn an_empty_function_has_entry_cancellation_check_and_return() {
     let f = main_body("");
 
-    assert_eq!(f.blocks.len(), 1);
-    assert_eq!(f.blocks[0].terminator, Some(Terminator::Return(None)));
+    assert_eq!(f.blocks.len(), 3);
+    assert!(matches!(
+        f.blocks[0].terminator,
+        Some(Terminator::Branch { .. })
+    ));
+    assert!(
+        f.blocks
+            .iter()
+            .any(|block| block.terminator == Some(Terminator::Cancel))
+    );
+    assert!(
+        f.blocks
+            .iter()
+            .any(|block| block.terminator == Some(Terminator::Return(None)))
+    );
     assert_eq!(f.return_type, IrType::Void);
 }
 
@@ -755,8 +768,8 @@ fn a_conditional_produces_a_branch() {
 fn a_conditional_produces_blocks_for_both_branches_and_the_continuation() {
     let f = main_body("if true { } else { }\nreturn;");
 
-    // entry + then + else + continuation
-    assert_eq!(f.blocks.len(), 4);
+    // Cancellation branch + body entry, then + else + continuation.
+    assert_eq!(f.blocks.len(), 6);
 }
 
 #[test]
@@ -780,7 +793,11 @@ fn if_both_branches_return_no_continuation_is_created() {
 
     // An unreachable continuation block would have no terminator and the
     // verifier would reject it, but the count states the intent explicitly.
-    assert_eq!(f.blocks.len(), 3, "entry, then and else — nothing after");
+    assert_eq!(
+        f.blocks.len(),
+        5,
+        "cancellation entry, body entry, then and else"
+    );
 }
 
 #[test]
@@ -793,7 +810,7 @@ fn a_chained_conditional_nests_blocks() {
         .filter(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
         .count();
 
-    assert_eq!(branches, 2, "each `if` contributes its own branch");
+    assert_eq!(branches, 3, "entry cancellation plus each `if` branch");
 }
 
 // --- Calls and println ------------------------------------------------------
@@ -1074,7 +1091,10 @@ fn every_instruction_keeps_its_source_location() {
     for block in &main.blocks {
         for inst in &block.instructions {
             let (line, _) = source.line_column(inst.span.start);
-            assert_eq!(line, 2, "every instruction comes from line 2");
+            assert!(
+                line == 2 || matches!(&inst.kind, InstKind::IsCancelled),
+                "unexpected instruction location on line {line}"
+            );
         }
     }
 }
@@ -1140,7 +1160,11 @@ fn a_do_while_enters_its_body_before_its_condition() {
     // The only difference from `while` is which block the entry jumps to.
     let f = main_body("mut i = 0;\ndo { i += 1; } while i < 10;");
 
-    let entry = &f.blocks[0];
+    let entry = f
+        .blocks
+        .iter()
+        .find(|block| matches!(block.terminator, Some(Terminator::Jump(_))))
+        .unwrap();
     let Some(Terminator::Jump(target)) = entry.terminator else {
         panic!("the entry block must jump into the loop");
     };
@@ -1150,6 +1174,7 @@ fn a_do_while_enters_its_body_before_its_condition() {
     let header = f
         .blocks
         .iter()
+        .skip(2)
         .find(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
         .expect("the loop has a header that branches");
 
@@ -1163,12 +1188,18 @@ fn a_do_while_enters_its_body_before_its_condition() {
 fn a_while_enters_through_its_header() {
     let f = main_body("mut i = 0;\nwhile i < 10 { i += 1; }");
 
-    let Some(Terminator::Jump(target)) = f.blocks[0].terminator else {
+    let entry = f
+        .blocks
+        .iter()
+        .find(|block| matches!(block.terminator, Some(Terminator::Jump(_))))
+        .unwrap();
+    let Some(Terminator::Jump(target)) = entry.terminator else {
         panic!("the entry block must jump into the loop");
     };
     let header = f
         .blocks
         .iter()
+        .skip(2)
         .find(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
         .expect("the loop has a header that branches");
 
@@ -1544,6 +1575,36 @@ fn a_call_through_the_base_goes_through_the_table() {
             .iter()
             .any(|k| matches!(k, InstKind::CallVirtual { .. })),
         "seen as a `Base`, which body runs is not statically known"
+    );
+}
+
+#[test]
+fn lowered_virtual_call_receiver_and_method_self_are_gc_roots() {
+    let module = compile(&format!(
+        "{HIERARCHY}\n\
+         fn value(b: Base): Int32 {{ return b.overridden(); }}\n\
+         fn main(): Void {{ mut d = Derived(); mut n = value(d); }}"
+    ));
+    let caller = module.function("value").expect("the function exists");
+    let receiver = caller
+        .slots
+        .iter()
+        .position(|slot| slot.name == "b")
+        .map(|index| SlotId(index as u32))
+        .expect("the virtual receiver has a slot");
+    assert_eq!(receiver, SlotId(0));
+    assert!(
+        caller.gc_roots.contains(&receiver),
+        "a managed virtual-call receiver must be rooted across dispatch"
+    );
+
+    let method = module
+        .function(&zirk_ir::method_symbol("Base", "overridden"))
+        .expect("the base method body exists");
+    let self_slot = method.params[0];
+    assert!(
+        method.gc_roots.contains(&self_slot),
+        "the managed `self` parameter must be rooted in the method body"
     );
 }
 
@@ -2638,6 +2699,54 @@ fn an_exception_escaping_unsafe_emits_journal_rollback() {
     );
 }
 
+#[test]
+fn cancellation_exit_runs_finally_and_rolls_back_active_journals() {
+    let source = "fn pause(): Void {}\nfn main(): Void {
+        mut value: Int32 = 1;
+        try {
+            unsafe {
+                value = 2;
+                pause();
+            }
+        } finally {
+            stdout.println(\"cleanup\");
+        }
+    }";
+    let module = compile(source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+
+    assert!(matches!(
+        main.blocks[0].terminator,
+        Some(Terminator::Branch { .. })
+    ));
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::IsCancelled))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::CancelShieldEnter))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::CancelShieldExit))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::JournalRollback(_)))
+    );
+    assert!(
+        main.blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Some(Terminator::Cancel)))
+    );
+}
+
 /// `return` leaving an `unsafe { ... }` block must roll back before the function exits.
 #[test]
 fn return_inside_unsafe_emits_journal_rollback() {
@@ -3267,7 +3376,7 @@ fn from_name_lowers_to_a_comparison_chain_producing_a_result() {
         .iter()
         .filter(|b| matches!(b.terminator, Some(Terminator::Branch { .. })))
         .count();
-    assert_eq!(branches, 2, "the chain branches once per case");
+    assert_eq!(branches, 3, "entry cancellation plus one branch per case");
 }
 
 #[test]

@@ -16,6 +16,9 @@ use crate::task::TaskId;
 pub const CHAN_SENT: i32 = 0;
 pub const CHAN_FULL: i32 = 1;
 pub const CHAN_CLOSED: i32 = 2;
+/// A blocking operation returned because its owning task was cancelled.
+/// Generated code must check the cancellation predicate after the call.
+pub const CHAN_CANCELLED: i32 = 3;
 pub const CHAN_RECEIVED: i32 = 0;
 pub const CHAN_EMPTY: i32 = 1;
 
@@ -267,7 +270,10 @@ pub unsafe extern "C" fn zirk_rt_chan_try_recv(channel: *mut c_void, destination
 pub unsafe extern "C-unwind" fn zirk_rt_chan_send(channel: *mut c_void, source: *const u8) -> i32 {
     let task = executor::current_task();
     loop {
-        executor::check_cancelled();
+        if executor::current_task_cancel_requested() {
+            remove_sender(unsafe { &mut *body(channel) }, task);
+            return CHAN_CANCELLED;
+        }
         let result = unsafe { zirk_rt_chan_try_send(channel, source) };
         if result != CHAN_FULL {
             return result;
@@ -309,7 +315,10 @@ pub unsafe extern "C-unwind" fn zirk_rt_chan_recv(
 ) -> i32 {
     let task = executor::current_task();
     loop {
-        executor::check_cancelled();
+        if executor::current_task_cancel_requested() {
+            remove_receiver(unsafe { &mut *body(channel) }, task);
+            return CHAN_CANCELLED;
+        }
         let result = unsafe { zirk_rt_chan_try_recv(channel, destination) };
         if result != CHAN_EMPTY {
             return result;
@@ -493,6 +502,36 @@ mod tests {
         assert_eq!(
             unsafe { zirk_rt_chan_try_recv(channel, (&raw mut received).cast()) },
             CHAN_CLOSED
+        );
+    }
+
+    #[test]
+    fn cancelled_blocking_receive_returns_sentinel_and_await_still_propagates() {
+        let channel = unsafe { int_channel(0) };
+        let channel_address = channel as usize;
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1));
+        let outcome = crate::executor::Executor::new().run_with_root({
+            let observed = std::sync::Arc::clone(&observed);
+            move || {
+                let receiver = crate::executor::spawn(move || {
+                    let mut value = 0_i32;
+                    let status = unsafe {
+                        zirk_rt_chan_recv(channel_address as *mut c_void, (&raw mut value).cast())
+                    };
+                    observed.store(status, std::sync::atomic::Ordering::SeqCst);
+                    status as usize
+                });
+                crate::executor::yield_now();
+                crate::executor::cancel_current(receiver);
+                let awaited = std::panic::catch_unwind(|| crate::executor::await_task(receiver));
+                assert!(awaited.is_err());
+                0
+            }
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+        assert_eq!(
+            observed.load(std::sync::atomic::Ordering::SeqCst),
+            CHAN_CANCELLED
         );
     }
 

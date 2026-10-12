@@ -522,10 +522,12 @@ fn run_one_turn(task: TaskId) {
     crate::collector::set_active_frames(std::ptr::null_mut());
 
     with_exec(move |exec| {
-        exec.registry
+        let tcb = exec
+            .registry
             .get_mut(task)
-            .expect("the task cannot vanish while its context is out")
-            .context = Some(context);
+            .expect("the task cannot vanish while its context is out");
+        tcb.context = Some(context);
+        let cancel_requested = tcb.cancel_requested;
 
         match outcome {
             Ok(crate::context::Run::Suspended) => {
@@ -538,9 +540,30 @@ fn run_one_turn(task: TaskId) {
                 }
             }
             Ok(crate::context::Run::Finished(value)) => {
-                exec.complete(task, TaskOutcome::Value(value), TaskState::Completed);
+                if cancel_requested {
+                    // A shield only defers delivery while cleanup is running.
+                    // Normalize it once the context is terminal in case a
+                    // cleanup return skipped its matching exit.
+                    exec.registry.get_mut(task).unwrap().shield_depth = 0;
+                    exec.complete(
+                        task,
+                        TaskOutcome::Panicked(Box::new(Cancelled)),
+                        TaskState::Cancelled,
+                    );
+                } else {
+                    exec.complete(task, TaskOutcome::Value(value), TaskState::Completed);
+                }
             }
             Err(payload) => {
+                if cancel_requested {
+                    exec.registry.get_mut(task).unwrap().shield_depth = 0;
+                    exec.complete(
+                        task,
+                        TaskOutcome::Panicked(Box::new(Cancelled)),
+                        TaskState::Cancelled,
+                    );
+                    return;
+                }
                 let state = if payload.is::<Cancelled>() {
                     TaskState::Cancelled
                 } else {
@@ -707,31 +730,80 @@ pub fn block_current_on_region(remaining: std::sync::Arc<AtomicUsize>) {
 /// (This is the timer safe point `await ... timeout` and `select { after ... }`
 /// will build on.)
 pub fn sleep(delay_nanos: i64) {
-    check_cancelled();
     let me = CURRENT_TASK.get().expect("sleep outside a task body");
+    // Do not park a task whose cancellation has already been requested. The
+    // generated caller observes the cancellation predicate after this call.
+    // Cleanup shields defer delivery, but must not make cleanup block on a
+    // timer after the owning task was cancelled.
+    if current_task_cancel_requested() {
+        return;
+    }
     let timer = with_exec(|exec| match exec.timers.arm(delay_nanos, me.to_bits()) {
         Ok(id) => id,
         Err(_) => fatal("sleep with a negative duration"),
     });
     suspend_current(WaitReason::Timer(timer.to_bits()));
-    check_cancelled();
 }
 
-/// Delivers a pending cancellation at an explicit safe point. There is no
-/// shielded region in this change, but preserving the depth check makes the
-/// rule forward-compatible with the non-cancellable region introduced later.
+/// Compatibility safe point. Cancellation is observed as state by generated
+/// cleanup code and delivered when a task returns; it must not unwind through
+/// language frames, since that would skip `finally` and resource cleanup.
 pub fn check_cancelled() {
-    let me = CURRENT_TASK
-        .get()
-        .expect("check_cancelled outside a task body");
-    let cancelled = with_exec(|exec| {
+    let _ = current_task_is_cancelled();
+}
+
+/// Whether the currently running task has a deliverable cancellation request.
+/// This is a side-effect-free query for generated cleanup code; it does not
+/// deliver cancellation or mutate task state.
+pub(crate) fn current_task_is_cancelled() -> bool {
+    let Some(me) = CURRENT_TASK.get() else {
+        return false;
+    };
+    with_exec(|exec| {
         exec.registry
             .get(me)
             .is_some_and(|tcb| tcb.cancel_requested && tcb.shield_depth == 0)
+    })
+}
+
+/// Whether the active task has any cancellation request, ignoring cleanup
+/// shields. Blocking runtime operations use this to return promptly during
+/// cleanup; generated code checks the shielded query before delivering it.
+pub(crate) fn current_task_cancel_requested() -> bool {
+    let Some(me) = CURRENT_TASK.get() else {
+        return false;
+    };
+    with_exec(|exec| {
+        exec.registry
+            .get(me)
+            .is_some_and(|tcb| tcb.cancel_requested)
+    })
+}
+
+/// Temporarily defers delivery while cancellation cleanup runs. Calls outside
+/// an executor task are harmless, allowing generated cleanup helpers to share
+/// the same runtime ABI in synchronous contexts.
+pub(crate) fn enter_cancellation_shield() {
+    let Some(me) = CURRENT_TASK.get() else { return };
+    with_exec(|exec| {
+        let tcb = exec.registry.get_mut(me).expect("the current task");
+        tcb.shield_depth = tcb
+            .shield_depth
+            .checked_add(1)
+            .expect("cancellation shield nesting overflow");
     });
-    if cancelled {
-        std::panic::panic_any(Cancelled);
-    }
+}
+
+/// Leaves one temporary cleanup shield. Unbalanced exits are runtime bugs.
+pub(crate) fn exit_cancellation_shield() {
+    let Some(me) = CURRENT_TASK.get() else { return };
+    with_exec(|exec| {
+        let tcb = exec.registry.get_mut(me).expect("the current task");
+        tcb.shield_depth = tcb
+            .shield_depth
+            .checked_sub(1)
+            .expect("unbalanced cancellation shield exit");
+    });
 }
 
 /// Identifies the branch currently executing a runtime operation.
@@ -924,6 +996,113 @@ mod tests {
             })
         });
         assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn normal_return_delivers_pending_cancellation_without_safe_point_unwind() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let me = CURRENT_TASK.get().expect("root task");
+                with_exec(|exec| exec.request_cancel(me));
+                7
+            })
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn cleanup_shield_defers_delivery_until_exit_and_supports_nesting() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let me = CURRENT_TASK.get().expect("root task");
+                with_exec(|exec| exec.request_cancel(me));
+                unsafe { crate::resource::zirk_rt_cancel_shield_enter() };
+                unsafe { crate::resource::zirk_rt_cancel_shield_enter() };
+                assert!(!current_task_is_cancelled());
+                unsafe { crate::resource::zirk_rt_cancel_shield_exit() };
+                assert!(!current_task_is_cancelled());
+                unsafe { crate::resource::zirk_rt_cancel_shield_exit() };
+                assert!(current_task_is_cancelled());
+                0
+            })
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn cancelled_sleep_inside_cleanup_shield_resumes_and_finishes_cleanup() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let child = spawn(|| {
+                    enter_cancellation_shield();
+                    sleep(60_000_000_000);
+                    exit_cancellation_shield();
+                    7
+                });
+                yield_now();
+                cancel_current(child);
+                await_task(child)
+            })
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn pending_cancellation_wins_over_return_with_unbalanced_cleanup_shield() {
+        let outcome = std::panic::catch_unwind(|| {
+            run(|| {
+                let me = CURRENT_TASK.get().expect("root task");
+                with_exec(|exec| exec.request_cancel(me));
+                enter_cancellation_shield();
+                // Models a return from finally that bypasses the generated
+                // shield exit. Completing the context must still cancel.
+                0
+            })
+        });
+        assert!(outcome.is_err());
+    }
+
+    #[test]
+    fn cancellation_query_tracks_active_task_state_and_shielding() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observations = Arc::clone(&seen);
+        run(move || {
+            let child = spawn({
+                let observations = Arc::clone(&observations);
+                move || {
+                    observations
+                        .lock()
+                        .unwrap()
+                        .push(current_task_is_cancelled());
+                    yield_now();
+                    observations
+                        .lock()
+                        .unwrap()
+                        .push(current_task_is_cancelled());
+                    yield_now();
+                    observations
+                        .lock()
+                        .unwrap()
+                        .push(current_task_is_cancelled());
+                    0
+                }
+            });
+            yield_now();
+            with_exec(|exec| {
+                let tcb = exec.registry.get_mut(child).unwrap();
+                tcb.cancel_requested = true;
+                tcb.shield_depth = 1;
+            });
+            // The child's next turn observes a shielded request as deferred.
+            yield_now();
+            with_exec(|exec| {
+                let tcb = exec.registry.get_mut(child).unwrap();
+                tcb.shield_depth = 0;
+            });
+            yield_now();
+            0
+        });
+        assert_eq!(*seen.lock().unwrap(), vec![false, false, true]);
     }
 
     #[test]

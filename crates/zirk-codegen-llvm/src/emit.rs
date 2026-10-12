@@ -1053,6 +1053,49 @@ struct FunctionEmitter<'ctx, 'a> {
 }
 
 impl<'ctx> FunctionEmitter<'ctx, '_> {
+    /// Builds static byte offsets for every managed reference inside one
+    /// collection element. These offsets use the emitted LLVM layout of the
+    /// element, matching the runtime's word-buffer representation.
+    fn gc_offsets_for(
+        &self,
+        ty: ir::IrType,
+        global_name: &str,
+    ) -> (PointerValue<'ctx>, inkwell::values::IntValue<'ctx>) {
+        let paths = gc_reference_paths_of(self.module, ty);
+        let offsets: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                if path.is_empty() {
+                    self.context.i64_type().const_zero()
+                } else {
+                    const_field_offset(
+                        self.context,
+                        self.llvm_type(ty)
+                            .expect("managed collection element has an LLVM layout")
+                            .into_struct_type(),
+                        path,
+                    )
+                }
+            })
+            .collect();
+        if offsets.is_empty() {
+            return (
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+                self.context.i64_type().const_zero(),
+            );
+        }
+        let values = self.context.i64_type().const_array(&offsets);
+        let global = self.llvm.add_global(values.get_type(), None, global_name);
+        global.set_initializer(&values);
+        global.set_constant(true);
+        (
+            global.as_pointer_value(),
+            self.context
+                .i64_type()
+                .const_int(offsets.len() as u64, false),
+        )
+    }
+
     fn emit(mut self, function: &ir::Function, llvm_function: FunctionValue<'ctx>) {
         // Every block is created up front so a branch can reference one that
         // has not been filled yet.
@@ -1855,9 +1898,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
         }
 
-        first.unwrap_or_else(|| {
-            panic!("a verified module has an implementation of every reachable contract")
-        })
+        if let Some(function_type) = first {
+            return function_type;
+        }
+
+        // A function may be compiled against a contract even when this module
+        // contains no concrete implementor (for example, a library function
+        // whose caller supplies the value). The call-site IR already carries
+        // the substituted argument and result types, so they are sufficient
+        // to declare the indirect-call ABI. Runtime dispatch still uses the
+        // receiver's descriptor and contract table.
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let mut params: Vec<BasicMetadataTypeEnum<'ctx>> =
+            Vec::with_capacity(expected_args.len() + 1);
+        params.push(pointer_type.into());
+        params.extend(expected_args);
+        match expected_return {
+            Some(return_type) => return_type.fn_type(&params, false),
+            None => self.context.void_type().fn_type(&params, false),
+        }
     }
 
     /// The layout an object operand belongs to.
@@ -2226,10 +2285,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `value as <an integer width>` from a `Float` operand (roadmap
-            // Phase 3b) — `fptosi`/`fptoui`, chosen by the *destination*'s
-            // signedness. Unchecked: a `Float` outside the destination's
-            // representable range is undefined at the LLVM level, exactly
-            // like Rust's own lossy `as` between float and integer.
+            // Phase 3b). LLVM's `fptosi`/`fptoui` are only defined for finite,
+            // in-range inputs. Check the truncated value against an exact,
+            // power-of-two half-open range first; ordered comparisons reject
+            // NaN and infinities as well. This matches the interpreter's
+            // truncate-then-range-check behavior without exposing LLVM UB.
             ir::InstKind::FloatToInt(operand) => {
                 let value = self.operand(*operand).into_float_value();
                 let ir::IrType::Int(target_width) = instruction.ty else {
@@ -2242,13 +2302,88 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             .expect("every IntWidth is nonzero"),
                     )
                     .expect("every IntWidth is a valid LLVM integer width");
+                let trunc_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trunc")
+                    .expect("LLVM provides llvm.trunc for every supported float width");
+                let trunc_function = trunc_intrinsic
+                    .get_declaration(self.llvm, &[value.get_type().into()])
+                    .expect("llvm.trunc accepts each supported float width");
+                let truncated = self
+                    .builder
+                    .build_call(trunc_function, &[value.into()], "float_to_int_truncated")
+                    .expect("truncate float before checked integer conversion")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("llvm.trunc returns a float")
+                    .into_float_value();
+                let float_ty = value.get_type();
+                let exponent = if target_width.signed() {
+                    target_width.bits() - 1
+                } else {
+                    target_width.bits()
+                };
+                let upper_integer = if exponent == 128 {
+                    "340282366920938463463374607431768211456".to_string()
+                } else {
+                    (1_u128 << exponent).to_string()
+                };
+                let upper = unsafe { float_ty.const_float_from_string(&upper_integer) };
+                let lower = if target_width.signed() {
+                    unsafe { float_ty.const_float_from_string(&format!("-{upper_integer}")) }
+                } else {
+                    float_ty.const_zero()
+                };
+                let at_or_above_lower = self
+                    .builder
+                    .build_float_compare(
+                        inkwell::FloatPredicate::OGE,
+                        truncated,
+                        lower,
+                        "float_to_int_lower_ok",
+                    )
+                    .expect("compare float conversion lower bound");
+                let below_upper = self
+                    .builder
+                    .build_float_compare(
+                        inkwell::FloatPredicate::OLT,
+                        truncated,
+                        upper,
+                        "float_to_int_upper_ok",
+                    )
+                    .expect("compare float conversion upper bound");
+                let in_range = self
+                    .builder
+                    .build_and(at_or_above_lower, below_upper, "float_to_int_in_range")
+                    .expect("combine float conversion range checks");
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .expect("float conversion is emitted inside a block")
+                    .get_parent()
+                    .expect("float conversion block belongs to a function");
+                let valid = self
+                    .context
+                    .append_basic_block(function, "float_to_int_valid");
+                let invalid = self
+                    .context
+                    .append_basic_block(function, "float_to_int_invalid");
+                self.builder
+                    .build_conditional_branch(in_range, valid, invalid)
+                    .expect("branch on checked float conversion range");
+                self.builder.position_at_end(invalid);
+                self.builder
+                    .build_call(self.runtime.invalid_cast, &[], "invalid_float_to_int")
+                    .expect("report out-of-range float-to-integer conversion");
+                self.builder
+                    .build_unreachable()
+                    .expect("invalid cast handler does not return");
+                self.builder.position_at_end(valid);
                 let converted = if target_width.signed() {
                     self.builder
-                        .build_float_to_signed_int(value, target_ty, "fptosi")
+                        .build_float_to_signed_int(truncated, target_ty, "fptosi")
                         .expect("float to signed int")
                 } else {
                     self.builder
-                        .build_float_to_unsigned_int(value, target_ty, "fptoui")
+                        .build_float_to_unsigned_int(truncated, target_ty, "fptoui")
                         .expect("float to unsigned int")
                 };
                 Some(converted.into())
@@ -2557,7 +2692,9 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     &self.module.values,
                     &self.module.enums,
                 );
-                let mut built = struct_type.get_undef();
+                // Start from a fully initialized value so any nested
+                // managed references in fields are null until written.
+                let mut built = struct_type.const_zero();
                 for (index, field) in fields.iter().enumerate() {
                     built = self
                         .builder
@@ -2586,7 +2723,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     &self.module.values,
                     &self.module.enums,
                 );
-                let mut built = struct_type.get_undef();
+                // Inactive flattened payload slots are scanned by GC field
+                // descriptors without consulting the enum discriminant.
+                // Start from a fully initialized null/zero representation.
+                let mut built = struct_type.const_zero();
                 built = self
                     .builder
                     .build_insert_value(
@@ -2601,9 +2741,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .into_struct_value();
                 let indices = &layout.variants[*variant as usize];
                 for (&index, field) in indices.iter().zip(fields) {
-                    // A `Void` field (roadmap Phase 4c, `Result<Void,E>`) has
-                    // no operand to insert — its slot stays `undef`, which is
-                    // sound: `LoadField`'s own `Void` guard never reads it.
+                    // A `Void` field has no operand to insert; its zero-sized
+                    // slot remains initialized and is never read by codegen.
                     if layout.fields[index as usize].ty == ir::IrType::Void {
                         continue;
                     }
@@ -2858,6 +2997,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_call(self.runtime.is_cancelled, &[], "is_cancelled")
                     .expect("query the cancellation token");
                 call.try_as_basic_value().basic()
+            }
+            ir::InstKind::CancelShieldEnter => {
+                self.builder
+                    .build_call(self.runtime.cancel_shield_enter, &[], "")
+                    .expect("enter cancellation cleanup shield");
+                None
+            }
+            ir::InstKind::CancelShieldExit => {
+                self.builder
+                    .build_call(self.runtime.cancel_shield_exit, &[], "")
+                    .expect("exit cancellation cleanup shield");
+                None
             }
 
             ir::InstKind::TakePendingException => {
@@ -3652,17 +3803,20 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let element = self.module.array_types[*element_id as usize];
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
-                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let result_id = instruction.result.expect("ArrayNew produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.array.offsets.{result_id}"));
                 let capacity = self.operand(*capacity).into_int_value();
                 let call = self
                     .builder
                     .build_call(
-                        self.runtime.array_new,
+                        self.runtime.array_new_with_layout,
                         &[
                             capacity.into(),
                             elem_size.into(),
                             elem_align.into(),
-                            is_ref.into(),
+                            offsets.into(),
+                            count.into(),
                         ],
                         "array",
                     )
@@ -3673,12 +3827,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let element = self.module.list_types[*element_id as usize];
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
-                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let result_id = instruction.result.expect("ListNew produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.list.offsets.{result_id}"));
                 let call = self
                     .builder
                     .build_call(
-                        self.runtime.list_new,
-                        &[elem_size.into(), elem_align.into(), is_ref.into()],
+                        self.runtime.list_new_with_layout,
+                        &[
+                            elem_size.into(),
+                            elem_align.into(),
+                            offsets.into(),
+                            count.into(),
+                        ],
                         "list",
                     )
                     .expect("list new");
@@ -3686,19 +3847,139 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::MapNew { map_id } => {
-                let _ = map_id;
+                let (key_ty, _) = self.module.map_types[*map_id as usize];
+                let string_content_keys =
+                    self.bool_const(matches!(key_ty, ir::IrType::String | ir::IrType::Char));
+                let (_, value_ty) = self.module.map_types[*map_id as usize];
+                let offsets_for = |ty: ir::IrType, suffix: &str| {
+                    let paths = gc_reference_paths_of(self.module, ty);
+                    let offsets: Vec<_> = paths
+                        .iter()
+                        .map(|path| {
+                            if path.is_empty() {
+                                self.context.i64_type().const_zero()
+                            } else {
+                                const_field_offset(
+                                    self.context,
+                                    self.llvm_type(ty)
+                                        .expect("map entry type has an LLVM layout")
+                                        .into_struct_type(),
+                                    path,
+                                )
+                            }
+                        })
+                        .collect();
+                    if offsets.is_empty() {
+                        (
+                            self.context
+                                .ptr_type(inkwell::AddressSpace::default())
+                                .const_null(),
+                            self.context.i64_type().const_zero(),
+                        )
+                    } else {
+                        let values = self.context.i64_type().const_array(&offsets);
+                        let result_id = instruction.result.expect("MapNew produces a value").0;
+                        let global = self.llvm.add_global(
+                            values.get_type(),
+                            None,
+                            &format!("zk.map.{suffix}.{result_id}"),
+                        );
+                        global.set_initializer(&values);
+                        global.set_constant(true);
+                        (
+                            global.as_pointer_value(),
+                            self.context
+                                .i64_type()
+                                .const_int(offsets.len() as u64, false),
+                        )
+                    }
+                };
+                let (key_offsets, key_count) =
+                    if matches!(key_ty, ir::IrType::String | ir::IrType::Char) {
+                        // Text keys are snapshotted by the runtime into immutable
+                        // Rust-owned content; the mutable source handle is not a
+                        // GC edge of the map entry.
+                        (
+                            self.context
+                                .ptr_type(inkwell::AddressSpace::default())
+                                .const_null(),
+                            self.context.i64_type().const_zero(),
+                        )
+                    } else {
+                        offsets_for(key_ty, "key_offsets")
+                    };
+                let (value_offsets, value_count) = offsets_for(value_ty, "value_offsets");
                 let call = self
                     .builder
-                    .build_call(self.runtime.map_new, &[], "map")
+                    .build_call(
+                        self.runtime.map_new,
+                        &[
+                            key_offsets.into(),
+                            key_count.into(),
+                            value_offsets.into(),
+                            value_count.into(),
+                            string_content_keys.into(),
+                        ],
+                        "map",
+                    )
                     .expect("map new");
                 call.try_as_basic_value().basic()
             }
 
             ir::InstKind::SetNew { set_id } => {
-                let _ = set_id;
+                let element_ty = self.module.set_types[*set_id as usize];
+                let has_text_equality = matches!(element_ty, ir::IrType::String | ir::IrType::Char);
+                let string_content_elements = self.bool_const(has_text_equality);
+                let paths = if has_text_equality {
+                    Vec::new()
+                } else {
+                    gc_reference_paths_of(self.module, element_ty)
+                };
+                let offsets: Vec<_> = paths
+                    .iter()
+                    .map(|path| {
+                        if path.is_empty() {
+                            self.context.i64_type().const_zero()
+                        } else {
+                            const_field_offset(
+                                self.context,
+                                self.llvm_type(element_ty)
+                                    .expect("set element type has an LLVM layout")
+                                    .into_struct_type(),
+                                path,
+                            )
+                        }
+                    })
+                    .collect();
+                let (offsets, count) = if offsets.is_empty() {
+                    (
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null(),
+                        self.context.i64_type().const_zero(),
+                    )
+                } else {
+                    let values = self.context.i64_type().const_array(&offsets);
+                    let result_id = instruction.result.expect("SetNew produces a value").0;
+                    let global = self.llvm.add_global(
+                        values.get_type(),
+                        None,
+                        &format!("zk.set.element_offsets.{result_id}"),
+                    );
+                    global.set_initializer(&values);
+                    global.set_constant(true);
+                    (
+                        global.as_pointer_value(),
+                        self.context.i64_type().const_int(paths.len() as u64, false),
+                    )
+                };
                 let call = self
                     .builder
-                    .build_call(self.runtime.set_new, &[], "set")
+                    .build_call(
+                        self.runtime.set_new,
+                        &[offsets.into(), count.into(), string_content_elements.into()],
+                        "set",
+                    )
                     .expect("set new");
                 call.try_as_basic_value().basic()
             }
@@ -4220,34 +4501,42 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             // `array.clone()` / `list.clone()` — a shallow copy of the
-            // element buffer; the runtime's `is_ref` flag keeps the GC
-            // informed.
+            // element buffer; typed collection layouts preserve every nested
+            // managed reference path.
             ir::InstKind::ArrayClone { receiver } | ir::InstKind::ListClone { receiver } => {
                 let receiver_ty = self.value_types[&receiver.0];
-                let (_, element, _) = self.array_list_element(receiver_ty);
+                let (_, element, is_ref) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
-                let is_ref = self.bool_const(self.is_gc_reference(element));
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let function = if matches!(receiver_ty, ir::IrType::Array(_)) {
-                    self.runtime.array_clone
-                } else {
-                    self.runtime.list_clone
-                };
-                self.builder
-                    .build_call(
-                        function,
+                let call = if matches!(receiver_ty, ir::IrType::Array(_)) {
+                    let result_id = instruction.result.expect("ArrayClone produces a value").0;
+                    let (offsets, count) = self
+                        .gc_offsets_for(element, &format!("zk.array.clone.offsets.{result_id}"));
+                    self.builder.build_call(
+                        self.runtime.array_clone_with_layout,
                         &[
                             receiver.into(),
                             elem_size.into(),
                             elem_align.into(),
-                            is_ref.into(),
+                            offsets.into(),
+                            count.into(),
                         ],
                         "",
                     )
-                    .expect("array/list clone")
-                    .try_as_basic_value()
-                    .basic()
+                } else {
+                    self.builder.build_call(
+                        self.runtime.list_clone,
+                        &[
+                            receiver.into(),
+                            elem_size.into(),
+                            elem_align.into(),
+                            self.bool_const(is_ref).into(),
+                        ],
+                        "",
+                    )
+                };
+                call.expect("array/list clone").try_as_basic_value().basic()
             }
             // `array[start:end:step]` — shallow copy of the selected elements.
             ir::InstKind::ArraySlice {
@@ -4260,14 +4549,16 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let (_, element, _) = self.array_list_element(receiver_ty);
                 let elem_size = self.byte_size_of(element);
                 let elem_align = self.byte_align_of(element);
-                let is_ref = self.bool_const(self.is_gc_reference(element));
+                let result_id = instruction.result.expect("ArraySlice produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.array.slice.offsets.{result_id}"));
                 let receiver = self.operand(*receiver).into_pointer_value();
                 let start = self.operand(*start).into_int_value();
                 let end = self.operand(*end).into_int_value();
                 let step = self.operand(*step).into_int_value();
                 self.builder
                     .build_call(
-                        self.runtime.array_slice,
+                        self.runtime.array_slice_with_layout,
                         &[
                             receiver.into(),
                             start.into(),
@@ -4275,7 +4566,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             step.into(),
                             elem_size.into(),
                             elem_align.into(),
-                            is_ref.into(),
+                            offsets.into(),
+                            count.into(),
                         ],
                         "",
                     )
@@ -5331,7 +5623,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             &self.module.values,
             &self.module.enums,
         );
-        let built = struct_type.get_undef();
+        let built = struct_type.const_zero();
         let built = self
             .builder
             .build_insert_value(built, status, 0, "flush.kind")
@@ -5392,7 +5684,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             &self.module.values,
             &self.module.enums,
         );
-        let built = struct_type.get_undef();
+        let built = struct_type.const_zero();
         let built = self
             .builder
             .build_insert_value(built, kind, 0, "stdin.kind")
@@ -6261,6 +6553,22 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 self.builder
                     .build_return(Some(&value as &dyn BasicValue))
                     .expect("return with a value");
+            }
+            ir::Terminator::Cancel => {
+                self.pop_gc_frame();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .expect("cancellation block exists")
+                    .get_parent()
+                    .expect("cancellation block has a function");
+                let result = function
+                    .get_type()
+                    .get_return_type()
+                    .map(|ty| ty.const_zero());
+                self.builder
+                    .build_return(result.as_ref().map(|value| value as &dyn BasicValue))
+                    .expect("return cancellation marker");
             }
             ir::Terminator::Jump(target) => {
                 self.builder

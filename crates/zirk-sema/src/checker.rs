@@ -6827,22 +6827,70 @@ impl<'a> Checker<'a> {
         Type::of(Base::Range(id))
     }
 
-    /// Whether a type is acceptable as the key of a `Map` or the element of a
-    /// `Set`. This is deliberately conservative: it only admits types whose
-    /// runtime representation can be hashed without special equality machinery.
+    /// Whether a type has the scalar/identity hash representation currently
+    /// implemented by the collection runtime. Keep this list synchronized
+    /// with the one-word Map/Set ABI: aggregate enum values and 128-bit
+    /// integers cannot be represented by its `i64` key/element word.
     fn is_hashable(&self, ty: Type) -> bool {
         if ty.nullable {
             return false;
         }
-        matches!(
-            ty.base,
-            Base::Int(_)
-                | Base::Boolean
-                | Base::Char
-                | Base::String
-                | Base::Duration
-                | Base::Enum(_)
-        )
+        match ty.base {
+            Base::Int(width) => width.bits() <= 64,
+            Base::Boolean
+            | Base::Char
+            | Base::String
+            | Base::Duration
+            | Base::Date
+            | Base::Time => true,
+            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
+                enum_ty
+                    .variants
+                    .iter()
+                    .all(|variant| variant.associated.is_empty())
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether Map's `i64` value slot can round-trip a type through the
+    /// current native ABI. The runtime/backend work may add more layouts;
+    /// accepting one here before `MapGet` can reconstruct it would defer a
+    /// source type error to a backend panic or lossy conversion.
+    fn is_map_word_value(&self, ty: Type) -> bool {
+        if ty.nullable {
+            return false;
+        }
+        match ty.base {
+            Base::Int(width) => width.bits() <= 64,
+            Base::Boolean
+            | Base::Char
+            | Base::String
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::Regex
+            | Base::Job(_)
+            | Base::Channel(_)
+            | Base::Array(_)
+            | Base::List(_)
+            | Base::Map(_)
+            | Base::Set(_)
+            | Base::Range(_)
+            | Base::Weak(_) => true,
+            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
+                enum_ty
+                    .variants
+                    .iter()
+                    .all(|variant| variant.associated.is_empty())
+            }),
+            Base::Class(id) => self
+                .classes
+                .get(id as usize)
+                .is_some_and(|class| class.kind != ClassKind::Record),
+            Base::Contract(_) => true,
+            _ => false,
+        }
     }
 
     /// `Map<K, V>`: resolves `K` and `V`, interning the pair if `K` is
@@ -6868,6 +6916,16 @@ impl<'a> Checker<'a> {
                 format!("`Map<{found}, ...>` has an unhashable key type"),
                 "a `Map` key must be an integer, Boolean, Char, String, Duration, or enum",
                 None,
+            );
+        }
+        if !value.is_unknown() && !self.is_map_word_value(value) {
+            let found = self.name(value);
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[1].span,
+                format!("`Map<..., {found}>` has no supported one-word value representation"),
+                "a `Map` value must have a supported integer, Boolean, Char, String, Duration, Date, Time, enum, or managed-handle representation",
+                Some("use a one-word value type supported by Map".into()),
             );
         }
         let id = self.intern_map_type(key, value);

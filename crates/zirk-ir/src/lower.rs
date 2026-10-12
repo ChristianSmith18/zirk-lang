@@ -3188,6 +3188,7 @@ struct FunctionLowering<'a> {
     /// (having run every enclosing `finally` it passes on the way) an early
     /// return from the current function.
     try_stack: Vec<TryFrame>,
+    cancellation_cleanup_depth: u32,
     /// Active `unsafe { ... }` frames, innermost last (roadmap Phase 4e,
     /// `fase-4e-unsafe-journal`, design D1/D4) — what a write inside an
     /// active block journals against, and what a propagating exception
@@ -3439,6 +3440,7 @@ impl<'a> FunctionLowering<'a> {
             value_types: HashMap::new(),
             current_catch: None,
             try_stack: Vec::new(),
+            cancellation_cleanup_depth: 0,
             unsafe_stack: Vec::new(),
             next_scope_seq: 0,
             recursive_call: None,
@@ -4415,6 +4417,21 @@ impl<'a> FunctionLowering<'a> {
             .zip(resolved)
             .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span))
             .collect();
+
+        // A queued task may already be cancelled before its first turn. The
+        // entry edge has no active lexical cleanup yet, but it must still
+        // return through the controlled cancellation outcome.
+        let entry_cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, function.span);
+        let cancelled_entry = self.new_block();
+        let body_entry = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: entry_cancelled,
+            then_block: cancelled_entry,
+            else_block: body_entry,
+        });
+        self.current = cancelled_entry;
+        self.terminate(Terminator::Cancel);
+        self.current = body_entry;
 
         // `main` runs in an implicit `concurrent` scope
         // (`concurrent-blocks-and-timers`, design D5) — opened only when the
@@ -10405,6 +10422,11 @@ impl<'a> FunctionLowering<'a> {
         }
 
         self.emit_effect(InstKind::Throw(exception), stmt.span);
+        if self.cancellation_cleanup_depth > 0 {
+            let throwable_ty = IrType::Object(self.throwable_object_id());
+            let _ = self.emit(InstKind::TakePendingException, throwable_ty, stmt.span);
+            return;
+        }
         // Dispatches to a local `catch` that covers it, or — finding
         // none — re-propagates by returning early from the current
         // function; the same resolution a throwing call's own post-call
@@ -10443,6 +10465,50 @@ impl<'a> FunctionLowering<'a> {
             slot
         });
 
+        if self.cancellation_cleanup_depth > 0 {
+            // Cancellation remains the primary outcome if a cleanup call
+            // fails. Consume that secondary exception and continue the
+            // remaining outer cleanup scopes rather than dispatching to a
+            // catch or returning early.
+            let pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
+            let discard_block = self.new_block();
+            let continue_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: pending,
+                then_block: discard_block,
+                else_block: continue_block,
+            });
+            self.current = discard_block;
+            let throwable_ty = IrType::Object(self.throwable_object_id());
+            let _ = self.emit(InstKind::TakePendingException, throwable_ty, span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = continue_block;
+            return match holder {
+                Some(slot) => self.emit(InstKind::Load(slot), ty, span),
+                None => self.emit(InstKind::Undefined, IrType::Void, span),
+            };
+        }
+
+        // Cancellation is a non-catchable control outcome, so deliver it
+        // before examining an exception produced by the same call.
+        let cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, span);
+        let cancel_block = self.new_block();
+        let check_exception_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: cancel_block,
+            else_block: check_exception_block,
+        });
+
+        self.current = cancel_block;
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        self.cancellation_cleanup_depth += 1;
+        self.run_exit_cleanup(0, 0, span);
+        self.cancellation_cleanup_depth -= 1;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        self.terminate(Terminator::Cancel);
+
+        self.current = check_exception_block;
         let has_pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
         let handle_block = self.new_block();
         let continue_block = self.new_block();
@@ -10667,9 +10733,10 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Lowers one resource `close()` guarded by `zirk_rt_is_cancelled` and, on
-    /// the first close error, stores the error in `close_error_slot` and sets
-    /// `close_failed_slot`. Cancellation skips the close entirely.
+    /// Lowers one resource `close()` and, on the first close error, stores the
+    /// error in `close_error_slot` and sets `close_failed_slot`. Cleanup runs
+    /// regardless of cancellation state; a cancellation request must not leak
+    /// an already-acquired resource.
     fn lower_resource_cleanup(
         &mut self,
         name: &str,
@@ -10677,16 +10744,7 @@ impl<'a> FunctionLowering<'a> {
         close_failed_slot: SlotId,
         span: Span,
     ) {
-        let cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, span);
-        let do_close = self.new_block();
         let after_close = self.new_block();
-        self.terminate(Terminator::Branch {
-            condition: cancelled,
-            then_block: after_close,
-            else_block: do_close,
-        });
-
-        self.current = do_close;
         let close_call = Self::resource_close_call(name, span);
         let result = self.lower_expr(&close_call);
         let result_ty = self.type_of_operand(result);

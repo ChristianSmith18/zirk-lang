@@ -52,7 +52,14 @@ pub fn days_from_civil(year: i32, month: i32, day: i32) -> i64 {
 /// The civil `year`-`month`-`day` of a day count since 1970-01-01
 /// (Hinnant's `civil_from_days`).
 pub fn civil_from_days(days: i64) -> (i32, i32, i32) {
-    let z = days + 719_468;
+    civil_from_days_checked(days).expect("date year is outside the public Int32 range")
+}
+
+/// Converts a day count only when its civil year fits the public `Int32`
+/// representation. The wide intermediate also handles the full `i64` day
+/// domain without overflowing at `days + 719_468`.
+pub fn civil_from_days_checked(days: i64) -> Option<(i32, i32, i32)> {
+    let z = i128::from(days) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -61,7 +68,8 @@ pub fn civil_from_days(days: i64) -> (i32, i32, i32) {
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    ((y + i64::from(m <= 2)) as i32, m as i32, d as i32)
+    let year = i32::try_from(y + i128::from(m <= 2)).ok()?;
+    Some((year, m as i32, d as i32))
 }
 
 /// Whether `year`-`month`-`day` is a real calendar day — never normalized.
@@ -116,13 +124,13 @@ pub fn time_nanosecond(nanos: i64) -> i64 {
 /// `Time`(+|-)`Duration`, wrapping modulo one day — `Time(23, 30) + 2h` is
 /// `Time(1, 30)`, civil-style.
 pub fn time_add_nanos(time: i64, delta: i64) -> i64 {
-    (time + delta).rem_euclid(NANOS_PER_DAY)
+    ((i128::from(time) + i128::from(delta)).rem_euclid(i128::from(NANOS_PER_DAY))) as i64
 }
 
 /// `Time - Time`: the `Duration` nanoseconds between them, measured
 /// forward around the day (`Time(1, 0) - Time(23, 0)` is `2h`).
 pub fn time_diff(left: i64, right: i64) -> i64 {
-    (left - right).rem_euclid(NANOS_PER_DAY)
+    (i128::from(left) - i128::from(right)).rem_euclid(i128::from(NANOS_PER_DAY)) as i64
 }
 
 /// Renders a `Time` as `HH:MM:SS[.fffffffff]` — the fraction is trimmed of
@@ -148,7 +156,11 @@ pub fn datetime_pack(days: i64, nanos: i64) -> i128 {
 
 /// The `Date` half of a `DateTime` (its day count).
 pub fn datetime_days(value: i128) -> i64 {
-    value.div_euclid(NANOS_PER_DAY as i128) as i64
+    datetime_days_checked(value).expect("datetime day count is outside the public Int64 range")
+}
+
+pub fn datetime_days_checked(value: i128) -> Option<i64> {
+    i64::try_from(value.div_euclid(NANOS_PER_DAY as i128)).ok()
 }
 
 /// The `Time` half of a `DateTime` (its day's nanoseconds).
@@ -166,24 +178,45 @@ pub fn datetime_to_string(value: i128) -> String {
 /// ISO 8601 weekday: `1` = Monday … `7` = Sunday. Day 0 (1970-01-01) was
 /// a Thursday, so `(days + 3) mod 7` counts from Monday.
 pub fn date_day_of_week(days: i64) -> i32 {
-    ((days + 3).rem_euclid(7) + 1) as i32
+    ((i128::from(days) + 3).rem_euclid(7) + 1) as i32
 }
 
 /// The 1-based ordinal day within `days`' year.
 pub fn date_day_of_year(days: i64) -> i32 {
     let (year, _, _) = civil_from_days(days);
-    (days - days_from_civil(year, 1, 1) + 1) as i32
+    (i128::from(days) - i128::from(days_from_civil(year, 1, 1)) + 1) as i32
+}
+
+/// Checked ordinal day projection for values that may not be valid public dates.
+pub fn date_day_of_year_checked(days: i64) -> Option<i32> {
+    let (year, _, _) = civil_from_days_checked(days)?;
+    Some((i128::from(days) - i128::from(days_from_civil(year, 1, 1)) + 1) as i32)
 }
 
 /// Whether an ISO year holds 53 weeks: it does when January 1 falls on a
 /// Thursday, or on a Wednesday of a leap year.
 pub fn weeks_in_iso_year(year: i32) -> i32 {
-    let jan1 = date_day_of_week(days_from_civil(year, 1, 1));
-    if jan1 == 4 || (jan1 == 3 && is_leap_year(year)) {
+    weeks_in_iso_year_wide(i64::from(year))
+}
+
+pub fn weeks_in_iso_year_wide(year: i64) -> i32 {
+    let jan1 = date_day_of_week(days_from_civil_wide(year, 1, 1));
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    if jan1 == 4 || (jan1 == 3 && leap) {
         53
     } else {
         52
     }
+}
+
+fn days_from_civil_wide(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// The ISO 8601 week number: week 1 is the week containing the year's
@@ -192,12 +225,26 @@ pub fn date_week_of_year(days: i64) -> i32 {
     let (year, _, _) = civil_from_days(days);
     let week = (i64::from(date_day_of_year(days)) - i64::from(date_day_of_week(days)) + 10) / 7;
     if week < 1 {
-        weeks_in_iso_year(year - 1)
+        weeks_in_iso_year_wide(i64::from(year) - 1)
     } else if week > i64::from(weeks_in_iso_year(year)) {
         1
     } else {
         week as i32
     }
+}
+
+/// Checked ISO week projection for values that may not be valid public dates.
+pub fn date_week_of_year_checked(days: i64) -> Option<i32> {
+    let (year, _, _) = civil_from_days_checked(days)?;
+    let ordinal = date_day_of_year_checked(days)?;
+    let week = (i64::from(ordinal) - i64::from(date_day_of_week(days)) + 10) / 7;
+    Some(if week < 1 {
+        weeks_in_iso_year_wide(i64::from(year) - 1)
+    } else if week > i64::from(weeks_in_iso_year_wide(i64::from(year))) {
+        1
+    } else {
+        week as i32
+    })
 }
 
 /// The quarter of `days`' month, `1..=4`.
@@ -454,4 +501,48 @@ pub fn datetime_format(value: i128, pattern: &str) -> String {
         time_second(nanos),
         time_nanosecond(nanos),
     )
+}
+
+#[cfg(test)]
+mod checked_wide_arithmetic_tests {
+    use super::*;
+
+    #[test]
+    fn time_addition_and_difference_use_wide_intermediates() {
+        let day = i128::from(NANOS_PER_DAY);
+        for time in [i64::MIN, -1, 0, NANOS_PER_DAY - 1, i64::MAX] {
+            for delta in [i64::MIN, -1, 0, 1, i64::MAX] {
+                let expected = (i128::from(time) + i128::from(delta)).rem_euclid(day) as i64;
+                assert_eq!(time_add_nanos(time, delta), expected);
+            }
+        }
+        for left in [i64::MIN, -1, 0, i64::MAX] {
+            for right in [i64::MIN, -1, 0, i64::MAX] {
+                let expected = (i128::from(left) - i128::from(right)).rem_euclid(day) as i64;
+                assert_eq!(time_diff(left, right), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn civil_projection_checks_year_bounds_without_i64_overflow() {
+        let first = days_from_civil(i32::MIN, 1, 1);
+        let last = days_from_civil(i32::MAX, 12, 31);
+        assert_eq!(civil_from_days_checked(first), Some((i32::MIN, 1, 1)));
+        assert_eq!(civil_from_days_checked(last), Some((i32::MAX, 12, 31)));
+        assert_eq!(civil_from_days_checked(first - 1), None);
+        assert_eq!(civil_from_days_checked(last + 1), None);
+        assert_eq!(civil_from_days_checked(i64::MIN), None);
+        assert_eq!(civil_from_days_checked(i64::MAX), None);
+        for days in [i64::MIN, first - 1, last + 1, i64::MAX] {
+            assert_eq!(date_day_of_year_checked(days), None);
+            assert_eq!(date_week_of_year_checked(days), None);
+        }
+        assert_eq!(datetime_days_checked(i128::MIN), None);
+        assert_eq!(datetime_days_checked(i128::MAX), None);
+        assert!((1..=7).contains(&date_day_of_week(i64::MIN)));
+        assert!((1..=7).contains(&date_day_of_week(i64::MAX)));
+        let first_year_day = days_from_civil(i32::MIN, 1, 1);
+        assert!((1..=53).contains(&date_week_of_year(first_year_day)));
+    }
 }

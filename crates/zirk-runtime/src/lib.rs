@@ -360,6 +360,9 @@ pub unsafe extern "C" fn zirk_rt_timer_after(
         move || {
             let arg = arg;
             executor::sleep(delay_nanos);
+            if executor::current_task_cancel_requested() {
+                return 0;
+            }
             body(arg.0)
         },
         capture_root,
@@ -394,6 +397,9 @@ pub unsafe extern "C" fn zirk_rt_timer_every(
             let arg = arg;
             loop {
                 executor::sleep(delay_nanos);
+                if executor::current_task_cancel_requested() {
+                    return 0;
+                }
                 body(arg.0);
             }
         },

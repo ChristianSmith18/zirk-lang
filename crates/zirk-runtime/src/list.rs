@@ -83,7 +83,7 @@ pub unsafe extern "C" fn zirk_rt_list_new_with_layout(
     };
     for &offset in &offsets {
         assert!(
-            offset + WORD <= elem_size,
+            offset.checked_add(WORD).is_some_and(|end| end <= elem_size),
             "list GC offset is outside its element"
         );
     }
@@ -147,9 +147,15 @@ unsafe fn make_descriptor(
     reference_offsets: &[usize],
 ) -> *mut c_void {
     use std::alloc::{Layout, alloc};
-    let entry_count = count.saturating_mul(reference_offsets.len());
-    let words = 4usize.saturating_add(entry_count);
-    let size = words.saturating_mul(WORD);
+    let entry_count = count
+        .checked_mul(reference_offsets.len())
+        .unwrap_or_else(|| crate::failure::zirk_rt_allocation_failed());
+    let words = 4usize
+        .checked_add(entry_count)
+        .unwrap_or_else(|| crate::failure::zirk_rt_allocation_failed());
+    let size = words
+        .checked_mul(WORD)
+        .unwrap_or_else(|| crate::failure::zirk_rt_allocation_failed());
     let layout = Layout::from_size_align(size, WORD).expect("descriptor layout");
     let pointer = unsafe { alloc(layout) as *mut usize };
     if pointer.is_null() {
@@ -164,7 +170,11 @@ unsafe fn make_descriptor(
         let mut entry = 0;
         for i in 0..count {
             for &offset in reference_offsets {
-                pointer.add(4 + entry).write(base + i * stride + offset);
+                let field = base
+                    .checked_add(i.saturating_mul(stride))
+                    .and_then(|value| value.checked_add(offset))
+                    .unwrap_or_else(|| crate::failure::zirk_rt_allocation_failed());
+                pointer.add(4 + entry).write(field);
                 entry += 1;
             }
         }
@@ -406,8 +416,46 @@ pub unsafe extern "C" fn zirk_rt_array_from_list(
     elem_align: usize,
     is_ref: bool,
 ) -> *mut c_void {
+    let stored_count = unsafe { read_usize(list, LAYOUT_COUNT_OFFSET) };
+    let stored_pointer = unsafe { read_ptr(list, LAYOUT_PTR_OFFSET) } as *const usize;
+    let legacy_offsets = if is_ref { &[0usize][..] } else { &[] };
+    let offsets = if stored_count > 0 {
+        unsafe { std::slice::from_raw_parts(stored_pointer, stored_count) }
+    } else {
+        legacy_offsets
+    };
+    unsafe {
+        zirk_rt_array_from_list_with_layout(
+            list,
+            elem_size,
+            elem_align,
+            offsets.as_ptr(),
+            offsets.len(),
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+/// `list` must be a live runtime list; `offsets` must be readable and valid
+/// for the supplied element size when `offset_count` is nonzero.
+pub unsafe extern "C" fn zirk_rt_array_from_list_with_layout(
+    list: *mut c_void,
+    elem_size: usize,
+    elem_align: usize,
+    offsets: *const usize,
+    offset_count: usize,
+) -> *mut c_void {
     let length = unsafe { zirk_rt_list_length(list) };
-    let array = unsafe { crate::array::zirk_rt_array_new(length, elem_size, elem_align, is_ref) };
+    let array = unsafe {
+        crate::array::zirk_rt_array_new_with_layout(
+            length,
+            elem_size,
+            elem_align,
+            offsets,
+            offset_count,
+        )
+    };
     for index in 0..length {
         let source = unsafe { zirk_rt_list_element(list, index as i64, elem_size) };
         let target = unsafe { crate::array::zirk_rt_array_element(array, index as i64, elem_size) };
@@ -521,6 +569,51 @@ pub unsafe extern "C" fn zirk_rt_list_remove_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_reference_offsets_survive_list_growth_clone_and_materialization() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let offsets = [WORD];
+        let elem_size = 2 * WORD;
+        let list = unsafe {
+            zirk_rt_list_new_with_layout(elem_size, WORD, offsets.as_ptr(), offsets.len())
+        };
+        let child = crate::string::alloc_owned("list-nested-edge");
+        for index in 0..5usize {
+            let value = [index, child as usize];
+            unsafe { zirk_rt_list_add(list, value.as_ptr().cast(), elem_size, WORD, false) };
+        }
+        let clone = unsafe { zirk_rt_list_clone(list, elem_size, WORD, false) };
+        let array = unsafe { zirk_rt_array_from_list(list, elem_size, WORD, false) };
+        let mut list_root = list;
+        let mut clone_root = clone;
+        let mut array_root = array;
+        let mut roots = [
+            &mut list_root as *mut *mut c_void as *mut c_void,
+            &mut clone_root as *mut *mut c_void as *mut c_void,
+            &mut array_root as *mut *mut c_void as *mut c_void,
+        ];
+        unsafe { crate::zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+        crate::collector::collect_for_tests();
+        assert!(crate::collector::is_live_for_tests(child));
+        for index in 0..5 {
+            for container in [list, clone] {
+                let slot = unsafe { zirk_rt_list_element(container, index, elem_size) };
+                assert_eq!(
+                    unsafe { (slot as *mut usize).add(1).read() },
+                    child as usize
+                );
+            }
+            let slot = unsafe { crate::array::zirk_rt_array_element(array, index, elem_size) };
+            assert_eq!(
+                unsafe { (slot as *mut usize).add(1).read() },
+                child as usize
+            );
+        }
+        crate::zirk_rt_pop_frame();
+        crate::collector::reset_state_for_tests();
+    }
 
     #[test]
     fn shrinking_after_removals_keeps_capacity_dynamic() {

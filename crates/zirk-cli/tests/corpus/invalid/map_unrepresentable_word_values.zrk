@@ -1,0 +1,3 @@
+fn main(): Void {
+    mut wide_integer: Map<String, Int128> = Map();
+}

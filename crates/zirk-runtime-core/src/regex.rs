@@ -4,8 +4,13 @@
 
 pub use regex::Regex;
 
+/// Maximum compiled-program size accepted for a single pattern.
+pub const MAX_COMPILED_REGEX_BYTES: usize = 256 * 1024;
+
 pub fn compile(pattern: &str) -> Result<Regex, regex::Error> {
-    Regex::new(pattern)
+    let mut builder = regex::RegexBuilder::new(pattern);
+    builder.size_limit(MAX_COMPILED_REGEX_BYTES);
+    builder.build()
 }
 pub fn is_valid(pattern: &str) -> bool {
     !pattern.is_empty() && compile(pattern).is_ok()
@@ -66,6 +71,7 @@ pub fn match_group_name(regex: &Regex, haystack: &str, match_start: usize, name:
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn constructs_matches_finds_and_replaces() {
         let regex = compile("a+").unwrap();
@@ -74,5 +80,21 @@ mod tests {
         assert_eq!(replace(&regex, "baacaa", "x"), "bxcx");
         assert_eq!(split(&regex, "baac"), ["b", "c"]);
         assert!(!is_valid("["));
+    }
+
+    #[test]
+    fn rejects_patterns_whose_compiled_program_exceeds_the_limit() {
+        // The alternation has a compact source but expands into a large
+        // compiled automaton. The builder limit must reject it before runtime
+        // handles can retain the compiled program.
+        let pattern = format!(
+            "(?:{}){{100}}",
+            (0..40)
+                .map(|i| format!("x{i}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        );
+        assert!(compile(&pattern).is_err());
+        assert!(compile("(?:ab|cd)+").is_ok());
     }
 }

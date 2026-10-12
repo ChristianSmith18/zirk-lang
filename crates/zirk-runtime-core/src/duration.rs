@@ -55,12 +55,40 @@ pub fn format(nanos: i64) -> String {
     unreachable!("nanoseconds always render")
 }
 
-pub fn multiply(nanos: i64, scalar: f64) -> i64 {
-    (nanos as f64 * scalar) as i64
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarError {
+    DivisionByZero,
+    NonFiniteResult,
+    Overflow,
 }
 
-pub fn divide(nanos: i64, scalar: f64) -> i64 {
-    (nanos as f64 / scalar) as i64
+/// Converts the computed scalar result using the existing truncation-toward-
+/// zero rule, while rejecting NaN, infinity, and values outside the i64 range.
+fn scalar_result(value: f64) -> Result<i64, ScalarError> {
+    if value.is_nan() {
+        return Err(ScalarError::NonFiniteResult);
+    }
+    if !value.is_finite() {
+        return Err(ScalarError::Overflow);
+    }
+    // `i64::MAX as f64` rounds up to 2^63, so the upper bound is exclusive.
+    let upper_exclusive = 9_223_372_036_854_775_808.0_f64;
+    let lower_inclusive = -upper_exclusive;
+    if value < lower_inclusive || value >= upper_exclusive {
+        return Err(ScalarError::Overflow);
+    }
+    Ok(value.trunc() as i64)
+}
+
+pub fn multiply(nanos: i64, scalar: f64) -> Result<i64, ScalarError> {
+    scalar_result(nanos as f64 * scalar)
+}
+
+pub fn divide(nanos: i64, scalar: f64) -> Result<i64, ScalarError> {
+    if scalar == 0.0 {
+        return Err(ScalarError::DivisionByZero);
+    }
+    scalar_result(nanos as f64 / scalar)
 }
 
 pub fn ratio(left: i64, right: i64) -> f64 {
@@ -277,6 +305,21 @@ pub fn humanize(nanos: i64, _locale: &str, max_units: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_scalar_conversions_are_truncated_and_range_checked() {
+        assert_eq!(multiply(5, 0.5), Ok(2));
+        assert_eq!(multiply(-5, 0.5), Ok(-2));
+        assert_eq!(multiply(i64::MIN, 1.0), Ok(i64::MIN));
+        assert_eq!(multiply(i64::MAX, 2.0), Err(ScalarError::Overflow));
+        assert_eq!(
+            multiply(0, f64::INFINITY),
+            Err(ScalarError::NonFiniteResult)
+        );
+        assert_eq!(divide(1, 0.0), Err(ScalarError::DivisionByZero));
+        assert_eq!(divide(i64::MIN, -1.0), Err(ScalarError::Overflow));
+        assert_eq!(divide(7, 2.0), Ok(3));
+    }
 
     #[test]
     fn formats_exact_duration_literals() {

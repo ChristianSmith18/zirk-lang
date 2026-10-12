@@ -918,6 +918,10 @@ pub enum InstKind {
     /// `phase-4c-resources`) — consulted before a resource `close()` action.
     /// Produces `IrType::Boolean`.
     IsCancelled,
+    /// Temporarily suppresses cancellation delivery while generated cleanup
+    /// code runs. Enter/exit are paired by cancellation lowering.
+    CancelShieldEnter,
+    CancelShieldExit,
     /// Takes the pending exception, clearing the slot (roadmap Phase 4b) —
     /// a matching `catch`'s own lowering, right after `IsInstance` confirms
     /// it. Typed as whichever class the matching `catch` declared: the
@@ -1814,6 +1818,9 @@ impl BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
     Return(Option<Operand>),
+    /// Propagates cooperative cancellation after this function's cleanup.
+    /// This is distinct from exceptions and cannot be handled by `catch`.
+    Cancel,
     /// Control never arrives here.
     ///
     /// A block still needs a terminator even when nothing can reach it — the
@@ -1833,7 +1840,7 @@ impl Terminator {
     /// Blocks this terminator can transfer control to.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
-            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
+            Terminator::Return(_) | Terminator::Cancel | Terminator::Unreachable => Vec::new(),
             Terminator::Jump(target) => vec![*target],
             Terminator::Branch {
                 then_block,

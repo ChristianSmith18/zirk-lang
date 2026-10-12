@@ -9,7 +9,7 @@
 //! invariants of the *representation*.
 
 use crate::ir::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A violation of the IR invariants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,14 +28,340 @@ impl std::fmt::Display for IrError {
 pub fn verify(module: &Module) -> Result<(), Vec<IrError>> {
     let mut errors = Vec::new();
 
-    for function in &module.functions {
-        verify_function(module, function, &mut errors);
+    verify_module_layouts(module, &mut errors);
+
+    // Function verification calls helpers such as `is_managed_reference`
+    // that index validated module layout tables. Stop before those accesses
+    // when the module-level representation is malformed.
+    if errors.is_empty() {
+        for function in &module.functions {
+            verify_function(module, function, &mut errors);
+        }
     }
 
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn module_error(errors: &mut Vec<IrError>, detail: impl Into<String>) {
+    errors.push(IrError {
+        function: "<module>".into(),
+        detail: detail.into(),
+    });
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum InlineLayout {
+    Value(u32),
+    Enum(u32),
+    Closure(u32),
+}
+
+/// Inline aggregates must be finite. Opaque references such as Object, Array,
+/// and Callable do not recurse through their pointee here.
+fn has_inline_layout_cycle(
+    module: &Module,
+    ty: IrType,
+    visiting: &mut HashSet<InlineLayout>,
+) -> bool {
+    match ty {
+        IrType::Value(id) => {
+            let key = InlineLayout::Value(id);
+            if !visiting.insert(key) {
+                return true;
+            }
+            let cycle = module.values[id as usize]
+                .fields
+                .iter()
+                .any(|field| has_inline_layout_cycle(module, field.ty, visiting));
+            visiting.remove(&key);
+            cycle
+        }
+        IrType::Enum(id) => {
+            let key = InlineLayout::Enum(id);
+            if !visiting.insert(key) {
+                return true;
+            }
+            let cycle = module.enums[id as usize]
+                .fields
+                .iter()
+                .any(|field| has_inline_layout_cycle(module, field.ty, visiting));
+            visiting.remove(&key);
+            cycle
+        }
+        IrType::Closure(id) => {
+            let key = InlineLayout::Closure(id);
+            if !visiting.insert(key) {
+                return true;
+            }
+            let cycle = module.closures[id as usize]
+                .captures
+                .iter()
+                .any(|&capture| has_inline_layout_cycle(module, capture, visiting));
+            visiting.remove(&key);
+            cycle
+        }
+        IrType::Nullable(Nullable::Value(id)) => {
+            has_inline_layout_cycle(module, IrType::Value(id), visiting)
+        }
+        IrType::Nullable(Nullable::Enum(id)) => {
+            has_inline_layout_cycle(module, IrType::Enum(id), visiting)
+        }
+        _ => false,
+    }
+}
+
+/// Validate every layout table before any later verifier/backend pass indexes
+/// it to derive GC paths or LLVM field offsets.
+fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
+    fn check_type(module: &Module, errors: &mut Vec<IrError>, ty: IrType, context: &str) {
+        let valid = match ty {
+            IrType::Closure(id) | IrType::Callable(id) => id < module.closures.len() as u32,
+            IrType::Channel(id) => id < module.channel_types.len() as u32,
+            IrType::Object(id) | IrType::Nullable(Nullable::Object(id)) => {
+                id < module.objects.len() as u32
+            }
+            IrType::Value(id) | IrType::Nullable(Nullable::Value(id)) => {
+                id < module.values.len() as u32
+            }
+            IrType::Enum(id) | IrType::Nullable(Nullable::Enum(id)) => {
+                id < module.enums.len() as u32
+            }
+            IrType::Pointer(id) => id < module.pointer_types.len() as u32,
+            IrType::Weak(id) => id < module.weak_types.len() as u32,
+            IrType::NativeSlice(id) => id < module.native_slice_types.len() as u32,
+            IrType::NativeSliceMut(id) => id < module.native_slice_mut_types.len() as u32,
+            IrType::Dependent(id) => id < module.dependent_types.len() as u32,
+            IrType::Pin(id) => id < module.pin_types.len() as u32,
+            IrType::Array(id) | IrType::Nullable(Nullable::Array(id)) => {
+                id < module.array_types.len() as u32
+            }
+            IrType::List(id) | IrType::Nullable(Nullable::List(id)) => {
+                id < module.list_types.len() as u32
+            }
+            IrType::Map(id) => id < module.map_types.len() as u32,
+            IrType::Set(id) => id < module.set_types.len() as u32,
+            IrType::Nullable(Nullable::Contract(_)) => true,
+            IrType::Void
+            | IrType::Never
+            | IrType::Int(_)
+            | IrType::Float(_)
+            | IrType::Decimal
+            | IrType::Boolean
+            | IrType::String
+            | IrType::Regex
+            | IrType::Char
+            | IrType::Job
+            | IrType::Contract(_)
+            | IrType::Nullable(
+                Nullable::Int(_)
+                | Nullable::Float(_)
+                | Nullable::Boolean
+                | Nullable::String
+                | Nullable::Char,
+            )
+            | IrType::JournalHandle
+            | IrType::Range => true,
+        };
+        if !valid {
+            module_error(
+                errors,
+                format!(
+                    "{context} references an out-of-range layout in {}",
+                    ty.as_str()
+                ),
+            );
+        }
+    }
+    let mut layout_errors = Vec::new();
+
+    for (index, layout) in module.objects.iter().enumerate() {
+        for field in &layout.fields {
+            check_type(
+                module,
+                errors,
+                field.ty,
+                &format!("object layout {index} field `{}`", field.name),
+            );
+        }
+    }
+    for (index, layout) in module.values.iter().enumerate() {
+        for field in &layout.fields {
+            check_type(
+                module,
+                errors,
+                field.ty,
+                &format!("value layout {index} field `{}`", field.name),
+            );
+        }
+    }
+    for (index, layout) in module.enums.iter().enumerate() {
+        for field in &layout.fields {
+            check_type(
+                module,
+                errors,
+                field.ty,
+                &format!("enum layout {index} field `{}`", field.name),
+            );
+        }
+        let mut assigned = vec![false; layout.fields.len()];
+        for (variant_index, variant) in layout.variants.iter().enumerate() {
+            for &field_index in variant {
+                let Some(assigned_slot) = assigned.get_mut(field_index as usize) else {
+                    layout_errors.push(format!(
+                        "enum layout {index} variant {variant_index} has out-of-range field index {field_index}"
+                    ));
+                    continue;
+                };
+                if *assigned_slot {
+                    layout_errors.push(format!(
+                        "enum layout {index} reuses flattened field index {field_index}"
+                    ));
+                }
+                *assigned_slot = true;
+            }
+        }
+        if assigned.iter().any(|assigned| !assigned) {
+            layout_errors.push(format!(
+                "enum layout {index} contains a flattened field not owned by any variant"
+            ));
+        }
+    }
+    for (index, layout) in module.closures.iter().enumerate() {
+        for &ty in layout.captures.iter().chain(&layout.params) {
+            check_type(module, errors, ty, &format!("closure layout {index}"));
+        }
+        check_type(
+            module,
+            errors,
+            layout.returns,
+            &format!("closure layout {index} return"),
+        );
+    }
+
+    for (table_name, table) in [
+        ("pointer", &module.pointer_types),
+        ("weak", &module.weak_types),
+        ("native slice", &module.native_slice_types),
+        ("mutable native slice", &module.native_slice_mut_types),
+        ("dependent", &module.dependent_types),
+        ("pin", &module.pin_types),
+        ("array", &module.array_types),
+        ("list", &module.list_types),
+        ("set", &module.set_types),
+    ] {
+        for (index, &ty) in table.iter().enumerate() {
+            check_type(
+                module,
+                errors,
+                ty,
+                &format!("{table_name} type table entry {index}"),
+            );
+        }
+    }
+    for (index, &(key, value)) in module.map_types.iter().enumerate() {
+        check_type(
+            module,
+            errors,
+            key,
+            &format!("map type table entry {index} key"),
+        );
+        check_type(
+            module,
+            errors,
+            value,
+            &format!("map type table entry {index} value"),
+        );
+    }
+    for (index, function) in module.functions.iter().enumerate() {
+        check_type(
+            module,
+            errors,
+            function.return_type,
+            &format!("function {index} return"),
+        );
+        for (slot_index, slot) in function.slots.iter().enumerate() {
+            check_type(
+                module,
+                errors,
+                slot.ty,
+                &format!("function {index} slot {slot_index}"),
+            );
+        }
+        for (block_index, block) in function.blocks.iter().enumerate() {
+            for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+                check_type(
+                    module,
+                    errors,
+                    instruction.ty,
+                    &format!(
+                        "function {index} block {block_index} instruction {instruction_index}"
+                    ),
+                );
+            }
+        }
+    }
+    for (index, function) in module.externs.iter().enumerate() {
+        for &ty in &function.params {
+            check_type(
+                module,
+                errors,
+                ty,
+                &format!("extern function {index} parameter"),
+            );
+        }
+        check_type(
+            module,
+            errors,
+            function.return_type,
+            &format!("extern function {index} return"),
+        );
+    }
+    for detail in layout_errors {
+        module_error(errors, detail);
+    }
+    if errors.is_empty() {
+        for (index, layout) in module.values.iter().enumerate() {
+            if layout
+                .fields
+                .iter()
+                .any(|field| has_inline_layout_cycle(module, field.ty, &mut HashSet::new()))
+            {
+                module_error(
+                    errors,
+                    format!("value layout {index} contains an infinitely recursive inline field"),
+                );
+            }
+        }
+        for (index, layout) in module.enums.iter().enumerate() {
+            if layout
+                .fields
+                .iter()
+                .any(|field| has_inline_layout_cycle(module, field.ty, &mut HashSet::new()))
+            {
+                module_error(
+                    errors,
+                    format!("enum layout {index} contains an infinitely recursive inline field"),
+                );
+            }
+        }
+        for (index, layout) in module.closures.iter().enumerate() {
+            if layout
+                .captures
+                .iter()
+                .any(|&ty| has_inline_layout_cycle(module, ty, &mut HashSet::new()))
+            {
+                module_error(
+                    errors,
+                    format!(
+                        "closure layout {index} contains an infinitely recursive inline capture"
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -46,6 +372,34 @@ fn verify_function(module: &Module, function: &Function, errors: &mut Vec<IrErro
             detail,
         })
     };
+
+    let mut seen_roots = std::collections::HashSet::new();
+    for &root in &function.gc_roots {
+        match function.slots.get(root.0 as usize) {
+            None => report(format!(
+                "GC root {root:?} does not refer to a function slot"
+            )),
+            Some(slot) => {
+                if !slot.ty.is_managed_reference(module) {
+                    report(format!(
+                        "GC root {root:?} has unmanaged type {}",
+                        slot.ty.as_str()
+                    ));
+                }
+                if !seen_roots.insert(root) {
+                    report(format!("GC root {root:?} is listed more than once"));
+                }
+            }
+        }
+    }
+    for (index, slot) in function.slots.iter().enumerate() {
+        let slot_id = SlotId(index as u32);
+        if slot.ty.is_managed_reference(module) && !seen_roots.contains(&slot_id) {
+            report(format!(
+                "managed slot {slot_id:?} is missing from the GC roots"
+            ));
+        }
+    }
 
     if function.block(function.entry).is_none() {
         report(format!(
@@ -268,6 +622,15 @@ fn verify_instruction(
 
         InstKind::IsCancelled => {
             expect(inst.ty, IrType::Boolean, position, "IsCancelled", report);
+        }
+        InstKind::CancelShieldEnter | InstKind::CancelShieldExit => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "cancellation shield",
+                report,
+            );
         }
 
         // No shape to check: `ty` is whichever class the matching `catch`
@@ -2407,7 +2770,7 @@ fn verify_terminator(
 
     match terminator {
         // Nothing to check: a block nothing reaches transfers control nowhere.
-        Terminator::Unreachable => {}
+        Terminator::Unreachable | Terminator::Cancel => {}
 
         Terminator::Return(value) => {
             let returned = match value {
@@ -2513,9 +2876,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             suppressed,
         } => vec![*exception, *suppressed],
         InstKind::StackTrace(exception) | InstKind::Suppressed(exception) => vec![*exception],
-        InstKind::HasPendingException | InstKind::IsCancelled | InstKind::TakePendingException => {
-            Vec::new()
-        }
+        InstKind::HasPendingException
+        | InstKind::IsCancelled
+        | InstKind::CancelShieldEnter
+        | InstKind::CancelShieldExit
+        | InstKind::TakePendingException => Vec::new(),
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
         InstKind::Alloc(_) => Vec::new(),
