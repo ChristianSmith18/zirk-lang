@@ -5,7 +5,9 @@
 Defines the types of the language, name resolution, mutability, inference and flow analysis.
 
 This is where the rules of `ZIRK_LANGUAGE_SPEC.md` that most often surprise someone coming from another language are enforced: no numeric truthiness, no implicit conversions and no function overloading.
+
 ## Requirements
+
 ### Requirement: Runtime type identity is safe and representation-independent
 Every value and declared type MUST expose compiler-provided `Type` identity.
 Identity SHALL distinguish constructed generic arguments and provide broad
@@ -1086,3 +1088,15 @@ not established associative SHALL be rejected unless `reduce_ordered` is used.
 #### Scenario: adapter chain retains its sequential result type
 - **WHEN** `rows.parallel.map(cost).sum()` is checked
 - **THEN** its type equals the sequential `rows.map(cost).sum()` result type
+
+### Requirement: Accepted types have end-to-end representations
+
+The type checker SHALL accept a type use only when semantic operations, IR representation, native ABI, runtime storage, and GC behavior are defined for that use. The checker SHALL reject unsupported generic collection keys, values, or elements before lowering, with a stable diagnostic that identifies the type and operation.
+
+#### Scenario: Type passes checking but lacks a backend layout
+- **WHEN** a collection operation uses a type with no supported LLVM/runtime layout
+- **THEN** semantic analysis rejects it and compilation does not reach a code-generation panic
+
+#### Scenario: Type has a complete runtime representation
+- **WHEN** a generic value has defined storage, equality, and GC metadata
+- **THEN** it remains accepted and those semantics are preserved through code generation

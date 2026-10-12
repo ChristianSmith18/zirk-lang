@@ -5,7 +5,9 @@
 Defines the typed intermediate representation and its generation from the verified tree.
 
 The IR is the boundary that gets distributed inside a `.zpkg`, so its form is a contract. See `docs/decisions/ADR-007-forma-de-la-ir.md`.
+
 ## Requirements
+
 ### Requirement: Typed IR
 
 The intermediate representation SHALL be typed: every operation and every value know their type, per `ZIRK_COMPILER_SPEC.md` section 4.
@@ -560,3 +562,19 @@ otherwise identical positional call.
 - **WHEN** `super.rename(suffix: "SUF", prefix: "PRE")` targets
   `(prefix: String, suffix: String)`
 - **THEN** the emitted call passes `"PRE"` as `prefix` and `"SUF"` as `suffix`
+
+### Requirement: Lowering preserves managed-reference metadata
+
+IR lowering SHALL preserve the complete type-derived reference layout for roots, collection elements, nested values, and runtime-owned container entries. It SHALL not erase distinctions required for safe pointer tracing or typed storage.
+
+#### Scenario: Nested reference-bearing value is lowered
+- **WHEN** a value containing managed references is lowered into a collection or object field
+- **THEN** IR carries sufficient layout metadata for runtime tracing after copies and mutation
+
+### Requirement: Unsupported typed operations fail before backend emission
+
+Lowering SHALL emit a stable diagnostic for any type/operation pair without a defined IR and runtime representation. It SHALL NOT construct an IR instruction whose only handling in the backend is an unchecked cast, `panic!`, or `unreachable!` for a source program that passed semantic analysis.
+
+#### Scenario: Unsupported collection operation is lowered
+- **WHEN** semantic analysis identifies an unsupported key, value, or element representation
+- **THEN** lowering reports the diagnostic and no invalid instruction reaches LLVM emission

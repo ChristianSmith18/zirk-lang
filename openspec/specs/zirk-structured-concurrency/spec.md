@@ -3,7 +3,9 @@
 ## Purpose
 Defines model-neutral structured concurrency, cancellation, transfer/share
 safety, channels, threads, parallelism, and synchronization.
+
 ## Requirements
+
 ### Requirement: Cancellation metadata and scheduling remain safe
 Cancellation of a concurrent operation SHALL be idempotent, MAY carry an optional typed `CancellationReason` whose default is `Cancelled`, and SHALL NOT expose user-controlled scheduling priority.
 The runtime SHALL schedule fairly and prevent starvation as an implementation
@@ -187,3 +189,15 @@ strict immutable sharing, cloning, or a channel as the resolution.
 
 - **WHEN** a parent transfers an exclusive mutable reference into a child task
 - **THEN** the parent cannot use that reference again until it returns through a structured result or a channel
+
+### Requirement: Cancellation is a cleanup-aware structured exit
+
+Cancellation SHALL enter the compiler's structured cleanup path rather than unwind across generated language frames as an opaque host panic. A cancelled branch SHALL be reported terminal only after its lexical cleanup has completed.
+
+#### Scenario: Cancellation crosses nested cleanup scopes
+- **WHEN** cancellation leaves nested `try/finally`, resource, and unsafe scopes
+- **THEN** cleanup executes from the innermost scope outward and the branch reports cancellation afterward
+
+#### Scenario: Cancellation is observed after cleanup
+- **WHEN** a job is cancelled while it owns language resources
+- **THEN** `Job` completion becomes observable only after cleanup and rollback obligations finish

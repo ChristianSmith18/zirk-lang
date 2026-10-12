@@ -3,7 +3,9 @@
 ## Purpose
 Defines structural callable types, escaping closure environments, method
 values, generators, and pipeline adaptation.
+
 ## Requirements
+
 ### Requirement: Callable rendering
 
 Function values SHALL render `<Function name>` when they refer to named functions and `<Function>` when anonymous, replacing `<Callable>`.
@@ -89,3 +91,15 @@ The language SHALL support `.clone()` on a callable when all captures are `Clone
 #### Scenario: Non-cloneable capture is rejected
 - **WHEN** a callable captures a non-`Clone` resource and `.clone()` is called
 - **THEN** compilation fails
+
+### Requirement: Callable captures remain visible to managed-memory tracing
+
+Every managed reference captured by a closure SHALL remain represented in its environment descriptor, including when a closure is nested inside a supported tuple, record, enum payload, or collection element. Copies and clones SHALL preserve the correct capture edges.
+
+#### Scenario: Closure is stored in a supported aggregate
+- **WHEN** a reachable aggregate contains a closure as its only path to a captured object and collection runs
+- **THEN** the captured object remains valid while the aggregate and closure remain reachable
+
+#### Scenario: Closure clone is collected during construction
+- **WHEN** collection runs while a closure clone is being constructed
+- **THEN** partially built capture environments remain reachable until cloning completes or fails

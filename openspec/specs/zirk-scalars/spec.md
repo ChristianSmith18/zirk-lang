@@ -3,7 +3,9 @@
 ## Purpose
 Defines integer and floating families, Boolean and grapheme Char semantics,
 checked arithmetic, final-result scalar conversion, and scalar formatting contracts.
+
 ## Requirements
+
 ### Requirement: Complete family of integer widths
 
 The type system SHALL recognize `Int8`, `Int16`, `Int32`, `Int64`, `Int128` signed and `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128` unsigned, with `Int`/`Integer` as an alias for `Int32` and `UInt`/`UInteger` as an alias for `UInt32`.
@@ -189,3 +191,15 @@ The `String * n` operator SHALL accept an integer of any width for `n`, widening
 #### Scenario: Repeating with a signed narrow count
 - **WHEN** `"x" * (3 as Int8)` is evaluated
 - **THEN** the count is converted to `Int32` and the result is the repeated string
+
+### Requirement: Binary floating conversions are range-safe
+
+Conversions from binary floating types to integer types SHALL reject non-finite values and values outside the destination range with a controlled language failure. In-range conversion SHALL follow one documented rounding rule across execution backends.
+
+#### Scenario: NaN or infinity is converted to an integer
+- **WHEN** a non-finite value reaches an integer conversion
+- **THEN** conversion fails deterministically without backend-dependent integer bits
+
+#### Scenario: Floating value exceeds integer bounds
+- **WHEN** a finite value is below the minimum or above the maximum of the destination integer type
+- **THEN** conversion fails with a controlled range error
