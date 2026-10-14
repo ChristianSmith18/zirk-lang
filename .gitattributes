@@ -6,3 +6,7 @@
 # programa imprime, y un `.zrk` convertido desplaza las columnas que reportan
 # los diagnósticos.
 crates/zirk-cli/tests/corpus/**  -text
+
+# Canonical formatting compares source bytes across platforms; keep Windows
+# checkouts from rewriting these examples to CRLF before the formatter check.
+examples/*.zrk  -text
