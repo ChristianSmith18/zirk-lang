@@ -11,6 +11,12 @@ Logical packages are unquoted; local paths are quoted. Imports are lexical
 dependencies, not runtime code execution. Missing, private, or ambiguous names
 produce resolution diagnostics.
 
+Quoted imports and `share mod` re-exports must remain inside the project root;
+standalone files and editor overlays use the entry file's directory as their
+root. Files from a declared dependency are confined to that dependency's own
+root. Paths that escape these boundaries, including through a symlink, are
+rejected before the target source is read.
+
 An imported module opens its published members when the name is unambiguous:
 
 ```zirk

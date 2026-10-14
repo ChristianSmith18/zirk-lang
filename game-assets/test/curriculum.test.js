@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { exportCurriculum } from '../curriculum/export.mjs';
 import { CATALOG } from '../src/catalog.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const doc = fileURLToPath(new URL('../../ZIRK_LEARNING_GAME_CURRICULUM.md', import.meta.url));
+const doc = resolve(here, '..', '..', '..', 'zirk-lang-game-site', 'docs', 'CURRICULUM.md');
 const levelsFile = fileURLToPath(new URL('../curriculum/levels.json', import.meta.url));
 const markdown = readFileSync(doc, 'utf8');
 const knownAssets = new Set(CATALOG.map((a) => a.id));
@@ -59,7 +60,7 @@ test('the committed levels.json is up to date with the document', () => {
   const { levels } = exportCurriculum(markdown, { knownAssets });
   const committed = JSON.parse(readFileSync(levelsFile, 'utf8'));
   assert.equal(committed.schemaVersion, 1);
-  assert.deepEqual(committed.levels, levels, 'run `npm run curriculum:export` and commit levels.json');
+  assert.deepEqual(committed.levels, levels, 'run `npm run curriculum:export` in game-assets and commit levels.json');
 });
 
 test('every level is solvable by its own solution (runs the interpreter)', { skip: !existsSync(fileURLToPath(new URL('../../target/debug/examples/interp_repro', import.meta.url))) && 'build with: cargo build -p zirk-browser --example interp_repro' }, () => {

@@ -1,26 +1,21 @@
 # Compiler Pipeline
 
 Zirk uses one staged frontend for checking, compilation, formatting, linting,
-editor services, documentation, and validated decorator expansion. Native
-builds continue through portable IR and LLVM; frontend-only tools stop before
-those stages.
+editor services, and documentation. Native builds continue through portable IR
+and LLVM; frontend-only tools stop before those stages.
 
 ```text
 source files and .zkinit
         ↓
 source/module loading
         ↓
-lexing and lossless syntax
+lexing, trivia and recoverable parsing
         ↓
 semantic AST
         ↓
 module and name resolution
         ↓
 type and flow analysis
-        ↓
-decorator Inspect → Augment → Wrap
-        ↓
-generated-code resolution, typing and validation
         ↓
 typed portable IR
         ↓
@@ -31,10 +26,12 @@ LLVM IR → object → linker → native artifact
 > lexing, recursive-descent parsing, semantic AST, name/type/flow checking,
 > typed IR verification, LLVM emission, linking, and a static runtime for its
 > implemented subset. The persistent lossless tree, fine-grained incremental
-> frontend, full module namespaces, decorator engine, and many later language
-> features remain target architecture. See
-> [`COMPILER_IMPROVEMENT_SUGGESTIONS.md`](../../../COMPILER_IMPROVEMENT_SUGGESTIONS.md)
-> for the observed integration state and implementation guidance.
+> frontend, per-module name resolution, and many later language features remain
+> target architecture. `zirk check` and the standalone LLVM-independent
+> `zirk-check` frontend are available. Generic contract dispatch remains partial;
+> consult [`ZIRK_FEATURE_STATUS.md`](../../init/ZIRK_FEATURE_STATUS.md) for its
+> exact pipeline boundary and the [compiler improvement roadmap](../../COMPILER_IMPROVEMENT_ROADMAP.md)
+> for remaining work.
 
 The LLVM backend now exposes `None`, `Less`, `Default`, and `Aggressive` object
 optimization levels for controlled parity experiments. The CLI continues to
@@ -49,10 +46,9 @@ before backend optimization is considered.
 | Stage | Compiler owner | Produces | Must not do |
 | --- | --- | --- | --- |
 | Source loading | driver/project loader | canonical source graph and snapshots | resolve language names or grant permissions |
-| Lexer | `zirk-lexer` | tokens, trivia/syntax input and byte spans | decide grammar or types |
+| Lexer | `zirk-lexer` | tokens, optional comment trivia and byte spans | decide grammar or types |
 | Parser | `zirk-parser` | recoverable syntax and semantic AST input | perform type checking |
 | Resolution/checking | `zirk-sema` | resolved, typed and flow-validated program | choose object layout or emit code |
-| Decorator engine | compiler frontend | generated validated syntax and expansion maps | bypass visibility, types, permissions or hygiene |
 | Portable IR | `zirk-ir` | verified target-independent executable form | commit to LLVM or a memory strategy not required by semantics |
 | Native backend | `zirk-codegen-llvm` | LLVM module and object | redefine language behavior |
 | Driver/linker | `zirk-cli` | requested artifacts and diagnostics | contain compilation semantics |
@@ -68,37 +64,36 @@ Compilation begins at an entry source or the entry declared by `.zkinit`. The
 loader follows imports rather than compiling every `.zrk` in a directory. An
 unreachable file is not part of the program.
 
-Each file receives a stable identity in the compilation source map. The target
-model preserves both its user-facing written path and canonical module identity,
+Each file receives a stable identity in the compilation source map. The loader
+preserves both its user-facing written path and canonical module identity,
 deduplicates aliases/symlinks, prevents project-root escape, and permits access
 to dependencies only through the manifest. Mutual imports do not make the file
 loader recurse forever; semantic dependency rules decide whether the resulting
 declaration cycle is valid.
 
-The current loader already walks reachable local imports, reads each normalized
-path once, accepts mutual file traversal, and continues loading after parse
-errors to produce useful project-wide diagnostics. Current compilation still
-temporarily merges declarations into one crate namespace; per-module resolution
-is later work.
+The current loader walks reachable imports, accepts mutual file traversal,
+deduplicates canonical file paths, confines local imports to the project (or
+standalone entry-file) root, and confines dependencies to their own resolved
+roots. It rejects symlinks that lead outside those roots and continues loading
+after parse errors to produce project-wide diagnostics. Current compilation
+still temporarily merges declarations into one crate namespace; per-module
+resolution is later work.
 
 ## Frontend-only workflows
 
-`zirk check`, formatter, linter, LSP, documentation, and compatible decorator
-inspection share source snapshots and frontend results. They do not need LLVM,
-a platform linker, SDK, runtime archive, or native dependencies.
+`zirk check`, formatter, linter, LSP, and documentation use frontend facilities.
+The standalone `zirk-check` executable can be built without LLVM. These workflows
+do not need a platform linker, SDK, runtime archive, or native dependencies.
 
 ```text
-zirk check       frontend through semantic/decorator validation
-zirk format      lossless syntax and canonical formatting
+zirk check       frontend through semantic validation
+zirk-check       standalone frontend validation, without LLVM
+zirk format      canonical formatting with comment preservation
 zirk lint        syntax + resolved/type information required by each rule
 zirk doc         public typed API and documentation
 LSP              incremental snapshots and recoverable frontend state
 zirk build/run   complete frontend + IR + backend + linker
 ```
-
-The current CLI does not yet provide the LLVM-independent `check` path. It is a
-documented target and a priority integration boundary, not a claim about the
-current executable.
 
 ## Stage gates
 
@@ -107,11 +102,9 @@ into evidence that the program is valid:
 
 1. Lexical and parser recovery produce marked tokens/nodes.
 2. Semantic recovery may use an internal unknown/error type to prevent cascades.
-3. Any frontend error prevents decorator commit or IR lowering as applicable.
-4. Generated decorator code passes the same resolution, typing, effect, safety,
-   and visibility checks as source code.
-5. Portable IR is independently verified before backend emission.
-6. An invalid IR is an internal compiler error, never blamed on user source.
+3. Any frontend error prevents IR lowering.
+4. Portable IR is independently verified before backend emission.
+5. Invalid IR is an internal compiler error, never blamed on user source.
 
 ## Feature completion states
 

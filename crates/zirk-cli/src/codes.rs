@@ -22,3 +22,5 @@ pub const IMPORT_CYCLE: Code = Code::new("E0509");
 pub const INVALID_PROJECT: Code = Code::new("E0510");
 /// A package import cannot be resolved from the declared project dependencies.
 pub const PACKAGE_RESOLUTION: Code = Code::new("E0511");
+/// A local import or re-export escapes its authorized source root.
+pub const IMPORT_OUTSIDE_ROOT: Code = Code::new("E0512");

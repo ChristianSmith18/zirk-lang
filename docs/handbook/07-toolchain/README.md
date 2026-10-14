@@ -1,6 +1,8 @@
 # Toolchain
 
-The `zirk` toolchain shares one incremental frontend across checking, formatting, linting, editor services, documentation, and native compilation. LLVM is invoked only when code generation is needed.
+The `zirk` toolchain shares frontend facilities across checking, formatting,
+linting, editor services, documentation, and native compilation. LLVM is
+invoked only when code generation is needed.
 
 Begin with the [Compiler Pipeline](01-compiler-pipeline.md), then follow the
 frontend through [Lexer and Parser](02-lexer-and-parser.md),

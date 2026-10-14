@@ -55,4 +55,4 @@
 - [x] 7.2 Record the same way: audit of `static mut`/`thread_local!` in `zirk-runtime` ahead of starting Phase 5 (e.g., `fase-4e-runtime-thread-safety`).
 - [x] 7.3 Record the same way: modularizing `crates/zirk-ir/src/lower.rs` and `crates/zirk-codegen-llvm/src/emit.rs` (e.g., `refactor-lower-y-emit`).
 - [x] 7.4 Record the same way: the `value class` versus `record` scope decision, and semantic verification of `in`/`out` variance (e.g., `fase-3-value-class-alcance`, `fase-3-verificacion-varianza`).
-- [x] 7.5 Link the four follow-up notes from `docs/init/ZIRK_FEATURE_STATUS.md` or from `COMPILER_IMPROVEMENT_SUGGESTIONS.md`, so they are not lost as loose comments in this change.
+- [x] 7.5 Link the four follow-up notes from `docs/init/ZIRK_FEATURE_STATUS.md` or from `docs/COMPILER_IMPROVEMENT_ROADMAP.md`, so they are not lost as loose comments in this change.

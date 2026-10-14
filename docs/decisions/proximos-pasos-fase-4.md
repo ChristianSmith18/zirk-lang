@@ -266,7 +266,8 @@ risk ADR-003 (phase 0) set out to avoid from the start.
 
 ## 6. Follow-up work identified during `fix-docs-tooling-drift`
 
-These items were deliberately left unresolved while closing the documentation and tooling alignment change. Each one has a suggested change name for the next OpenSpec change that addresses it.
+The original follow-ups are reconciled below against the delivered compiler and
+runtime. Only module extraction remains an optional maintainability investment.
 
 ### 6.1 `String`/`Char` lifetime strategy under the mark-sweep collector
 
@@ -274,11 +275,12 @@ These items were deliberately left unresolved while closing the documentation an
 - **Why it matters:** The decision has been closed. `String` and `Char` values are now ordinary collector-managed objects: they are allocated through `zirk_rt_alloc`, use a dedicated `zirk_rt_string_descriptor` with no traced fields, and are reclaimed by the same non-moving mark-sweep collector as ordinary objects. This keeps ADR-005's opaque-handle guarantee intact and leaves cross-ABI lifetime, small-string optimization, and interning as future follow-up work.
 - **What was decided:** `String`/`Char` are purely managed by the same collector as objects. The runtime owns the bytes for runtime-built strings; string literals keep their global-constant bytes untouched. `Char` shares `String`'s representation bit for bit (ADR-014).
 
-### 6.2 Audit of `static mut` and `thread_local!` in `zirk-runtime` before Phase 5
+### 6.2 Runtime concurrency safety review (closed)
 
-- **Suggested change:** `fase-4e-runtime-thread-safety`
-- **Why it matters:** Phase 5 (concurrency) assumes the runtime is free of data races in its global and thread-local state. Any `static mut` or unchecked `thread_local!` usage must be inventoried and converted to safe concurrency primitives before `task`/`parallel` are exposed.
-- **What to decide before implementation:** Which runtime globals are truly read-only after init? Which are mutable? Where does the exception stack live relative to a task? Does the current `thread_local` exception state compose with a future scheduler?
+- **Status:** the blanket pre-concurrency prerequisite is superseded by the
+  completed concurrency implementation and its cross-platform runtime/CI
+  validation. New runtime primitives still require their own synchronization,
+  lifecycle, cancellation, and GC-root audits.
 
 ### 6.3 Modularizing `crates/zirk-ir/src/lower.rs` and `crates/zirk-codegen-llvm/src/emit.rs`
 
@@ -286,10 +288,11 @@ These items were deliberately left unresolved while closing the documentation an
 - **Why it matters:** Both files are large and monolithic. New language constructs keep adding branches to the same giant match, increasing the risk of cross-cutting bugs and making it hard to add new backends.
 - **What to decide before implementation:** What is the right unit of split — per construct, per backend stage, or per type? Should lowering become a trait or a pass pipeline? How do we preserve source maps and the independent IR verifier?
 
-### 6.4 `value class` versus `record` scope decision and `in`/`out` variance verification
+### 6.4 Value types and variance (closed)
 
-- **Suggested changes:** `fase-3-value-class-alcance` and `fase-3-verificacion-varianza`
-- **Why it matters:** The parser and tests already recognize `interface` and `trait`, but the semantic phase has not decided whether `value class` and `record` share the same scope rules or whether they are distinct kinds. Variance annotations `in`/`out` are parsed but not checked.
-- **What to decide before implementation:** Is a `value class` a kind of `record`? Do both participate in nominal or structural subtyping? Where are variance positions enforced in generic parameters? Which generic parameters may be declared `in`/`out`?
+- **Status:** `value class` was removed; use `record` for value semantics or
+  `class` for identity. Declared `in`/`out` variance is checked positionally by
+  sema. The former scope question and verification task are obsolete.
 
-These four follow-ups are also linked from the compiler improvement suggestions so they are not lost as loose comments in the original change.
+The active compiler improvements and their current completion states are tracked
+in [`../COMPILER_IMPROVEMENT_ROADMAP.md`](../COMPILER_IMPROVEMENT_ROADMAP.md).

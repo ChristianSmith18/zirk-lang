@@ -100,19 +100,24 @@ pub fn load_with_overlay(
     // lookups always see the normalized form `Loader::load` produces.
     let overlay: HashMap<PathBuf, String> = overlay
         .iter()
-        .map(|(path, text)| (normalize(path), text.clone()))
+        .map(|(path, text)| (absolute_normalize(path), text.clone()))
         .collect();
 
+    let entry = absolute_normalize(entry);
     let mut loader = Loader {
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
         overlay: &overlay,
         package_roots: standard_package_roots(),
+        local_root: entry
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
         sink,
     };
 
-    loader.load(entry, None)?;
+    loader.load(&entry, None, &loader.local_root.clone())?;
 
     Some(Crate {
         sources: loader.sources,
@@ -130,7 +135,14 @@ fn load_with_project(
     let overlay = HashMap::new();
     let package_roots: HashMap<String, PathBuf> =
         match project::resolve_package_roots(root, manifest, lock) {
-            Ok(roots) => roots.into_iter().collect(),
+            Ok(roots) => roots
+                .into_iter()
+                .map(|(name, entry)| {
+                    let entry = absolute_normalize(&entry);
+                    let entry = std::fs::canonicalize(&entry).unwrap_or(entry);
+                    (name, entry)
+                })
+                .collect(),
             Err(error) => {
                 sink.emit(Diagnostic::error(
                     codes::PACKAGE_RESOLUTION,
@@ -149,9 +161,10 @@ fn load_with_project(
             roots.extend(package_roots);
             roots
         },
+        local_root: absolute_normalize(root),
         sink,
     };
-    loader.load(entry, None)?;
+    loader.load(entry, None, &loader.local_root.clone())?;
     Some(Crate {
         sources: loader.sources,
         units: loader.units,
@@ -163,9 +176,12 @@ fn load_with_project(
 /// logical identity is fixed and their trusted host bindings remain governed
 /// by `zirk_sema::stdlib` rather than source syntax.
 fn standard_package_roots() -> HashMap<String, PathBuf> {
+    let entry = absolute_normalize(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io/package.zrk"),
+    );
     HashMap::from([(
         "std.io".into(),
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io/package.zrk"),
+        std::fs::canonicalize(&entry).unwrap_or(entry),
     )])
 }
 
@@ -174,7 +190,7 @@ fn standard_package_roots() -> HashMap<String, PathBuf> {
 /// identical across targets.
 fn standard_source(path: &Path) -> Option<&'static str> {
     let directory =
-        normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io"));
+        absolute_normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io"));
     match path
         .strip_prefix(&directory)
         .ok()?
@@ -199,6 +215,8 @@ struct Loader<'a> {
     /// Logical package roots resolved from the project manifest. Non-local
     /// transports intentionally do not become filesystem imports here.
     package_roots: HashMap<String, PathBuf>,
+    /// Filesystem boundary for the local project (canonicalized for each check).
+    local_root: PathBuf,
     sink: &'a mut DiagnosticSink,
 }
 
@@ -207,10 +225,18 @@ impl Loader<'_> {
     ///
     /// `from` is the span of the `import` that asked for it, so a missing file
     /// is reported where it was requested rather than at the top of nowhere.
-    fn load(&mut self, path: &Path, from: Option<(FileId, zirk_diagnostics::Span)>) -> Option<()> {
-        let path = normalize(path);
+    fn load(
+        &mut self,
+        path: &Path,
+        from: Option<(FileId, zirk_diagnostics::Span)>,
+        authorized_root: &Path,
+    ) -> Option<()> {
+        let path = absolute_normalize(path);
+        let Some((path, identity_path)) = self.authorize_path(&path, authorized_root, from) else {
+            return None;
+        };
 
-        if self.by_path.contains_key(&path) {
+        if self.by_path.contains_key(&identity_path) {
             return Some(());
         }
 
@@ -245,13 +271,14 @@ impl Loader<'_> {
             .iter()
             .find_map(|(name, entry)| {
                 let root = entry.parent()?;
-                path.starts_with(root)
+                identity_path
+                    .starts_with(root)
                     .then(|| (name.clone(), root.to_path_buf()))
             })
-            .unwrap_or_else(|| ("local".into(), directory_for(&path)));
-        let canonical_module_path = path
+            .unwrap_or_else(|| ("local".into(), self.local_root.clone()));
+        let canonical_module_path = identity_path
             .strip_prefix(&package_root)
-            .unwrap_or(&path)
+            .unwrap_or(&identity_path)
             .with_extension("")
             .display()
             .to_string()
@@ -264,7 +291,7 @@ impl Loader<'_> {
             package_root: package_root.display().to_string(),
         });
         let file = self.sources.add(source);
-        self.by_path.insert(path.clone(), file);
+        self.by_path.insert(identity_path, file);
 
         let tokens = zirk_lexer::tokenize(self.sources.file(file), self.sink);
         let mut program = zirk_parser::parse(self.sources.file(file), &tokens, self.sink);
@@ -272,6 +299,14 @@ impl Loader<'_> {
         // Imports are followed even when the file had errors: reporting every
         // file's problems in one run beats one file per invocation.
         let directory = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let import_root = PathBuf::from(
+            self.sources
+                .file(file)
+                .identity()
+                .expect("loader assigned source identity")
+                .package_root
+                .clone(),
+        );
 
         for import in &program.imports {
             match &import.source {
@@ -282,13 +317,15 @@ impl Loader<'_> {
                     self.load(
                         &directory.join(format!("{written}.zrk")),
                         Some((file, *span)),
+                        &import_root,
                     );
                 }
                 ImportSource::Package { path, span } => {
                     let package = path.split("::").next().unwrap_or(path).to_string();
                     if zirk_sema::stdlib::standard_module(path).is_some() {
                         if let Some(root) = self.package_roots.get(&package).cloned() {
-                            self.load(&root, Some((file, *span)));
+                            let package_root = root.parent().unwrap_or_else(|| Path::new("."));
+                            self.load(&root, Some((file, *span)), package_root);
                         }
                         continue;
                     }
@@ -303,7 +340,8 @@ impl Loader<'_> {
                         continue;
                     }
                     if let Some(root) = self.package_roots.get(&package).cloned() {
-                        self.load(&root, Some((file, *span)));
+                        let package_root = root.parent().unwrap_or_else(|| Path::new("."));
+                        self.load(&root, Some((file, *span)), package_root);
                     } else {
                         self.package_error(
                             file,
@@ -316,9 +354,10 @@ impl Loader<'_> {
         }
         for reexport in &program.module_reexports.clone() {
             let target = directory.join(format!("{}.zrk", reexport.source_path));
-            self.load(&target, Some((file, reexport.span)));
-            let target = normalize(&target);
-            if let Some(target_file) = self.by_path.get(&target)
+            self.load(&target, Some((file, reexport.span)), &import_root);
+            let target = self.authorized_identity_path(&target);
+            if let Some(target) = target
+                && let Some(target_file) = self.by_path.get(&target)
                 && let Some(target_program) = self
                     .units
                     .iter()
@@ -339,6 +378,74 @@ impl Loader<'_> {
         Some(())
     }
 
+    /// Returns the normalized source path and canonical identity key only when
+    /// the path is lexically contained and its existing target stays inside
+    /// the same authorized root after symlink resolution.
+    fn authorize_path(
+        &mut self,
+        path: &Path,
+        authorized_root: &Path,
+        from: Option<(FileId, zirk_diagnostics::Span)>,
+    ) -> Option<(PathBuf, PathBuf)> {
+        let lexical = absolute_normalize(path);
+        let lexical_root = absolute_normalize(authorized_root);
+        let canonical_root = std::fs::canonicalize(&lexical_root).ok();
+        let Some(canonical_root) = canonical_root.filter(|_| lexical.starts_with(&lexical_root))
+        else {
+            self.outside_root(path, from);
+            return None;
+        };
+
+        match std::fs::canonicalize(&lexical) {
+            Ok(canonical) if canonical.starts_with(&canonical_root) => Some((lexical, canonical)),
+            Ok(_) => {
+                self.outside_root(path, from);
+                None
+            }
+            Err(_) => {
+                // An unsaved overlay entry may not exist, but its existing
+                // parent must still resolve within the authorized root.
+                if self.overlay.contains_key(&lexical) {
+                    let parent = lexical.parent().unwrap_or(&canonical_root);
+                    match std::fs::canonicalize(parent) {
+                        Ok(canonical_parent) if canonical_parent.starts_with(&canonical_root) => {
+                            Some((lexical.clone(), lexical))
+                        }
+                        _ => {
+                            self.outside_root(path, from);
+                            None
+                        }
+                    }
+                } else {
+                    // Preserve the normal missing/unreadable-file diagnostic.
+                    Some((lexical.clone(), lexical))
+                }
+            }
+        }
+    }
+
+    fn authorized_identity_path(&self, path: &Path) -> Option<PathBuf> {
+        std::fs::canonicalize(absolute_normalize(path)).ok()
+    }
+
+    fn outside_root(&mut self, path: &Path, from: Option<(FileId, zirk_diagnostics::Span)>) {
+        let mut diagnostic = Diagnostic::error(
+            codes::IMPORT_OUTSIDE_ROOT,
+            format!(
+                "source path `{}` escapes its authorized root",
+                path.display()
+            ),
+        )
+        .with_help("keep the source within the project or declared package root");
+        if let Some((file, span)) = from {
+            let span = zirk_diagnostics::Span::in_file(file, span.start, span.end);
+            diagnostic = diagnostic
+                .at(self.sources.location(span))
+                .with_snippet(self.sources.snippet(span));
+        }
+        self.sink.emit(diagnostic);
+    }
+
     fn package_error(&mut self, file: FileId, span: zirk_diagnostics::Span, message: String) {
         let span = zirk_diagnostics::Span::in_file(file, span.start, span.end);
         self.sink.emit(
@@ -350,21 +457,18 @@ impl Loader<'_> {
     }
 }
 
-fn directory_for(path: &Path) -> PathBuf {
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf()
-}
-
-/// Removes `.` and `..` without touching the filesystem.
-///
-/// `canonicalize` is not used because it fails when the file does not exist,
-/// and a missing import deserves its own diagnostic rather than a read error
-/// with no location.
-fn normalize(path: &Path) -> PathBuf {
+/// Makes a path absolute and removes `.` and `..` without touching the filesystem.
+fn absolute_normalize(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
     let mut result = PathBuf::new();
 
-    for component in path.components() {
+    for component in absolute.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
@@ -430,6 +534,79 @@ mod tests {
         let krate = load_with_overlay(&entry, &overlay, &mut sink).unwrap();
 
         assert_eq!(krate.units.len(), 2);
+        assert!(!sink.has_errors());
+    }
+
+    #[test]
+    fn rejects_parent_traversal_outside_standalone_root() {
+        let dir = scratch("outside-parent");
+        let source_dir = dir.join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        write(&dir, "outside.zrk", "fn secret() { }\n");
+        let entry = write(
+            &source_dir,
+            "main.zrk",
+            "import { secret } from \"../outside\";\n",
+        );
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&entry, &mut sink).unwrap();
+
+        assert_eq!(krate.units.len(), 1, "outside source must not be loaded");
+        assert!(sink.has_errors());
+        assert!(
+            sink.diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_str() == "E0512")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_outside_standalone_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch("outside-symlink");
+        let source_dir = dir.join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        write(&dir, "outside.zrk", "fn secret() { }\n");
+        symlink(dir.join("outside.zrk"), source_dir.join("escape.zrk")).unwrap();
+        let entry = write(
+            &source_dir,
+            "main.zrk",
+            "import { secret } from \"./escape\";\n",
+        );
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&entry, &mut sink).unwrap();
+
+        assert_eq!(krate.units.len(), 1, "symlink target must not be loaded");
+        assert!(sink.has_errors());
+        assert!(
+            sink.diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_str() == "E0512")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_root_symlink_aliases_share_one_source_identity() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch("in-root-symlink");
+        write(&dir, "lib.zrk", "fn helper() { }\n");
+        symlink(dir.join("lib.zrk"), dir.join("alias.zrk")).unwrap();
+        let entry = write(
+            &dir,
+            "main.zrk",
+            "import { helper } from \"./lib\";\nimport { helper } from \"./alias\";\n",
+        );
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&entry, &mut sink).unwrap();
+
+        assert_eq!(krate.units.len(), 2, "the aliased source loads only once");
         assert!(!sink.has_errors());
     }
 

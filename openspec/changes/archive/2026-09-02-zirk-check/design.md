@@ -1,6 +1,6 @@
 ## Context
 
-The Zirk compiler is a Rust workspace with one crate per pipeline stage. Today the only public entry points are in `zirk-cli`, which depends on the full chain: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema`, `zirk-ir`, `zirk-codegen-llvm`, `zirk-diagnostics`, and the runtime archive. `COMPILER_IMPROVEMENT_SUGGESTIONS.md` already identified this as the main pipeline gap: a developer cannot run `cargo build -p zirk-cli` and get a useful command on a machine without LLVM, even though the compiler frontend is complete.
+The Zirk compiler is a Rust workspace with one crate per pipeline stage. Today the only public entry points are in `zirk-cli`, which depends on the full chain: `zirk-lexer`, `zirk-parser`, `zirk-ast`, `zirk-sema`, `zirk-ir`, `zirk-codegen-llvm`, `zirk-diagnostics`, and the runtime archive. `docs/COMPILER_IMPROVEMENT_ROADMAP.md` already identified this as the main pipeline gap: a developer cannot run `cargo build -p zirk-cli` and get a useful command on a machine without LLVM, even though the compiler frontend is complete.
 
 `zirk check` is not a new language feature; it is a new boundary in the existing compiler. The front end already supports every phase implemented up to the current roadmap, and `zirk-diagnostics` already owns the diagnostic contract. The work is therefore to expose the frontend as a self-contained command with a build graph that stops at `zirk-sema`.
 
@@ -62,7 +62,7 @@ If `zirk check` emits a frontend error, the command exits without invoking `zirk
 - **[Risk] Conditional compilation in `zirk-cli` becomes complex and hard to read.** → Mitigation: the backend-only code is isolated in a `backend` module and `#[cfg(feature = "backend")]` is applied at module boundaries, not scattered inside functions.
 - **[Risk] `zirk check` and `zirk build` drift if the frontend path is not actually shared.** → Mitigation: the shared driver is a single `run_frontend` function called by both binaries, and the `zirk-check` test suite asserts that the same input produces the same diagnostics in both commands.
 - **[Risk] A consumer expects `zirk check` to type-check code that uses backend-only intrinsics.** → Mitigation: the spec states that `zirk check` covers the same language subset as `zirk build`. If the program references a backend-only feature, the same roadmap diagnostic is emitted as today.
-- **[Trade-off] Feature-gating is more invasive than a runtime branch.** → Accepted: the `COMPILER_IMPROVEMENT_SUGGESTIONS.md` explicitly warns against a runtime branch, because it would not make the frontend buildable without the backend.
+- **[Trade-off] Feature-gating is more invasive than a runtime branch.** → Accepted: the `docs/COMPILER_IMPROVEMENT_ROADMAP.md` explicitly warns against a runtime branch, because it would not make the frontend buildable without the backend.
 
 ## Migration Plan
 

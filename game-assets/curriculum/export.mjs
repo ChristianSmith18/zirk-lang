@@ -5,12 +5,15 @@
 // It also enforces the document's structure: every level needs a title, a
 // concept, a story, a goal, exactly three hints and its code blocks. Reference
 // solutions are NOT exported; the client must never ship them.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..', '..');
+const localCurriculum = join(repo, 'docs', 'CURRICULUM.md');
+const siteCurriculum = resolve(repo, '..', 'zirk-lang-game-site', 'docs', 'CURRICULUM.md');
+const defaultCurriculum = existsSync(localCurriculum) ? localCurriculum : siteCurriculum;
 
 export function exportCurriculum(markdown, { knownAssets } = {}) {
   // Blocks are pulled out first so their content cannot be mistaken for prose.
@@ -106,7 +109,7 @@ export function exportCurriculum(markdown, { knownAssets } = {}) {
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${resolve(process.argv[1]).split('/').map(encodeURIComponent).join('/')}`).href) {
-  const docPath = resolve(process.argv[2] ?? join(repo, 'ZIRK_LEARNING_GAME_CURRICULUM.md'));
+  const docPath = resolve(process.argv[2] ?? process.env.ZIRK_CURRICULUM_SOURCE ?? defaultCurriculum);
   const outPath = resolve(process.argv[3] ?? join(here, 'levels.json'));
   // The asset names in the document must be real catalog entries.
   const { CATALOG } = await import('../src/catalog.js');

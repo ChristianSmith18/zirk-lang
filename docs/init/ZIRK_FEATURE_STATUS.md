@@ -228,7 +228,7 @@ native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zkinit` / multi-file projects | yes | yes | yes | partial | no | yes | `add-packages-and-module-exports`: project discovery, package/application identity, quoted local imports, logical package imports, `share mod` roots, local/vendored graph traversal and lock metadata validation reach `check`/`build`/`run`. Registry/Git acquisition, verified archive hashes and publication remain pending. |
+| `.zkinit` / multi-file projects | yes | yes | yes | partial | no | yes | `add-packages-and-module-exports`: project discovery, package/application identity, root-confined quoted local imports, logical package imports, `share mod` roots, local/vendored graph traversal and lock metadata validation reach `check`/`build`/`run`. Registry/Git acquisition, verified archive hashes and publication remain pending. |
 | `requires`/`during: build` manifest | no | no | no | no | no | no | Spec defined; not started. |
 
 ## Phase 7 — Standard library

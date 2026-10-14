@@ -1054,7 +1054,9 @@ fn colour_can_be_disabled_explicitly() {
 fn colour_does_not_change_what_the_diagnostic_says() {
     let source = corpus("invalid").join("type_mismatch.zrk");
     let plain = zirk("run", &source, "colour_cmp_plain", &["--color=never"]);
-    let colored = zirk("run", &source, "colour_cmp_ansi", &["--color=always"]);
+    // Use the same workspace path for both runs: source locations are part of
+    // the diagnostic text, and the colour flag must be the only difference.
+    let colored = zirk("run", &source, "colour_cmp_plain", &["--color=always"]);
 
     assert_eq!(
         strip_ansi(&colored.stderr),

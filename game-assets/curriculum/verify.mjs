@@ -26,7 +26,10 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, '..', '..');
-const docPath = resolve(process.argv[2] ?? join(repo, 'ZIRK_LEARNING_GAME_CURRICULUM.md'));
+const localCurriculum = join(repo, 'docs', 'CURRICULUM.md');
+const siteCurriculum = resolve(repo, '..', 'zirk-lang-game-site', 'docs', 'CURRICULUM.md');
+const defaultCurriculum = existsSync(localCurriculum) ? localCurriculum : siteCurriculum;
+const docPath = resolve(process.argv[2] ?? process.env.ZIRK_CURRICULUM_SOURCE ?? defaultCurriculum);
 const runner = process.env.ZIRK_REPRO ?? join(repo, 'target/debug/examples/interp_repro');
 if (!existsSync(runner)) {
   console.error(`missing ${runner}; build it with: cargo build -p zirk-browser --example interp_repro`);

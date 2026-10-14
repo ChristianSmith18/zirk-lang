@@ -110,7 +110,7 @@ motion (coins, portals) and leave only state changes.
 
 ## Curriculum
 
-`../ZIRK_LEARNING_GAME_CURRICULUM.md` is the level script for the basics of Zirk
+`../../zirk-lang-game-site/docs/CURRICULUM.md` is the canonical level script for the basics of Zirk
 (output, variables and types, values versus references, control flow,
 functions, collections, `record`/`enum`/`Result`; no OOP): 7 sectors and 53
 levels. The document is **executable**:
