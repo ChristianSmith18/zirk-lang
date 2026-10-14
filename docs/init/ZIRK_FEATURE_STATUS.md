@@ -19,7 +19,7 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `concurrency-completion`, **2026-10-13**.
+Last reviewed for `concurrency-completion`, **2026-10-14**.
 
 ## Browser-hosted interpreter tooling
 
@@ -222,7 +222,7 @@ native backend is delivered.
 | `Mutex<T>` / `mutex.with` | n/a | yes | yes | yes | yes | yes | Native managed mutex with inline, descriptor-traced payload. Only `with` exposes a writable borrowed view; sema rejects escape and transitive suspension/block/spawn, IR verifies region/lock/root invariants, and LLVM calls the FIFO cooperative runtime ABI. Unwind and source-exception cleanup are verified; other public synchronizers remain unavailable. |
 | `Channel<T>` | yes | yes | yes | yes | yes | yes | `typed-channels`: bounded/rendezvous/growable channels, cooperative send/receive, try outcomes, closure, GC tracing, and indirect native ABI. `select`/drain follow-ups remain. |
 | `Atomic<T>` language feature | yes | yes | yes | yes | yes | yes | Native source API and managed lowering support `Boolean` and signed/unsigned 8/16/32/64-bit integers when the target provides that atomic width; the scalar payload is inline in the GC-managed object. Operations default to `SeqCst`; weaker orders require `unsafe`, and a dynamically invalid order raises `InvalidArgumentError`. Pointer atomics are unsupported. Native-host E2E coverage passes. Runtime build checks pass on nine configured LLVM triples plus `wasm32-unknown-unknown`, but are compile-only and do not establish non-host execution support. `Thread<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` remain unavailable. |
-| Detached background work and supervisor | n/a | yes | yes | yes | partial | yes | `concurrency-completion`: native `Concurrent.detach` validates zero-argument `Void` callbacks and capture ownership, lowers to the bounded executor-owned supervisor, retains capture roots, reports per-job diagnostics, and maps 256-job saturation to `BackgroundCapacityError`; native E2E covers execution, root drain, exact saturation, rejection, and permit reuse. The supervisor uses a fixed five-second cooperative shutdown grace. Language-level `App.on_background_error` delivery and `application.spawn_service`, configurable grace, host signals, and service lifecycle integration remain unavailable. |
+| Detached background work and supervisor | n/a | yes | yes | yes | yes | yes | `concurrency-completion`: native `Concurrent.detach` validates zero-argument `Void` callbacks and capture ownership, lowers to the bounded executor-owned supervisor, retains capture roots, reports failures through `App.on_background_error`, and maps the 256-job ceiling to `BackgroundCapacityError`. `application.spawn_service` provides readiness, dependency ordering, failure propagation, and bounded shutdown; `App.set_shutdown_grace(Duration)` configures cooperative drain and generated CLI exits 124 at deadline. Host shutdown signals are integrated. Cancellation remains cooperative and does not forcibly terminate arbitrary native work. |
 
 ## Phase 6 — Project system and CLI
 
