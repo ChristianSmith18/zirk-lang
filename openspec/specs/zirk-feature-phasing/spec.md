@@ -90,7 +90,7 @@ once Phase 5 steps 1 to 3 are delivered; they resolve as ordinary known types.
 
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured concurrency semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
 
-Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` delivers `Channel<T>` with bounded, rendezvous, and limited-growable construction, suspension-safe send/receive, typed `try_*`, idempotent close, and drain. Only `concurrency-completion` remains deferred.
+The existing Phase 5 sub-changes remain delivered: `concurrent-blocks-and-timers`, `parallel-cpu-regions`, and `typed-channels`. `concurrency-completion` delivers bounded combinators, `Outcome<T>`, supervised background work, managed collector-aware threads where supported, cooperative synchronizers, portable atomics, bounded non-suspending cleanup protection, and sound effect plus Transfer/Share enforcement. Phase 5 SHALL be marked complete only after all capability gates and supported-target evidence pass; unsupported targets retain a precise phase/capability diagnostic. `task`, `await`, `select`, and `cancellation shield` remain removed constructs.
 
 #### Scenario: Phase planning reaches concurrency
 - **WHEN** implementation work starts branch scheduling
@@ -101,8 +101,8 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 - **THEN** no phase diagnostic is emitted and the construct is compiled and run
 
 #### Scenario: Completion sub-change stays deferred
-- **WHEN** a program uses `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
-- **THEN** the diagnostic names the construct and the Phase 5 sub-change that delivers it
+- **WHEN** a completion API is not yet enabled because its safety gate is incomplete
+- **THEN** the diagnostic names the construct and the unmet Phase 5 capability gate
 
 #### Scenario: Channel surface is delivered
 - **WHEN** a program constructs `Channel<T>` and uses `send`, `receive`, `try_send`, `try_receive`, `close`, or `drain`
@@ -116,6 +116,14 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 - **WHEN** a program uses `task`, `await`, `select`, or `cancellation shield`
 - **THEN** the diagnostic states the construct was removed and names its replacement
 
+#### Scenario: Phase 5 is complete
+- **WHEN** all Phase 5 implementation gates pass for a supported target and a program uses a delivered concurrency construct
+- **THEN** no phase diagnostic is emitted and the construct is compiled and run
+- **AND** unsupported target capabilities retain a precise diagnostic
+
+#### Scenario: Removed constructs stay removed
+- **WHEN** a program uses `task`, `await`, `select`, or `cancellation shield`
+- **THEN** the diagnostic states the construct was removed and names its replacement
 ### Requirement: Browser interpretation is distinct from a WebAssembly language target
 
 Project phase and implementation-status documentation SHALL describe browser execution as compiler tooling in which the Rust frontend and IR interpreter are compiled to WebAssembly. It SHALL NOT claim that Zirk programs compile to WebAssembly or that `wasm32` is a supported Zirk target.

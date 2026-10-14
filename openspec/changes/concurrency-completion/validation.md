@@ -654,3 +654,9 @@ After the explicit-ordering change, `cargo check -p zirk-runtime --tests --targe
 - `mutex_with_releases_the_lock_when_callback_unwinds` mutates the payload, injects unwind, checks status 4, then reacquires and observes the mutation. `cargo test -p zirk-runtime --lib gc_mutex::tests -- --test-threads=1` passed 9/9.
 - Added the C consumer callback type assertion, exported-symbol/prototype checks, and LLVM declaration. `cargo build -p zirk-runtime` refreshed the static archive; `cargo test -p zirk-runtime --test staticlib -- --test-threads=1` passed 9/9. The ABI checker matched 32 Rust/C symbols for `aarch64-apple-darwin`; its Python suite passed 6/6. The focused LLVM ABI declaration test passed 1/1.
 - This makes runtime cleanup exception-safe for the synchronous native callback boundary. Generated code still does not invoke the callback ABI, source-language borrowed parameters are still represented as copied values in lifted lambda bodies, and source exception/cancellation edges remain unintegrated. Tasks 6.7/8.1/8.3 remain open.
+
+## Windows Actions completion (2026-10-14)
+
+- GitHub Actions run [38596309918](https://github.com/ChristianSmith18/zirk-lang/actions/runs/38596309918) completed successfully for `windows-x86_64`, `linux-x86_64`, `linux-aarch64`, and `macos-aarch64`.
+- Windows focused GC/thread lifecycle checks, including the mixed-task/registered-worker FIFO waiter regression, passed; the full Windows workspace test job passed. `optimization_bench` reported 371 passed, 0 failed, and 3 ignored.
+- This closes task 5.6 with actual Windows runner execution for the documented Windows checks. It does not claim execution on Windows ARM64; the local ARM64 VM was inaccessible and is not part of this evidence.
