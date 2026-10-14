@@ -6,7 +6,7 @@ fn fail_in_background(): Void throws InvalidArgumentError {
 
 fn main(): Void {
     inmut prefix: String = "retained";
-    App.on_background_error = (error: Throwable): Void => {
+    App.on_background_error =(error: Throwable): Void => {
         stdout.println(prefix + ":" + error.message());
     };
     Concurrent.detach(fail_in_background);

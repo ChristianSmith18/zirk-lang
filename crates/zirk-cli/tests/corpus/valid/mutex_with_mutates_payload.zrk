@@ -1,10 +1,12 @@
 import { stdout } from std.io;
 
 fn main(): Void {
-  mut mutex: Mutex<Int32> = Mutex(0);
-  inmut result: Int32 = mutex.with((value: Int32): Int32 => {
-    value = 2;
-    return value;
-  });
-  stdout.println(result);
+    mut mutex: Mutex<Int32> = Mutex(0);
+    inmut result: Int32 = mutex.with (
+        (value: Int32): Int32 => {
+        value = 2;
+        return value;
+    },
+    );
+    stdout.println(result);
 }

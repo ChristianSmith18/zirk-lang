@@ -79,7 +79,7 @@ fn linger(name: String, counter: Counter): Void throws Boom {
                 }
             } finally {
                 stdout.println("outer cleanup");
-                    fail_cleanup();
+                fail_cleanup();
             }
         }
         Error(_) => { }

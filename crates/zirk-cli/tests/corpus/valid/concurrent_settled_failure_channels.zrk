@@ -17,24 +17,26 @@ fn return_ok_value(): Result<Int32, String> {
 fn main(): Void {
     mut outcomes = Concurrent.of(
         (): Int32 => {
-            try {
-                throw CancelledError("branch cancelled");
-            } finally {
-                stdout.println("cancel cleanup complete");
-            }
-            return 0;
-        },
+        try {
+            throw CancelledError("branch cancelled");
+        } finally {
+            stdout.println("cancel cleanup complete");
+        }
+        return 0;
+    },
         (): Int32 => { throw InvalidArgumentError("branch failure"); },
         (): Int32 => 7,
         (): Int32 => {
-            try {
-                throw CancelledError("branch cancelled before cleanup");
-            } finally {
-                fail_cleanup();
-            }
-            return 0;
-        },
-    ).settled();
+        try {
+            throw CancelledError("branch cancelled before cleanup");
+        } finally {
+            fail_cleanup();
+        }
+        return 0;
+    },
+    ).settled(
+
+    );
 
     for outcome in outcomes {
         match outcome {
@@ -47,7 +49,9 @@ fn main(): Void {
     mut returned_errors = Concurrent.of(
         (): Result<Int32, String> => return_error_value(),
         (): Result<Int32, String> => return_ok_value(),
-    ).settled();
+    ).settled(
+
+    );
     for outcome in returned_errors {
         match outcome {
             Outcome.Fulfilled(value) => {

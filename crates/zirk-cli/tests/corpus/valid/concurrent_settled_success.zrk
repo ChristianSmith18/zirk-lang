@@ -3,12 +3,14 @@ import { stdout } from std.io;
 fn main(): Void {
     mut outcomes = Concurrent.of(
         (): Int32 => {
-            Timer.sleep(20ms);
-            return 11;
-        },
+        Timer.sleep(20ms);
+        return 11;
+    },
         (): Int32 => 22,
         (): Int32 => 33,
-    ).settled();
+    ).settled(
+
+    );
 
     for outcome in outcomes {
         match outcome {

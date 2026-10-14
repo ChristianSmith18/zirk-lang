@@ -51,8 +51,7 @@ or callable name available to application packages.
 class Label {
     text: String;
 
-    #override
-    to_string(): String { return this.text; }
+    #override to_string(): String { return this.text; }
 }
 ```
 

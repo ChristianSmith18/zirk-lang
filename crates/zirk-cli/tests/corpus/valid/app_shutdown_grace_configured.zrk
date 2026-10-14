@@ -8,9 +8,11 @@ fn main(): Void {
         stdout.println("negative rejected");
     }
     App.set_shutdown_grace(0ns);
-    Concurrent.detach((): Void => {
+    Concurrent.detach(
+        (): Void => {
         Timer.sleep(100ms);
         stdout.println("background completed");
-    });
+    },
+    );
     stdout.println("root completed");
 }

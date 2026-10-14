@@ -2,13 +2,17 @@ import { stdout } from std.io;
 
 fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3];
-    mut outcomes = Concurrent.each_settled(values, (value: Int32): Int32 => {
+    mut outcomes = Concurrent.each_settled(
+        values,
+        (value: Int32): Int32 => {
         if value == 2 {
             throw InvalidArgumentError("expected rejection");
         }
         Timer.sleep(if value == 1 { 15ms } else { 1ms });
         return value * 10;
-    }, 2);
+    },
+        2,
+    );
     for outcome in outcomes {
         match outcome {
             Outcome.Fulfilled(value) => stdout.println(value.to_string());

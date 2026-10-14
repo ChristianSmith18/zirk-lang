@@ -16,17 +16,17 @@ fn main(): Void {
     try {
         mut winner: Int32 = Concurrent.of(
             (): Int32 => {
-                Timer.sleep(150ms);
-                return 1;
-            },
+            Timer.sleep(150ms);
+            return 1;
+        },
             (): Int32 => {
-                stdout.println("loser started");
-                try { Timer.sleep(500ms); } finally {
-                    stdout.println("cleanup ran");
-                    cleanup();
-                }
-                return 2;
-            },
+            stdout.println("loser started");
+            try { Timer.sleep(500ms); } finally {
+                stdout.println("cleanup ran");
+                cleanup();
+            }
+            return 2;
+        },
         ).first();
         stdout.println(winner);
     } catch CleanupFailure(_) {

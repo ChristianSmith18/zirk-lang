@@ -7,12 +7,13 @@
 import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const binary = args.find((arg) => !arg.startsWith("--")) ?? "target/debug/zirk";
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const docsDir = join(root, "docs");
 
 function* markdownFiles(dir) {

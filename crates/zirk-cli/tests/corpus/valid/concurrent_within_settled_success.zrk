@@ -3,7 +3,9 @@ fn main(): Void {
     mut outcomes = Concurrent.of(
         (): Int32 => { Timer.sleep(5ms); return 11; },
         (): Int32 => 22,
-    ).within(1s).settled();
+    ).within(1s).settled(
+
+    );
     for outcome in outcomes {
         match outcome {
             Outcome.Fulfilled(value) => stdout.println(value.to_string());

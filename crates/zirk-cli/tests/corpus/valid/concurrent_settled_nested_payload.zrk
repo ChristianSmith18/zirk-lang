@@ -8,7 +8,9 @@ fn main(): Void {
     mut outcomes = Concurrent.of(
         (): Payload => Payload(text: "nested settled one"),
         (): Payload => Payload(text: "nested settled two"),
-    ).settled();
+    ).settled(
+
+    );
 
     mut i: Int32 = 0;
     while i < 20_000 {

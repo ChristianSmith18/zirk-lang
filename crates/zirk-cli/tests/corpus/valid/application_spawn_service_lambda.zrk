@@ -1,12 +1,14 @@
 import { stdout } from std.io;
 
 fn main(): Void {
-    application.spawn_service((context: ServiceContext): Void => {
+    application.spawn_service(
+        (context: ServiceContext): Void => {
         context.ready();
         stdout.println("ready");
         while true {
             Timer.sleep(1ms);
         }
-    });
+    },
+    );
     Timer.sleep(3ms);
 }

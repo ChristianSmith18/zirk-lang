@@ -3,10 +3,12 @@ import { stdout } from std.io;
 fn main(): Void {
     mut winner: Int32 = Concurrent.of(
         (): Int32 => {
-            Timer.sleep(20ms);
-            return 1;
-        },
+        Timer.sleep(20ms);
+        return 1;
+    },
         (): Int32 => 2,
-    ).first();
+    ).first(
+
+    );
     stdout.println(winner);
 }

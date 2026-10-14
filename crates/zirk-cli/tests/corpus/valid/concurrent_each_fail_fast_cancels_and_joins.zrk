@@ -3,7 +3,7 @@ import { stdout } from std.io;
 fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3];
     try {
-        mut ignored = Concurrent.each(values, (value: Int32): Int32 => {
+        mut ignored = Concurrent.each(values,(value: Int32): Int32 => {
             stdout.println("started " + value.to_string());
             if value == 1 {
                 Timer.sleep(5ms);
