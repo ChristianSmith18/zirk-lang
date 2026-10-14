@@ -3,26 +3,25 @@
 
 import { stdout } from std.io;
 
-// The full integer family (roadmap Phase 3b, task 4.1-4.4): every width
-// declarable, checked arithmetic per width and signedness, implicit safe
-// widening (same signedness, no narrower destination), explicit `as` for
-// narrowing/sign-crossing (unchecked truncate/extend, like Rust's own `as`),
-// and bitwise/shift generalized — a shift's own amount may be an
-// independent width.
+// La familia completa de enteros permite declarar cada ancho y comprobar
+// operaciones según el ancho y el signo. La ampliación segura implícita exige
+// conservar el signo y no reducir el ancho; `as` permite conversiones
+// explícitas que reducen el ancho o cambian el signo. Los operadores de bits
+// y desplazamiento aceptan anchos distintos para el valor y el desplazamiento.
 fn main(): Void {
-    // Checked arithmetic on a narrow signed width.
+    // Aritmética comprobada con un entero con signo de ancho reducido.
     mut a: Int32 = 100;
     mut a8 = a as Int8;
     mut b8 =(20 as Int32) as Int8;
     stdout.println((a8 + b8) as Int32);
 
-    // Checked arithmetic on an unsigned width, and unsigned comparison.
+    // Aritmética comprobada y comparación con enteros sin signo.
     mut u8: UInt8 = 200 as UInt8;
     mut v8: UInt8 = 50 as UInt8;
     stdout.println(u8 < v8);
     stdout.println(v8 < u8);
 
-    // Implicit safe widening: Int32 -> Int64 -> Int128, same signedness.
+    // Ampliación segura implícita: Int32 -> Int64 -> Int128, sin cambiar el signo.
     mut x64: Int64 = a as Int64;
     mut y64: Int64 = 3;
     mut z64 = x64 * y64;
@@ -31,13 +30,13 @@ fn main(): Void {
     mut w128: Int128 = z64 as Int128;
     stdout.println(w128 as Int32);
 
-    // `-` requires a signed width; `~` and bitwise/shift work on any.
+    // `-` requiere un ancho con signo; `~` y las operaciones de bits admiten ambos.
     mut n: UInt32 = 10 as UInt32;
     stdout.println((n << 2) as Int32);
     stdout.println((n >> 1) as Int32);
     stdout.println((~ a));
 
-    // Division and remainder, checked.
+    // División y resto con comprobación.
     mut p: Int64 = 100 as Int64;
     mut q: Int64 = 7 as Int64;
     stdout.println((p / q) as Int32);

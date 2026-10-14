@@ -3,12 +3,9 @@
 
 import { stdout } from std.io;
 
-// `throw`/`try`/`catch`/`finally` (roadmap Phase 4b,
-// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a compiler-known
-// exception hierarchy, a user's own `implements Throwable`/`RuntimeError`
-// class, catch by concrete type and by the `Throwable` supertype, `finally`
-// running on both the normal and the exceptional path, `throws` propagated
-// across a call, and a bare rethrow inside a `catch`.
+// Se muestran excepciones integradas y definidas por el usuario, captura por
+// tipo concreto o por `Throwable`, ejecución de `finally` tanto en éxito como
+// en error, propagación mediante `throws` y relanzamiento desde un `catch`.
 class NetworkError implements Throwable {
     inmut reason: String;
 

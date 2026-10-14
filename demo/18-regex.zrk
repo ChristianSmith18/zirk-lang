@@ -3,7 +3,7 @@
 
 import { stdout } from std.io;
 
-// `Regex` literals and built-in methods.
+// Literales `Regex` y sus métodos integrados.
 fn main(): Void {
     inmut r = re'\\d+';
     stdout.println(r.matches("123"));

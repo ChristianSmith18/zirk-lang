@@ -3,10 +3,8 @@
 
 import { stdout } from std.io;
 
-// `Result<T,E>` (roadmap Phase 4a, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
-// section 2): construction (`Ok(...)`/`Error(...)`), destructuring
-// `match`, and the seven in-scope methods (`get_or_else` and the four
-// generic combinators are out of scope for this pass).
+// `Result<T,E>` representa un valor exitoso `Ok(...)` o un error `Error(...)`.
+// El ejemplo muestra su construcción y análisis exhaustivo con `match`.
 fn divide(a: Int32, b: Int32): Result<Int32, String> {
     if b == 0 {
         return Error("division by zero");
@@ -44,8 +42,7 @@ fn main(): Void {
     stdout.println(ok.unwrap());
     stdout.println(error.unwrap_error());
 
-    // Mandatory consumption: a `Result` produced by a statement and never
-    // matched or checked is a compile-time error; `_ = expr;` is the
-    // explicit discard that opts out.
+    // Un `Result` debe analizarse o comprobarse. Si se quiere descartar de
+    // forma deliberada, `_ = expresión;` expresa esa decisión.
     _ = divide(1, 0);
 }

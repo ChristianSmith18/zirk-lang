@@ -3,9 +3,9 @@
 
 import { stdout } from std.io;
 
-// Duration literals, arithmetic, comparison and printing.
+// Literales `Duration`, operaciones aritméticas, comparaciones e impresión.
 fn main(): Void {
-    // Literals in each unit print normalized to the largest unit reached.
+    // Las duraciones se imprimen normalizadas a la unidad mayor que corresponda.
     stdout.println(500ns);
     stdout.println(500us);
     stdout.println(250ms);
@@ -13,37 +13,37 @@ fn main(): Void {
     stdout.println(90m);
     stdout.println(1w);
 
-    // Fractional literals land on the exact nanosecond count.
+    // Los literales fraccionarios se convierten a un número exacto de nanosegundos.
     stdout.println(1.5s);
     stdout.println(1.500000001s);
 
-    // Duration +|- Duration, unary negation.
+    // Suma y resta de duraciones, y negación unaria.
     stdout.println(1s + 500ms);
     stdout.println(2s - 500ms);
     stdout.println(-250ms);
 
-    // Scalar multiply/divide, either order for `*`.
+    // Multiplicación y división por escalares; `*` admite ambos órdenes.
     stdout.println(2 * 250ms);
     stdout.println(250ms * 2);
     stdout.println(1s / 4);
     stdout.println(1s * 2.5);
     stdout.println(1s / 2.0);
 
-    // `Duration / Duration` is a `Float64` ratio, not a duration.
+    // `Duration / Duration` produce una razón `Float64`, no otra duración.
     stdout.println(1s / 250ms);
 
-    // Comparisons run on the nanosecond count.
+    // Las comparaciones se realizan sobre el total de nanosegundos.
     stdout.println(1s > 250ms);
     stdout.println(1s == 1000ms);
     stdout.println(500ms <= 500ms);
 
-    // `to_string()`, `String(...)` and interpolation all render the same.
+    // `to_string()`, `String(...)` e interpolación muestran el mismo formato.
     inmut d: Duration = 1500ms;
     stdout.println(d.to_string());
     stdout.println(String(d));
     stdout.println("elapsed {1s + 500ms}");
 
-    // `Duration` sign/magnitude members.
+    // Componentes de signo y magnitud de `Duration`.
     inmut neg = -1500ms;
     stdout.println(neg.abs().to_string());
     stdout.println(neg.sign().to_string());

@@ -3,10 +3,10 @@
 
 import { stdout } from std.io;
 
-// Fn(...) => R / Function(...) => R as a real, writable type (roadmap Phase
-// 4d): a named function assigned to a typed local, a closure that captures a
-// value and escapes its creating function, a recursive lambda with an
-// explicit binding type, and `is` between two callable values.
+// Los tipos `Fn(...) => R` y `Function(...) => R` permiten guardar funciones
+// en variables. Aquí se muestra una función con nombre, una closure que
+// captura un valor y sobrevive a su función creadora, una lambda recursiva
+// con tipo explícito y la comparación entre valores invocables con `is`.
 
 fn double(n: Int32): Int32 {
     return n * 2;

@@ -3,8 +3,8 @@
 
 import { stdout } from std.io;
 
-// A compiler-level smoke test for a bounded typed channel: construction,
-// indirect send/receive and idempotent close all have dedicated lowering.
+// Canal tipado y acotado: creación, envío y recepción indirectos, y cierre
+// idempotente. El tipo del canal determina el tipo de los valores enviados.
 fn main(): Void {
     mut channel: Channel<Int32> = Channel(1);
     channel.send(7);

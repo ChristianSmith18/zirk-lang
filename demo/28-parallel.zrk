@@ -3,13 +3,11 @@
 
 import { stdout } from std.io;
 
-// `parallel { for x in coll { ... } }` runs across the worker pool
-// (`parallel-cpu-regions` task 6.1) when the loop body has no `return` /
-// `break` / `continue` / `throw` and does not reassign a captured name.
-// The region boundary forbids capturing a `mut` reference type (design D5),
-// so this has no directly observable side effect from inside the region —
-// it demonstrates the region itself compiles, dispatches, and joins
-// correctly before ordinary code after it runs.
+// `parallel { for x in coll { ... } }` distribuye el recorrido entre los
+// workers disponibles. El cuerpo no puede usar `return`, `break`, `continue`
+// ni `throw`, ni reasignar nombres capturados. Tampoco puede capturar una
+// referencia `mut`. Al cerrar la región, los workers terminan antes de que
+// continúe el código secuencial posterior.
 
 fn touch(n: Int32): Int32 {
     return n * n;

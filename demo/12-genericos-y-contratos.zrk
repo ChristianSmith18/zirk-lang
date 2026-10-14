@@ -41,8 +41,8 @@ fn main(): Void {
     for i in Counter() {
         stdout.println(i);
     }
-    // `next()` through an `Iterator<Int32>`-typed binding: generic contract
-    // dispatch (roadmap Phase 7, task 12.3).
+    // `next()` se invoca mediante una variable tipada como `Iterator<Int32>`;
+    // el contrato genérico determina el método que se ejecuta.
     mut it: Iterator<Int32> = Counter().iterator();
     match it.next() {
         Iteration.Item(value) => stdout.println(value);

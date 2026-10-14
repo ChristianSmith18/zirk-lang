@@ -3,12 +3,10 @@
 
 import { stdout } from std.io;
 
-// `Resource<E>`/`match ... with` (roadmap Phase 4c,
-// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4): a user class
-// `implements Resource<OpenError>`, acquisition returns
-// `Result<FakeFile,OpenError>`, and `match ... with` owns whichever arm's
-// pattern binds the resource, closing it exactly once — on normal
-// completion, and on an early `return` out of the arm that acquired it.
+// Una clase puede implementar `Resource<E>` y devolver la adquisición como
+// `Result<Recurso,E>`. La rama de `match ... with` que recibe el recurso se
+// hace cargo de cerrarlo exactamente una vez, tanto al terminar normalmente
+// como al salir temprano con `return`.
 class OpenError implements Error {
     inmut reason: String;
 
@@ -64,8 +62,8 @@ fn open_file(name: String, fail: Boolean): Result<FakeFile, OpenError> {
     return Ok(FakeFile(name));
 }
 
-// `return` written directly inside the arm that owns the resource still
-// closes it before leaving the function (design D3, reused as-is).
+    // Un `return` dentro de la rama que posee el recurso lo cierra antes de
+    // abandonar la función.
 fn read_then_return_early(name: String): Int32 {
     match open_file(name, false) with file {
         Ok(file) => {
@@ -80,7 +78,7 @@ fn read_then_return_early(name: String): Int32 {
 }
 
 fn main(): Void {
-    // Normal completion: acquire, use, close.
+    // Flujo normal: adquirir, usar y cerrar.
     match open_file("users.json", false) with file {
         Ok(file) => {
             stdout.println(file.read_all());
@@ -90,7 +88,7 @@ fn main(): Void {
         }
     }
 
-    // The error branch never acquired anything, so nothing closes there.
+    // La rama de error no adquirió ningún recurso y no tiene nada que cerrar.
     match open_file("missing.json", true) with file {
         Ok(file) => {
             stdout.println(file.read_all());

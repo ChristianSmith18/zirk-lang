@@ -3,10 +3,9 @@
 
 import { stdout } from std.io;
 
-// Algebraic enums lower to a discriminant plus a flattened payload
-// (roadmap task 11.3), and destructuring reads straight out of it
-// (task 11.4): construction, matching with bindings, and a wildcard
-// discarding a field all work end to end.
+// Los enums con datos almacenan una etiqueta de variante y su contenido.
+// Se pueden construir, reconocer mediante patrones, extraer sus valores y
+// descartar campos con `_` dentro de un patrón comodín.
 enum Shape {
     Circle(radius: Int32),
     Rect(width: Int32, height: Int32),
@@ -30,7 +29,7 @@ fn describe(s: Shape): String {
 }
 
 fn main(): Void {
-    // Named arguments may reorder, the same as an ordinary call.
+    // Los argumentos nombrados pueden cambiar de orden, igual que en una llamada normal.
     mut circle = Shape.Circle(radius: 2);
     mut rect = Shape.Rect(height: 4, width: 3);
     mut point = Shape.Point;

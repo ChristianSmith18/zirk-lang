@@ -3,13 +3,10 @@
 
 import { stdout } from std.io;
 
-// A `match` arm other than `null` sees a scrutinee that cannot be absent —
-// the `null` arm already took that case — so its own binding is the
-// unwrapped type, not `T?`. Before this narrowing, walking a hand-rolled
-// linked list needed `?.`/`??` at every step (see
-// `recursive_match_with_safe_navigation.zrk`) even though the `null` arm
-// already ruled out absence; this is the natural form that removes the
-// detour.
+// Después de separar `null` en una rama de `match`, las demás ramas reciben
+// el valor como tipo `T`, no como opcional `T?`. Así se puede recorrer una
+// estructura enlazada sin repetir navegación segura y valores alternativos
+// en cada paso.
 class Node {
     mut value: Int32;
     mut next: Node?;

@@ -3,7 +3,7 @@
 
 import { stdout } from std.io;
 
-// Dynamic branches: every `spawn` inside the block is awaited before it closes.
+// Cada `spawn` iniciado en el bloque termina antes de que el bloque se cierre.
 
 fn announce(n: Int32): Void {
     stdout.println(n);
