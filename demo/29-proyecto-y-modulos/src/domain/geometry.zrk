@@ -1,0 +1,4 @@
+// `share` publica la función para que otro archivo pueda importarla.
+share fn area(radius: Int32): Int32 {
+    return radius * radius * 3;
+}

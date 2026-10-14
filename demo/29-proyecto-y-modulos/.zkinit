@@ -1,0 +1,6 @@
+project {
+    name: "demo-modules";
+    version: "0.1.0";
+    type: application;
+    entry: "src/main.zrk";
+}

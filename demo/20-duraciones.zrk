@@ -1,0 +1,57 @@
+// DEMO 20 — Literales con unidades y aritmética de Duration.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+// Duration literals, arithmetic, comparison and printing.
+fn main(): Void {
+    // Literals in each unit print normalized to the largest unit reached.
+    stdout.println(500ns);
+    stdout.println(500us);
+    stdout.println(250ms);
+    stdout.println(2s);
+    stdout.println(90m);
+    stdout.println(1w);
+
+    // Fractional literals land on the exact nanosecond count.
+    stdout.println(1.5s);
+    stdout.println(1.500000001s);
+
+    // Duration +|- Duration, unary negation.
+    stdout.println(1s + 500ms);
+    stdout.println(2s - 500ms);
+    stdout.println(-250ms);
+
+    // Scalar multiply/divide, either order for `*`.
+    stdout.println(2 * 250ms);
+    stdout.println(250ms * 2);
+    stdout.println(1s / 4);
+    stdout.println(1s * 2.5);
+    stdout.println(1s / 2.0);
+
+    // `Duration / Duration` is a `Float64` ratio, not a duration.
+    stdout.println(1s / 250ms);
+
+    // Comparisons run on the nanosecond count.
+    stdout.println(1s > 250ms);
+    stdout.println(1s == 1000ms);
+    stdout.println(500ms <= 500ms);
+
+    // `to_string()`, `String(...)` and interpolation all render the same.
+    inmut d: Duration = 1500ms;
+    stdout.println(d.to_string());
+    stdout.println(String(d));
+    stdout.println("elapsed {1s + 500ms}");
+
+    // `Duration` sign/magnitude members.
+    inmut neg = -1500ms;
+    stdout.println(neg.abs().to_string());
+    stdout.println(neg.sign().to_string());
+    stdout.println(neg.is_zero().to_string());
+    stdout.println(neg.is_positive().to_string());
+    stdout.println(neg.is_negative().to_string());
+    inmut zero: Duration = 0ns;
+    stdout.println(zero.is_zero().to_string());
+    stdout.println(zero.sign().to_string());
+    stdout.println(d.is_positive().to_string());
+}

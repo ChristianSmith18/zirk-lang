@@ -1,0 +1,106 @@
+// DEMO 15 — Resource<E> y match with con cierre automático en las salidas.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+// `Resource<E>`/`match ... with` (roadmap Phase 4c,
+// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4): a user class
+// `implements Resource<OpenError>`, acquisition returns
+// `Result<FakeFile,OpenError>`, and `match ... with` owns whichever arm's
+// pattern binds the resource, closing it exactly once — on normal
+// completion, and on an early `return` out of the arm that acquired it.
+class OpenError implements Error {
+    inmut reason: String;
+
+    construct(reason: String) {
+        this.reason = reason;
+    }
+
+    #override message(): String {
+        return this.reason;
+    }
+
+    #override code(): String {
+        return "OPEN";
+    }
+
+    #override cause(): Error? {
+        return null;
+    }
+}
+
+class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    mut closed: Boolean;
+
+    construct(name: String) {
+        this.name = name;
+        this.closed = false;
+    }
+
+    read_all(): String {
+        return "contents of " + this.name;
+    }
+
+    nothing(): Void {
+        return;
+    }
+
+    #override close(): Result<Void, OpenError> {
+        this.closed = true;
+        stdout.println("closed " + this.name);
+        return Ok(this.nothing());
+    }
+
+    #override is_closed(): Boolean {
+        return this.closed;
+    }
+}
+
+fn open_file(name: String, fail: Boolean): Result<FakeFile, OpenError> {
+    if fail {
+        return Error(OpenError("cannot open " + name));
+    }
+    return Ok(FakeFile(name));
+}
+
+// `return` written directly inside the arm that owns the resource still
+// closes it before leaving the function (design D3, reused as-is).
+fn read_then_return_early(name: String): Int32 {
+    match open_file(name, false) with file {
+        Ok(file) => {
+            stdout.println(file.read_all());
+            return 7;
+        }
+        Error(error) => {
+            stdout.println(error.message());
+        }
+    }
+    return -1;
+}
+
+fn main(): Void {
+    // Normal completion: acquire, use, close.
+    match open_file("users.json", false) with file {
+        Ok(file) => {
+            stdout.println(file.read_all());
+        }
+        Error(error) => {
+            stdout.println("failed: " + error.message());
+        }
+    }
+
+    // The error branch never acquired anything, so nothing closes there.
+    match open_file("missing.json", true) with file {
+        Ok(file) => {
+            stdout.println(file.read_all());
+        }
+        Error(error) => {
+            stdout.println("failed: " + error.message());
+        }
+    }
+
+    stdout.println(read_then_return_early("early.txt"));
+
+    stdout.println("done");
+}

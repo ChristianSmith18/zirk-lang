@@ -1,0 +1,25 @@
+// DEMO 23 — Mapeo concurrente acotado, límite explícito y orden de resultados.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3, 4];
+    mut doubled = Concurrent.each(
+        values,
+        (value: Int32): Int32 => {
+        stdout.println("start " + value.to_string());
+        if value == 1 {
+            Timer.sleep(30ms);
+        } else {
+            Timer.sleep(1ms);
+        }
+        stdout.println("done " + value.to_string());
+        return value * 2;
+    },
+        2,
+    );
+    for value in doubled {
+        stdout.println(value.to_string());
+    }
+}

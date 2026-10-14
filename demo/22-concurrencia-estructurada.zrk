@@ -1,0 +1,19 @@
+// DEMO 22 — Bloques concurrent, spawn y espera estructurada al salir del ámbito.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+// Dynamic branches: every `spawn` inside the block is awaited before it closes.
+
+fn announce(n: Int32): Void {
+    stdout.println(n);
+}
+
+fn main(): Void {
+    concurrent {
+        for n in 1 ..= 3 {
+            spawn announce(n);
+        }
+    }
+    stdout.println(0);
+}

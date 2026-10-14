@@ -1,0 +1,13 @@
+// DEMO 17 — Acceso explícito a Pointer dentro de un bloque unsafe.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut x: Int32 = 41;
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from (x);
+        p.write(p.read() + 1);
+    }
+    stdout.println(x.to_string());
+}

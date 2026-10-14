@@ -1,0 +1,35 @@
+// DEMO 27 — Atomic<T>, operaciones RMW y órdenes de memoria.
+// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
+
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut value = Atomic(3);
+    stdout.println(value.load().to_string());
+    value.store(9);
+    stdout.println(value.exchange(12).to_string());
+    stdout.println(value.fetch_add(4).to_string());
+    stdout.println(value.fetch_sub(2).to_string());
+
+    match value.compare_exchange(14, 20) {
+        Result.Ok(observed) => stdout.println("exchanged " + observed.to_string());
+        Result.Error(observed) => stdout.println("changed " + observed.to_string());
+    }
+    match value.compare_exchange(14, 21) {
+        Result.Ok(observed) => stdout.println("unexpected exchange " + observed.to_string());
+        Result.Error(observed) => stdout.println("not exchanged " + observed.to_string());
+    }
+    stdout.println(value.load().to_string());
+    unsafe {
+        value.store(15, AtomicOrder.release);
+        stdout.println(value.load(AtomicOrder.acquire).to_string());
+    }
+
+    mut invalid = AtomicOrder.release;
+    try {
+        unsafe { value.load(invalid); }
+    } catch InvalidArgumentError(_) {
+        stdout.println("invalid ordering caught");
+    }
+    stdout.println(value.load().to_string());
+}

@@ -1,0 +1,7 @@
+// DEMO 29 — Proyecto ejecutable, punto de entrada e importación de un módulo local.
+import { stdout } from std.io;
+import { area } from "./domain/geometry";
+
+fn main(): Void {
+    stdout.println(area(5));
+}
