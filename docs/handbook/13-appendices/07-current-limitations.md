@@ -203,10 +203,12 @@ Current high-impact delivery limits include:
   28-digit budget the rational operations use. `Decimal.format(spec)` and an
   explicit `RoundingMode` for `div` / `round` are specified but not implemented;
   both round half-to-even by default.
-- Concurrency is partially delivered. `concurrent {}`, `spawn`/`Job<T>`,
+- The reviewed Phase 5 concurrency slice is delivered for its documented
+  scope. `concurrent {}`, `spawn`/`Job<T>`,
   `Timer`, `parallel`, typed channels, completion combinators, bounded
-  `Concurrent.detach`, and `Mutex<T>.with` have compiler/runtime support, but
-  the broader Phase 5 completion work is still in progress. Cancellation is
+  `Concurrent.detach`, and `Mutex<T>.with` have compiler/runtime support,
+  including bounded completion and collection combinators, managed
+  `Thread.run`, supervised services, and scalar `Atomic<T>`. Cancellation is
   cooperative at runtime safe points and interruptible waits; it does not
   preempt arbitrary loops or blocking native calls. The runtime's `Transfer`
   / `Share` and effect checks do not yet establish general end-to-end race
@@ -223,11 +225,12 @@ Current high-impact delivery limits include:
   also builds for nine configured LLVM triples plus `wasm32-unknown-unknown`,
   but those are compile-only checks, not non-host execution evidence.
   Cross-compilation does not establish complete concurrency support on every
-  target. Internal
-  background-service supervision and managed blocking-pool foundations also
-  do not constitute the corresponding public Zirk APIs. Shutdown drains and
-  reports unfinished work according to the owning runtime component; it does
-  not forcibly terminate arbitrary running native work.
+  target. Background and service APIs are public and tested. Shutdown drains
+  and reports unfinished work according to the owning runtime component; it
+  does not forcibly terminate arbitrary running native work. `Thread<T>`,
+  `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` remain unavailable as
+  source APIs. Windows execution evidence covers x86_64 CI only; other
+  non-host target builds remain compile-only unless separately recorded.
 - Other standard-library, packaging, developer-tooling, decorator, and public
   documentation surfaces are specified ahead of full compiler/runtime
   delivery.

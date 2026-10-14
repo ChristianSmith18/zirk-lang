@@ -131,10 +131,10 @@ asserting every callee-saved register and the stack pointer round-trip exactly.
 
 | Triple | Executor context switch | Evidence |
 |---|---|---|
-| Linux x86_64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
-| Linux aarch64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
-| macOS aarch64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
-| Windows x86_64 | ⏳ pending `fase-5-async-core` | ping-pong test in CI |
+| Linux x86_64 | ✅ verified | Phase 5 executor/task ping-pong test passed in CI run [38596309918](https://github.com/ChristianSmith18/zirk-lang/actions/runs/38596309918) |
+| Linux aarch64 | ✅ verified | Phase 5 executor/task ping-pong test passed in CI run [38596309918](https://github.com/ChristianSmith18/zirk-lang/actions/runs/38596309918) |
+| macOS aarch64 | ✅ verified | Phase 5 executor/task ping-pong test passed in CI run [38596309918](https://github.com/ChristianSmith18/zirk-lang/actions/runs/38596309918) |
+| Windows x86_64 | ✅ verified | Phase 5 executor/task ping-pong test passed in CI run [38596309918](https://github.com/ChristianSmith18/zirk-lang/actions/runs/38596309918) |
 
 No `task` / `await` codegen is merged until every row above is green, the same
 discipline portability B followed from Phase 1.

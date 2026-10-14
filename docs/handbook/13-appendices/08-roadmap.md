@@ -17,15 +17,17 @@ changes: trait defaults under generic substitution, nested contract
 arguments (`Container<Box<T>>`), type-parameter defaults and bodies for
 user-defined generic functions, and `static` on `record`/`enum`.
 
-Phase 5 structured concurrency is in progress: the existing structured
-executor, `parallel`, and typed-channel slices are delivered, while bounded
-combinators, public background/service APIs, managed `Thread.run`, language
-synchronizers, language-level atomics, and complete race/effect guarantees
-remain gated on compiler, runtime, GC, and target evidence. Runtime foundations
-such as `AtomicCell`, background supervision, and a managed blocking pool do
-not by themselves make those Zirk APIs available. Cancellation remains
-cooperative, and runtime shutdown does not promise to forcibly stop arbitrary
-native work. After Phase 5, the remaining sequence moves through
+Phase 5 scoped delivery is complete: alongside the structured executor,
+`parallel`, and typed channels, the compiler supports bounded completion and
+collection combinators, public background and service supervision, managed
+`Thread.run`, scalar `Atomic<T>`, and `Mutex<T>.with`. The Linux
+x86_64/aarch64, macOS aarch64, and Windows x86_64 CI matrix passed, including
+actual Windows execution of GC/thread checks and the workspace suite.
+`Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, and `Once<T>` remain explicitly
+gated source APIs. These scoped results do not establish general data-race
+freedom or complete `Transfer`/`Share` enforcement. Cancellation remains
+cooperative, and runtime shutdown does not forcibly stop arbitrary native
+work. After Phase 5, the remaining sequence moves through
 projects/permissions, the rest of the standard library, functional style,
 packaging, developer tooling, decorators, hardening, and eventual
 self-hosting. Every feature requires one owning phase, end-to-end tests,

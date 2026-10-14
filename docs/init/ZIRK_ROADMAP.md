@@ -411,26 +411,31 @@ function coloring.
    the worker path; `reduce_ordered` deliberately keeps sequential grouping.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
    (`typed-channels`, delivered; `drain` and `select` remain follow-ups).
-4. Completion APIs and safety boundaries (`concurrency-completion`; in
-   progress as of 13 October 2026). Runtime foundations include a bounded
-   managed-blocking pool and a provisional detached-background supervisor.
-   Scalar source `Atomic<T>` is implemented for target-supported Boolean and
-   signed/unsigned integer widths through 64 bits, with GC-inline storage;
-   native-host E2E coverage passes, while configured non-host triples have
-   compile-only runtime checks. Managed `Thread.run`, Mutex/RwLock/Semaphore/
-   Barrier/Once, complete `Transfer`/`Share` enforcement, and a language-level
-   background-service lifecycle remain incomplete.
+4. Completion APIs and safety boundaries (`concurrency-completion`; scoped
+   delivery completed 14 October 2026). The source surface now includes
+   bounded completion and collection combinators, managed `Thread.run`,
+   supervised background work and services, scalar source `Atomic<T>`, and
+   `Mutex<T>.with`. The Linux x86_64/aarch64, macOS aarch64, and Windows
+   x86_64 CI matrix passed; the Windows job executed the focused GC/thread
+   lifecycle checks and full workspace tests. `Thread<T>`, `RwLock<T>`,
+   `Semaphore`, `Barrier`, and `Once<T>` remain explicitly gated with
+   diagnostics. Cancellation is cooperative, native work is not forcibly
+   terminated, and current `Transfer`/`Share` and effect rules do not establish
+   general end-to-end race freedom. Other target claims remain limited to
+   their recorded compile/build evidence.
 
 `task`, `await`, `Task<T>`, task scopes, `select`, and cancellation shields are
 removed constructs. Their parser diagnostic names the applicable replacement.
 
-**Output:** the delivered structured-concurrency subset works end to end:
-`concurrent`/`spawn`/`Job<T>`/`Timer`, CPU `parallel` regions, and typed
-channels. This does not establish general data-race freedom or complete
-`Transfer`/`Share` enforcement. `select`/channel draining, managed threads,
-synchronization APIs, and source-level completion/background combinators
-remain unavailable or partial; see the feature-status catalog and the active
-`concurrency-completion` change for current evidence.
+**Output:** the Phase 5 scoped delivery works end to end: structured
+`concurrent`/`spawn`/`Job<T>`/`Timer`, CPU `parallel` regions, typed channels,
+completion and collection combinators, managed `Thread.run`, background and
+service supervision, scalar `Atomic<T>`, and `Mutex<T>.with`. This does not
+establish general data-race freedom or complete `Transfer`/`Share` enforcement.
+`Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, and `Once<T>` remain gated and
+unavailable as source APIs; `task`, `await`, and `select` remain removed.
+See the feature-status catalog and archived `concurrency-completion` evidence
+for target-specific validation and limitations.
 
 ---
 
