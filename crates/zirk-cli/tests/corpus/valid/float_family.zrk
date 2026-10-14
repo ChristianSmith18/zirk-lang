@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The binary floating family (roadmap Phase 3b, task 5): every width
 // declarable with a literal suffix, implicit safe widening (a narrower
 // width fits a wider one), explicit `as` for narrowing and for crossing

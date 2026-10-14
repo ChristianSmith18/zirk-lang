@@ -6,7 +6,12 @@ Only applications may declare globals, inside `globals` in `.zkinit`. Each sourc
 use APP_NAME;
 ```
 
-`use` does not import code. Mutable globals accessed from `parallel` or `thread` require `sync` or `Atomic<T>`. Libraries cannot define application globals.
+`use` does not import code. The compiler rejects mutable reference captures at
+the implemented `parallel` boundary, but this is not a general check for
+unsynchronized mutable-global access. Managed `thread` and the public mutex,
+rwlock, semaphore, barrier, and once APIs remain unavailable; scalar
+`Atomic<T>` is available for supported target widths. Libraries cannot define
+application globals.
 
 ---
 

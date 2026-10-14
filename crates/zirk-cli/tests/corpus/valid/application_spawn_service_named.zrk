@@ -1,0 +1,14 @@
+import { stdout } from std.io;
+
+fn serve(context: ServiceContext): Void {
+    context.ready();
+    stdout.println("ready");
+    while true {
+        Timer.sleep(1ms);
+    }
+}
+
+fn main(): Void {
+    application.spawn_service(serve);
+    Timer.sleep(3ms);
+}

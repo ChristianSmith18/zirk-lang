@@ -1,0 +1,27 @@
+import { stdout } from std.io;
+fn slow(label: String): Int32 {
+    try {
+        Timer.sleep(100ms);
+        return 1;
+    } finally {
+        stdout.println(label);
+    }
+    return 0;
+}
+fn main(): Void {
+    try {
+        mut value: Int32 = Concurrent.of(
+            (): Int32 => Concurrent.of(
+                (): Int32 => slow("inner-cleaned-a"),
+                (): Int32 => slow("inner-cleaned-b"),
+            ).within(5s).first(),
+            (): Int32 => {
+                Timer.sleep(1ms);
+                return 2;
+            },
+        ).first();
+        stdout.println(value);
+    } catch RuntimeError(e) {
+        stdout.println("caller error propagated");
+    }
+}

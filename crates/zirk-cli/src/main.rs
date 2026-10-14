@@ -35,6 +35,7 @@ fn main() {
 fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
+        Some("format") => format(&args[1..]),
 
         #[cfg(feature = "backend")]
         Some("build") => compile(&args[1..], Action::Build),
@@ -65,10 +66,10 @@ fn dispatch(args: &[String]) -> i32 {
         }
 
         // Subcommands of `COMPILER_SPEC` section 9 that arrive later.
-        Some(later @ ("test" | "bench" | "format" | "lint" | "new" | "init" | "doc")) => {
+        Some(later @ ("test" | "bench" | "lint" | "new" | "init" | "doc")) => {
             let phase = match later {
                 "test" | "new" | "init" => Phase::SIX,
-                "format" | "lint" => Phase::NINE,
+                "lint" => Phase::NINE,
                 _ => Phase::SEVEN,
             };
             fail(
@@ -90,8 +91,73 @@ fn dispatch(args: &[String]) -> i32 {
     }
 }
 
+fn format(args: &[String]) -> i32 {
+    let _json = args.iter().any(|arg| arg == "--json");
+    let check = args.iter().any(|arg| arg == "--check");
+    let diff = args.iter().any(|arg| arg == "--diff");
+    let files: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
+    if files.is_empty() {
+        return fail(
+            codes::INVALID_USAGE,
+            "`zirk format` needs at least one source file or directory",
+            "formatting works independently for every target",
+            Some("write `zirk format [--check] [--diff] program.zrk src/`"),
+        );
+    }
+    let mut paths = Vec::new();
+    for file in files {
+        let raw = std::path::Path::new(file);
+        let path = if raw.exists() {
+            raw.to_path_buf()
+        } else {
+            frontend::resolve_source_path(file)
+        };
+        collect_format_targets(&path, &mut paths);
+    }
+    let mut failed = false;
+    let mut drift = false;
+    for path in paths {
+        match zirk_cli::format::format_path_with_diff(&path, check, diff) {
+            Ok(zirk_cli::format::Outcome::Unchanged) => {}
+            Ok(zirk_cli::format::Outcome::Changed) if check => {
+                eprintln!("{} needs formatting", path.display());
+                drift = true;
+            }
+            Ok(zirk_cli::format::Outcome::Changed) => {}
+            Ok(zirk_cli::format::Outcome::Invalid(diagnostic)) | Err(diagnostic) => {
+                eprint!("{diagnostic}");
+                failed = true;
+            }
+        }
+    }
+    i32::from(failed || drift)
+}
+
+fn collect_format_targets(path: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
+    if path.is_file() {
+        output.push(path.to_path_buf());
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        output.push(path.to_path_buf());
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            collect_format_targets(&child, output);
+        } else if child
+            .extension()
+            .is_some_and(|extension| extension == "zrk")
+        {
+            output.push(child);
+        }
+    }
+}
+
 fn check(args: &[String]) -> i32 {
     let json = args.iter().any(|a| a == "--json");
+    let types = args.iter().any(|a| a == "--types");
     let color = frontend::resolve_color(color_choice(args).as_deref());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
@@ -113,12 +179,30 @@ fn check(args: &[String]) -> i32 {
         );
     }
 
-    let path = frontend::resolve_source_path(files[0].as_str());
+    let raw = std::path::Path::new(files[0]);
+    let path = if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
+        raw.to_path_buf()
+    } else {
+        frontend::resolve_source_path(files[0].as_str())
+    };
     let mut sink = zirk_diagnostics::DiagnosticSink::new();
-    let _ = frontend::run_frontend(&path, &mut sink);
+    let result = if types {
+        // `--types` keeps the checked program even on errors: the map
+        // reports what the checker managed to resolve.
+        frontend::run_frontend_lenient(&path, &mut sink)
+    } else {
+        frontend::run_frontend(&path, &mut sink)
+    };
 
     if !sink.is_empty() {
         eprint!("{}", frontend::render(&sink, json, color));
+    }
+
+    if types && let Some(result) = &result {
+        println!(
+            "{}",
+            frontend::render_type_map(&result.checked, &result.sources)
+        );
     }
 
     if sink.has_errors() { 1 } else { 0 }
@@ -148,7 +232,12 @@ fn compile(args: &[String], action: Action) -> i32 {
         );
     }
 
-    let path = frontend::resolve_source_path(files[0].as_str());
+    let raw = std::path::Path::new(files[0]);
+    let path = if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
+        raw.to_path_buf()
+    } else {
+        frontend::resolve_source_path(files[0].as_str())
+    };
     let output_dir = PathBuf::from(OUTPUT_DIR);
     let compilation = driver::compile(&path, &output_dir);
 
@@ -212,6 +301,7 @@ fn help() {
     println!();
     println!("Subcommands:");
     println!("  check <file>       validate the frontend only");
+    println!("  format [--check] [--diff] <target>...  canonicalize Zirk source files");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");

@@ -138,6 +138,14 @@ maintained initially.
 - Release: high optimization, dead-code elimination, LTO where appropriate,
   vectorization and size/memory optimization without altering guarantees.
 
+**Current implementation status:** object emission exposes explicit LLVM
+optimization levels (`None`, `Less`, `Default`, `Aggressive`) for experiments,
+while the CLI compilation path still selects `None`. The optimized levels are
+not release defaults: parity and representative performance gates must pass
+before changing that policy. This distinction is intentional; the target
+policy above describes the desired backend behavior, not a claim that the
+current CLI already applies it.
+
 Inline textual assembly is not implemented. Zirk offers portable intrinsics and
 SIMD vectors; the backend selects instructions per architecture and emits a safe
 fallback when no equivalent instruction exists.
@@ -169,7 +177,10 @@ Resolution:
 A CLI target temporarily replaces `build_targets`. The compiler checks early for
 incompatible native libraries and explains which dependency blocks the target.
 
-WebAssembly, browser, DOM and platform directives are outside Zirk 1.x.
+WebAssembly, browser, DOM and platform directives are outside Zirk 1.x. An
+implementation may ship a browser-hosted interpreter as external developer
+tooling for verified IR; that tooling does not define a Zirk target, browser
+capability, or source-language semantic extension.
 
 ## 7. Incremental and reproducible builds
 
@@ -250,6 +261,12 @@ uses the `.zrk` extension.
 The formatter is canonical, idempotent and free of configuration that would
 fragment style. It adds `;`, and normalizes spacing, braces, line breaks and
 ordering where semantically neutral.
+
+The first delivered command is `zirk format [--check] <file>` and intentionally
+only canonicalizes `'''` layout: opening and closing delimiters align one
+indent deeper than their `=`/`(`/named-argument introducer, while content is
+re-indented relative to that edge. `--check` is report-only; syntax-invalid
+files are diagnosed and left untouched.
 
 The linter shares parser, resolution and types with the compiler. Fast rules run
 by default; expensive analyses are explicit. Automatic fixes must be safe and

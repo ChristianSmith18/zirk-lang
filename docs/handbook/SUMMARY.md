@@ -265,7 +265,7 @@ This file defines the handbook hierarchy. Linked entries are published in the cu
   - [`std.time`](./04-standard-library/07-std-time.md)
   - [`std.thread`](./04-standard-library/09-std-thread.md)
   - [`std.sync`](./04-standard-library/10-std-sync.md)
-  - [`std.parallel`](./04-standard-library/10a-std-parallel.md)
+  - [Parallel CPU operations](./04-standard-library/10a-std-parallel.md)
   - [`std.net`](./04-standard-library/11-std-net.md)
   - [`std.http`](./04-standard-library/12-std-http.md)
   - [`std.json`](./04-standard-library/13-std-json.md)

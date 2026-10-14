@@ -1,0 +1,25 @@
+import { stdout } from std.io;
+
+fn noop(): Void { return; }
+
+fn main(): Void {
+    concurrent {
+        // The root occupies slot 1; these 4,095 children fill the remaining
+        // slots before the next spawn attempts to exceed the per-executor cap.
+        for i in 1 ..= 4095 {
+            spawn noop();
+        }
+        try {
+            spawn noop();
+            stdout.println("unexpectedly admitted");
+        } catch TaskCapacityError(error) {
+            stdout.println("capacity caught");
+        }
+    }
+    stdout.println("children joined");
+
+    concurrent {
+        spawn noop();
+    }
+    stdout.println("capacity reused");
+}

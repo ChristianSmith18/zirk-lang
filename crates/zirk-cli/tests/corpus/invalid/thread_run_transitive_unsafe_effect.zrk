@@ -1,0 +1,11 @@
+extern "C" fn host_wait(): Void;
+
+fn waits_on_host(): Void {
+    unsafe {
+        host_wait();
+    }
+}
+
+fn main(): Void {
+    Thread.run(waits_on_host);
+}

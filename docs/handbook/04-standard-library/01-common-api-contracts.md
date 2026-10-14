@@ -58,39 +58,24 @@ positional and explicit named arguments, but after the first named argument all
 remaining arguments must also be named. Repeated labels and missing variables
 are compile-time errors.
 
-## Waiting, tasks and timeouts
+## Waiting, concurrency and timeouts
 
-There is no `async fn` and no public event loop. An operation that can suspend
-returns `Task<T>` or another standard awaitable; `await` suspends the current
-task without reserving an operating-system thread.
+The delivered concurrency surface is `concurrent`, `spawn`, `Job<T>`,
+`Channel<T>`, and `Timer`. There is no `async fn`, source-level `Task<T>`, or
+general event loop; the former `await` syntax was removed. Channel receive and
+`Timer.sleep` suspend the current cooperative branch directly.
 
-When a blocking and a task-aware API coexist, the latter uses `_async`:
-
-```zirk
-inmut immediate = File.read_text(path);
-inmut pending = File.read_text_async(path);
-inmut content = await pending;
-```
-
-Inherently task-aware APIs such as channel receive and watcher notification do
-not need the suffix:
-
-```zirk
-inmut event = await watcher.next();
-```
-
-Timeouts are typed `Duration` arguments when they are intrinsic to the
-operation:
+An API may accept a typed `Duration` timeout when that timeout is intrinsic to
+the operation:
 
 ```zirk
 client.get(url, timeout: 5s);
 process.wait(timeout: 30s);
 ```
 
-The language-level `await operation timeout 5s` remains available when the
-caller must impose a boundary on an arbitrary task. Expiry requests
-cancellation and awaits cleanup before producing `TimeoutError`; it never
-abandons work in the background.
+There is no language-level timeout operator for arbitrary work. Timeout
+operators and task-aware file/network APIs remain planned contracts; consult
+[Feature Status](../11-reference/12-feature-status.md) for module availability.
 
 ## Resources
 
@@ -98,7 +83,7 @@ Handles with deterministic cleanup implement `Resource<E>`:
 
 ```zirk
 interface Resource<E from Error> {
-    close(): Result<Void,E>;
+    close(): Result<Void, E>;
     is_closed(): Boolean;
 }
 ```

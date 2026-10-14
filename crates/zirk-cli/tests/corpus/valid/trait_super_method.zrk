@@ -1,18 +1,21 @@
+import { stdout } from std.io;
+
 // Selección explícita del default de un trait con TraitName.super.
 trait Greeter {
-     greet(): String;
-     buildGreeting(): String { return "hello"; }
+    greet(): String;
+    buildGreeting(prefix: String, suffix: String): String { return prefix + "hello" + suffix; }
 }
 
 class Person implements Greeter {
     name: String;
     construct(name: String) { this.name = name; }
-     greet(): String { return "hi, " + this.name; }
-    #override
-     buildGreeting(): String { return Greeter.super.buildGreeting() + " " + this.name; }
+    greet(): String { return "hi, " + this.name; }
+    #override buildGreeting(prefix: String, suffix: String): String {
+        return Greeter.super.buildGreeting(suffix:, prefix:) + " " + this.name;
+    }
 }
 
 fn main(): Void {
     mut p = Person("world");
-    stdout.println(p.buildGreeting());
+    stdout.println(p.buildGreeting(suffix: ">", prefix: "<"));
 }

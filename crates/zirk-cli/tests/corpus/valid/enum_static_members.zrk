@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 enum Direction { North, South, East, West }
 enum ExitCode { Success -> 0, Failure -> 1 }
 enum HttpStatus { Ok -> "ok", NotFound -> "not-found" }

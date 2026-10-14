@@ -1,0 +1,20 @@
+import { stdout } from std.io;
+
+class Label {
+    text: String;
+
+    construct(text: String) {
+        this.text = text;
+    }
+
+    #override
+    to_string(): String {
+        return this.text;
+    }
+}
+
+fn main(): Void {
+    inmut label = Label("items");
+    stdout.println("count", 2, true, label);
+    println("done", 3.5, null);
+}

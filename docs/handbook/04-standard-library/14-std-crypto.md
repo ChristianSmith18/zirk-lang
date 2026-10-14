@@ -114,8 +114,9 @@ format or pepper failed. `needs_rehash` supports transparent parameter upgrades.
 The explicit FIPS profile uses PBKDF2-HMAC-SHA256 with current profile-owned
 costs; it never replaces Argon2id silently at runtime. Bcrypt/scrypt creation,
 legacy verification and migration live outside the initial core. Password
-hashing is intentionally expensive CPU work: servers run batches through
-`std.parallel` rather than blocking the task reactor.
+hashing is intentionally expensive CPU work: servers can run batches through
+the delivered `.parallel` collection adapter rather than occupying the
+cooperative executor.
 
 ## KDF and MAC
 

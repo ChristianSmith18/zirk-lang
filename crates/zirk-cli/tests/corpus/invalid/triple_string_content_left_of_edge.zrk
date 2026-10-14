@@ -1,0 +1,5 @@
+fn main(): Void {
+    inmut message = '''
+  escapes the edge
+    ''';
+}

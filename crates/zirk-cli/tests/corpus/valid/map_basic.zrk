@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut m: Map<Int32, Int32> = Map();
     m.set(1, 10);

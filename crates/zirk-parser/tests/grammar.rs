@@ -242,7 +242,7 @@ fn valid_function_without_parameters() {
 
     assert_eq!(f.name.name, "main");
     assert!(f.params.is_empty());
-    assert_eq!(f.return_type.name, "Void");
+    assert_eq!(f.return_type.as_ref().unwrap().name, "Void");
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn valid_function_with_parameters() {
     assert_eq!(f.params.len(), 2);
     assert_eq!(f.params[0].name.name, "a");
     assert_eq!(f.params[0].ty.name, "Int32");
-    assert_eq!(f.return_type.name, "Int32");
+    assert_eq!(f.return_type.as_ref().unwrap().name, "Int32");
 }
 
 #[test]
@@ -263,8 +263,16 @@ fn valid_several_functions_in_one_file() {
 }
 
 #[test]
-fn invalid_function_without_return_type() {
-    let output = errors("fn main() { }");
+fn valid_function_without_return_type() {
+    // `return-type-inference`: a body gives the checker something to infer
+    // from, so the annotation may be omitted.
+    let p = program("fn main() { }");
+    assert!(p.functions[0].return_type.is_none());
+}
+
+#[test]
+fn invalid_signature_without_return_type() {
+    let output = errors("interface Runner { run(); }\nfn main(): Void { }");
     assert!(output.contains(codes::MISSING_RETURN_TYPE.as_str()));
     assert!(output.contains("= help:"));
 }
@@ -717,7 +725,7 @@ fn valid_statements_without_semicolons() {
 fn valid_println_with_string() {
     assert_eq!(
         shape(&expression("stdout.println(\"Hola\")")),
-        "println(\"Hola\")"
+        "stdout.println(\"Hola\")"
     );
 }
 
@@ -725,7 +733,7 @@ fn valid_println_with_string() {
 fn valid_println_with_expression() {
     assert_eq!(
         shape(&expression("stdout.println(a + b)")),
-        "println((a + b))"
+        "stdout.println((a + b))"
     );
 }
 
@@ -733,17 +741,10 @@ fn valid_println_with_expression() {
 fn valid_print_and_println_accept_multiple_or_zero_arguments() {
     assert_eq!(
         shape(&expression("stdout.print(\"sum\", 1 + 2, true)")),
-        "print(\"sum\", (1 + 2), true)"
+        "stdout.print(\"sum\", (1 + 2), true)"
     );
-    assert_eq!(shape(&expression("stdout.print()")), "print()");
-    assert_eq!(shape(&expression("stdout.println()")), "println()");
-}
-
-#[test]
-fn invalid_other_stdout_method() {
-    let output = errors("fn main(): Void { stdout.write(\"x\"); }");
-    assert!(output.contains(codes::NOT_IMPLEMENTED.as_str()));
-    assert!(output.contains("Phase 7"));
+    assert_eq!(shape(&expression("stdout.print()")), "stdout.print()");
+    assert_eq!(shape(&expression("stdout.println()")), "stdout.println()");
 }
 
 // --- Constructs from later phases ------------------------------------
@@ -1201,6 +1202,25 @@ fn valid_named_arguments() {
 }
 
 #[test]
+fn named_argument_shorthand_desugars_to_the_identifier_path() {
+    for source in ["f(value:)", "object.method(value:)", "Type(value:)"] {
+        let Expr::Call(call) = expression(source) else {
+            panic!("expected a call for {source}");
+        };
+        assert_eq!(
+            call.args[0].name.as_ref().map(|name| name.name.as_str()),
+            Some("value")
+        );
+        assert!(matches!(&call.args[0].value, Expr::Path(path) if path.name == "value"));
+        // The written argument is `value:` — the span covers the colon so
+        // source-slicing tools (the formatter) keep the shorthand marker.
+        let name_span = call.args[0].name.as_ref().unwrap().span;
+        assert_eq!(call.args[0].span.start, name_span.start);
+        assert_eq!(call.args[0].span.end, name_span.end + 1);
+    }
+}
+
+#[test]
 fn valid_lambda_with_expression_body() {
     let e = expression("(a: Int32, b: Int32): Int32 => a + b");
     let Expr::Lambda(l) = &e else {
@@ -1276,6 +1296,15 @@ fn valid_prefix_cast_chains_a_field_access_after_it() {
 }
 
 #[test]
+fn reserved_with_keyword_is_allowed_after_member_access_operator() {
+    let e = expression("mutex.with");
+    let Expr::Field(field) = e else {
+        panic!("expected a member access, got {e:?}");
+    };
+    assert_eq!(field.name.name, "with");
+}
+
+#[test]
 fn valid_postfix_cast_binds_tighter_than_a_following_call() {
     let e = expression("value as String");
     assert_eq!(shape(&e), "(value as String)");
@@ -1325,7 +1354,7 @@ fn valid_function_type_alias_is_also_recognized() {
 #[test]
 fn valid_function_type_on_a_return_type() {
     let p = program("fn make(): Fn(Int32) => Int32 { }\nfn main(): Void { }");
-    let ty = &p.functions[0].return_type;
+    let ty = &p.functions[0].return_type.as_ref().unwrap();
     let function = ty.function.as_ref().expect("a callable type");
     assert_eq!(function.params.len(), 1);
 }
@@ -1677,7 +1706,55 @@ fn valid_import_with_alias() {
 #[test]
 fn valid_import_from_a_standard_module() {
     let p = program("import { stdout } from std.io;\nfn main(): Void { }");
-    assert!(matches!(&p.imports[0].source, ImportSource::Std { path, .. } if path == "std.io"));
+    assert!(matches!(&p.imports[0].source, ImportSource::Package { path, .. } if path == "std.io"));
+}
+
+#[test]
+fn valid_import_from_an_external_package_and_its_module() {
+    let p =
+        program("import { clear } from acme.cli::terminal;\nfn main(): Void { terminal.clear(); }");
+    assert!(
+        matches!(&p.imports[0].source, ImportSource::Package { path, .. } if path == "acme.cli::terminal")
+    );
+    let Stmt::Expr(ExprStmt {
+        expr: Expr::Call(call),
+        ..
+    }) = &p.functions[0].body.statements[0]
+    else {
+        panic!("expected qualified call");
+    };
+    let Expr::Field(field) = &*call.callee else {
+        panic!("expected module access");
+    };
+    assert_eq!(field.access, FieldAccess::Dot);
+}
+
+#[test]
+fn valid_package_inline_module_and_root_reexport() {
+    let p = program(
+        "package std.io;\nshare mod stdout { fn println(): Void { } }\nshare mod stdin from \"./stdin\";",
+    );
+    assert_eq!(p.package.as_ref().unwrap().path, "std.io");
+    assert!(p.modules[0].shared);
+    assert_eq!(p.modules[0].name.name, "stdout");
+    assert_eq!(p.module_reexports[0].source_path, "./stdin");
+}
+
+#[test]
+fn valid_module_type_is_retained() {
+    let p = program("fn main(value: model.User): Void { }");
+    assert_eq!(p.functions[0].params[0].ty.name, "model.User");
+}
+
+#[test]
+fn valid_qualified_stdout_call_is_an_ordinary_call() {
+    // `stdout.println(...)` is a call through the `stdout` module; only the
+    // lowering knows the bundled standard-library body.
+    let p = program("fn main(): Void { stdout.println(\"ready\"); }");
+    assert!(matches!(
+        &p.functions[0].body.statements[0],
+        Stmt::Expr(ExprStmt { expr, .. }) if !matches!(expr, Expr::Println(_))
+    ));
 }
 
 #[test]
@@ -1705,7 +1782,7 @@ fn valid_every_node_exposes_its_span() {
 
     let f = &p.functions[0];
     assert_eq!(source.slice(f.name.span), "main");
-    assert_eq!(source.slice(f.return_type.span), "Void");
+    assert_eq!(source.slice(f.return_type.as_ref().unwrap().span), "Void");
 
     let Stmt::Let(l) = &f.body.statements[0] else {
         panic!("expected a declaration");
@@ -1718,7 +1795,7 @@ fn valid_every_node_exposes_its_span() {
 
 #[test]
 fn invalid_one_error_does_not_prevent_parsing_the_rest() {
-    let source = SourceFile::new("test.zrk", "fn a() { }\nfn b(): Void { }");
+    let source = SourceFile::new("test.zrk", "fn a(): Void;\nfn b(): Void { }");
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(&source, &mut sink);
     let p = parse(&source, &tokens, &mut sink);
@@ -2191,7 +2268,7 @@ fn valid_pointer_type_in_every_position() {
     assert_eq!(p.classes[0].fields[0].ty.name, "Pointer");
     assert_eq!(p.classes[0].fields[0].ty.arguments[0].name, "Int32");
     assert_eq!(p.functions[0].params[0].ty.name, "Pointer");
-    assert_eq!(p.functions[0].return_type.name, "Pointer");
+    assert_eq!(p.functions[0].return_type.as_ref().unwrap().name, "Pointer");
 }
 
 // --- `task` / `await` / `select` were removed (`remove-task-await-model`) ---
@@ -2374,4 +2451,50 @@ fn valid_cores_as_an_ordinary_identifier_outside_a_parallel_header() {
         panic!("expected a binding");
     };
     assert!(matches!(binding.init, Some(Expr::Int(_))));
+}
+
+#[test]
+fn valid_promoted_constructor_parameters_preserve_their_contract() {
+    let p = program(
+        "class User { construct(public name?: String, private inmut id: UInt64 = 1) { } } fn main(): Void { }",
+    );
+    let params = &p.classes[0].constructors[0].params;
+    assert!(params[0].promoted.is_some());
+    assert!(params[0].optional);
+    assert!(params[1].promoted.is_some());
+    assert!(params[1].default.is_some());
+}
+
+#[test]
+fn invalid_member_modifier_on_a_function_parameter_is_targeted() {
+    let output = errors("fn f(public name: String): Void { } fn main(): Void { }");
+    assert!(
+        output.contains("only to `construct` parameters"),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_unmodified_constructor_parameter_is_not_promoted() {
+    let p = program("class User { construct(name: String) { } } fn main(): Void { }");
+    assert!(p.classes[0].constructors[0].params[0].promoted.is_none());
+}
+
+#[test]
+fn standard_io_sources_are_ordinary_package_and_module_declarations() {
+    let root = program(include_str!("../../../stdlib/std/io/package.zrk"));
+    assert_eq!(root.package.as_ref().unwrap().path, "std.io");
+    assert_eq!(root.module_reexports.len(), 3);
+
+    let stdout = program(include_str!("../../../stdlib/std/io/stdout.zrk"));
+    // The public surface is shared; `write` and `write_line` are the private
+    // leaves the lowering reaches the host through.
+    let shared: Vec<&str> = stdout
+        .functions
+        .iter()
+        .filter(|function| function.shared)
+        .map(|function| function.name.name.as_str())
+        .collect();
+    assert_eq!(shared, ["print", "println", "flush"]);
+    assert_eq!(stdout.functions[1].name.name, "println");
 }

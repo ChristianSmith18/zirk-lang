@@ -1,6 +1,11 @@
 # Maps
 
-`Map<K, V>` associates unique keys with values.
+`Map<K, V>` associates unique keys with values. The compiler currently provides
+a restricted runtime representation: keys and values occupy one machine word,
+so semantic analysis rejects aggregate shapes that do not fit that layout.
+Managed references in supported entries are traced by the collector. `String`
+and `Char` keys are stored as normalized text snapshots, so mutating the source
+string after insertion does not change the stored key.
 
 ```zirk
 mut users: Map<UserId, User> = Map();
@@ -18,13 +23,16 @@ Iteration order is guaranteed only if the concrete map contract says so. Do not 
 Unique key/value associations; insertion-order iteration; `K` requires coherent
 `Hash` + `Equal`.
 
-> Entirely `specified` — `Map` is ahead of the current compiler.
+> The API below is the language contract. The current compiler implements only
+> the basic constructor, length/emptiness, set, contains, nullable lookup, and
+> remove operations described in the feature-status table; iteration and the
+> remaining methods are still specified rather than delivered.
 
 ### Properties
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Entry count | specified |
+| `length` | `UInt64` | Entry count | specified |
 | `is_empty` | `Boolean` | `length == 0` | specified |
 
 ### Methods
@@ -58,6 +66,11 @@ match users.get_or_null(id) {
     null => stdout.println("absent"),
     user => stdout.println(user.name),
 }
+
+mut labels: Map<String, Int32> = Map();
+mut key: String = "café";
+labels.set(key, 1);        // the collection stores a normalized key snapshot
+key[0] = "C";              // this mutation does not move the stored key
 ```
 
 ---

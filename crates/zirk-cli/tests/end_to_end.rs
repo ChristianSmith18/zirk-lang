@@ -9,8 +9,9 @@
 //! with its expected output; the invalid ones have their diagnostics captured
 //! as snapshots so a change in wording is visible in review.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Path to the `zirk` executable produced by the workspace.
 fn compiler() -> PathBuf {
@@ -71,6 +72,17 @@ fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
 
 /// Runs the compiler over a source file using an explicit command-line argument.
 fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: &[&str]) -> Output {
+    zirk_with_runtime_env(subcommand, source, name, arg, extra, &[])
+}
+
+fn zirk_with_runtime_env(
+    subcommand: &str,
+    source: &Path,
+    name: &str,
+    arg: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let dir = workspace(name);
     let copied = dir.join(source.file_name().expect("file name"));
     std::fs::copy(source, &copied).expect("copy the source");
@@ -79,6 +91,7 @@ fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: 
         .arg(subcommand)
         .arg(arg)
         .args(extra)
+        .envs(env.iter().copied())
         .current_dir(&dir)
         .output()
         .expect("run the compiler");
@@ -90,9 +103,52 @@ fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: 
     }
 }
 
+#[test]
+fn managed_background_error_handler_roots_throwable_and_captures_during_gc() {
+    let source = corpus("valid").join("background_error_handler_receives_throwable.zrk");
+    let output = zirk_with_runtime_env(
+        "run",
+        &source,
+        "managed_background_error_roots",
+        "background_error_handler_receives_throwable.zrk",
+        &[],
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "retained:detached failure\n");
+}
+
+#[test]
+fn managed_background_error_handler_failure_is_reported_without_recursion() {
+    let source = corpus("valid").join("background_error_handler_failure_contained.zrk");
+    let output = zirk(
+        "run",
+        &source,
+        "managed_background_error_handler_failure",
+        &[],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "handler-called\n");
+    assert!(
+        output
+            .stderr
+            .contains("background error handler failed for job BackgroundJobId(1)"),
+        "handler failure must be reported: {}",
+        output.stderr
+    );
+}
+
 // --- Valid programs ---------------------------------------------------------
 
-/// Every valid program compiles, runs, and prints exactly its `.out` file.
+/// Every valid program compiles, runs with its declared status, and prints its `.out` file.
 #[test]
 fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     let dir = corpus("valid");
@@ -112,12 +168,15 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
         let expected = std::fs::read_to_string(path.with_extension("out")).unwrap_or_else(|_| {
             panic!("`{name}.out` is missing: every valid program declares its expected output")
         });
+        let expected_status = std::fs::read_to_string(path.with_extension("exit"))
+            .map(|value| value.trim().parse::<i32>().expect("valid exit status"))
+            .unwrap_or(0);
 
         let output = zirk("run", &path, &format!("valid_{name}"), &[]);
 
         assert_eq!(
-            output.status, 0,
-            "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+            output.status, expected_status,
+            "`{name}` exited with an unexpected status.\nstdout:\n{}\nstderr:\n{}",
             output.stdout, output.stderr
         );
         assert_eq!(
@@ -132,6 +191,128 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     assert!(
         checked >= 10,
         "the corpus shrank unexpectedly: {checked} programs"
+    );
+}
+
+#[test]
+fn concurrent_first_uses_completion_order_and_aggregates_failures() {
+    for name in [
+        "concurrent_first_completion_order",
+        "concurrent_first_tie_input_order",
+        "concurrent_first_failure_then_success",
+        "concurrent_first_all_fail_suppressed",
+        "concurrent_first_cleanup_failure",
+    ] {
+        let source = corpus("valid").join(format!("{name}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("focused first fixture has expected output");
+        let output = zirk("run", &source, &format!("focused_{name}"), &[]);
+        assert_eq!(
+            output.status, 0,
+            "`{name}` failed.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            normalize(&output.stdout),
+            normalize(&expected),
+            "`{name}` output"
+        );
+    }
+}
+
+#[test]
+fn concurrent_within_first_and_settled_enforce_deadlines() {
+    for name in [
+        "concurrent_within_first_winner",
+        "concurrent_within_first_timeout",
+        "concurrent_within_first_timeout_joins_cleanup",
+        "concurrent_within_first_caller_cancellation",
+        "concurrent_within_first_roots_managed_winner",
+        "concurrent_within_settled_timeout",
+        "concurrent_within_settled_timeout_joins_cleanup",
+        "concurrent_within_settled_success",
+        "concurrent_within_negative_duration",
+    ] {
+        let source = corpus("valid").join(format!("{name}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("focused within fixture has expected output");
+        let output = zirk("run", &source, &format!("focused_{name}"), &[]);
+        assert_eq!(
+            output.status, 0,
+            "`{name}` failed.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            normalize(&output.stdout),
+            normalize(&expected),
+            "`{name}` output"
+        );
+    }
+}
+
+#[test]
+fn concurrent_task_capacity_is_caught_and_reusable_from_zirk() {
+    let name = "concurrent_task_capacity_ceiling";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("task-capacity fixture has expected output");
+    let output = zirk("run", &source, "concurrent_task_capacity_ceiling", &[]);
+
+    assert_eq!(
+        output.status, 0,
+        "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn background_capacity_error_is_constructible_and_catchable_from_zirk() {
+    let name = "background_capacity_error_catch";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("background-capacity fixture has expected output");
+    let output = zirk("run", &source, name, &[]);
+
+    assert_eq!(
+        output.status, 0,
+        "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn app_shutdown_grace_is_configurable_from_native_zirk_and_negative_literals_are_rejected() {
+    let name = "app_shutdown_grace_configured";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let output = zirk("run", &source, name, &[]);
+    assert_eq!(
+        output.status, 124,
+        "configured shutdown grace should use the approved expiry status.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(
+        normalize(&output.stdout),
+        "negative rejected\nroot completed\n"
+    );
+    assert!(output.stderr.contains("background shutdown grace expired"));
+    assert!(output.stderr.contains("unfinished jobs: ["));
+
+    let negative = corpus("invalid").join("app_shutdown_grace_negative.zrk");
+    let output = zirk("check", &negative, "app_shutdown_grace_negative", &[]);
+    assert_ne!(output.status, 0, "negative literal grace must fail in sema");
+    assert!(output.stderr.contains("requires a non-negative Duration"));
+
+    let wrong_type = corpus("invalid").join("app_shutdown_grace_wrong_type.zrk");
+    let output = zirk("check", &wrong_type, "app_shutdown_grace_wrong_type", &[]);
+    assert_ne!(output.status, 0, "non-Duration grace must fail in sema");
+    assert!(
+        output
+            .stderr
+            .contains("no implicit conversion from Int32 to Duration"),
+        "{}",
+        output.stderr
     );
 }
 
@@ -166,6 +347,82 @@ fn the_concurrent_examples_program_runs() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "10\n1\n2\n3\n42\ncaught: boom\n");
+}
+
+#[test]
+fn concurrent_join_round_trips_nested_managed_record_results() {
+    let source = std::env::temp_dir().join(format!(
+        "zirk-managed-task-result-{}-{}.zrk",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         record Inner { text: String; }\n\
+         record Outer { prefix: Int64; inner: Inner; }\n\
+         enum MaybeText { Some(value: String), None }\n\
+         fn make_outer(): Outer { return Outer(prefix: 5, inner: Inner(text: \"task result survived\")); }\n\
+         fn make_enum(): MaybeText { return MaybeText.Some(value: \"enum result survived\"); }\n\
+         fn make_wide(): Int128 { return 123456789123456789012345678901234567; }\n\
+         fn churn(): Int32 { mut values: List<Int32> = [0 .. 4096]; return 7; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut value: Outer = make_outer();\n\
+             inmut enum_value: MaybeText = make_enum();\n\
+             inmut wide: Int128 = make_wide();\n\
+             inmut churned: Int32 = churn();\n\
+           }\n\
+           stdout.println(value.inner.text);\n\
+           match enum_value {\n\
+             MaybeText.Some(text) => stdout.println(text);\n\
+             MaybeText.None => stdout.println(\"empty\");\n\
+           }\n\
+           stdout.println(wide);\n\
+         }\n",
+    )
+    .expect("write managed-result test source");
+    let dir = workspace("concurrent_managed_result_gc");
+    let input_name = "managed_result.zrk";
+    std::fs::copy(&source, dir.join(input_name)).expect("copy managed-result source");
+    let output = Command::new(compiler())
+        .arg("run")
+        .arg(input_name)
+        .env("ZIRK_GC_THRESHOLD", "8192")
+        .env("ZIRK_GC_TRACE", "1")
+        .current_dir(&dir)
+        .output()
+        .expect("run managed-result program under forced GC");
+    let _ = std::fs::remove_file(source);
+
+    assert_eq!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[zirk-gc] collection"),
+        "the managed-result regression must observe a real collection; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "task result survived\nenum result survived\n123456789123456789012345678901234567\n"
+    );
+}
+
+#[test]
+fn the_channel_examples_program_runs() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("channel_examples.zrk");
+    let output = zirk("run", &source, "channel_examples", &[]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "6\n60\n4\n16\n");
 }
 
 #[test]
@@ -387,6 +644,360 @@ fn removed_concurrency_constructs_name_their_replacement() {
 }
 
 #[test]
+fn pending_concurrency_types_report_the_phase_gate() {
+    for name in [
+        "thread_pending_type",
+        "rwlock_pending_type",
+        "semaphore_pending_type",
+        "barrier_pending_type",
+        "once_pending_type",
+    ] {
+        let source = corpus("invalid").join(format!("{name}.zrk"));
+        let output = zirk("check", &source, &format!("pending_{name}"), &[]);
+
+        assert_ne!(output.status, 0, "`{name}` should remain unavailable");
+        assert!(
+            output.stderr.contains("error[E0402]"),
+            "`{name}` should use the pending-type diagnostic:\n{}",
+            output.stderr
+        );
+        assert!(
+            output
+                .stderr
+                .contains("exists in the language but arrives in Phase 5"),
+            "`{name}` should identify its delivery phase:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn mutex_with_mutates_the_protected_payload_across_calls() {
+    let source = corpus("valid").join("mutex_with_mutates_payload.zrk");
+    let output = zirk("run", &source, "mutex_with_mutates_payload", &[]);
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "2\n");
+}
+
+#[test]
+fn mutex_roots_nested_record_references_while_mutating_inline_fields() {
+    let source = corpus("valid").join("mutex_with_nested_record.zrk");
+    let output = zirk_with_runtime_env(
+        "run",
+        &source,
+        "mutex_with_nested_record",
+        "mutex_with_nested_record.zrk",
+        &[],
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "8\n");
+}
+
+#[test]
+fn mutex_with_unlocks_after_source_exception_and_can_be_reacquired() {
+    let source = corpus("valid").join("mutex_with_exception_unlock.zrk");
+    let output = zirk("run", &source, "mutex_with_exception_unlock", &[]);
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "E_INVALID_ARGUMENT\n9\n");
+}
+
+#[test]
+fn atomic_supported_type_is_accepted_and_unsupported_payload_is_rejected() {
+    let supported = corpus("valid").join("atomic_supported_type.zrk");
+    let output = zirk("check", &supported, "atomic_supported_type", &[]);
+    assert_eq!(
+        output.status, 0,
+        "Atomic<Int32> is a supported type:\n{}",
+        output.stderr
+    );
+
+    let unsupported = corpus("invalid").join("atomic_unsupported_payload.zrk");
+    let output = zirk("check", &unsupported, "atomic_unsupported_payload", &[]);
+    assert_ne!(output.status, 0, "Atomic<String> must be rejected");
+    assert!(
+        output.stderr.contains("error[E0403]") || output.stderr.contains("error[E0402]"),
+        "unsupported Atomic payload should fail type checking:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+
+    let ordering = corpus("invalid").join("atomic_weak_order_requires_unsafe.zrk");
+    let output = zirk("check", &ordering, "atomic_weak_order_requires_unsafe", &[]);
+    assert_ne!(output.status, 0, "weaker atomic ordering requires unsafe");
+    assert!(
+        output
+            .stderr
+            .contains("non-sequentially-consistent atomic ordering"),
+        "ordering violation should be diagnosed at the CLI boundary:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn concurrent_protect_requires_non_suspending_cleanup() {
+    let invalid = corpus("invalid").join("concurrent_protect_suspension_rejected.zrk");
+    let output = zirk("check", &invalid, "protect_suspension_rejected", &[]);
+    assert_ne!(output.status, 0, "suspending cleanup must be rejected");
+    assert!(
+        output.stderr.contains("error[E0483]"),
+        "suspending cleanup should retain the guard diagnostic:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+
+    let valid = corpus("valid").join("concurrent_protect_cleanup.zrk");
+    let expected = std::fs::read_to_string(valid.with_extension("out"))
+        .expect("valid cleanup fixture has expected output");
+    let output = zirk("run", &valid, "protect_cleanup", &[]);
+    assert_eq!(
+        output.status, 0,
+        "synchronous cleanup should run:\n{}",
+        output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn thread_run_executes_managed_callback_and_returns_its_result() {
+    for fixture in ["thread_run_managed_result", "thread_run_throwable"] {
+        let source = corpus("valid").join(format!("{fixture}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("managed Thread.run fixture has expected output");
+        let output = zirk("run", &source, fixture, &[]);
+        assert_eq!(output.status, 0, "{fixture}: {}", output.stderr);
+        assert_eq!(normalize(&output.stdout), normalize(&expected), "{fixture}");
+    }
+}
+
+#[test]
+fn thread_run_preserves_ownership_diagnostics() {
+    for (fixture, ownership_code) in [
+        ("thread_run_mutable_capture", "E0430"),
+        ("thread_run_pointer_result", "E0482"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("thread_run_security_{fixture}"),
+            &[],
+        );
+
+        assert_ne!(output.status, 0, "{fixture} must remain rejected");
+        let ownership_reported = output.stderr.contains(&format!("error[{ownership_code}]"))
+            || (fixture == "thread_run_mutable_capture" && output.stderr.contains("mutable alias"));
+        assert!(
+            ownership_reported,
+            "{fixture} must report its ownership failure as well:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn thread_run_checks_effects_and_accepts_complete_callbacks() {
+    for (fixture, forbidden_effect) in [
+        ("thread_run_transitive_channel_effect", "E0484"),
+        ("thread_run_try_channel", "E0484"),
+        ("thread_run_transitive_unsafe_effect", "E0484"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, &format!("thread_effect_{fixture}"), &[]);
+        assert_ne!(output.status, 0, "{fixture} must remain rejected");
+        assert!(
+            output
+                .stderr
+                .contains(&format!("error[{forbidden_effect}]")),
+            "{fixture} must preserve the effect diagnostic alongside the gate:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let source = corpus("valid").join("thread_run_managed_result.zrk");
+    let output = zirk("check", &source, "thread_pure_callback_check", &[]);
+    assert_eq!(output.status, 0, "{}", output.stderr);
+}
+
+#[test]
+fn concurrent_boundary_fixtures_reject_invalid_result_and_thunk_types() {
+    for (fixture, expected_code) in [
+        ("concurrent_of_heterogeneous_results", "E0403"),
+        ("concurrent_each_void_result", "E0403"),
+        ("concurrent_each_settled_void_result", "E0403"),
+        ("concurrent_each_non_collection", "E0403"),
+        ("concurrent_each_nontransferable_result", "E0482"),
+        ("concurrent_each_nested_mutable_element", "E0482"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("concurrent_boundary_{fixture}"),
+            &[],
+        );
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{expected_code}]")),
+            "{fixture} must fail at its source type boundary:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn ownership_boundary_corpus_covers_each_exercisable_api_boundary() {
+    for (fixture, expected_code) in [
+        ("spawn_mutable_capture", "E0430"),
+        ("spawn_nontransferable_result", "E0482"),
+        ("channel_nontransferable_send", "E0482"),
+        ("channel_nontransferable_receive", "E0482"),
+        ("timer_mutable_capture", "E0430"),
+        ("timer_nontransferable_result", "E0482"),
+        ("parallel_nontransferable_result", "E0482"),
+        ("concurrent_of_mutable_capture", "E0430"),
+        ("concurrent_of_nontransferable_result", "E0482"),
+        ("concurrent_each_mutable_capture", "E0430"),
+        ("concurrent_detach_mutable_capture", "E0430"),
+        ("parallel_boundary_alias", "E0430"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("ownership_boundary_{fixture}"),
+            &[],
+        );
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{expected_code}]")),
+            "{fixture} must report its boundary ownership error {expected_code}:\n{}",
+            output.stderr
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{fixture} unexpectedly wrote stdout"
+        );
+    }
+}
+
+#[test]
+fn service_source_callbacks_register_ready_and_shutdown_cleanly() {
+    for fixture in [
+        "application_spawn_service_lambda",
+        "application_spawn_service_named",
+        "application_spawn_service_capacity_catch",
+        "application_spawn_service_ready_lifecycle_error",
+    ] {
+        let source = corpus("valid").join(format!("{fixture}.zrk"));
+        let output = zirk("run", &source, fixture, &[]);
+        assert_eq!(output.status, 0, "{fixture}: {}", output.stderr);
+        let expected = match fixture {
+            "application_spawn_service_capacity_catch" => "E_SERVICE_CAPACITY\n",
+            "application_spawn_service_ready_lifecycle_error" => "E_SERVICE_LIFECYCLE\n",
+            _ => "ready\n",
+        };
+        assert_eq!(normalize(&output.stdout), expected, "{fixture}");
+    }
+}
+
+#[test]
+fn service_callback_shape_ownership_capability_and_namespace_are_checked() {
+    for (fixture, code) in [
+        ("application_spawn_service_wrong_signature", "E0403"),
+        ("application_spawn_service_mutable_capture", "E0430"),
+        ("service_context_ready_outside_callback", "E0403"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, fixture, &[]);
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{code}]")),
+            "{fixture}: {}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let source = corpus("invalid").join("application_namespace_shadowed.zrk");
+    let output = zirk("check", &source, "application_namespace_shadowed", &[]);
+    assert_ne!(
+        output.status, 0,
+        "a shadowed application name is an ordinary value"
+    );
+    assert!(
+        !output.stderr.contains("type-checked but not lowered"),
+        "shadowing must disable the builtin: {}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn concurrent_each_collection_requires_strict_deep_share_ownership() {
+    for fixture in [
+        "concurrent_each_mutable_list",
+        "concurrent_each_inline_list",
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, &format!("each_ownership_{fixture}"), &[]);
+
+        assert_ne!(
+            output.status, 0,
+            "{fixture} must fail the ownership boundary"
+        );
+        assert!(
+            output.stderr.contains("error[E0482]"),
+            "{fixture} must fail with the ownership diagnostic:\n{}",
+            output.stderr,
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let strict = corpus("valid").join("concurrent_each_ordered.zrk");
+    let output = zirk("check", &strict, "each_ownership_strict_list", &[]);
+    assert_eq!(
+        output.status, 0,
+        "a deeply shareable strict binding is supported:\n{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error[E0424]"), "{}", output.stderr);
+}
+
+#[test]
+fn concurrent_first_wrong_arity_has_a_specific_diagnostic() {
+    let source = corpus("invalid").join("concurrent_first_wrong_arity.zrk");
+    let output = zirk("check", &source, "first_wrong_arity", &[]);
+    assert_ne!(output.status, 0);
+    assert!(output.stderr.contains("error[E0406]"), "{}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains("`Concurrent.first()` takes no arguments"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("E0424"), "{}", output.stderr);
+}
+
+#[test]
 fn diagnostics_go_to_standard_error() {
     // They must never mix with the output of the compiled program.
     let source = corpus("invalid").join("type_mismatch.zrk");
@@ -524,7 +1135,6 @@ fn later_subcommands_name_their_phase() {
         // The CLI surface belongs to Phase 6, except for `check` which is now
         // implemented and no longer reports a future phase.
         ("test", "Phase 6"),
-        ("format", "Phase 9"),
         ("new", "Phase 6"),
         ("doc", "Phase 7"),
     ] {
@@ -582,6 +1192,32 @@ fn crate_of(name: &str, files: &[(&str, &str)]) -> Output {
     }
 }
 
+/// Runs a one-file crate while supplying deterministic process stdin.
+fn crate_of_with_input(name: &str, source: &str, input: &[u8]) -> Output {
+    let dir = workspace(name);
+    std::fs::write(dir.join("main.zrk"), source).expect("write the source");
+    let mut child = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the compiler");
+    child
+        .stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write process stdin");
+    let output = child.wait_with_output().expect("wait for the compiler");
+    Output {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 #[test]
 fn a_crate_of_several_files_compiles_and_runs() {
     let output = crate_of(
@@ -589,7 +1225,8 @@ fn a_crate_of_several_files_compiles_and_runs() {
         &[
             (
                 "main.zrk",
-                "import { Role, describe } from \"./domain/user\";\n\
+                "import { stdout } from std.io;\n\
+                 import { Role, describe } from \"./domain/user\";\n\
                  fn main(): Void {\n\
                  stdout.println(describe(Role.Admin));\n\
                  stdout.println(describe(Role.Guest));\n\
@@ -613,13 +1250,107 @@ fn a_crate_of_several_files_compiles_and_runs() {
 }
 
 #[test]
+fn a_standard_package_module_compiles_and_runs_through_the_native_backend() {
+    let output = crate_of(
+        "standard_package_native",
+        &[(
+            "main.zrk",
+            "import { stdout } from std.io;\nfn main(): Void { println(\"package native\"); }",
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "package native\n");
+}
+
+#[test]
+fn standard_input_line_is_read_by_the_native_backend() {
+    let output = crate_of_with_input(
+        "standard_input_native",
+        "import { stdin, stdout } from std.io;\nfn main(): Void { stdout.println(stdin.read_line()); }",
+        "hola\n".as_bytes(),
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "hola\n");
+}
+
+#[test]
+fn standard_error_is_written_to_the_process_error_stream() {
+    let output = crate_of(
+        "standard_error_native",
+        &[(
+            "main.zrk",
+            "import { stderr } from std.io;\nfn main(): Void { stderr.print(\"warning\"); }",
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(output.stdout, "");
+    assert_eq!(output.stderr, "warning");
+}
+
+#[test]
+fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
+    let dir = workspace("external_package_native");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project \"app\"\nkind application\ndependency acme.math ^1 local \"dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\nimport { math } from acme.math;\nfn main(): Void { stdout.println(math.answer()); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project \"acme.math\"\nkind package\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.math;\nshare mod math from \"./math\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/math.zrk"),
+        "share fn answer(): Int32 { return 42; }",
+    )
+    .unwrap();
+    let manifest = zirk_cli::project::read_manifest(&dir.join("dep/.zkinit")).unwrap();
+    let hash = zirk_cli::project::package_integrity_hash(&dir.join("dep"), &manifest).unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        format!("acme.math 1.0 local sha256:{hash} src/package.zrk\n"),
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run external package");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(normalize(&String::from_utf8_lossy(&output.stdout)), "42\n");
+}
+
+#[test]
 fn a_declaration_without_share_is_private_to_its_file() {
     let output = crate_of(
         "modules_private",
         &[
             (
                 "main.zrk",
-                "import { helper } from \"./other\";\n\
+                "import { stdout } from std.io;\n\
+                 import { helper } from \"./other\";\n\
                  fn main(): Void { stdout.println(helper()); }\n",
             ),
             ("other.zrk", "fn helper(): String { return \"x\"; }\n"),
@@ -643,7 +1374,8 @@ fn two_files_may_import_from_each_other() {
         &[
             (
                 "a.zrk",
-                "import { b } from \"./b\";\n\
+                "import { stdout } from std.io;\n\
+                 import { b } from \"./b\";\n\
                  share fn a(): String { return b(); }\n\
                  fn main(): Void { stdout.println(a()); }\n",
             ),
@@ -712,7 +1444,8 @@ fn an_import_alias_binds_only_the_alias() {
         &[
             (
                 "main.zrk",
-                "import { Role -> R, describe -> name } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { Role -> R, describe -> name } from \"./lib\";\n\
                  fn main(): Void { stdout.println(name(R.Guest)); }\n",
             ),
             (
@@ -736,7 +1469,8 @@ fn the_original_name_is_not_available_under_an_alias() {
         &[
             (
                 "main.zrk",
-                "import { valor -> v } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { valor -> v } from \"./lib\";\n\
                  fn main(): Void { stdout.println(valor()); }\n",
             ),
             ("lib.zrk", "share fn valor(): Int32 { return 8; }\n"),
@@ -760,7 +1494,8 @@ fn a_shared_declaration_still_has_to_be_imported() {
         &[
             (
                 "main.zrk",
-                "import { one } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { one } from \"./lib\";\n\
                  fn main(): Void { stdout.println(one() + two()); }\n",
             ),
             (
@@ -786,7 +1521,8 @@ fn a_private_enum_is_not_reachable_from_another_file() {
         &[
             (
                 "main.zrk",
-                "import { E } from \"./lib\";\n\
+                "import { stdout } from std.io;\n\
+                 import { E } from \"./lib\";\n\
                  fn main(): Void { stdout.println(match E.A { _ => \"x\" }); }\n",
             ),
             ("lib.zrk", "enum E { A }\n"),
@@ -852,7 +1588,7 @@ fn zirk_with_env(source_text: &str, name: &str, env: &[(&str, &str)]) -> Output 
 /// off-by-one, a use-after-free.
 #[test]
 fn d4_hazard_the_first_constructor_argument_survives_a_collection_triggered_by_the_second() {
-    let source = "class Marker {
+    let source = "import { stdout } from std.io;\nclass Marker {
         id: Int32;
         construct(id: Int32) { this.id = id; }
     }
@@ -883,7 +1619,7 @@ fn d4_hazard_the_first_constructor_argument_survives_a_collection_triggered_by_t
 /// still be caught by comparison.
 #[test]
 fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
-    let source = "class Marker {
+    let source = "import { stdout } from std.io;\nclass Marker {
         id: Int32;
         construct(id: Int32) { this.id = id; }
     }
@@ -922,7 +1658,7 @@ fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
 /// live-byte accounting drops to exactly zero for this identical shape.
 #[test]
 fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_threshold() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut next: Node?;
         construct() { }
     }
@@ -955,7 +1691,7 @@ fn a_sustained_loop_of_discarded_reference_cycles_completes_under_a_small_thresh
 /// GC objects.
 #[test]
 fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
-    let source = "fn churn(n: Int32): Void {\n\
+    let source = "import { stdout } from std.io;\nfn churn(n: Int32): Void {\n\
         mut i = 0;\n\
         while i < n {\n\
             mut s = \"x\" + i.to_string();\n\
@@ -994,7 +1730,7 @@ fn a_sustained_loop_of_discarded_strings_completes_under_a_small_threshold() {
 /// fix (verified by re-reverting the fix locally and re-running this test).
 #[test]
 fn a_list_survives_repeated_buffer_growth_under_a_small_threshold() {
-    let source = "fn main(): Void {\n\
+    let source = "import { stdout } from std.io;\nfn main(): Void {\n\
         mut values: List<Int32> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];\n\
         mut total: Int32 = 0;\n\
         for v in values {\n\
@@ -1016,7 +1752,7 @@ fn a_list_survives_repeated_buffer_growth_under_a_small_threshold() {
 /// the innermost one.
 #[test]
 fn a_still_active_outer_frames_root_survives_unrelated_allocation_in_an_inner_call() {
-    let source = "class Holder {
+    let source = "import { stdout } from std.io;\nclass Holder {
         value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1063,7 +1799,7 @@ fn a_still_active_outer_frames_root_survives_unrelated_allocation_in_an_inner_ca
 /// the next collection) the moment its frame pops.
 #[test]
 fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_loop() {
-    let source = "class Scratch {
+    let source = "import { stdout } from std.io;\nclass Scratch {
         value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1107,7 +1843,7 @@ fn an_object_unreachable_after_its_frame_pops_does_not_derail_a_sustained_call_l
 /// while the referent is alive").
 #[test]
 fn weak_upgrade_and_is_alive_see_a_still_reachable_referent() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn main(): Void {
         mut m: Marker = Marker(42);
@@ -1137,7 +1873,7 @@ fn weak_upgrade_and_is_alive_see_a_still_reachable_referent() {
 /// stale, dangling pointer instead of `null`.
 #[test]
 fn weak_upgrade_and_is_alive_see_a_collected_referent_as_gone() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn make(): Weak<Marker> {
         mut m: Marker = Marker(7);
@@ -1185,7 +1921,7 @@ fn weak_upgrade_and_is_alive_see_a_collected_referent_as_gone() {
 /// object forever, since `w` never goes out of scope in `main`.
 #[test]
 fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
-    let source = "class Marker { id: Int32; construct(id: Int32) { this.id = id; } }
+    let source = "import { stdout } from std.io;\nclass Marker { id: Int32; construct(id: Int32) { this.id = id; } }
 
     fn make(): Weak<Marker> {
         mut m: Marker = Marker(9);
@@ -1230,7 +1966,7 @@ fn a_reachable_weak_handle_does_not_keep_its_referent_alive() {
 /// identity (`is` false against the source) and equal field values.
 #[test]
 fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
-    let source = "class Point {
+    let source = "import { stdout } from std.io;\nclass Point {
         mut x: Int32;
         mut y: Int32;
         construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
@@ -1259,7 +1995,7 @@ fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
 /// The single most important test in this change.
 #[test]
 fn clone_preserves_internal_sharing_of_a_shared_child() {
-    let source = "class Child {
+    let source = "import { stdout } from std.io;\nclass Child {
         mut value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1297,7 +2033,7 @@ fn clone_preserves_internal_sharing_of_a_shared_child() {
 /// contains a cycle").
 #[test]
 fn clone_of_a_self_referential_cycle_terminates_within_the_new_graph() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut next: Node?;
         construct() { }
     }
@@ -1333,7 +2069,7 @@ fn clone_of_a_self_referential_cycle_terminates_within_the_new_graph() {
 /// observed concretely rather than only through identity comparisons).
 #[test]
 fn mutating_a_clone_does_not_affect_the_source_or_vice_versa() {
-    let source = "class Counter {
+    let source = "import { stdout } from std.io;\nclass Counter {
         mut value: Int32;
         construct(value: Int32) { this.value = value; }
     }
@@ -1365,7 +2101,7 @@ fn mutating_a_clone_does_not_affect_the_source_or_vice_versa() {
 /// traversal state is collector-safe for its whole duration" requirement.
 #[test]
 fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
-    let source = "class Node {
+    let source = "import { stdout } from std.io;\nclass Node {
         mut value: Int32;
         mut next: Node?;
         construct(value: Int32) { this.value = value; this.next = null; }
@@ -1426,7 +2162,7 @@ fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
 /// member").
 #[test]
 fn clone_of_a_class_reaching_a_pointer_field_is_rejected_at_compile_time() {
-    let source = "class Holder {
+    let source = "import { stdout } from std.io;\nclass Holder {
         mut p: Pointer<Int32>;
         construct(p: Pointer<Int32>) { this.p = p; }
     }

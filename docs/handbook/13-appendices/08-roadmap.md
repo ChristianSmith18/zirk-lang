@@ -17,7 +17,15 @@ changes: trait defaults under generic substitution, nested contract
 arguments (`Container<Box<T>>`), type-parameter defaults and bodies for
 user-defined generic functions, and `static` on `record`/`enum`.
 
-The remaining sequence moves through structured concurrency,
+Phase 5 structured concurrency is in progress: the existing structured
+executor, `parallel`, and typed-channel slices are delivered, while bounded
+combinators, public background/service APIs, managed `Thread.run`, language
+synchronizers, language-level atomics, and complete race/effect guarantees
+remain gated on compiler, runtime, GC, and target evidence. Runtime foundations
+such as `AtomicCell`, background supervision, and a managed blocking pool do
+not by themselves make those Zirk APIs available. Cancellation remains
+cooperative, and runtime shutdown does not promise to forcibly stop arbitrary
+native work. After Phase 5, the remaining sequence moves through
 projects/permissions, the rest of the standard library, functional style,
 packaging, developer tooling, decorators, hardening, and eventual
 self-hosting. Every feature requires one owning phase, end-to-end tests,
@@ -26,6 +34,12 @@ diagnostics, and a documentation/status update.
 Future features require an explicit specification change and compatibility
 analysis. Excluded 1.x ideas are not automatically roadmap commitments, and a
 completed documentation design is not an implementation-complete claim.
+
+An optional browser-hosted verified-IR interpreter is positioned as tooling
+alongside compiler validation, not as a roadmap target backend. Its browser
+package may grow only through reviewed compatibility policy, conformance
+fixtures, and resource-boundary tests; a Zirk-to-WebAssembly target would need
+a separate language, ABI, and code-generation proposal.
 
 ---
 

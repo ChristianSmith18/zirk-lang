@@ -22,8 +22,10 @@ cooperative stop.
 
 The first unhandled child exception cancels siblings, waits for their cleanup,
 and propagates with later failures suppressed. A returned `Result.Error` is an
-ordinary completed value. Long-lived work transfers explicitly to the
-application root supervisor.
+ordinary completed value. Zirk does not yet provide a language-level detach or
+service-transfer API. The runtime's detached-job and service supervisors are
+internal foundations, not a way for application code to move work out of its
+structured scope.
 
 ---
 

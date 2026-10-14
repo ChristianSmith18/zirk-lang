@@ -10,7 +10,7 @@
 //! reaches this point.
 
 use crate::ir::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
@@ -23,6 +23,21 @@ use zirk_sema::{
 /// Phase 4b) — see `lower`'s own doc comment on the dummy function it
 /// points to.
 const UNREACHABLE_ABSTRACT_METHOD: &str = "zk.unreachable_abstract_method";
+
+#[derive(Clone, Copy)]
+struct FirstFailureSlots {
+    outcome: SlotId,
+    primary: SlotId,
+    tail: SlotId,
+    has_primary: SlotId,
+}
+
+struct FirstCleanupContext<'a> {
+    index: usize,
+    mask: u16,
+    entries: &'a HashMap<u16, BlockId>,
+    done: BlockId,
+}
 
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
@@ -90,7 +105,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // (`Base::Class` doc comment: the two tables index the same id space).
     // A value type that never implements a contract keeps the empty
     // placeholder, the same way a still-generic template's is.
-    let objects = checked
+    let mut objects: Vec<ObjectLayout> = checked
         .classes
         .iter()
         .enumerate()
@@ -222,6 +237,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         })
         .collect();
 
+    // `Stringifiable` is a real trait even for inline values. A scalar,
+    // collection or enum is converted to its text once, then held in this
+    // ordinary heap object whose contract table answers `to_string()`. This
+    // gives a `Stringifiable`-typed value the same pointer/vtable shape as
+    // every other contract value instead of treating the trait as syntax.
+    let stringifiable_box = checked.native_stringifiable.map(|contract| {
+        let id = objects.len() as u32;
+        let method = &checked.contracts[contract as usize].methods[0];
+        objects.push(ObjectLayout {
+            name: "std.io.Stringifiable$box".into(),
+            fields: vec![ObjectField {
+                name: "text".into(),
+                ty: IrType::String,
+            }],
+            methods: Vec::new(),
+            contracts: vec![ContractTable {
+                contract,
+                methods: vec![stringifiable_box_to_string_symbol()],
+            }],
+            ancestors: vec![id],
+        });
+        debug_assert_eq!(method.name, "to_string");
+        id
+    });
+
     // A record's own layout — indexed the same way `objects`
     // is, sharing `checked.classes`' id space (roadmap task 11.5); an
     // ordinary class's or a still-generic template's entry here is the
@@ -329,6 +369,9 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+    if let Some(id) = stringifiable_box {
+        module.functions.push(build_stringifiable_box_to_string(id));
+    }
 
     // `checked.pointer_types` is pushed first, in the same order, so
     // `Base::Pointer(id)`/`IrType::Pointer(id)` always name the same
@@ -337,6 +380,23 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .pointer_types
         .iter()
         .map(|&pointee| ir_type(pointee, instance_base, enum_instance_base, checked))
+        .collect();
+
+    // `Channel<T>` follows the same lockstep interning rule as pointers: the
+    // semantic and IR ids name the same concrete element type.
+    module.channel_types = checked
+        .channel_types
+        .iter()
+        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+
+    // Mutex payload type ids are interned in lockstep by sema and IR. The
+    // handle is already a traced pointer; this table lets codegen recover the
+    // inline payload's exact layout without exposing a view as a stored value.
+    module.mutex_types = checked
+        .mutex_types
+        .iter()
+        .map(|&payload| ir_type(payload, instance_base, enum_instance_base, checked))
         .collect();
 
     // `checked.weak_types` is pushed first, in the same order, for the same
@@ -403,6 +463,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .iter()
         .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
         .collect();
+
+    // `universal-to-string-and-multiline-strings`: entries the `to_string`
+    // lowering names — the key/element snapshots the runtime builds are
+    // `Array<Int64>` of stored words, and the snapshot externs declare
+    // their collection parameters through these stand-in ids. The word
+    // array reuses a checker-interned `Array<Int64>` when one already
+    // exists so `word_array_type` below resolves the same id the extern
+    // declares; the map/set stand-ins are appended past every
+    // checker-interned entry, which keeps each existing id intact.
+    let word_array_id = module
+        .array_types
+        .iter()
+        .position(|&t| t == IrType::Int(IntWidth::I64))
+        .map(|i| i as u32)
+        .unwrap_or_else(|| {
+            let id = module.array_types.len() as u32;
+            module.array_types.push(IrType::Int(IntWidth::I64));
+            id
+        });
+    let word_map_id = module.map_types.len() as u32;
+    module
+        .map_types
+        .push((IrType::Int(IntWidth::I64), IrType::Int(IntWidth::I64)));
+    let word_set_id = module.set_types.len() as u32;
+    module.set_types.push(IrType::Int(IntWidth::I64));
 
     // `Regex.split` returns `List<String>` and `Regex.find_all` returns
     // `List<Regex.Match>`; the checker interns each element type only when
@@ -574,11 +659,12 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             return_type: IrType::String,
         },
         // `s.split(sep)` (roadmap Phase 7, `String` split): a `List<String>`
-        // of parts; the `List` id is element-agnostic for the runtime call.
+        // of parts, using the checked `String` list id rather than assuming
+        // that it is the first interned list type.
         ExternFn {
             name: "zirk_str_split".to_string(),
             params: vec![IrType::String, IrType::String],
-            return_type: IrType::List(0),
+            return_type: IrType::List(list_string_id.unwrap_or(0)),
         },
         // `d.abs()`/`d.sign()` on a `Duration` (`native-type-member-surface`):
         // nanoseconds in, nanoseconds or an `i32` sign out.
@@ -1071,6 +1157,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 IrType::Int(IntWidth::I64),
             ],
             return_type: IrType::Range,
+        },
+        // `universal-to-string-and-multiline-strings`: `Range` rendering and
+        // the `Map`/`Set` sorted-word snapshots `lower_map_to_string`/
+        // `lower_set_to_string` walk. The snapshot externs declare their
+        // collection parameters through the synthetic stand-in ids pushed
+        // above — the ABI is an opaque pointer either way.
+        ExternFn {
+            name: "zirk_range_to_string".to_string(),
+            params: vec![IrType::Range, IrType::Int(IntWidth::I64)],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_map_sorted_keys".to_string(),
+            params: vec![IrType::Map(word_map_id), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Array(word_array_id),
+        },
+        ExternFn {
+            name: "zirk_rt_set_sorted_elements".to_string(),
+            params: vec![IrType::Set(word_set_id), IrType::Int(IntWidth::I64)],
+            return_type: IrType::Array(word_array_id),
         },
         // `Char` classification and normalization (roadmap Phase 7).
         ExternFn {
@@ -2057,7 +2163,209 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         module.functions.extend(lifted);
     }
 
+    // Types interned mid-lowering (an inferred sequence result's `List<T>`,
+    // say, when no `List<T>` type ever appeared in checked source) missed the
+    // `zirk_rt_array_from_list` registration above — declare the conversions
+    // now so every emitted call resolves.
+    for (array_id, &element) in module.array_types.clone().iter().enumerate() {
+        let Some(list_id) = module
+            .list_types
+            .iter()
+            .position(|&candidate| candidate == element)
+        else {
+            continue;
+        };
+        let declared = module.externs.iter().any(|e| {
+            e.name == "zirk_rt_array_from_list"
+                && e.params.first() == Some(&IrType::List(list_id as u32))
+        });
+        if !declared {
+            module.externs.push(ExternFn {
+                name: "zirk_rt_array_from_list".to_string(),
+                params: vec![
+                    IrType::List(list_id as u32),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Int(IntWidth::U64),
+                    IrType::Boolean,
+                ],
+                return_type: IrType::Array(array_id as u32),
+            });
+        }
+    }
+
+    insert_safepoint_polls(&mut module);
     module
+}
+
+/// Inserts one poll on every reachable CFG back-edge. Branch edges are split
+/// so a poll on one successor never runs on the other path. This operates on
+/// the finished CFG, which also covers `continue` after its cleanup blocks.
+fn insert_safepoint_polls(module: &mut Module) {
+    for function in &mut module.functions {
+        if !function
+            .blocks
+            .iter()
+            .any(|block| block.id == function.entry)
+        {
+            continue;
+        }
+        let count = function.blocks.len();
+        let indices: HashMap<BlockId, usize> = function
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.id, index))
+            .collect();
+
+        let mut reachable = HashSet::new();
+        let mut pending = vec![function.entry];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(&index) = indices.get(&id)
+                && let Some(terminator) = &function.blocks[index].terminator
+            {
+                pending.extend(terminator.successors());
+            }
+        }
+
+        let mut predecessors: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
+            if let Some(terminator) = &block.terminator {
+                for successor in terminator.successors() {
+                    if reachable.contains(&successor) {
+                        predecessors.entry(successor).or_default().push(block.id);
+                    }
+                }
+            }
+        }
+
+        let mut dominators: HashMap<BlockId, HashSet<BlockId>> = reachable
+            .iter()
+            .map(|&id| {
+                (
+                    id,
+                    if id == function.entry {
+                        HashSet::from([id])
+                    } else {
+                        reachable.clone()
+                    },
+                )
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for &id in &reachable {
+                if id == function.entry {
+                    continue;
+                }
+                let preds = predecessors.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                let mut next = preds
+                    .first()
+                    .and_then(|pred| dominators.get(pred).cloned())
+                    .unwrap_or_default();
+                for pred in preds.iter().skip(1) {
+                    if let Some(pred_dominators) = dominators.get(pred) {
+                        next.retain(|candidate| pred_dominators.contains(candidate));
+                    }
+                }
+                next.insert(id);
+                if dominators.get(&id) != Some(&next) {
+                    dominators.insert(id, next);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut next_id = function
+            .blocks
+            .iter()
+            .map(|block| block.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut splits = Vec::new();
+        for source_index in 0..count {
+            let source = function.blocks[source_index].id;
+            if !reachable.contains(&source) {
+                continue;
+            }
+            let mut back_edges: Vec<BlockId> = function.blocks[source_index]
+                .terminator
+                .as_ref()
+                .into_iter()
+                .flat_map(Terminator::successors)
+                .filter(|target| {
+                    dominators
+                        .get(&source)
+                        .is_some_and(|set| set.contains(target))
+                })
+                .collect();
+            back_edges.sort_unstable();
+            back_edges.dedup();
+            if back_edges.is_empty() {
+                continue;
+            }
+
+            if matches!(
+                function.blocks[source_index].terminator,
+                Some(Terminator::Jump(_))
+            ) {
+                {
+                    if !function.blocks[source_index]
+                        .instructions
+                        .last()
+                        .is_some_and(|instruction| {
+                            matches!(instruction.kind, InstKind::SafepointPoll)
+                        })
+                    {
+                        function.blocks[source_index]
+                            .instructions
+                            .push(Instruction {
+                                result: None,
+                                kind: InstKind::SafepointPoll,
+                                ty: IrType::Void,
+                                span: function.span,
+                            });
+                    }
+                }
+            } else if let Some(Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            }) = function.blocks[source_index].terminator.as_mut()
+            {
+                for target in back_edges {
+                    let split = BlockId(next_id);
+                    next_id = next_id.saturating_add(1);
+                    if *then_block == target {
+                        *then_block = split;
+                    }
+                    if *else_block == target {
+                        *else_block = split;
+                    }
+                    splits.push(Block {
+                        id: split,
+                        instructions: vec![Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span: function.span,
+                        }],
+                        terminator: Some(Terminator::Jump(target)),
+                    });
+                }
+            }
+        }
+        function.blocks.extend(splits);
+    }
 }
 
 /// Builds the method bodies of every native failure class by hand
@@ -2110,6 +2418,14 @@ fn synthesize_native_failure_bodies<'a>(
         // constructors throw.
         (native.invalid_date, "E_INVALID_DATE"),
         (native.invalid_time, "E_INVALID_TIME"),
+        (native.cancelled_error, "E_CANCELLED"),
+        (native.timeout_error, "E_TIMEOUT"),
+        (native.task_capacity_error, "E_TASK_CAPACITY"),
+        (native.timer_capacity_error, "E_TIMER_CAPACITY"),
+        (native.background_capacity_error, "E_BACKGROUND_CAPACITY"),
+        (native.service_capacity_error, "E_SERVICE_CAPACITY"),
+        (native.service_lifecycle_error, "E_SERVICE_LIFECYCLE"),
+        (native.invalid_argument, "E_INVALID_ARGUMENT"),
     ];
 
     for (class_id, code) in classes {
@@ -2204,7 +2520,7 @@ fn lower_class_body<'a>(
 
     // A method is the same shape as a constructor: a function whose first
     // parameter is the receiver.
-    for (index, method) in class.methods.iter().enumerate() {
+    for method in &class.methods {
         let Some(body) = &method.body else { continue };
         let lowering = FunctionLowering::new(
             module,
@@ -2213,7 +2529,7 @@ fn lower_class_body<'a>(
             instance_base,
             enum_instance_base,
         );
-        let (lowered, lifted) = lowering.run_method(class, method, body, id, index);
+        let (lowered, lifted) = lowering.run_method(class, method, body, id);
         module.functions.push(lowered);
         module.functions.extend(lifted);
     }
@@ -2496,10 +2812,7 @@ fn substitute_generic_type(checked: &CheckedProgram, ty: Type, subst: &[(u32, Ty
         _ => return ty,
     };
 
-    Type {
-        base,
-        nullable: ty.nullable,
-    }
+    ty.with_base(base)
 }
 
 /// One generic enum's own `T` replaced by one instantiation's concrete
@@ -2583,6 +2896,54 @@ pub fn static_field_symbol(class: &str, field: &str) -> String {
 /// however many classes reuse it.
 pub fn contract_method_symbol(contract: &str, method: &str) -> String {
     format!("{contract}$default${method}")
+}
+
+fn stringifiable_box_to_string_symbol() -> String {
+    "std.io.Stringifiable$box$to_string".into()
+}
+
+/// The single vtable body used by compiler-generated boxes that turn any
+/// value into a real `Stringifiable` object. Conversion happens before
+/// allocation; a contract call simply reads this immutable text field.
+fn build_stringifiable_box_to_string(id: u32) -> Function {
+    let span = Span::empty(0);
+    let this = SlotId(0);
+    let receiver = Operand(ValueId(0));
+    let text = Operand(ValueId(1));
+    Function {
+        name: stringifiable_box_to_string_symbol(),
+        params: vec![this],
+        return_type: IrType::String,
+        slots: vec![Slot {
+            name: "this".into(),
+            ty: IrType::Object(id),
+            span,
+        }],
+        blocks: vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::Load(this),
+                    ty: IrType::Object(id),
+                    span,
+                },
+                Instruction {
+                    result: Some(ValueId(1)),
+                    kind: InstKind::LoadField {
+                        object: receiver,
+                        index: 0,
+                    },
+                    ty: IrType::String,
+                    span,
+                },
+            ],
+            terminator: Some(Terminator::Return(Some(text))),
+        }],
+        entry: BlockId(0),
+        span,
+        gc_roots: vec![this],
+    }
 }
 
 /// The name a boxed value's contract-table entry for one of its own methods
@@ -2707,6 +3068,14 @@ fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
         .any(|v| !v.associated.is_empty())
 }
 
+/// The name a user wrote for a class — a class declared inside a block is
+/// interned as `Name$local$N` so two blocks can each declare `Name`, but
+/// that suffix is a compiler detail that must never surface in rendered
+/// output (`universal-to-string-and-multiline-strings`).
+fn surface_name(interned: &str) -> &str {
+    interned.split("$local$").next().unwrap_or(interned)
+}
+
 /// Converts a frontend type into an IR type.
 ///
 /// `instance_base` is where the specialized copies of generic classes start
@@ -2743,6 +3112,21 @@ fn ir_type(
         Base::DateTime => IrType::Int(IntWidth::I128),
         Base::Regex => IrType::Regex,
         Base::Char => IrType::Char,
+        // The runtime-issued callback capability carries its stable service ID.
+        // Source execution remains gated until the complete callback ABI lands.
+        Base::ServiceContext => IrType::Int(IntWidth::U64),
+        Base::ServiceCapacityError => IrType::Object(
+            checked
+                .native_exceptions
+                .expect("native exceptions are registered before lowering")
+                .service_capacity_error,
+        ),
+        Base::ServiceLifecycleError => IrType::Object(
+            checked
+                .native_exceptions
+                .expect("native exceptions are registered before lowering")
+                .service_lifecycle_error,
+        ),
         // A traditional enum — none of its variants carry data — is exactly
         // its discriminant. One with at least one algebraic variant gets a
         // representation of its own (roadmap task 11.3).
@@ -2806,6 +3190,16 @@ fn ir_type(
         // A Job is an opaque one-word runtime handle. Its source-level result
         // type remains in the checker; IR operations recover it at `JobWait`.
         Base::Job(_) => IrType::Job,
+        Base::Channel(id) => IrType::Channel(id),
+        Base::Atomic(id) => {
+            let scalar = checked.atomic_types[id as usize];
+            let scalar_ir = ir_type(scalar, instance_base, enum_instance_base, checked);
+            IrType::Atomic(
+                crate::AtomicKind::from_ir_type(scalar_ir)
+                    .expect("sema restricts Atomic<T> to supported scalar widths"),
+            )
+        }
+        Base::Mutex(id) => IrType::Mutex(id),
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -3019,6 +3413,7 @@ struct FunctionLowering<'a> {
     /// (having run every enclosing `finally` it passes on the way) an early
     /// return from the current function.
     try_stack: Vec<TryFrame>,
+    cancellation_cleanup_depth: u32,
     /// Active `unsafe { ... }` frames, innermost last (roadmap Phase 4e,
     /// `fase-4e-unsafe-journal`, design D1/D4) — what a write inside an
     /// active block journals against, and what a propagating exception
@@ -3153,6 +3548,15 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     fn job_result(&self, id: u32) -> Type {
         self.0.job_types[id as usize]
     }
+    fn channel_element(&self, id: u32) -> Type {
+        self.0.channel_types[id as usize]
+    }
+    fn atomic_element(&self, id: u32) -> Type {
+        self.0.atomic_types[id as usize]
+    }
+    fn mutex_element(&self, id: u32) -> Type {
+        self.0.mutex_types[id as usize]
+    }
     fn class_name(&self, id: u32) -> String {
         self.0.classes[id as usize].name.clone()
     }
@@ -3243,6 +3647,124 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
 }
 
 impl<'a> FunctionLowering<'a> {
+    /// Returns a direct `Concurrent.of` call and its optional timeout duration
+    /// from a checked terminal. Lowering reads the original AST so duration
+    /// evaluation remains exactly once.
+    fn concurrent_pipeline_parts(
+        terminal: &ast::CallExpr,
+        has_deadline: bool,
+    ) -> (&ast::CallExpr, Option<&ast::Expr>) {
+        let ast::Expr::Field(field) = &*terminal.callee else {
+            unreachable!("completion terminal is a field call")
+        };
+        if !has_deadline {
+            let ast::Expr::Call(of_call) = &*field.object else {
+                unreachable!("sema validates a direct Concurrent.of pipeline")
+            };
+            return (of_call, None);
+        }
+        let ast::Expr::Call(within) = &*field.object else {
+            unreachable!("sema validates the within stage")
+        };
+        let ast::Expr::Field(within_field) = &*within.callee else {
+            unreachable!("within is a field call")
+        };
+        let ast::Expr::Call(of_call) = &*within_field.object else {
+            unreachable!("sema validates a direct Concurrent.of pipeline")
+        };
+        (of_call, within.args.first().map(|arg| &arg.value))
+    }
+
+    /// Validates signed nanoseconds before any child starts. A negative
+    /// duration raises a compiler-known language error rather than reaching
+    /// TimerService's fatal ABI guard.
+    fn lower_concurrent_deadline(
+        &mut self,
+        duration: Option<&ast::Expr>,
+        span: Span,
+    ) -> Option<Operand> {
+        let duration = duration?;
+        let nanos = self.lower_expr_as(duration, IrType::Int(IntWidth::I64));
+        let slot = self.spill(nanos, IrType::Int(IntWidth::I64), duration.span());
+        let value = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        let negative = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: negative,
+            then_block: invalid,
+            else_block: valid,
+        });
+        self.current = invalid;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        self.throw_native_failure(native.native_error, "duration must not be negative", span);
+        self.current = valid;
+        Some(self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span))
+    }
+
+    /// Starts a no-op ambient timer task which participates in the same
+    /// completion-sequence ordering as the pipeline branches.
+    fn lower_deadline_timer(&mut self, delay: Operand, scope_slot: SlotId, span: Span) -> Operand {
+        let target = format!("zirk.within.deadline.{}.{}", span.file.0, span.start);
+        let closure = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: vec![],
+            params: vec![],
+            returns: IrType::Void,
+        });
+        let entry = BlockId(0);
+        let mut block = Block::new(entry);
+        block.terminator = Some(Terminator::Return(None));
+        self.lifted.push(Function {
+            name: target.clone(),
+            params: vec![],
+            return_type: IrType::Void,
+            gc_roots: vec![],
+            slots: vec![],
+            blocks: vec![block],
+            entry,
+            span,
+        });
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: target.clone(),
+                captures: vec![],
+            },
+            IrType::Callable(closure),
+            span,
+        );
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        let job = self.emit(
+            InstKind::BranchStart {
+                target,
+                body,
+                scope,
+                kind: BranchKind::TimerAfter,
+                delay: Some(delay),
+                status_slot,
+            },
+            IrType::Job,
+            span,
+        );
+        let job_slot = self.spill(job, IrType::Job, span);
+        self.lower_branch_admission_check(status_slot, BranchKind::TimerAfter, span);
+        self.emit(InstKind::Load(job_slot), IrType::Job, span)
+    }
+
     fn new(
         module: &'a mut Module,
         checked: &'a CheckedProgram,
@@ -3267,6 +3789,7 @@ impl<'a> FunctionLowering<'a> {
             value_types: HashMap::new(),
             current_catch: None,
             try_stack: Vec::new(),
+            cancellation_cleanup_depth: 0,
             unsafe_stack: Vec::new(),
             next_scope_seq: 0,
             recursive_call: None,
@@ -3335,6 +3858,19 @@ impl<'a> FunctionLowering<'a> {
     /// is what must survive, not merely the slot it happened to come from,
     /// since that slot can be overwritten before the next collection point.
     fn emit(&mut self, kind: InstKind, ty: IrType, span: Span) -> Operand {
+        // A `Void` instruction materializes no value, so it must not declare a
+        // result id: consumers read `result.is_some()` as "produces a value"
+        // (the interpreter builds its call return destination from exactly
+        // that, and the verifier rejects a `Void` instruction that carries
+        // one). Emitting it as an effect and returning the `Undefined`
+        // placeholder keeps every caller's `Operand` valid — `Undefined` is
+        // the one `Void`-typed instruction allowed to declare a result,
+        // precisely because it exists to stand in value position for a `Void`
+        // expression.
+        if ty == IrType::Void && !matches!(kind, InstKind::Undefined) {
+            self.emit_effect(kind, span);
+            return self.emit(InstKind::Undefined, IrType::Void, span);
+        }
         let result = self.new_value();
         self.value_types.insert(result, ty);
         let current = self.current;
@@ -3457,6 +3993,14 @@ impl<'a> FunctionLowering<'a> {
     /// The checker recorded the resolution, so lowering does not need to know
     /// that aliases exist.
     fn callee_name(&self, call: &ast::CallExpr) -> String {
+        if let Some(binding) = self.checked.standard_stream_calls.get(&call.span) {
+            return binding.clone();
+        }
+        if let ast::Expr::Field(field) = &*call.callee
+            && self.checked.aliases.contains_key(&field.name.span)
+        {
+            return self.declaration_of(&field.name.name, field.name.span);
+        }
         let ident = callee_ident(call);
         self.declaration_of(&ident.name, ident.span)
     }
@@ -3470,10 +4014,28 @@ impl<'a> FunctionLowering<'a> {
             .unwrap_or_else(|| written.to_string())
     }
 
+    /// Internal symbol for a compiler-bundled stream implementation. The
+    /// source-level name remains `stdout.println` or `stderr.println`; the
+    /// qualified IR name prevents their equally named bodies from colliding.
+    fn standard_stream_function_symbol(&self, function: &ast::FnDecl) -> String {
+        self.checked
+            .standard_stream_source_modules
+            .get(&function.name.span.file)
+            .map(|module| format!("std.io.{module}.{}", function.name.name))
+            .unwrap_or_else(|| function.name.name.clone())
+    }
+
     fn ir_type_from_ref(&self, reference: &ast::TypeRef) -> IrType {
+        self.ir_type(self.resolve_written_type_with_nullability(reference))
+    }
+
+    /// Resolves a written type and preserves its `?` marker. Generic
+    /// arguments reach lowering through `resolve_written_type` too, so they
+    /// must retain this bit before looking up the checker-interned shape.
+    fn resolve_written_type_with_nullability(&self, reference: &ast::TypeRef) -> Type {
         let mut ty = self.resolve_written_type(reference);
         ty.nullable = reference.nullable;
-        self.ir_type(ty)
+        ty
     }
 
     /// Resolves a written type reference the same way the checker's own
@@ -3518,7 +4080,7 @@ impl<'a> FunctionLowering<'a> {
         // structural equality, matching the exact id `Checker::resolve_pointer_type_ref`
         // used, rather than interning a second, unrelated table here.
         if reference.name == "Pointer" {
-            let pointee = self.resolve_written_type(&reference.arguments[0]);
+            let pointee = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .pointer_types
@@ -3533,7 +4095,7 @@ impl<'a> FunctionLowering<'a> {
         // handle. Looked up in `checked.job_types` by structural equality on
         // the result `T`, matching the id `Checker::resolve_job_type_ref` used.
         if reference.name == "Job" {
-            let result = self.resolve_written_type(&reference.arguments[0]);
+            let result = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .job_types
@@ -3544,10 +4106,34 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Job(id));
         }
 
+        if reference.name == "Channel" {
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+            let id = self
+                .checked
+                .channel_types
+                .iter()
+                .position(|&t| t == element)
+                .expect("the checker interned every Channel<T> it type-checked")
+                as u32;
+            return Type::of(Base::Channel(id));
+        }
+
+        if reference.name == "Mutex" {
+            let payload = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+            let id = self
+                .checked
+                .mutex_types
+                .iter()
+                .position(|&ty| ty == payload)
+                .expect("the checker interned every Mutex<T> it type-checked")
+                as u32;
+            return Type::of(Base::Mutex(id));
+        }
+
         // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
         // treatment as `Pointer<T>` above.
         if reference.name == "Weak" {
-            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .weak_types
@@ -3562,7 +4148,7 @@ impl<'a> FunctionLowering<'a> {
         // `fase-4e-native-slice`, design D1): same treatment as
         // `Pointer<T>`/`Weak<T>` above.
         if reference.name == "NativeSlice" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .native_slice_types
@@ -3573,7 +4159,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::NativeSlice(id));
         }
         if reference.name == "NativeSliceMut" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .native_slice_mut_types
@@ -3587,7 +4173,7 @@ impl<'a> FunctionLowering<'a> {
         // `Dependent<T>` / `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
         // design D1): same treatment as `Pointer<T>`/`Weak<T>` above.
         if reference.name == "Dependent" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .dependent_types
@@ -3598,7 +4184,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Dependent(id));
         }
         if reference.name == "Pin" {
-            let referent = self.resolve_written_type(&reference.arguments[0]);
+            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .pin_types
@@ -3611,7 +4197,7 @@ impl<'a> FunctionLowering<'a> {
 
         // `Array<T>` / `List<T>`: same interned-by-content treatment as slices.
         if reference.name == "Array" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .array_types
@@ -3622,7 +4208,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Array(id));
         }
         if reference.name == "List" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .list_types
@@ -3636,8 +4222,8 @@ impl<'a> FunctionLowering<'a> {
         // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
         // treatment — the checker already interned every shape.
         if reference.name == "Map" {
-            let key = self.resolve_written_type(&reference.arguments[0]);
-            let value = self.resolve_written_type(&reference.arguments[1]);
+            let key = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+            let value = self.resolve_written_type_with_nullability(&reference.arguments[1]);
             let id = self
                 .checked
                 .map_types
@@ -3648,7 +4234,7 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Map(id));
         }
         if reference.name == "Set" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .set_types
@@ -3663,7 +4249,7 @@ impl<'a> FunctionLowering<'a> {
         // the element type the checker stored is resolved and matched back
         // against `checked.range_types`.
         if reference.name == "Range" {
-            let element = self.resolve_written_type(&reference.arguments[0]);
+            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
             let id = self
                 .checked
                 .range_types
@@ -3679,7 +4265,7 @@ impl<'a> FunctionLowering<'a> {
             let elements: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
             let tuple = TupleType { elements };
             let id = self
@@ -3712,7 +4298,7 @@ impl<'a> FunctionLowering<'a> {
             let args: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
             let instance = self
                 .checked
@@ -3727,7 +4313,7 @@ impl<'a> FunctionLowering<'a> {
             let mut args: Vec<Type> = reference
                 .arguments
                 .iter()
-                .map(|a| self.resolve_written_type(a))
+                .map(|a| self.resolve_written_type_with_nullability(a))
                 .collect();
 
             // Apply trailing type-parameter defaults at use sites the same way
@@ -3848,6 +4434,45 @@ impl<'a> FunctionLowering<'a> {
     /// the IR performs implicitly: this is where the widening becomes an
     /// instruction.
     fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
+        if let ast::Expr::Call(call) = expr
+            && self.checked.first_plans.contains_key(&call.span)
+        {
+            return self.lower_concurrent_first(call, call.span);
+        }
+        // `std.io::Stringifiable` is a compiler-provided trait, not an
+        // erased `String` parameter.  Values that do not already have the
+        // trait's object representation are put in a small ordinary object
+        // with a real contract table.  Its vtable's `to_string()` returns the
+        // text produced by the value's normal implementation (including a
+        // class's `#override`).  Consequently the bundled Zirk body still
+        // performs an ordinary virtual `arg.to_string()` call.
+        if let IrType::Contract(contract) = expected
+            && self.checked.native_stringifiable == Some(contract)
+        {
+            let value = self.lower_render_operand(expr, expr.span());
+            if self.type_of_operand(value) == expected {
+                return value;
+            }
+            let text = self.lower_to_string_expr(expr, value, expr.span());
+            let box_id = self
+                .module
+                .objects
+                .iter()
+                .position(|layout| layout.name == "std.io.Stringifiable$box")
+                .expect("Stringifiable boxing layout is present when its trait is declared")
+                as u32;
+            let object = self.emit(InstKind::Alloc(box_id), IrType::Object(box_id), expr.span());
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: 0,
+                    value: text,
+                },
+                expr.span(),
+            );
+            return self.emit(InstKind::Retype(object), expected, expr.span());
+        }
+
         // A diverging source (`fatalError(...)`, roadmap Phase 4a) never
         // actually produces a value of `expected` — the checker's
         // `Type::accepts`/`Type::unify` already let `Never` fit anywhere, so
@@ -4159,6 +4784,21 @@ impl<'a> FunctionLowering<'a> {
             .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span))
             .collect();
 
+        // A queued task may already be cancelled before its first turn. The
+        // entry edge has no active lexical cleanup yet, but it must still
+        // return through the controlled cancellation outcome.
+        let entry_cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, function.span);
+        let cancelled_entry = self.new_block();
+        let body_entry = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: entry_cancelled,
+            then_block: cancelled_entry,
+            else_block: body_entry,
+        });
+        self.current = cancelled_entry;
+        self.terminate(Terminator::Cancel);
+        self.current = body_entry;
+
         // `main` runs in an implicit `concurrent` scope
         // (`concurrent-blocks-and-timers`, design D5) — opened only when the
         // body directly starts a branch (`spawn`, `Timer.after` / `every`)
@@ -4206,7 +4846,7 @@ impl<'a> FunctionLowering<'a> {
         let lifted = std::mem::take(&mut self.lifted);
         let gc_roots = gc_roots_of(self.module, &self.slots);
         let lowered = Function {
-            name: function.name.name.clone(),
+            name: self.standard_stream_function_symbol(function),
             params,
             return_type: self.return_type,
             slots: self.slots,
@@ -4287,6 +4927,42 @@ impl<'a> FunctionLowering<'a> {
                 .map(|(p, ty)| self.declare_slot(&p.name.name, ty, p.name.span)),
         );
 
+        // Parameter properties are ordinary field stores, emitted after the
+        // allocation defaults and before the user-written body.
+        for param in constructor
+            .params
+            .iter()
+            .filter(|param| param.promoted.is_some())
+        {
+            let object = self.emit(InstKind::Load(this), IrType::Object(id), param.name.span);
+            let field_ty = self.checked.classes[id as usize]
+                .fields
+                .iter()
+                .find(|field| field.name == param.name.name && field.owner == id)
+                .expect("checker registers every promoted parameter")
+                .ty;
+            let value = self.emit(
+                InstKind::Load(self.lookup_slot(&param.name.name)),
+                self.ir_type(field_ty),
+                param.name.span,
+            );
+            let field_index = self.checked.classes[id as usize]
+                .fields
+                .iter()
+                .filter(|field| !field.is_static)
+                .position(|field| field.name == param.name.name && field.owner == id)
+                .expect("checker registers every promoted parameter")
+                as u32;
+            self.emit_effect(
+                InstKind::StoreField {
+                    object,
+                    index: field_index,
+                    value,
+                },
+                param.name.span,
+            );
+        }
+
         self.lower_block(&constructor.body);
         self.terminate(Terminator::Return(None));
         self.scopes.pop();
@@ -4322,7 +4998,16 @@ impl<'a> FunctionLowering<'a> {
         body: &ast::Block,
         id: u32,
     ) -> (Function, Vec<Function>) {
-        self.return_type = self.ir_type_from_ref(&method.return_type);
+        // The checker's resolved return type — which is what an unannotated
+        // trait default's inferred type lives in (`return-type-inference`),
+        // not the AST's now-optional annotation.
+        let resolved_method = self
+            .checked
+            .contracts
+            .get(id as usize)
+            .and_then(|c| c.method(&method.name.name))
+            .expect("the checker records every contract method");
+        self.return_type = self.ir_type(resolved_method.returns);
 
         let entry = self.new_block();
         self.current = entry;
@@ -4330,13 +5015,11 @@ impl<'a> FunctionLowering<'a> {
 
         let this = self.declare_slot("this", IrType::Contract(id), contract.name.span);
 
-        let resolved: Vec<IrType> = self
-            .checked
-            .contracts
-            .get(id as usize)
-            .and_then(|c| c.method(&method.name.name))
-            .map(|m| m.params.iter().map(|p| self.ir_type(p.ty)).collect())
-            .expect("the checker records every contract method");
+        let resolved: Vec<IrType> = resolved_method
+            .params
+            .iter()
+            .map(|p| self.ir_type(p.ty))
+            .collect();
 
         let mut params = vec![this];
         params.extend(
@@ -4439,10 +5122,14 @@ impl<'a> FunctionLowering<'a> {
             // there is no empty grapheme to fall back to.
             IrType::Void
             | IrType::Never
+            | IrType::BorrowedView { .. }
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Callable(_)
             | IrType::Job
+            | IrType::Channel(_)
+            | IrType::Atomic(_)
+            | IrType::Mutex(_)
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -4493,7 +5180,6 @@ impl<'a> FunctionLowering<'a> {
         method: &ast::MethodDecl,
         body: &ast::Block,
         id: u32,
-        index: usize,
     ) -> (Function, Vec<Function>) {
         // Read from the checked class rather than the written annotation: a
         // specialized copy's method returns `Int32` where the AST still says
@@ -4504,7 +5190,19 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .classes
             .get(id as usize)
-            .and_then(|c| c.methods.iter().find(|m| m.index == index))
+            .and_then(|c| {
+                // `index` is the declaration position inside this class's own
+                // body, while `MethodInfo::index` counts inherited methods
+                // too, so the two only agree for a class without a base. A
+                // subclass's first own method would otherwise match the
+                // base's first method. A class has no overloading, so the
+                // name identifies the entry; prefer the one this class
+                // declares over an inherited entry of the same name.
+                c.methods
+                    .iter()
+                    .find(|m| m.name == method.name.name && m.owner == id)
+                    .or_else(|| c.methods.iter().find(|m| m.name == method.name.name))
+            })
             .expect("the checker records every method");
         self.return_type = self.ir_type(found.returns);
         let resolved: Vec<IrType> = found.params.iter().map(|p| self.ir_type(p.ty)).collect();
@@ -5122,6 +5820,23 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
+        if let ast::AssignTarget::Field(field) = &stmt.target
+            && field.name.name == "on_background_error"
+            && matches!(&*field.object, ast::Expr::Path(base) if base.name == "App")
+            && !self.scopes.iter().any(|scope| scope.contains_key("App"))
+            && !self.checked.functions.contains_key("App")
+            && !self.checked.classes.iter().any(|class| class.name == "App")
+        {
+            let callable = self.lower_expr(&stmt.value);
+            let IrType::Callable(layout) = self.type_of_operand(callable) else {
+                unreachable!("sema validates the App handler as a function")
+            };
+            self.emit_effect(
+                InstKind::AppSetBackgroundError { callable, layout },
+                stmt.span,
+            );
+            return;
+        }
         match &stmt.target {
             // `_ = expr;`: the value is lowered for its side effects and
             // then dropped — there is no slot named `_` to store it in
@@ -5132,11 +5847,35 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
-                let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
-                self.journal_writes_to_slot(slot, stmt.span);
-                self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                let slot_ty = self.slot_type(slot);
+                if let IrType::BorrowedView { mutex_type, .. } = slot_ty {
+                    let payload_ty = self.module.mutex_types[mutex_type as usize];
+                    let value = self.lower_expr_as(&stmt.value, payload_ty);
+                    let view = self.emit(InstKind::Load(slot), slot_ty, stmt.span);
+                    self.emit_effect(InstKind::BorrowViewStore { view, value }, stmt.span);
+                } else {
+                    let value = self.lower_expr_as(&stmt.value, slot_ty);
+                    self.journal_writes_to_slot(slot, stmt.span);
+                    self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                }
             }
             ast::AssignTarget::Field(field) => {
+                if let Some((view_slot, mut path, object_ty)) =
+                    self.borrowed_view_field_path(&field.object)
+                {
+                    let (index, field_ty) = self
+                        .field_position_for_ir_type(object_ty, &field.name.name)
+                        .expect("sema validated a field on the borrowed payload");
+                    path.push(index);
+                    let value = self.lower_expr_as(&stmt.value, field_ty);
+                    let view_ty = self.slot_type(view_slot);
+                    let view = self.emit(InstKind::Load(view_slot), view_ty, stmt.span);
+                    self.emit_effect(
+                        InstKind::BorrowViewFieldStore { view, path, value },
+                        stmt.span,
+                    );
+                    return;
+                }
                 // The object is evaluated before the value, which is the order
                 // it is written in. The value may now introduce a guard branch
                 // (`+`, `-`, `*`, `/`, `%` with overflow or division-by-zero
@@ -6783,7 +7522,16 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Path(ident) => {
                 if let Some(slot) = self.try_lookup_slot(&ident.name) {
                     let ty = self.slot_type(slot);
-                    self.emit(InstKind::Load(slot), ty, span)
+                    if matches!(ty, IrType::BorrowedView { .. }) {
+                        let IrType::BorrowedView { mutex_type, .. } = ty else {
+                            unreachable!()
+                        };
+                        let payload = self.module.mutex_types[mutex_type as usize];
+                        let view = self.emit(InstKind::Load(slot), ty, span);
+                        self.emit(InstKind::BorrowViewLoad { view }, payload, span)
+                    } else {
+                        self.emit(InstKind::Load(slot), ty, span)
+                    }
                 } else if ident.name == "outer"
                     && let Some(class) = self.current_class
                     && let Some(parent) = self.checked.classes[class as usize].enclosing
@@ -7024,12 +7772,27 @@ impl<'a> FunctionLowering<'a> {
                             self.convert_numeric(right, right_actual, common, e.right.span());
                         (left, right, common)
                     } else {
+                        // Ordered comparisons share arithmetic's rule: both
+                        // operands are evaluated in their smallest common
+                        // type, so `i32 < u64` widens instead of narrowing the
+                        // unsigned side into the signed one. Other operators
+                        // (bitwise, shifts) keep the left operand's domain —
+                        // a shift's result is the shifted value's own type.
+                        let common = if matches!(
+                            op,
+                            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq
+                        ) {
+                            self.common_numeric_ir_type(left_ty, right_ty)
+                                .unwrap_or(left_ty)
+                        } else {
+                            left_ty
+                        };
                         let left_actual = self.type_of_operand(left);
                         let right_actual = self.type_of_operand(right);
-                        let left = self.convert_numeric(left, left_actual, left_ty, e.left.span());
+                        let left = self.convert_numeric(left, left_actual, common, e.left.span());
                         let right =
-                            self.convert_numeric(right, right_actual, left_ty, e.right.span());
-                        (left, right, left_ty)
+                            self.convert_numeric(right, right_actual, common, e.right.span());
+                        (left, right, common)
                     }
                 } else {
                     match (left_ty, right_ty) {
@@ -7076,6 +7839,15 @@ impl<'a> FunctionLowering<'a> {
                 self.emit_checked_binary(op, left, right, operand_type, span)
             }
 
+            ast::Expr::Call(e)
+                if matches!(&*e.callee, ast::Expr::Field(field)
+                    if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Channel")
+                        && field.name.name == "unbounded") =>
+            {
+                self.lower_array_list_construction(e, span)
+                    .expect("checked Channel.unbounded construction")
+            }
+
             // A recursive lambda calling itself by its own binding name
             // (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d): an
             // ordinary, direct recursive call to this same lifted function,
@@ -7103,8 +7875,34 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
+            ast::Expr::Call(e) if self.is_thread_run_call(e) => self.lower_thread_run_call(e, span),
+
+            ast::Expr::Call(e) if self.checked.service_spawns.contains_key(&e.span) => {
+                self.lower_service_start(e, span)
+            }
+
+            ast::Expr::Call(e) if self.checked.service_ready_calls.contains_key(&e.span) => {
+                self.lower_service_ready(e, span)
+            }
+
             // Calling a callable value goes through the boxed callable, not a name.
-            ast::Expr::Call(e) if !Self::is_parallel_each_call(e) && self.is_callable_call(e) => {
+            ast::Expr::Call(e) if self.checked.mutex_with_calls.contains_key(&e.span) => {
+                self.lower_mutex_with_call(e, span)
+            }
+
+            ast::Expr::Call(e)
+                if !Self::is_parallel_each_call(e)
+                    && !self.is_atomic_call(e)
+                    && !self.checked.mutex_with_calls.contains_key(&e.span)
+                    && !self.is_concurrent_detach_call(e)
+                    && !matches!(
+                        &*e.callee,
+                        ast::Expr::Field(field)
+                            if self.checked.aliases.contains_key(&field.name.span)
+                                || self.checked.standard_stream_calls.contains_key(&e.span)
+                    )
+                    && self.is_callable_call(e) =>
+            {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
                 };
@@ -7126,6 +7924,43 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if self.is_mutex_constructor_call(e) {
+                    return self.lower_mutex_construction(e, span);
+                }
+                if self.is_atomic_call(e) {
+                    return self.lower_atomic_call(e, span);
+                }
+                if self.checked.concurrent_each_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_each(e, span);
+                }
+                if self.checked.first_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_first(e, span);
+                }
+                if self.checked.settled_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_settled(e, span);
+                }
+                if let Some(result) = self.try_lower_stdio_host_call(e, span) {
+                    let returns = self.type_of_operand(result);
+                    return self.lower_throws_check(result, returns, span);
+                }
+                if let ast::Expr::Field(field) = &*e.callee
+                    && let ast::Expr::Path(base) = &*field.object
+                    && base.name == "Channel"
+                    && field.name.name == "unbounded"
+                {
+                    return self
+                        .lower_array_list_construction(e, span)
+                        .expect("checked Channel.unbounded construction");
+                }
+                if self.is_concurrent_protect_call(e) {
+                    return self.lower_concurrent_protect_call(e, span);
+                }
+                if self.is_concurrent_detach_call(e) {
+                    return self.lower_concurrent_detach(e, span);
+                }
+                if self.is_app_shutdown_grace_call(e) {
+                    return self.lower_app_shutdown_grace_call(e, span);
+                }
                 if self.is_timer_call(e) {
                     return self.lower_timer_call(e, span);
                 }
@@ -7165,6 +8000,22 @@ impl<'a> FunctionLowering<'a> {
                 }
                 if let Some(operand) = self.lower_super_call(e, span) {
                     return operand;
+                }
+                // A module namespace is not a runtime receiver. Resolution
+                // already selected its shared declaration, so lower the call
+                // directly before receiver-oriented method probes inspect the
+                // namespace path as though it were a value.
+                if matches!(
+                    &*e.callee,
+                    ast::Expr::Field(field)
+                        if self.checked.aliases.contains_key(&field.name.span)
+                            || self.checked.standard_stream_calls.contains_key(&e.span)
+                ) {
+                    let name = self.callee_name(e);
+                    let args = self.lower_args(e);
+                    let returns = self.signature_return(&name);
+                    let result = self.emit(InstKind::Call { callee: name, args }, returns, span);
+                    return self.lower_throws_check(result, returns, span);
                 }
                 // `Outer.Nested(...)` / `o.Inner(...)`: a construction whose
                 // callee is a field access. The method-call lowerers below
@@ -7228,6 +8079,9 @@ impl<'a> FunctionLowering<'a> {
                     return operand;
                 }
                 if let Some(operand) = self.lower_map_set_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_channel_method_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
@@ -7683,7 +8537,7 @@ impl<'a> FunctionLowering<'a> {
             .map(|binding| binding.statement_index)
             .collect();
 
-        let mut jobs: Vec<Option<Operand>> = vec![None; block.bindings.len()];
+        let mut jobs: Vec<Option<SlotId>> = vec![None; block.bindings.len()];
         let mut joined = vec![false; block.bindings.len()];
 
         for &i in &plan.order {
@@ -7722,7 +8576,9 @@ impl<'a> FunctionLowering<'a> {
                 None,
                 span,
             );
-            jobs[i] = Some(job);
+            let job_slot = self.declare_slot("<branch-job>", IrType::Job, binding.span);
+            self.emit_effect(InstKind::Store(job_slot, job), span);
+            jobs[i] = Some(job_slot);
         }
 
         // The block's own branch: the plain statements, in source order. The
@@ -7773,7 +8629,7 @@ impl<'a> FunctionLowering<'a> {
         &mut self,
         block: &ast::ConcurrentBlock,
         index: usize,
-        jobs: &[Option<Operand>],
+        jobs: &[Option<SlotId>],
         joined: &mut [bool],
         span: Span,
     ) {
@@ -7781,7 +8637,8 @@ impl<'a> FunctionLowering<'a> {
             return;
         }
         joined[index] = true;
-        let job = jobs[index].expect("a branch is started before it is joined");
+        let job_slot = jobs[index].expect("a branch is started before it is joined");
+        let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
         let binding = &block.bindings[index];
         let returns = {
             let info = self
@@ -7864,17 +8721,1126 @@ impl<'a> FunctionLowering<'a> {
             .last()
             .expect("the checker requires a scope around every branch");
         let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
-        self.emit(
+        let status_zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(status_zero, IrType::Int(IntWidth::U32), span);
+        let job = self.emit(
             InstKind::BranchStart {
                 target: name,
                 body: callable,
                 scope,
                 kind,
                 delay,
+                status_slot,
             },
             IrType::Job,
             span,
-        )
+        );
+        let job_slot = self.spill(job, IrType::Job, span);
+        self.lower_branch_admission_check(status_slot, kind, span);
+        self.emit(InstKind::Load(job_slot), IrType::Job, span)
+    }
+
+    fn lower_concurrent_detach(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let callback = &call.args[0].value;
+        let (target, body) = if let ast::Expr::Lambda(lambda) = callback {
+            let info = self
+                .checked
+                .lambdas
+                .get(&lambda.span)
+                .expect("sema records a validated detach lambda")
+                .clone();
+            let captures: Vec<SlotId> = info
+                .captures
+                .iter()
+                .map(|capture| self.lookup_slot(&capture.name))
+                .collect();
+            let capture_types: Vec<IrType> =
+                captures.iter().map(|slot| self.slot_type(*slot)).collect();
+            let names: Vec<String> = info
+                .captures
+                .iter()
+                .map(|capture| capture.name.clone())
+                .collect();
+            let values: Vec<Operand> = captures
+                .iter()
+                .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+                .collect();
+            let target = format!("background.{}.{}", lambda.span.file.0, lambda.span.start);
+            let body_ast = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            self.module.closures[info.fn_type as usize] = ClosureLayout {
+                captures: capture_types.clone(),
+                params: Vec::new(),
+                returns: IrType::Void,
+            };
+            let lifted = self.lift_branch_body(
+                &target,
+                &names,
+                &capture_types,
+                IrType::Void,
+                body_ast,
+                span,
+            );
+            self.lifted.push(lifted);
+            let body = self.emit(
+                InstKind::MakeCallable {
+                    target: target.clone(),
+                    captures: values,
+                },
+                IrType::Callable(info.fn_type),
+                span,
+            );
+            (target, body)
+        } else {
+            let callback = self.lower_expr(callback);
+            let IrType::Callable(callback_layout) = self.type_of_operand(callback) else {
+                unreachable!("sema validates the detached callback type")
+            };
+            let callback_ty = IrType::Callable(callback_layout);
+            let layout_id = self.module.closures.len() as u32;
+            self.module.closures.push(ClosureLayout {
+                captures: vec![callback_ty],
+                params: Vec::new(),
+                returns: IrType::Void,
+            });
+            let target = format!("background.invoke.{}.{}", span.file.0, span.start);
+            let mut inner = FunctionLowering::new(
+                self.module,
+                self.checked,
+                self.declarations,
+                self.instance_base,
+                self.enum_instance_base,
+            );
+            inner.return_type = IrType::Void;
+            let entry = inner.new_block();
+            inner.current = entry;
+            inner.scopes.push(HashMap::new());
+            let callback_slot = inner.declare_slot("$background_callback", callback_ty, span);
+            let callback_value = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+            let result = inner.emit(
+                InstKind::CallCallable {
+                    callable: callback_value,
+                    args: Vec::new(),
+                },
+                IrType::Void,
+                span,
+            );
+            inner.lower_throws_check(result, IrType::Void, span);
+            if inner.block_mut(inner.current).terminator.is_none() {
+                inner.terminate(Terminator::Return(None));
+            }
+            inner.scopes.pop();
+            let nested = std::mem::take(&mut inner.lifted);
+            self.lifted.extend(nested);
+            self.lifted.push(Function {
+                name: target.clone(),
+                params: vec![callback_slot],
+                return_type: IrType::Void,
+                gc_roots: gc_roots_of(inner.module, &inner.slots),
+                slots: inner.slots,
+                blocks: inner.blocks,
+                entry,
+                span,
+            });
+            let body = self.emit(
+                InstKind::MakeCallable {
+                    target: target.clone(),
+                    captures: vec![callback],
+                },
+                IrType::Callable(layout_id),
+                span,
+            );
+            (target, body)
+        };
+
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::BackgroundStart {
+                target,
+                body,
+                status_slot,
+            },
+            span,
+        );
+        self.lower_background_admission_check(status_slot, span);
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn lower_service_start(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let info = self.checked.service_spawns[&call.span].clone();
+        let callback = &call.args[0].value;
+        let target = match callback {
+            ast::Expr::Lambda(lambda) => {
+                format!("lambda.{}.{}", lambda.span.file.0, lambda.span.start)
+            }
+            ast::Expr::Path(path) => {
+                let (_, target) = self
+                    .named_function_value(&path.name, path.span)
+                    .expect("sema validated a named service callback");
+                target
+            }
+            _ => unreachable!("sema accepts only direct service callbacks"),
+        };
+        let body = self.lower_expr(callback);
+        assert_eq!(
+            self.type_of_operand(body),
+            IrType::Callable(info.callback_type)
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::ServiceStart {
+                target,
+                body,
+                status_slot,
+            },
+            span,
+        );
+        self.lower_service_admission_check(status_slot, span);
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn lower_service_admission_check(&mut self, status_slot: SlotId, span: Span) {
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let service_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let service_error = self.new_block();
+        let check_task = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: service_full,
+            then_block: service_error,
+            else_block: check_task,
+        });
+        self.current = service_error;
+        self.throw_native_failure(
+            native.service_capacity_error,
+            "service supervisor capacity reached",
+            span,
+        );
+
+        self.current = check_task;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let task_error = self.new_block();
+        let check_lifecycle = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: task_error,
+            else_block: check_lifecycle,
+        });
+        self.current = task_error;
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached while registering service",
+            span,
+        );
+
+        self.current = check_lifecycle;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let lifecycle_error = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: lifecycle_error,
+        });
+        self.current = lifecycle_error;
+        self.throw_native_failure(
+            native.service_lifecycle_error,
+            "service registration after application draining began",
+            span,
+        );
+        self.current = done;
+    }
+
+    fn lower_service_ready(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("sema only marks ServiceContext.ready calls")
+        };
+        let ast::Expr::Path(context_name) = &*field.object else {
+            unreachable!("sema binds readiness to a direct callback parameter")
+        };
+        let slot = self.lookup_slot(&context_name.name);
+        let context = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::ServiceReady {
+                context,
+                status_slot,
+            },
+            span,
+        );
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero_status = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.service_lifecycle_error,
+            "service readiness reported outside its active startup callback",
+            span,
+        );
+        self.current = done;
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn is_atomic_call(&self, call: &ast::CallExpr) -> bool {
+        match &*call.callee {
+            ast::Expr::Path(name) if name.name == "Atomic" => {
+                !self.checked.functions.contains_key("Atomic")
+                    && !self.scopes.iter().any(|scope| scope.contains_key("Atomic"))
+                    && self
+                        .checked
+                        .expr_types
+                        .get(&call.span)
+                        .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Atomic(_)))
+            }
+            ast::Expr::Field(field) => {
+                self.atomic_receiver_type(&field.object).is_some()
+                    && matches!(
+                        field.name.name.as_str(),
+                        "load"
+                            | "store"
+                            | "exchange"
+                            | "compare_exchange"
+                            | "fetch_add"
+                            | "fetch_sub"
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    fn is_mutex_constructor_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Path(name) if name.name == "Mutex")
+            && !self.checked.functions.contains_key("Mutex")
+            && !self.scopes.iter().any(|scope| scope.contains_key("Mutex"))
+            && self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Mutex(_)))
+    }
+
+    fn atomic_receiver_type(&self, receiver: &ast::Expr) -> Option<IrType> {
+        if let Some(ty) = self.checked.expr_types.get(&receiver.span()) {
+            let ir = self.ir_type(*ty);
+            if matches!(ir, IrType::Atomic(_)) {
+                return Some(ir);
+            }
+        }
+        let ast::Expr::Path(name) = receiver else {
+            return None;
+        };
+        let slot = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name.name))?;
+        let ty = self.slot_type(*slot);
+        matches!(ty, IrType::Atomic(_)).then_some(ty)
+    }
+
+    fn lower_mutex_construction(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ty = self.checked.expr_types[&call.span];
+        let zirk_sema::Base::Mutex(mutex_type) = ty.base else {
+            unreachable!("sema records Mutex<T> for its constructor")
+        };
+        let payload_ty = self.module.mutex_types[mutex_type as usize];
+        let payload = self.lower_expr_as(&call.args[0].value, payload_ty);
+        let payload_slot = self.spill(payload, payload_ty, call.args[0].value.span());
+        let payload = self.emit(InstKind::Load(payload_slot), payload_ty, span);
+        let object_slot = self.declare_slot("<mutex>", IrType::Mutex(mutex_type), span);
+        let status = self.emit(
+            InstKind::MutexNew {
+                payload,
+                mutex_type,
+                object_slot,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let failure = self.new_block();
+        let success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: success,
+            else_block: failure,
+        });
+        self.current = failure;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(native.invalid_argument, "mutex allocation failed", span);
+        self.current = success;
+        self.emit(InstKind::Load(object_slot), IrType::Mutex(mutex_type), span)
+    }
+
+    fn lower_mutex_with_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("sema records only direct Mutex.with calls")
+        };
+        let mutex_type = self.checked.mutex_with_calls[&call.span];
+        let handle_ty = IrType::Mutex(mutex_type);
+        let handle_value = self.lower_expr_as(&field.object, handle_ty);
+        let handle_slot = self.spill(handle_value, handle_ty, field.object.span());
+        let callback = self.lower_expr(&call.args[0].value);
+        let IrType::Callable(layout) = self.type_of_operand(callback) else {
+            unreachable!("sema validates the Mutex.with callback")
+        };
+        let callback_ty = IrType::Callable(layout);
+        let callback_slot = self.spill(callback, callback_ty, call.args[0].value.span());
+        let returns = self.module.closures[layout as usize].returns;
+        let result_slot = (returns != IrType::Void)
+            .then(|| self.declare_slot("<mutex_with_result>", returns, span));
+        let handle = self.emit(InstKind::Load(handle_slot), handle_ty, span);
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let status = self.emit(
+            InstKind::MutexWithCall {
+                mutex: handle,
+                callback,
+                layout,
+                result_slot,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+
+        let cancelled_value = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: cancelled_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let cancel_block = self.new_block();
+        let check_status_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: cancel_block,
+            else_block: check_status_block,
+        });
+        self.current = cancel_block;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("built-in error classes are registered");
+        self.throw_native_failure(native.cancelled_error, "mutex wait was cancelled", span);
+
+        self.current = check_status_block;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let internal_panic_value = self.const_int_at(4, IrType::Int(IntWidth::I32), span);
+        let internal_panic = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: internal_panic_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let panic_block = self.new_block();
+        let validate_status_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: internal_panic,
+            then_block: panic_block,
+            else_block: validate_status_block,
+        });
+        self.current = panic_block;
+        self.emit_first_fatal("internal panic escaped a Mutex.with callback", span);
+
+        self.current = validate_status_block;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let ok = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let failure_block = self.new_block();
+        let success_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: ok,
+            then_block: success_block,
+            else_block: failure_block,
+        });
+        self.current = failure_block;
+        self.throw_native_failure(
+            native.invalid_argument,
+            "mutex callback could not run",
+            span,
+        );
+
+        self.current = success_block;
+        // A Zirk throw is delivered through the pending-exception channel and
+        // returns normally through the callback thunk. Check it after the
+        // runtime has released the mutex, before reading a possibly
+        // uninitialized non-Void callback result slot.
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        self.lower_throws_check(unit, IrType::Void, span);
+        let result = if let Some(slot) = result_slot {
+            self.emit(InstKind::Load(slot), returns, span)
+        } else {
+            self.emit(InstKind::Undefined, IrType::Void, span)
+        };
+        result
+    }
+
+    fn lower_atomic_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        if let ast::Expr::Path(_) = &*call.callee {
+            let result_type = self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .copied()
+                .map(|ty| self.ir_type(ty))
+                .expect("sema records the Atomic constructor type");
+            let IrType::Atomic(kind) = result_type else {
+                unreachable!("sema validates the Atomic constructor payload")
+            };
+            let initial = self.lower_expr_as(&call.args[0].value, kind.ir_type());
+            // The constructor writes directly into a registered root slot;
+            // runtime allocation may collect before returning.
+            let object = self.declare_slot("<atomic>", IrType::Atomic(kind), span);
+            let status = self.emit(
+                InstKind::AtomicNew {
+                    kind,
+                    value: initial,
+                    object,
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            self.lower_atomic_constructor_status(status, span);
+            return self.emit(InstKind::Load(object), IrType::Atomic(kind), span);
+        }
+
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!()
+        };
+        let receiver = self.lower_expr(&field.object);
+        let IrType::Atomic(kind) = self.type_of_operand(receiver) else {
+            unreachable!("is_atomic_call checked the receiver")
+        };
+        let method = field.name.name.as_str();
+        let (value_count, labels) = match method {
+            "load" => (0, &["order"][..]),
+            "store" | "exchange" | "fetch_add" | "fetch_sub" => (1, &["value", "order"][..]),
+            "compare_exchange" => (2, &["expected", "desired", "success", "failure"][..]),
+            _ => unreachable!("is_atomic_call checked the method"),
+        };
+        let value_ty = kind.ir_type();
+        let expected: Vec<IrType> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i < value_count {
+                    value_ty
+                } else {
+                    IrType::Int(IntWidth::I32)
+                }
+            })
+            .collect();
+        let mut arg_slots: Vec<Option<usize>> = vec![None; expected.len()];
+        let mut next = 0usize;
+        for (index, arg) in call.args.iter().enumerate() {
+            let slot = if let Some(label) = &arg.name {
+                labels
+                    .iter()
+                    .position(|name| *name == label.name)
+                    .expect("sema checked atomic argument labels")
+            } else {
+                while next < arg_slots.len() && arg_slots[next].is_some() {
+                    next += 1;
+                }
+                let slot = next;
+                next += 1;
+                slot
+            };
+            assert!(
+                arg_slots[slot].replace(index).is_none(),
+                "sema rejected duplicate atomic argument"
+            );
+        }
+
+        // Keep the managed receiver rooted across argument evaluation. An
+        // argument may allocate even when its expression does not open CFG.
+        let receiver_slot = self.spill(receiver, IrType::Atomic(kind), field.object.span());
+        let mut held: Vec<Option<Held>> = std::iter::repeat_with(|| None)
+            .take(expected.len())
+            .collect();
+        for (index, arg) in call.args.iter().enumerate() {
+            let slot = arg_slots
+                .iter()
+                .position(|v| *v == Some(index))
+                .expect("argument mapped above");
+            let branches_later = call.args[index + 1..]
+                .iter()
+                .any(|later| self.opens_blocks(&later.value));
+            held[slot] = Some(self.lower_and_hold_as(&arg.value, expected[slot], branches_later));
+        }
+        let args: Vec<Option<Operand>> = held
+            .into_iter()
+            .map(|value| value.map(|value| self.reload(value, call.span)))
+            .collect();
+        let receiver = self.emit(InstKind::Load(receiver_slot), IrType::Atomic(kind), span);
+        let out = (matches!(method, "load" | "exchange" | "fetch_add" | "fetch_sub"))
+            .then(|| self.declare_slot("<atomic_result>", value_ty, span));
+        let status = match method {
+            "load" => self.emit(
+                InstKind::AtomicLoad {
+                    object: receiver,
+                    order: args[0],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "store" => self.emit(
+                InstKind::AtomicStore {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "exchange" => self.emit(
+                InstKind::AtomicExchange {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "fetch_add" => self.emit(
+                InstKind::AtomicFetchAdd {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "fetch_sub" => self.emit(
+                InstKind::AtomicFetchSub {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "compare_exchange" => {
+                let observed = self.declare_slot("<atomic_observed>", value_ty, span);
+                let exchanged = self.declare_slot("<atomic_exchanged>", IrType::Boolean, span);
+                let seq_cst = self.const_int_at(4, IrType::Int(IntWidth::I32), span);
+                let status = self.emit(
+                    InstKind::AtomicCompareExchange {
+                        object: receiver,
+                        current: args[0].unwrap(),
+                        new_value: args[1].unwrap(),
+                        success_order: args[2].unwrap_or(seq_cst),
+                        failure_order: args[3].unwrap_or(seq_cst),
+                        observed,
+                        exchanged,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                self.lower_atomic_operation_status(status, span);
+                let result_ty = self.ir_type(
+                    *self
+                        .checked
+                        .expr_types
+                        .get(&call.span)
+                        .expect("sema records Result<T,T>"),
+                );
+                let enum_id = match result_ty {
+                    IrType::Enum(id) => id,
+                    _ => unreachable!("Result lowers to enum"),
+                };
+                let result_slot = self.declare_slot("<atomic_cas_result>", result_ty, span);
+                let flag = self.emit(InstKind::Load(exchanged), IrType::Boolean, span);
+                let success = self.new_block();
+                let failure = self.new_block();
+                let join = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: flag,
+                    then_block: success,
+                    else_block: failure,
+                });
+                self.current = success;
+                let value = self.emit(InstKind::Load(observed), value_ty, span);
+                let ok = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: 0,
+                        fields: vec![value],
+                    },
+                    result_ty,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, ok), span);
+                self.terminate(Terminator::Jump(join));
+                self.current = failure;
+                let value = self.emit(InstKind::Load(observed), value_ty, span);
+                let err = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: 1,
+                        fields: vec![value],
+                    },
+                    result_ty,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, err), span);
+                self.terminate(Terminator::Jump(join));
+                self.current = join;
+                return self.emit(InstKind::Load(result_slot), result_ty, span);
+            }
+            _ => unreachable!(),
+        };
+        self.lower_atomic_operation_status(status, span);
+        match out {
+            Some(slot) => self.emit(InstKind::Load(slot), value_ty, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        }
+    }
+
+    fn lower_atomic_constructor_status(&mut self, status: Operand, span: Span) {
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: failed,
+        });
+        self.current = failed;
+        let message = self.const_string("atomic allocation failed for this target", span);
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    fn lower_atomic_operation_status(&mut self, status: Operand, span: Span) {
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let three = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let invalid_order = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: three,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw = self.new_block();
+        let check_success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid_order,
+            then_block: throw,
+            else_block: check_success,
+        });
+        self.current = throw;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors registered");
+        self.throw_native_failure(
+            native.invalid_argument,
+            "invalid atomic memory ordering",
+            span,
+        );
+        self.current = check_success;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: failed,
+        });
+        self.current = failed;
+        let message = self.const_string(
+            "atomic runtime rejected a compiler-validated operation",
+            span,
+        );
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    fn lower_background_admission_check(&mut self, status_slot: SlotId, span: Span) {
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let background_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_background = self.new_block();
+        let check_draining = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: background_full,
+            then_block: throw_background,
+            else_block: check_draining,
+        });
+
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.current = throw_background;
+        self.throw_native_failure(
+            native.background_capacity_error,
+            "background supervisor is full or draining",
+            span,
+        );
+
+        self.current = check_draining;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let draining = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_draining = self.new_block();
+        let check_task = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: draining,
+            then_block: throw_draining,
+            else_block: check_task,
+        });
+        self.current = throw_draining;
+        self.throw_native_failure(
+            native.background_capacity_error,
+            "background supervisor is draining",
+            span,
+        );
+
+        self.current = check_task;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let four = self.const_int_at(4, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: four,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_task = self.new_block();
+        let check_success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: throw_task,
+            else_block: check_success,
+        });
+        self.current = throw_task;
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = check_success;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let success = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: success,
+            then_block: done,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        let message = self.const_string("invalid background admission status", span);
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    /// Converts runtime admission statuses into catchable language errors.
+    /// Status 0 is success, 1 is task saturation, 2 is timer saturation, and
+    /// 3 is an invalid negative timer duration.
+    fn lower_branch_admission_check(&mut self, status_slot: SlotId, kind: BranchKind, span: Span) {
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let task_error = self.new_block();
+        let check_timer = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: task_error,
+            else_block: check_timer,
+        });
+
+        self.current = task_error;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = check_timer;
+        if matches!(kind, BranchKind::TimerAfter | BranchKind::TimerEvery) {
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+            let timer_full = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: two,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let timer_error = self.new_block();
+            let success = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: timer_full,
+                then_block: timer_error,
+                else_block: success,
+            });
+            self.current = timer_error;
+            self.throw_native_failure(
+                native.timer_capacity_error,
+                "executor timer capacity reached",
+                span,
+            );
+            self.current = success;
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let invalid_code = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+            let invalid = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: invalid_code,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let invalid_duration = self.new_block();
+            let admitted = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: invalid,
+                then_block: invalid_duration,
+                else_block: admitted,
+            });
+            self.current = invalid_duration;
+            self.throw_native_failure(
+                native.native_error,
+                "timer duration must not be negative",
+                span,
+            );
+            self.current = admitted;
+        }
     }
 
     /// Lifts a branch body to its own zero-argument (capture-prefixed) module
@@ -7952,11 +9918,2641 @@ impl<'a> FunctionLowering<'a> {
     /// Whether `call` is `Timer.sleep` / `Timer.after` / `Timer.every` — a
     /// static call on the compiler-known `Timer` namespace, recognized the
     /// same structural way the checker does (`Timer` is not a value).
+    fn is_concurrent_protect_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "protect"
+                && matches!(&*field.object, ast::Expr::Path(base)
+                    if base.name == "Concurrent"
+                        && self.try_lookup_slot(&base.name).is_none()
+                        && !self.checked.classes.iter().any(|class| class.name == base.name)))
+    }
+
+    fn is_concurrent_detach_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "detach"
+                && matches!(&*field.object, ast::Expr::Path(base)
+                    if base.name == "Concurrent"
+                        && self.try_lookup_slot(&base.name).is_none()
+                        && !self.checked.classes.iter().any(|class| class.name == base.name)))
+    }
+
+    /// Lowers the bounded `Concurrent.each` and `each_settled` operations.
+    /// Admission is incremental: the collect-all scope never has more than
+    /// `effective_limit` live callbacks, and completion ordinals index the
+    /// rooted staging array in source order.
+    fn lower_concurrent_each(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self.checked.concurrent_each_plans[&call.span].clone();
+        let collection_expr = &call.args[0].value;
+        let collection = self.lower_expr(collection_expr);
+        let collection_ty = self.type_of_operand(collection);
+        let collection_slot = self.spill(collection, collection_ty, collection_expr.span());
+        let collection = self.emit(InstKind::Load(collection_slot), collection_ty, span);
+        let length = self.emit(
+            match collection_ty {
+                IrType::Array(_) => InstKind::ArrayLength(collection),
+                IrType::List(_) => InstKind::ListLength(collection),
+                _ => unreachable!("sema restricts each input to Array/List"),
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let maximum = self.const_int_at(256, IrType::Int(IntWidth::U64), span);
+        let too_many = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: length,
+                right: maximum,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.lower_concurrent_each_invalid_if(
+            too_many,
+            "collection exceeds the 256 element limit",
+            span,
+        );
+
+        let requested_limit = if let Some(limit_expr) = call.args.get(2).map(|arg| &arg.value) {
+            let limit_type = self.checked.expr_types[&limit_expr.span()];
+            let limit_ty = self.ir_type(limit_type);
+            let IrType::Int(width) = limit_ty else {
+                unreachable!("sema validates the integer limit")
+            };
+            let limit = self.lower_expr(limit_expr);
+            let limit_slot = self.spill(limit, limit_ty, limit_expr.span());
+            let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+            let one = self.const_int_at(1, limit_ty, span);
+            let below = if width.signed() {
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: raw,
+                        right: one,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            } else {
+                let zero = self.const_int_at(0, limit_ty, span);
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: raw,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            };
+            self.lower_concurrent_each_invalid_if(
+                below,
+                "concurrency limit must be between 1 and 256",
+                span,
+            );
+            if width.bits() > 8 {
+                let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+                let upper = self.const_int_at(256, limit_ty, span);
+                let above = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Gt,
+                        left: raw,
+                        right: upper,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                self.lower_concurrent_each_invalid_if(
+                    above,
+                    "concurrency limit must be between 1 and 256",
+                    span,
+                );
+            }
+            let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+            self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::U64), span)
+        } else {
+            self.const_int_at(32, IrType::Int(IntWidth::U64), span)
+        };
+        let limit_slot = self.spill(requested_limit, IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let limit = self.emit(InstKind::Load(limit_slot), IrType::Int(IntWidth::U64), span);
+        let use_length = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: length,
+                right: limit,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let effective_slot = self.declare_slot(
+            "<each effective concurrency>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_block = self.new_block();
+        let limit_block = self.new_block();
+        let effective_done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: use_length,
+            then_block: length_block,
+            else_block: limit_block,
+        });
+        self.current = length_block;
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(effective_slot, length), span);
+        self.terminate(Terminator::Jump(effective_done));
+        self.current = limit_block;
+        let limit = self.emit(InstKind::Load(limit_slot), IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(effective_slot, limit), span);
+        self.terminate(Terminator::Jump(effective_done));
+        self.current = effective_done;
+
+        let ast::Expr::Lambda(callback_lambda) = &call.args[1].value else {
+            unreachable!("sema requires a lambda callback")
+        };
+        let callback = self.lower_lambda(callback_lambda, callback_lambda.span);
+        let callback_ty = self.type_of_operand(callback);
+        let callback_slot = self.spill(callback, callback_ty, callback_lambda.span);
+        let element_ty = self.ir_type(plan.element);
+        let result_ty = self.ir_type(plan.result);
+        let (adapter_target, adapter_closure) =
+            self.lift_concurrent_each_adapter(callback_ty, element_ty, result_ty, span);
+
+        let result_type = self.ir_type(self.checked.expr_types[&call.span]);
+        let IrType::List(list_id) = result_type else {
+            unreachable!("each returns List")
+        };
+        let staged_element_ty = if plan.settled {
+            let instance_index = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|instance| {
+                    self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                        && instance.args.as_slice() == [plan.result]
+                })
+                .expect("Outcome<R> was interned by sema");
+            IrType::Enum(self.enum_instance_base + instance_index as u32)
+        } else {
+            result_ty
+        };
+        let staged_array_id = self
+            .module
+            .array_types
+            .iter()
+            .position(|ty| *ty == staged_element_ty)
+            .map(|id| id as u32)
+            .unwrap_or_else(|| {
+                let id = self.module.array_types.len() as u32;
+                self.module.array_types.push(staged_element_ty);
+                id
+            });
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let staged_array = self.emit(
+            InstKind::ArrayNew {
+                element_id: staged_array_id,
+                capacity: length,
+            },
+            IrType::Array(staged_array_id),
+            span,
+        );
+        let staged_slot = self.spill(staged_array, IrType::Array(staged_array_id), span);
+
+        let scope = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot =
+            self.declare_slot("<each collect scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope), span);
+        self.scope_stack.push(scope_slot);
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exception types registered");
+        let value_root =
+            self.declare_slot("<each result root>", IrType::Object(native.throwable), span);
+        let throwable_root = self.declare_slot(
+            "<each throwable root>",
+            IrType::Object(native.throwable),
+            span,
+        );
+        let ordinal_slot =
+            self.declare_slot("<each outcome ordinal>", IrType::Int(IntWidth::U64), span);
+        let next_slot = self.declare_slot("<each next input>", IrType::Int(IntWidth::U64), span);
+        let active_slot =
+            self.declare_slot("<each active callbacks>", IrType::Int(IntWidth::U64), span);
+        let completed_slot = self.declare_slot(
+            "<each completed callbacks>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        for slot in [next_slot, active_slot, completed_slot] {
+            let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+            self.emit_effect(InstKind::Store(slot, zero), span);
+        }
+        let top = self.new_block();
+        let admit = self.new_block();
+        let wait = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(top));
+
+        self.current = top;
+        let next = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let input_remains = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: next,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let effective = self.emit(
+            InstKind::Load(effective_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let under_limit = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: active,
+                right: effective,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let can_admit = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: input_remains,
+                right: under_limit,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let check_active = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: can_admit,
+            then_block: admit,
+            else_block: check_active,
+        });
+        self.current = check_active;
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        let has_active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: active,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: has_active,
+            then_block: wait,
+            else_block: done,
+        });
+
+        self.current = admit;
+        let collection = self.emit(InstKind::Load(collection_slot), collection_ty, span);
+        let index = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let item = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: collection,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: adapter_target.clone(),
+                captures: vec![callback, item],
+            },
+            IrType::Callable(adapter_closure),
+            span,
+        );
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let zero_status = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let admission_status_slot = self.spill(zero_status, IrType::Int(IntWidth::U32), span);
+        let _job = self.emit(
+            InstKind::BranchStart {
+                target: adapter_target,
+                body,
+                scope,
+                kind: BranchKind::Spawn,
+                delay: None,
+                status_slot: admission_status_slot,
+            },
+            IrType::Job,
+            span,
+        );
+        let status = self.emit(
+            InstKind::Load(admission_status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let admitted = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let accepted = self.new_block();
+        let admission_failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: admitted,
+            then_block: accepted,
+            else_block: admission_failed,
+        });
+        self.current = accepted;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: next,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(next_slot, next), span);
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: active,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(active_slot, active), span);
+        self.terminate(Terminator::Jump(top));
+        self.current = admission_failed;
+        let one_status = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(admission_status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let capacity = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let capacity_block = self.new_block();
+        let invalid_admission = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: capacity,
+            then_block: capacity_block,
+            else_block: invalid_admission,
+        });
+        self.current = invalid_admission;
+        let message = self.const_string("invalid task admission status from runtime", span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = capacity_block;
+        self.lower_concurrent_each_cancel_scope(scope_slot, span);
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = wait;
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let status = self.emit(
+            InstKind::ScopeOutcomeWaitTake {
+                scope,
+                ordinal_slot,
+                value_slot: value_root,
+                throwable_slot: throwable_root,
+            },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let outcome_blocks = [
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        ];
+        let invalid_status = self.new_block();
+        let mut test = self.current;
+        for (code, block) in outcome_blocks.iter().enumerate() {
+            self.current = test;
+            let actual = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let expected = self.const_int_at(code as i128, IrType::Int(IntWidth::U32), span);
+            let matches = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: actual,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let next_test = if code == 3 {
+                invalid_status
+            } else {
+                self.new_block()
+            };
+            self.terminate(Terminator::Branch {
+                condition: matches,
+                then_block: *block,
+                else_block: next_test,
+            });
+            test = next_test;
+        }
+        self.current = invalid_status;
+        let message = self.const_string("invalid scope outcome status from runtime", span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+
+        let outcome_info = if plan.settled {
+            let instance_index = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|instance| {
+                    self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                        && instance.args.as_slice() == [plan.result]
+                })
+                .expect("Outcome<R> was interned by sema");
+            let enum_id = self.enum_instance_base + instance_index as u32;
+            let declaration = self.checked.enum_instances[instance_index].enum_id;
+            let variants = &self.checked.enums[declaration as usize];
+            Some((
+                enum_id,
+                variants.discriminant("Fulfilled").unwrap(),
+                variants.discriminant("Rejected").unwrap(),
+                variants.discriminant("Cancelled").unwrap(),
+                declaration,
+            ))
+        } else {
+            None
+        };
+        for (code, block) in outcome_blocks.into_iter().enumerate() {
+            self.current = block;
+            match code {
+                0 => {
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let boxed = self.emit(
+                        InstKind::Load(value_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    let value = self.emit(
+                        InstKind::JobResultLoad {
+                            box_pointer: boxed,
+                            result: result_ty,
+                        },
+                        result_ty,
+                        span,
+                    );
+                    let value = if let Some((enum_id, fulfilled, _, _, _)) = outcome_info {
+                        self.emit(
+                            InstKind::BuildEnum {
+                                enum_id,
+                                variant: fulfilled,
+                                fields: vec![value],
+                            },
+                            staged_element_ty,
+                            span,
+                        )
+                    } else {
+                        value
+                    };
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                1 if !plan.settled => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    let error = self.emit(
+                        InstKind::Load(throwable_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Throw(error), span);
+                    let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                    let _ = self.lower_throws_check(unit, IrType::Void, span);
+                    self.terminate(Terminator::Unreachable);
+                }
+                1 => {
+                    let (enum_id, _, rejected, _, _) =
+                        outcome_info.expect("each_settled Outcome layout");
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let error = self.emit(
+                        InstKind::Load(throwable_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    let value = self.emit(
+                        InstKind::BuildEnum {
+                            enum_id,
+                            variant: rejected,
+                            fields: vec![error],
+                        },
+                        staged_element_ty,
+                        span,
+                    );
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                2 if !plan.settled => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    self.throw_native_failure(
+                        native.cancelled_error,
+                        "callback was cancelled",
+                        span,
+                    );
+                }
+                2 => {
+                    let (enum_id, _, _, cancelled, declaration) =
+                        outcome_info.expect("each_settled Outcome layout");
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let class = self.checked.enums[declaration as usize].variants
+                        [cancelled as usize]
+                        .associated
+                        .first()
+                        .and_then(|field| match field.ty.base {
+                            Base::Class(id) => Some(id),
+                            _ => None,
+                        })
+                        .expect("Outcome.Cancelled carries CancelledError");
+                    let error = self.build_native_failure(class, "cancelled", span);
+                    let value = self.emit(
+                        InstKind::BuildEnum {
+                            enum_id,
+                            variant: cancelled,
+                            fields: vec![error],
+                        },
+                        staged_element_ty,
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                3 => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    self.cancellation_cleanup_depth += 1;
+                    self.run_exit_cleanup(0, 0, span);
+                    self.cancellation_cleanup_depth -= 1;
+                    self.terminate(Terminator::Cancel);
+                }
+                _ => unreachable!("scope wait status validation handles 0..=3"),
+            }
+        }
+
+        self.current = done;
+        self.scope_stack.pop();
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            result_type,
+            span,
+        );
+        let list_slot = self.spill(list, result_type, span);
+        let index_slot = self.declare_slot(
+            "<each ordered output index>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let loop_head = self.new_block();
+        let loop_add = self.new_block();
+        let loop_done = self.new_block();
+        self.terminate(Terminator::Jump(loop_head));
+        self.current = loop_head;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let has_more = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: has_more,
+            then_block: loop_add,
+            else_block: loop_done,
+        });
+        self.current = loop_add;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let staged = self.emit(
+            InstKind::Load(staged_slot),
+            IrType::Array(staged_array_id),
+            span,
+        );
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: staged,
+                index,
+            },
+            staged_element_ty,
+            span,
+        );
+        let list = self.emit(InstKind::Load(list_slot), result_type, span);
+        self.emit_effect(
+            InstKind::ListAdd {
+                receiver: list,
+                value,
+            },
+            span,
+        );
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let index = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, index), span);
+        self.terminate(Terminator::Jump(loop_head));
+        self.current = loop_done;
+        self.emit(InstKind::Load(list_slot), result_type, span)
+    }
+
+    fn lower_concurrent_each_internal_check(
+        &mut self,
+        invalid: Operand,
+        message: &str,
+        span: Span,
+    ) {
+        let fail = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: fail,
+            else_block: valid,
+        });
+        self.current = fail;
+        let message = self.const_string(message, span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = valid;
+    }
+
+    /// Creates the zero-argument branch thunk used by the bounded collection
+    /// combinators. Its captures are the already-evaluated callback and one
+    /// collection element; the source lambda itself remains an ordinary
+    /// callable, so captured managed references keep their usual root map.
+    fn lift_concurrent_each_adapter(
+        &mut self,
+        callback_ty: IrType,
+        element_ty: IrType,
+        result_ty: IrType,
+        span: Span,
+    ) -> (String, u32) {
+        let target = format!("concurrent.each.adapter.{}.{}", span.file.0, span.start);
+        let closure_id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: vec![callback_ty, element_ty],
+            params: Vec::new(),
+            returns: result_ty,
+        });
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = result_ty;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let callback_slot = inner.declare_slot("<each callback>", callback_ty, span);
+        let element_slot = inner.declare_slot("<each element>", element_ty, span);
+        let callback = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let element = inner.emit(InstKind::Load(element_slot), element_ty, span);
+        let result = inner.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![element],
+            },
+            result_ty,
+            span,
+        );
+        let result = inner.lower_throws_check(result, result_ty, span);
+        inner.terminate(Terminator::Return(Some(result)));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        self.lifted.push(Function {
+            name: target.clone(),
+            params: vec![callback_slot, element_slot],
+            return_type: result_ty,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        });
+        (target, closure_id)
+    }
+
+    fn lower_concurrent_each_invalid_if(&mut self, invalid: Operand, message: &str, span: Span) {
+        let fail = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: fail,
+            else_block: valid,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions registered");
+        self.throw_native_failure(native.invalid_argument, message, span);
+        self.current = valid;
+    }
+
+    /// Cancels and joins every callback admitted to this operation. The
+    /// shield keeps cleanup running even when the caller initiated it by
+    /// cancellation; callers decide whether to propagate a primary failure
+    /// or terminate with `Cancel` after this helper returns.
+    fn lower_concurrent_each_cancel_scope(&mut self, scope_slot: SlotId, span: Span) {
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeCancel { scope }, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.emit_effect(InstKind::CancelShieldExit, span);
+    }
+
+    /// Updates the live/completed counters after one terminal callback result
+    /// has been consumed, then returns to the admission loop.
+    fn lower_concurrent_each_record_completion(
+        &mut self,
+        active_slot: SlotId,
+        completed_slot: SlotId,
+        top: BlockId,
+        span: Span,
+    ) {
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Sub,
+                left: active,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(active_slot, active), span);
+        let completed = self.emit(
+            InstKind::Load(completed_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let completed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: completed,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(completed_slot, completed), span);
+        self.terminate(Terminator::Jump(top));
+    }
+
+    /// Lowers `Concurrent.of(thunks...).settled()` as a collect-all scope.
+    /// Handles are waited and consumed in source order, while the runtime
+    /// continues scheduling every child independently. Output list insertion
+    /// therefore has stable input order regardless of completion order.
+    fn lower_concurrent_settled(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self
+            .checked
+            .settled_plans
+            .get(&call.span)
+            .expect("the checker records the validated settled pipeline")
+            .clone();
+        let (of_call, deadline_expr) =
+            Self::concurrent_pipeline_parts(call, plan.deadline.is_some());
+        let deadline = self.lower_concurrent_deadline(deadline_expr, span);
+        let branches: Vec<&ast::LambdaExpr> = of_call
+            .args
+            .iter()
+            .map(|arg| match &arg.value {
+                ast::Expr::Lambda(lambda) => lambda,
+                _ => unreachable!("sema validates direct lambda thunks"),
+            })
+            .collect();
+        assert_eq!(branches.len(), plan.branches.len());
+
+        let result_ty = self.ir_type(plan.result);
+        let list_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("checker records List<Outcome<T>> for settled"),
+        );
+        let IrType::List(list_id) = list_ty else {
+            unreachable!("settled returns a list")
+        };
+        let enum_instance = self
+            .checked
+            .enum_instances
+            .iter()
+            .position(|instance| {
+                self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                    && instance.args.as_slice() == [plan.result]
+            })
+            .expect("Outcome<T> was interned by sema");
+        let outcome_id = self.enum_instance_base + enum_instance as u32;
+        let outcome_ty = IrType::Enum(outcome_id);
+        let outcome_decl = self.checked.enum_instances[enum_instance].enum_id;
+        let fulfilled = self.checked.enums[outcome_decl as usize]
+            .discriminant("Fulfilled")
+            .unwrap();
+        let rejected = self.checked.enums[outcome_decl as usize]
+            .discriminant("Rejected")
+            .unwrap();
+        let cancelled = self.checked.enums[outcome_decl as usize]
+            .discriminant("Cancelled")
+            .unwrap();
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        let opaque_root_ty = IrType::Object(native.throwable);
+        let throwable_ty = IrType::Object(native.throwable);
+
+        let scope_id = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot = self.declare_slot("<settled scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope_id), span);
+        self.scopes.push(HashMap::new());
+        self.scope_stack.push(scope_slot);
+        let deadline_slot = deadline.map(|delay| {
+            let timer = self.lower_deadline_timer(delay, scope_slot, span);
+            let slot = self.declare_slot("<settled deadline job>", IrType::Job, span);
+            self.emit_effect(InstKind::Store(slot, timer), span);
+            slot
+        });
+        let mut jobs = Vec::with_capacity(branches.len());
+        for lambda in &branches {
+            let body = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            let job = self.lower_branch_start(lambda.span, body, BranchKind::Spawn, None, span);
+            let slot = self.declare_slot("<settled job>", IrType::Job, lambda.span);
+            self.emit_effect(InstKind::Store(slot, job), span);
+            jobs.push(slot);
+        }
+        self.scope_stack.pop();
+        self.scopes.pop();
+
+        let value_slot = self.declare_slot("<settled value root>", opaque_root_ty, span);
+        let error_slot = self.declare_slot("<settled throwable root>", throwable_ty, span);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            list_ty,
+            span,
+        );
+        let list_slot = self.spill(list, list_ty, span);
+
+        for (job_index, &job_slot) in jobs.iter().enumerate() {
+            let caller_cancelled = self.new_block();
+            let timeout = deadline_slot.map(|_| self.new_block());
+            if let Some(timer_slot) = deadline_slot {
+                let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let selected = self.emit(
+                    InstKind::JobWaitAnyWithTimer {
+                        jobs: vec![job, timer],
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let selected_slot = self.declare_slot(
+                    "<settled deadline selection>",
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(selected_slot, selected), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current = self.emit(
+                    InstKind::Load(selected_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let is_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_cancelled,
+                    then_block: caller_cancelled,
+                    else_block: dispatch,
+                });
+                self.current = dispatch;
+                let timer_index = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+                let current = self.emit(
+                    InstKind::Load(selected_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let is_timeout = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: timer_index,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let take_job = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_timeout,
+                    then_block: timeout.unwrap(),
+                    else_block: take_job,
+                });
+                self.current = take_job;
+            }
+            let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+            let status = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let status_slot =
+                self.declare_slot("<settled status>", IrType::Int(IntWidth::U32), span);
+            self.emit_effect(InstKind::Store(status_slot, status), span);
+            let outcome_slot = self.declare_slot("<settled outcome>", outcome_ty, span);
+            let fulfilled_block = self.new_block();
+            let check_rejected = self.new_block();
+            let rejected_block = self.new_block();
+            let check_cancelled = self.new_block();
+            let cancelled_block = self.new_block();
+            let check_caller_cancelled = self.new_block();
+            let ready = self.new_block();
+
+            let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_fulfilled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: zero,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_fulfilled,
+                then_block: fulfilled_block,
+                else_block: check_rejected,
+            });
+
+            self.current = fulfilled_block;
+            let box_pointer = self.emit(InstKind::Load(value_slot), opaque_root_ty, span);
+            let value = self.emit(
+                InstKind::JobResultLoad {
+                    box_pointer,
+                    result: result_ty,
+                },
+                result_ty,
+                span,
+            );
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: fulfilled,
+                    fields: vec![value],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_rejected;
+            let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_rejected = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: one,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_rejected,
+                then_block: rejected_block,
+                else_block: check_cancelled,
+            });
+
+            self.current = rejected_block;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let is_explicit_cancel = self.emit(
+                InstKind::IsInstance {
+                    object: error,
+                    target_class: native.cancelled_error,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let rejected_throwable = self.new_block();
+            let cancelled_throwable = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_explicit_cancel,
+                then_block: cancelled_throwable,
+                else_block: rejected_throwable,
+            });
+
+            self.current = rejected_throwable;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: rejected,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = cancelled_throwable;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let error = self.emit(
+                InstKind::Retype(error),
+                IrType::Object(native.cancelled_error),
+                span,
+            );
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: cancelled,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_cancelled;
+            let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_cancelled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: two,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let invalid_status = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_cancelled,
+                then_block: cancelled_block,
+                else_block: check_caller_cancelled,
+            });
+
+            self.current = cancelled_block;
+            let error = self.build_native_failure(native.cancelled_error, "cancelled", span);
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: cancelled,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_caller_cancelled;
+            let three = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_caller_cancelled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: three,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_caller_cancelled,
+                then_block: caller_cancelled,
+                else_block: invalid_status,
+            });
+
+            // `JobOutcomeWaitTake` has a closed 0..=3 ABI. Do not silently
+            // reinterpret a compiler/runtime version mismatch as caller
+            // cancellation, which would discard otherwise valid outcomes.
+            self.current = invalid_status;
+            let message = self.const_string("invalid job outcome status from runtime", span);
+            let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+            self.terminate(Terminator::Unreachable);
+
+            self.current = caller_cancelled;
+            // Shield before the collect-all close: it may cooperatively yield
+            // while joining children. The runtime still observes the raw
+            // cancellation request and cancels the scope, while generated
+            // cancellation delivery stays deferred through draining and cleanup.
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+            if let Some(timer_slot) = deadline_slot {
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                self.emit_effect(InstKind::JobCancel { job: timer }, span);
+            }
+            let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+            self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+            // Caller cancellation closes the scope first, causing collect-all
+            // to cancel and join every child. Then consume every terminal
+            // result so neither TCB roots nor handles outlive this expression.
+            for &drain_slot in &jobs[job_index..] {
+                let drain_job = self.emit(InstKind::Load(drain_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job: drain_job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+            }
+            if let Some(timer_slot) = deadline_slot {
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+            }
+            self.cancellation_cleanup_depth += 1;
+            self.run_exit_cleanup(0, 0, span);
+            self.cancellation_cleanup_depth -= 1;
+            self.emit_effect(InstKind::CancelShieldExit, span);
+            self.terminate(Terminator::Cancel);
+
+            self.current = ready;
+            let outcome = self.emit(InstKind::Load(outcome_slot), outcome_ty, span);
+            let receiver = self.emit(InstKind::Load(list_slot), list_ty, span);
+            self.emit_effect(
+                InstKind::ListAdd {
+                    receiver,
+                    value: outcome,
+                },
+                span,
+            );
+
+            if let (Some(timer_slot), Some(timeout_block)) = (deadline_slot, timeout) {
+                let next_after_outcome = self.current;
+                self.current = timeout_block;
+                self.emit_effect(InstKind::CancelShieldEnter, span);
+                for &cancel_slot in &jobs[job_index..] {
+                    let active = self.emit(InstKind::Load(cancel_slot), IrType::Job, span);
+                    self.emit_effect(InstKind::JobCancel { job: active }, span);
+                }
+                let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+                self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+                for &drain_slot in &jobs[job_index..] {
+                    let active = self.emit(InstKind::Load(drain_slot), IrType::Job, span);
+                    let _ = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job: active,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                }
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                self.emit_effect(InstKind::CancelShieldExit, span);
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native exceptions are registered");
+                let error = self.build_native_failure(
+                    native.timeout_error,
+                    "concurrent operation exceeded its deadline",
+                    span,
+                );
+                self.emit_effect(InstKind::Throw(error), span);
+                let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                let _ = self.lower_throws_check(unit, IrType::Void, span);
+                self.terminate(Terminator::Unreachable);
+                self.current = next_after_outcome;
+            }
+        }
+
+        if deadline_slot.is_some() {
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+        }
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_effect(InstKind::CancelShieldExit, span);
+        }
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.emit(InstKind::Load(list_slot), list_ty, span)
+    }
+
+    /// Lowers the homogeneous `Concurrent.of(...).first()` pipeline. Each
+    /// state is keyed by the still-unconsumed input branches; `JobWaitAny`
+    /// picks the lowest executor completion sequence and the runtime uses the
+    /// input index as its tie-break. Rejected/cancelled branches are consumed
+    /// once and removed from the next state. A successful branch cancels and
+    /// joins every remaining child before its rooted payload is loaded.
+    fn lower_concurrent_first(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self
+            .checked
+            .first_plans
+            .get(&call.span)
+            .expect("the checker records the validated first pipeline")
+            .clone();
+        let (of_call, deadline_expr) =
+            Self::concurrent_pipeline_parts(call, plan.deadline.is_some());
+        let deadline = self.lower_concurrent_deadline(deadline_expr, span);
+        let branches: Vec<&ast::LambdaExpr> = of_call
+            .args
+            .iter()
+            .map(|arg| match &arg.value {
+                ast::Expr::Lambda(lambda) => lambda,
+                _ => unreachable!("sema validates direct lambda thunks"),
+            })
+            .collect();
+        assert_eq!(branches.len(), plan.branches.len());
+        let result_ty = self.ir_type(plan.result);
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        let throwable_ty = IrType::Object(native.throwable);
+        let value_slot = self.declare_slot("<first value root>", throwable_ty, span);
+        let error_slot = self.declare_slot("<first throwable root>", throwable_ty, span);
+        let winner_box_slot = self.declare_slot("<first winner box root>", throwable_ty, span);
+        let failure_slot = self.declare_slot("<first primary failure root>", throwable_ty, span);
+        let failure_tail_slot = self.declare_slot("<first failure tail root>", throwable_ty, span);
+        let has_failure_slot = self.declare_slot("<first has failure>", IrType::Boolean, span);
+        let cleanup_failure_slot =
+            self.declare_slot("<first cleanup failure root>", throwable_ty, span);
+        let cleanup_tail_slot =
+            self.declare_slot("<first cleanup failure tail root>", throwable_ty, span);
+        let has_cleanup_failure_slot =
+            self.declare_slot("<first has cleanup failure>", IrType::Boolean, span);
+        let cleanup_failure_slots = FirstFailureSlots {
+            outcome: error_slot,
+            primary: cleanup_failure_slot,
+            tail: cleanup_tail_slot,
+            has_primary: has_cleanup_failure_slot,
+        };
+        let no_failure = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(has_failure_slot, no_failure), span);
+        let no_cleanup_failure = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        self.emit_effect(
+            InstKind::Store(has_cleanup_failure_slot, no_cleanup_failure),
+            span,
+        );
+
+        let scope = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot = self.declare_slot("<first scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope), span);
+        self.scopes.push(HashMap::new());
+        self.scope_stack.push(scope_slot);
+        let deadline_slot = deadline.map(|delay| {
+            let timer = self.lower_deadline_timer(delay, scope_slot, span);
+            let slot = self.declare_slot("<first deadline job>", IrType::Job, span);
+            self.emit_effect(InstKind::Store(slot, timer), span);
+            slot
+        });
+        let mut jobs = Vec::with_capacity(branches.len());
+        for lambda in &branches {
+            let body = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            let job = self.lower_branch_start(lambda.span, body, BranchKind::Spawn, None, span);
+            let slot = self.declare_slot("<first job>", IrType::Job, lambda.span);
+            self.emit_effect(InstKind::Store(slot, job), span);
+            jobs.push(slot);
+        }
+        self.scope_stack.pop();
+        self.scopes.pop();
+
+        let full = (1u16 << jobs.len()) - 1;
+        let first_entries: HashMap<u16, BlockId> =
+            (1..=full).map(|mask| (mask, self.new_block())).collect();
+        let cleanup_entries: HashMap<u16, BlockId> =
+            (1..=full).map(|mask| (mask, self.new_block())).collect();
+        let all_failed = self.new_block();
+        let cleanup_done = self.new_block();
+        let timeout_blocks: HashMap<u16, BlockId> = deadline_slot
+            .map(|_| (1..=full).map(|mask| (mask, self.new_block())).collect())
+            .unwrap_or_default();
+        self.terminate(Terminator::Jump(first_entries[&full]));
+
+        for mask in 1..=full {
+            self.current = first_entries[&mask];
+            let indices: Vec<usize> = (0..jobs.len()).filter(|i| mask & (1 << i) != 0).collect();
+            if indices.len() == 1 && deadline_slot.is_none() {
+                let index = indices[0];
+                let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                let status = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot =
+                    self.declare_slot("<first wait status>", IrType::Int(IntWidth::U32), span);
+                self.emit_effect(InstKind::Store(status_slot, status), span);
+                let three = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: three,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let proceed = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: proceed,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_before_winner(
+                    mask,
+                    &jobs,
+                    scope_slot,
+                    deadline_slot,
+                    (value_slot, error_slot),
+                    span,
+                );
+                self.current = proceed;
+                self.lower_first_status_flow(
+                    status_slot,
+                    index,
+                    mask,
+                    &jobs,
+                    &first_entries,
+                    &cleanup_entries,
+                    all_failed,
+                    cleanup_done,
+                    value_slot,
+                    winner_box_slot,
+                    error_slot,
+                    failure_slot,
+                    failure_tail_slot,
+                    has_failure_slot,
+                    scope_slot,
+                    deadline_slot,
+                    throwable_ty,
+                    span,
+                );
+            } else {
+                let mut handles: Vec<Operand> = indices
+                    .iter()
+                    .map(|&i| self.emit(InstKind::Load(jobs[i]), IrType::Job, span))
+                    .collect();
+                if let Some(timer_slot) = deadline_slot {
+                    handles.push(self.emit(InstKind::Load(timer_slot), IrType::Job, span));
+                }
+                let wait = self.emit(
+                    if deadline_slot.is_some() {
+                        InstKind::JobWaitAnyWithTimer { jobs: handles }
+                    } else {
+                        InstKind::JobWaitAny { jobs: handles }
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let index_slot =
+                    self.declare_slot("<first completion index>", IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(index_slot, wait), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current =
+                    self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: dispatch,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_before_winner(
+                    mask,
+                    &jobs,
+                    scope_slot,
+                    deadline_slot,
+                    (value_slot, error_slot),
+                    span,
+                );
+                self.current = dispatch;
+                let invalid_index = self.new_block();
+                let mut test = dispatch;
+                for (local, &index) in indices.iter().enumerate() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let expected =
+                        self.const_int_at(local as i128, IrType::Int(IntWidth::U64), span);
+                    let matches = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: expected,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let selected = self.new_block();
+                    let next = if local + 1 == indices.len() && deadline_slot.is_some() {
+                        self.new_block()
+                    } else if local + 1 == indices.len() {
+                        invalid_index
+                    } else {
+                        self.new_block()
+                    };
+                    self.terminate(Terminator::Branch {
+                        condition: matches,
+                        then_block: selected,
+                        else_block: next,
+                    });
+                    self.current = selected;
+                    let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                    let status = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    let status_slot = self.declare_slot(
+                        "<first outcome status>",
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(status_slot, status), span);
+                    self.lower_first_status_flow(
+                        status_slot,
+                        index,
+                        mask,
+                        &jobs,
+                        &first_entries,
+                        &cleanup_entries,
+                        all_failed,
+                        cleanup_done,
+                        value_slot,
+                        winner_box_slot,
+                        error_slot,
+                        failure_slot,
+                        failure_tail_slot,
+                        has_failure_slot,
+                        scope_slot,
+                        deadline_slot,
+                        throwable_ty,
+                        span,
+                    );
+                    test = next;
+                }
+                if deadline_slot.is_some() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let timeout_index =
+                        self.const_int_at(indices.len() as i128, IrType::Int(IntWidth::U64), span);
+                    let is_timeout = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: timeout_index,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let invalid = self.new_block();
+                    self.terminate(Terminator::Branch {
+                        condition: is_timeout,
+                        then_block: timeout_blocks[&mask],
+                        else_block: invalid,
+                    });
+                    self.current = invalid;
+                    self.emit_first_fatal("invalid job wait-any index from runtime", span);
+                }
+                self.current = invalid_index;
+                self.emit_first_fatal("invalid job wait-any index from runtime", span);
+            }
+        }
+
+        if let Some(timer_slot) = deadline_slot {
+            for mask in 1..=full {
+                self.current = timeout_blocks[&mask];
+                self.emit_effect(InstKind::CancelShieldEnter, span);
+                for (index, &job_slot) in jobs.iter().enumerate() {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                    self.emit_effect(InstKind::JobCancel { job }, span);
+                }
+                let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+                self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+                for (index, &job_slot) in jobs.iter().enumerate() {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                    let _ = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                }
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                self.emit_effect(InstKind::CancelShieldExit, span);
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native exceptions are registered");
+                let error = self.build_native_failure(
+                    native.timeout_error,
+                    "concurrent operation exceeded its deadline",
+                    span,
+                );
+                self.emit_effect(InstKind::Throw(error), span);
+                let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                let _ = self.lower_throws_check(unit, IrType::Void, span);
+                self.terminate(Terminator::Unreachable);
+            }
+        }
+
+        self.current = all_failed;
+        if let Some(timer_slot) = deadline_slot {
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_effect(InstKind::CancelShieldExit, span);
+            let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+            let _ = self.lower_throws_check(unit, IrType::Void, span);
+        }
+        let has_failure = self.emit(InstKind::Load(has_failure_slot), IrType::Boolean, span);
+        let raise = self.new_block();
+        let all_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: has_failure,
+            then_block: raise,
+            else_block: all_cancelled,
+        });
+        self.current = raise;
+        let error = self.emit(InstKind::Load(failure_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = all_cancelled;
+        let error = self.build_native_failure(native.cancelled_error, "cancelled", span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+
+        for mask in 1..=full {
+            self.current = cleanup_entries[&mask];
+            let indices: Vec<usize> = (0..jobs.len()).filter(|i| mask & (1 << i) != 0).collect();
+            if indices.len() == 1 {
+                let index = indices[0];
+                let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                let status = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot =
+                    self.declare_slot("<first cleanup status>", IrType::Int(IntWidth::U32), span);
+                self.emit_effect(InstKind::Store(status_slot, status), span);
+                self.lower_first_cleanup_status_flow(
+                    status_slot,
+                    FirstCleanupContext {
+                        index,
+                        mask,
+                        entries: &cleanup_entries,
+                        done: cleanup_done,
+                    },
+                    cleanup_failure_slots,
+                    span,
+                );
+            } else {
+                let handles = indices
+                    .iter()
+                    .map(|&i| self.emit(InstKind::Load(jobs[i]), IrType::Job, span))
+                    .collect();
+                let wait = self.emit(
+                    InstKind::JobWaitAny { jobs: handles },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let index_slot =
+                    self.declare_slot("<first cleanup index>", IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(index_slot, wait), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current =
+                    self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: dispatch,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_after_close(
+                    mask,
+                    &jobs,
+                    deadline_slot,
+                    value_slot,
+                    error_slot,
+                    span,
+                );
+                self.current = dispatch;
+                let invalid_index = self.new_block();
+                let mut test = dispatch;
+                for (local, &index) in indices.iter().enumerate() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let expected =
+                        self.const_int_at(local as i128, IrType::Int(IntWidth::U64), span);
+                    let matches = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: expected,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let selected = self.new_block();
+                    let next = if local + 1 == indices.len() {
+                        invalid_index
+                    } else {
+                        self.new_block()
+                    };
+                    self.terminate(Terminator::Branch {
+                        condition: matches,
+                        then_block: selected,
+                        else_block: next,
+                    });
+                    self.current = selected;
+                    let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                    let status = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    let status_slot = self.declare_slot(
+                        "<first cleanup outcome status>",
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(status_slot, status), span);
+                    self.lower_first_cleanup_status_flow(
+                        status_slot,
+                        FirstCleanupContext {
+                            index,
+                            mask,
+                            entries: &cleanup_entries,
+                            done: cleanup_done,
+                        },
+                        cleanup_failure_slots,
+                        span,
+                    );
+                    test = next;
+                }
+                self.current = invalid_index;
+                self.emit_first_fatal("invalid job wait-any index during first cleanup", span);
+            }
+        }
+
+        self.current = cleanup_done;
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+        }
+        let failed_cleanup = self.emit(
+            InstKind::Load(has_cleanup_failure_slot),
+            IrType::Boolean,
+            span,
+        );
+        let throw_cleanup = self.new_block();
+        let return_winner = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed_cleanup,
+            then_block: throw_cleanup,
+            else_block: return_winner,
+        });
+        self.current = throw_cleanup;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        let error = self.emit(InstKind::Load(cleanup_failure_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = return_winner;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        let box_pointer = self.emit(InstKind::Load(winner_box_slot), throwable_ty, span);
+        let result = self.emit(
+            InstKind::JobResultLoad {
+                box_pointer,
+                result: result_ty,
+            },
+            result_ty,
+            span,
+        );
+        self.lower_throws_check(result, result_ty, span)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_first_status_flow(
+        &mut self,
+        status_slot: SlotId,
+        index: usize,
+        mask: u16,
+        jobs: &[SlotId],
+        first_entries: &HashMap<u16, BlockId>,
+        cleanup_entries: &HashMap<u16, BlockId>,
+        all_failed: BlockId,
+        cleanup_done: BlockId,
+        value_slot: SlotId,
+        winner_box_slot: SlotId,
+        error_slot: SlotId,
+        failure_slot: SlotId,
+        failure_tail_slot: SlotId,
+        has_failure_slot: SlotId,
+        scope_slot: SlotId,
+        deadline_slot: Option<SlotId>,
+        throwable_ty: IrType,
+        span: Span,
+    ) {
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let fulfilled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success = self.new_block();
+        let check_rejected = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: fulfilled,
+            then_block: success,
+            else_block: check_rejected,
+        });
+
+        self.current = success;
+        let box_pointer = self.emit(InstKind::Load(value_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Store(winner_box_slot, box_pointer), span);
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let remaining = mask & !(1 << index);
+        for (i, &slot) in jobs.iter().enumerate() {
+            if remaining & (1 << i) == 0 {
+                continue;
+            }
+            let job = self.emit(InstKind::Load(slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancelWithCleanupFailure { job }, span);
+        }
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            cleanup_done
+        } else {
+            cleanup_entries[&remaining]
+        }));
+
+        self.current = check_rejected;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let rejected = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let reject = self.new_block();
+        let check_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: rejected,
+            then_block: reject,
+            else_block: check_cancelled,
+        });
+        self.current = reject;
+        self.emit_first_record_failure(
+            error_slot,
+            failure_slot,
+            failure_tail_slot,
+            has_failure_slot,
+            span,
+        );
+        let remaining = mask & !(1 << index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            all_failed
+        } else {
+            first_entries[&remaining]
+        }));
+
+        self.current = check_cancelled;
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let proceed = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: proceed,
+            else_block: invalid,
+        });
+        self.current = proceed;
+        let remaining = mask & !(1 << index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            all_failed
+        } else {
+            first_entries[&remaining]
+        }));
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status from runtime", span);
+    }
+
+    fn lower_first_cleanup_status_flow(
+        &mut self,
+        status_slot: SlotId,
+        context: FirstCleanupContext<'_>,
+        failure_slots: FirstFailureSlots,
+        span: Span,
+    ) {
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let fulfilled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let continue_state = self.new_block();
+        let check_rejected = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: fulfilled,
+            then_block: continue_state,
+            else_block: check_rejected,
+        });
+        self.current = check_rejected;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let rejected = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let record = self.new_block();
+        let check_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: rejected,
+            then_block: record,
+            else_block: check_cancelled,
+        });
+        self.current = record;
+        self.emit_first_record_failure(
+            failure_slots.outcome,
+            failure_slots.primary,
+            failure_slots.tail,
+            failure_slots.has_primary,
+            span,
+        );
+        let remaining = context.mask & !(1 << context.index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            context.done
+        } else {
+            context.entries[&remaining]
+        }));
+        self.current = check_cancelled;
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: continue_state,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status during first cleanup", span);
+        self.current = continue_state;
+        let remaining = context.mask & !(1 << context.index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            context.done
+        } else {
+            context.entries[&remaining]
+        }));
+    }
+
+    fn emit_first_record_failure(
+        &mut self,
+        error_slot: SlotId,
+        primary_slot: SlotId,
+        tail_slot: SlotId,
+        has_slot: SlotId,
+        span: Span,
+    ) {
+        let has = self.emit(InstKind::Load(has_slot), IrType::Boolean, span);
+        let first = self.new_block();
+        let later = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: has,
+            then_block: later,
+            else_block: first,
+        });
+        self.current = first;
+        let error = self.emit(
+            InstKind::Load(error_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        self.emit_effect(InstKind::Store(primary_slot, error), span);
+        self.emit_effect(InstKind::Store(tail_slot, error), span);
+        let yes = self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(has_slot, yes), span);
+        self.terminate(Terminator::Jump(done));
+        self.current = later;
+        let tail = self.emit(
+            InstKind::Load(tail_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        let error = self.emit(
+            InstKind::Load(error_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        self.emit_effect(
+            InstKind::SetSuppressed {
+                exception: tail,
+                suppressed: error,
+            },
+            span,
+        );
+        self.emit_effect(InstKind::Store(tail_slot, error), span);
+        self.terminate(Terminator::Jump(done));
+        self.current = done;
+    }
+
+    fn lower_first_cancel_before_winner(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        scope_slot: SlotId,
+        deadline_slot: Option<SlotId>,
+        outcome_slots: (SlotId, SlotId),
+        span: Span,
+    ) {
+        let (value_slot, error_slot) = outcome_slots;
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.lower_first_drain_for_cancel(mask, jobs, value_slot, error_slot, span);
+        self.lower_first_drain_deadline(deadline_slot, value_slot, error_slot, span);
+        self.finish_first_cancellation(span);
+    }
+
+    fn lower_first_cancel_after_close(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        deadline_slot: Option<SlotId>,
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        self.lower_first_drain_for_cancel(mask, jobs, value_slot, error_slot, span);
+        self.lower_first_drain_deadline(deadline_slot, value_slot, error_slot, span);
+        self.finish_first_cancellation(span);
+    }
+
+    fn lower_first_drain_deadline(
+        &mut self,
+        deadline_slot: Option<SlotId>,
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        if let Some(slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+        }
+    }
+
+    fn lower_first_drain_for_cancel(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        for (i, &slot) in jobs.iter().enumerate() {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let job = self.emit(InstKind::Load(slot), IrType::Job, span);
+            let status = self.emit(
+                InstKind::JobOutcomeTake {
+                    job,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_first_status_validation(status, span);
+        }
+    }
+
+    fn emit_first_status_validation(&mut self, status: Operand, span: Span) {
+        let slot = self.declare_slot(
+            "<first status validation>",
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        self.emit_effect(InstKind::Store(slot, status), span);
+        let valid = self.new_block();
+        let check_one = self.new_block();
+        let check_two = self.new_block();
+        let invalid = self.new_block();
+        for (value, next) in [(0, check_one), (1, check_two)] {
+            let expected = self.const_int_at(value, IrType::Int(IntWidth::U32), span);
+            let actual = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U32), span);
+            let equal = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: actual,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: equal,
+                then_block: valid,
+                else_block: next,
+            });
+            self.current = next;
+        }
+        let expected = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let actual = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U32), span);
+        let equal = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: actual,
+                right: expected,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: equal,
+            then_block: valid,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status from runtime", span);
+        self.current = valid;
+    }
+
+    fn finish_first_cancellation(&mut self, span: Span) {
+        self.cancellation_cleanup_depth += 1;
+        self.run_exit_cleanup(0, 0, span);
+        self.cancellation_cleanup_depth -= 1;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        self.terminate(Terminator::Cancel);
+    }
+
+    fn emit_first_fatal(&mut self, message: &str, span: Span) {
+        let message = self.const_string(message, span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+    }
+
+    /// Lowers the checker-validated `Concurrent.protect((): Void => cleanup)`.
+    /// The callback call is deliberately emitted without its ordinary
+    /// post-call exception dispatch: a pending language exception must remain
+    /// pending until the shield has been restored. `lower_throws_check` then
+    /// checks cancellation at the first unshielded checkpoint and dispatches
+    /// any pending exception using the same ordering as every other call.
+    fn lower_concurrent_protect_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Lambda(lambda) = &call.args[0].value else {
+            unreachable!("the checker validates a zero-argument cleanup lambda")
+        };
+
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let callable = self.lower_lambda(lambda, lambda.span);
+        let result = self.emit(
+            InstKind::CallCallable {
+                callable,
+                args: Vec::new(),
+            },
+            IrType::Void,
+            span,
+        );
+        self.emit_effect(InstKind::CancelShieldExit, span);
+
+        // This is the first safe cancellation point after restoration. The
+        // shared check also dispatches a language exception only after Exit.
+        self.lower_throws_check(result, IrType::Void, span)
+    }
+
     fn is_timer_call(&self, call: &ast::CallExpr) -> bool {
         matches!(&*call.callee, ast::Expr::Field(field)
             if matches!(&*field.object, ast::Expr::Path(base)
                 if base.name == "Timer" && self.try_lookup_slot("Timer").is_none())
                 && matches!(field.name.name.as_str(), "sleep" | "after" | "every"))
+    }
+
+    fn is_app_shutdown_grace_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "set_shutdown_grace"
+                && matches!(&*field.object, ast::Expr::Path(base) if base.name == "App")
+                && !self.checked.functions.contains_key("App")
+                && !self.scopes.iter().any(|scope| scope.contains_key("App"))
+                && !self.checked.classes.iter().any(|class| class.name == "App"))
+    }
+
+    fn lower_app_shutdown_grace_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let nanos = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+        let status = self.emit(
+            InstKind::AppSetShutdownGrace { nanos },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let invalid_code = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let invalid = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: invalid_code,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let reject = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: reject,
+            else_block: cont,
+        });
+        self.current = reject;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.invalid_argument,
+            "shutdown grace must not be negative",
+            span,
+        );
+        self.current = cont;
+        self.emit(InstKind::Undefined, IrType::Void, span)
     }
 
     /// Lowers a `Timer.*` call. `sleep` is a suspension point; `after` / `every`
@@ -7968,8 +12564,80 @@ impl<'a> FunctionLowering<'a> {
         let delay = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
         match field.name.name.as_str() {
             "sleep" => {
-                self.emit_effect(InstKind::TimerSleep { nanos: delay }, span);
-                self.emit(InstKind::Undefined, IrType::Void, span)
+                let status = self.emit(
+                    InstKind::TimerSleep { nanos: delay },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let timer_full_code = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+                let timer_full = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: timer_full_code,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let timer_error = self.new_block();
+                let check_duration = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: timer_full,
+                    then_block: timer_error,
+                    else_block: check_duration,
+                });
+                self.current = timer_error;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native errors are registered");
+                self.throw_native_failure(
+                    native.timer_capacity_error,
+                    "executor timer capacity reached",
+                    span,
+                );
+
+                self.current = check_duration;
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let invalid_duration_code = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+                let invalid_duration = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: invalid_duration_code,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let duration_error = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: invalid_duration,
+                    then_block: duration_error,
+                    else_block: cont,
+                });
+                self.current = duration_error;
+                self.throw_native_failure(
+                    native.native_error,
+                    "duration must not be negative",
+                    span,
+                );
+                self.current = cont;
+                let result = self.emit(InstKind::Undefined, IrType::Void, span);
+                // Unlike timer registration, sleep suspends and can deliver
+                // cancellation. Route it through the ordinary post-call
+                // checkpoint so lexical finally blocks run before Cancel.
+                self.lower_throws_check(result, IrType::Void, span)
             }
             "after" | "every" => {
                 let kind = if field.name.name == "after" {
@@ -8070,7 +12738,20 @@ impl<'a> FunctionLowering<'a> {
             .map(|slot| self.slot_type(*slot))
             .collect();
         let signature = &self.checked.fn_types[info.fn_type as usize];
-        let param_types: Vec<IrType> = signature.params.iter().map(|t| self.ir_type(*t)).collect();
+        let mut param_types: Vec<IrType> =
+            signature.params.iter().map(|t| self.ir_type(*t)).collect();
+        let mutex_view = self.checked.mutex_view_lambdas.get(&expr.span).copied();
+        if let Some(mutex_type) = mutex_view {
+            assert_eq!(
+                param_types.len(),
+                1,
+                "sema validates one Mutex.with view parameter"
+            );
+            param_types[0] = IrType::BorrowedView {
+                region: 1,
+                mutex_type,
+            };
+        }
         let returns = self.ir_type(signature.returns);
 
         // The name reaches the object file as a symbol, so it may only use
@@ -8086,7 +12767,15 @@ impl<'a> FunctionLowering<'a> {
         // lambda shares its canonical id with every other value of the same
         // shape (design D12).
         let name = format!("lambda.{}.{}", expr.span.file.0, expr.span.start);
-        let id = info.fn_type;
+        let mut id = info.fn_type;
+        if mutex_view.is_some() && info.captures.is_empty() {
+            id = self.module.closures.len() as u32;
+            self.module.closures.push(ClosureLayout {
+                captures: capture_types.clone(),
+                params: param_types.clone(),
+                returns,
+            });
+        }
 
         // A capture-less lambda's id is the canonical, capture-less
         // `ClosureLayout` `Self::lower` already pre-populated for it (D12) —
@@ -8100,7 +12789,7 @@ impl<'a> FunctionLowering<'a> {
         // *purely* self-recursive lambda (no capture besides itself) still
         // reserved a placeholder id (it is not capture-less at the checker
         // level) that needs its real, non-`Void` shape filled in here too.
-        if !info.captures.is_empty() {
+        if !info.captures.is_empty() || mutex_view.is_some() {
             self.module.closures[id as usize] = ClosureLayout {
                 captures: capture_types.clone(),
                 params: param_types.clone(),
@@ -8450,7 +13139,17 @@ impl<'a> FunctionLowering<'a> {
             }
 
             let value = match &arm.body {
-                ast::ArmBody::Expr(e) => self.lower_expr(e),
+                // `lower_expr_as` rather than plain `lower_expr`: a `match`
+                // result's own type is not necessarily each arm's own raw
+                // expression type — most visibly a bare `null` arm (which
+                // `lower_expr` alone cannot lower at all: `null` carries no
+                // type of its own outside a destination that supplies one),
+                // but also an arm producing `T` where the match itself is
+                // `T?` because a sibling arm is `null` (found via
+                // `stdin.read_line()`'s own `match read_line_result() {
+                // ReadResult.Value(text) => text; ReadResult.End => null;
+                // ... }`, `add-stdin-stdout-standard-library`).
+                ast::ArmBody::Expr(e) => self.lower_expr_as(e, result_type),
                 ast::ArmBody::Block(b) if result_type == IrType::Void => {
                     self.lower_block(b);
                     self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
@@ -9040,6 +13739,20 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type the arms of a `match` produce.
     fn arm_value_type(&self, expr: &ast::MatchExpr) -> IrType {
+        // The checker already unified every arm's own type (`check_match`'s
+        // `result.unify(ty)` loop) and recorded the match expression's own
+        // final type at its span — consult that first: the first arm's own
+        // syntactic type is not always the match's own type, most visibly
+        // when a later arm is a bare `null` and an earlier one is `T`, which
+        // unifies to `T?` (found via `stdin.read_line()`'s own `match
+        // read_line_result() { ReadResult.Value(text) => text; ReadResult.End
+        // => null; ... }`, `add-stdin-stdout-standard-library`).
+        if let Some(&ty) = self.checked.expr_types.get(&expr.span)
+            && !ty.is_unknown()
+        {
+            return self.ir_type(ty);
+        }
+
         // The first arm decides: the checker already proved every arm agrees,
         // so looking further would only confirm what it verified.
         let Some(first) = expr.arms.first() else {
@@ -9145,13 +13858,9 @@ impl<'a> FunctionLowering<'a> {
             let name =
                 contract_method_symbol(&self.checked.contracts[contract_id].name, &method.name);
             let returns = self.ir_type(method.returns);
-            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
-
             let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
-            for (arg, ty) in call.args.iter().zip(params) {
-                args.push(self.lower_expr_as(&arg.value, ty));
-            }
+            args.extend(self.lower_args_for_params(call, &method.params));
             return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
         }
 
@@ -9165,13 +13874,9 @@ impl<'a> FunctionLowering<'a> {
             let method = class.method(&field.name.name)?;
             let name = body_symbol(self.checked, method);
             let returns = self.ir_type(method.returns);
-            let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
-
             let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
             let mut args = vec![receiver];
-            for (arg, ty) in call.args.iter().zip(params) {
-                args.push(self.lower_expr_as(&arg.value, ty));
-            }
+            args.extend(self.lower_args_for_params(call, &method.params));
             return Some(self.emit(InstKind::Call { callee: name, args }, returns, span));
         }
 
@@ -9180,17 +13885,16 @@ impl<'a> FunctionLowering<'a> {
         }
 
         // `super(...)`: the base's constructor, on this same instance.
-        let index = self.constructor_index(base, call.args.len());
-        let params: Vec<IrType> = self.checked.classes[base as usize].constructors[index]
-            .iter()
-            .map(|p| self.ir_type(p.ty))
-            .collect();
+        let index = *self
+            .checked
+            .resolved_constructor_indices
+            .get(&call.span)
+            .expect("the checker selected the base constructor");
+        let params = self.checked.classes[base as usize].constructors[index].clone();
 
         let receiver = self.emit(InstKind::Load(this_slot), this_ty, span);
         let mut args = vec![receiver];
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        args.extend(self.lower_args_for_params(call, &params));
 
         let name = self.checked.classes[base as usize].name.clone();
         self.emit_effect(
@@ -9342,6 +14046,13 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.lookup_error
                 || id == n.invalid_date
                 || id == n.invalid_time
+                || id == n.cancelled_error
+                || id == n.task_capacity_error
+                || id == n.timer_capacity_error
+                || id == n.background_capacity_error
+                || id == n.service_capacity_error
+                || id == n.service_lifecycle_error
+                || id == n.invalid_argument
         })
     }
 
@@ -10013,6 +14724,11 @@ impl<'a> FunctionLowering<'a> {
         }
 
         self.emit_effect(InstKind::Throw(exception), stmt.span);
+        if self.cancellation_cleanup_depth > 0 {
+            let throwable_ty = IrType::Object(self.throwable_object_id());
+            let _ = self.emit(InstKind::TakePendingException, throwable_ty, stmt.span);
+            return;
+        }
         // Dispatches to a local `catch` that covers it, or — finding
         // none — re-propagates by returning early from the current
         // function; the same resolution a throwing call's own post-call
@@ -10051,6 +14767,69 @@ impl<'a> FunctionLowering<'a> {
             slot
         });
 
+        if self.cancellation_cleanup_depth > 0 {
+            // Cancellation remains the primary outcome if a cleanup call
+            // fails. Consume that secondary exception and continue the
+            // remaining outer cleanup scopes rather than dispatching to a
+            // catch or returning early.
+            let pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
+            let discard_block = self.new_block();
+            let continue_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: pending,
+                then_block: discard_block,
+                else_block: continue_block,
+            });
+            self.current = discard_block;
+            let throwable_ty = IrType::Object(self.throwable_object_id());
+            let _ = self.emit(InstKind::TakePendingException, throwable_ty, span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = continue_block;
+            return match holder {
+                Some(slot) => self.emit(InstKind::Load(slot), ty, span),
+                None => self.emit(InstKind::Undefined, IrType::Void, span),
+            };
+        }
+
+        // Cancellation is a non-catchable control outcome, so deliver it
+        // before examining an exception produced by the same call.
+        let cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, span);
+        let cancel_block = self.new_block();
+        let check_exception_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: cancel_block,
+            else_block: check_exception_block,
+        });
+
+        self.current = cancel_block;
+        // The call that reached this checkpoint may have thrown while
+        // cancellation was pending. Cancellation is terminal and takes
+        // precedence, so consume that secondary throwable before any outer
+        // cleanup runs and before the task yields to another executor task.
+        let pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
+        let discard_block = self.new_block();
+        let cleanup_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: pending,
+            then_block: discard_block,
+            else_block: cleanup_block,
+        });
+
+        self.current = discard_block;
+        let throwable_ty = IrType::Object(self.throwable_object_id());
+        let _ = self.emit(InstKind::TakePendingException, throwable_ty, span);
+        self.terminate(Terminator::Jump(cleanup_block));
+
+        self.current = cleanup_block;
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        self.cancellation_cleanup_depth += 1;
+        self.run_exit_cleanup(0, 0, span);
+        self.cancellation_cleanup_depth -= 1;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        self.terminate(Terminator::Cancel);
+
+        self.current = check_exception_block;
         let has_pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
         let handle_block = self.new_block();
         let continue_block = self.new_block();
@@ -10255,6 +15034,7 @@ impl<'a> FunctionLowering<'a> {
             object: Box::new(object),
             name: ast::Ident::new("close".to_string(), span),
             safe: false,
+            access: ast::FieldAccess::Dot,
             span,
         });
         ast::Expr::Call(ast::CallExpr {
@@ -10274,9 +15054,10 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Lowers one resource `close()` guarded by `zirk_rt_is_cancelled` and, on
-    /// the first close error, stores the error in `close_error_slot` and sets
-    /// `close_failed_slot`. Cancellation skips the close entirely.
+    /// Lowers one resource `close()` and, on the first close error, stores the
+    /// error in `close_error_slot` and sets `close_failed_slot`. Cleanup runs
+    /// regardless of cancellation state; a cancellation request must not leak
+    /// an already-acquired resource.
     fn lower_resource_cleanup(
         &mut self,
         name: &str,
@@ -10284,16 +15065,7 @@ impl<'a> FunctionLowering<'a> {
         close_failed_slot: SlotId,
         span: Span,
     ) {
-        let cancelled = self.emit(InstKind::IsCancelled, IrType::Boolean, span);
-        let do_close = self.new_block();
         let after_close = self.new_block();
-        self.terminate(Terminator::Branch {
-            condition: cancelled,
-            then_block: after_close,
-            else_block: do_close,
-        });
-
-        self.current = do_close;
         let close_call = Self::resource_close_call(name, span);
         let result = self.lower_expr(&close_call);
         let result_ty = self.type_of_operand(result);
@@ -11396,8 +16168,20 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Field(field) = &*call.callee else {
             unreachable!("checked by is_native_to_string_call")
         };
-        let receiver = self.lower_expr(&field.object);
+        let receiver = self.lower_render_operand(&field.object, span);
         Some(self.lower_to_string_expr(&field.object, receiver, span))
+    }
+
+    /// The operand a `to_string` render reads — `null` has no `IrType` and
+    /// no instruction produces it, so it lowers to an `Undefined`
+    /// placeholder the `Base::Null` arm never reads
+    /// (`universal-to-string-and-multiline-strings`).
+    fn lower_render_operand(&mut self, expr: &ast::Expr, span: Span) -> Operand {
+        if matches!(expr, ast::Expr::Null(_)) {
+            self.emit(InstKind::Undefined, IrType::Void, span)
+        } else {
+            self.lower_expr(expr)
+        }
     }
 
     fn lower_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
@@ -11438,7 +16222,6 @@ impl<'a> FunctionLowering<'a> {
         // adopted trait default belongs to the trait.
         let name = body_symbol(self.checked, method);
         let returns = self.ir_type(method.returns);
-        let params: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
 
         let virtual_index = method.overridden.then_some(method.index as u32);
 
@@ -11448,10 +16231,7 @@ impl<'a> FunctionLowering<'a> {
         // survive to the `Call` that lives on the far side of it.
         let will_branch = call.args.iter().any(|arg| self.opens_blocks(&arg.value));
         let receiver = self.lower_and_hold(&field.object, will_branch);
-        let mut args = Vec::new();
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        let args = self.lower_args_for_params(call, &method.params);
         let receiver = self.reload(receiver, field.object.span());
 
         // A method some subclass redefines has no statically known target, so
@@ -11478,6 +16258,78 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 )
             }
+        })
+    }
+
+    /// `Self::opens_blocks` plus the *render* side
+    /// (`universal-to-string-and-multiline-strings`): converting a value to
+    /// its text opens blocks of its own — the nullable absent/present
+    /// split, a collection's loop, an algebraic enum's discriminant switch,
+    /// or a composite field recursing into one of those. `print`,
+    /// `println`, and interpolation parts go through `lower_to_string_expr`,
+    /// so their block-opening prediction must look through the render, not
+    /// just the expression.
+    fn to_string_opens_blocks(&self, expr: &ast::Expr) -> bool {
+        self.opens_blocks(expr)
+            || self
+                .semantic_type(expr)
+                .is_some_and(|ty| self.render_opens_blocks(ty, &mut HashSet::new()))
+    }
+
+    /// Whether `lower_to_string_of` on a value of type `ty` emits more than
+    /// one block. `seen` breaks the recursion on self-referential classes.
+    fn render_opens_blocks(&self, ty: zirk_sema::Type, seen: &mut HashSet<u32>) -> bool {
+        if ty.nullable {
+            return true;
+        }
+        match ty.base {
+            zirk_sema::Base::Array(_)
+            | zirk_sema::Base::List(_)
+            | zirk_sema::Base::Map(_)
+            | zirk_sema::Base::Set(_) => true,
+            zirk_sema::Base::Enum(id) => enum_has_payload(self.checked, id),
+            zirk_sema::Base::EnumInstance(id) => enum_has_payload(
+                self.checked,
+                self.checked.enum_instances[id as usize].enum_id,
+            ),
+            zirk_sema::Base::Class(id) => self.class_render_opens_blocks(id, &[], seen),
+            zirk_sema::Base::Instance(id) => {
+                let instance = &self.checked.generic_instances[id as usize];
+                let subst: Vec<(u32, zirk_sema::Type)> = self.checked.classes
+                    [instance.class as usize]
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                self.class_render_opens_blocks(instance.class, &subst, seen)
+            }
+            zirk_sema::Base::Tuple(id) => self.checked.tuple_types[id as usize]
+                .elements
+                .iter()
+                .any(|&t| self.render_opens_blocks(t, seen)),
+            zirk_sema::Base::Union(id) => self.checked.unions[id as usize]
+                .iter()
+                .any(|&base| self.render_opens_blocks(zirk_sema::Type::of(base), seen)),
+            _ => false,
+        }
+    }
+
+    /// The `Class`/`Instance` arm of `Self::render_opens_blocks`: a declared
+    /// `to_string` is a plain call that opens nothing in the caller; only
+    /// the default field-by-field render can branch.
+    fn class_render_opens_blocks(
+        &self,
+        class_id: u32,
+        subst: &[(u32, zirk_sema::Type)],
+        seen: &mut HashSet<u32>,
+    ) -> bool {
+        let class = &self.checked.classes[class_id as usize];
+        if class.method("to_string").is_some() || !seen.insert(class_id) {
+            return false;
+        }
+        class.fields.iter().any(|f| {
+            self.render_opens_blocks(substitute_generic_type(self.checked, f.ty, subst), seen)
         })
     }
 
@@ -14513,12 +19365,7 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("parallel sequence callback is callable")
         };
         let result_element = self.module.closures[callback_id as usize].returns;
-        let result_array_id =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == result_element)
-                .expect("parallel result array type was interned by sema") as u32;
+        let result_array_id = self.array_id_for(result_element);
         let result_array_ty = IrType::Array(result_array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let result = self.emit(
@@ -14662,12 +19509,7 @@ impl<'a> FunctionLowering<'a> {
     ) -> Operand {
         let source_slot = self.spill(receiver, receiver_ty, span);
         let source = self.emit(InstKind::Load(source_slot), receiver_ty, span);
-        let bool_array =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == IrType::Boolean)
-                .expect("parallel filter Boolean Array was interned by sema") as u32;
+        let bool_array = self.array_id_for(IrType::Boolean);
         let flags = self.lower_parallel_sequence_map(
             source,
             receiver_ty,
@@ -14928,13 +19770,7 @@ impl<'a> FunctionLowering<'a> {
         let IrType::Callable(_) = callback_ty else {
             unreachable!("parallel reduce callback is callable")
         };
-        let array_id = self
-            .module
-            .array_types
-            .iter()
-            .position(|&ty| ty == result_ty)
-            .expect("parallel reduce result array type was interned by sema")
-            as u32;
+        let array_id = self.array_id_for(result_ty);
         let array_ty = IrType::Array(array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let partials = self.emit(
@@ -15086,12 +19922,7 @@ impl<'a> FunctionLowering<'a> {
         element_ty: IrType,
         span: Span,
     ) -> Operand {
-        let array_id =
-            self.module
-                .array_types
-                .iter()
-                .position(|&ty| ty == element_ty)
-                .expect("parallel sum result array type was interned by sema") as u32;
+        let array_id = self.array_id_for(element_ty);
         let array_ty = IrType::Array(array_id);
         let length = self.sequence_length(receiver, receiver_ty, span);
         let partials = self.emit(
@@ -15282,23 +20113,16 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.lower_parallel_sequence_reduce(call, values, values_ty, element_ty, span))
             }
             "reduce" | "reduce_ordered" if call.args.len() == 2 => {
-                Some(self.lower_sequence_reduce(
-                    call,
-                    values,
-                    IrType::List(self.list_id_for(element_ty)),
-                    element_ty,
-                    span,
-                ))
+                let list_ty = IrType::List(self.list_id_for(element_ty));
+                Some(self.lower_sequence_reduce(call, values, list_ty, element_ty, span))
             }
             "sum" if call.args.is_empty() && parallel => {
                 Some(self.lower_parallel_sequence_sum(values, values_ty, element_ty, span))
             }
-            "sum" if call.args.is_empty() => Some(self.lower_sequence_sum(
-                values,
-                IrType::List(self.list_id_for(element_ty)),
-                element_ty,
-                span,
-            )),
+            "sum" if call.args.is_empty() => {
+                let list_ty = IrType::List(self.list_id_for(element_ty));
+                Some(self.lower_sequence_sum(values, list_ty, element_ty, span))
+            }
             "count" if call.args.is_empty() => {
                 let length = self.emit(
                     InstKind::ListLength(values),
@@ -15312,12 +20136,26 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    fn list_id_for(&self, element: IrType) -> u32 {
-        self.module
-            .list_types
-            .iter()
-            .position(|&ty| ty == element)
-            .expect("range collection list type") as u32
+    fn list_id_for(&mut self, element: IrType) -> u32 {
+        if let Some(id) = self.module.list_types.iter().position(|&ty| ty == element) {
+            return id as u32;
+        }
+        // The checker interns every list type a declared type or literal
+        // spelled out, but an inferred sequence result (`xs.filter` on an
+        // `Array` with no `List<T>` in sight) can need one sema never saw —
+        // intern it here instead of panicking on valid code.
+        let id = self.module.list_types.len() as u32;
+        self.module.list_types.push(element);
+        id
+    }
+
+    fn array_id_for(&mut self, element: IrType) -> u32 {
+        if let Some(id) = self.module.array_types.iter().position(|&ty| ty == element) {
+            return id as u32;
+        }
+        let id = self.module.array_types.len() as u32;
+        self.module.array_types.push(element);
+        id
     }
 
     fn lower_range_collect_values(
@@ -15484,12 +20322,7 @@ impl<'a> FunctionLowering<'a> {
         } else {
             callback_returns
         };
-        let result_id =
-            self.module
-                .list_types
-                .iter()
-                .position(|&ty| ty == result_element)
-                .expect("sequence result list type was interned by the checker") as u32;
+        let result_id = self.list_id_for(result_element);
         let result_slot = if discarding {
             None
         } else {
@@ -16080,12 +20913,7 @@ impl<'a> FunctionLowering<'a> {
         if let IrType::List(_) = receiver_ty {
             return self.emit(InstKind::ListClone { receiver }, receiver_ty, span);
         }
-        let list_id = self
-            .module
-            .list_types
-            .iter()
-            .position(|&ty| ty == element_ty)
-            .expect("collect list type") as u32;
+        let list_id = self.list_id_for(element_ty);
         let list = self.emit(
             InstKind::ListNew {
                 element_id: list_id,
@@ -17031,10 +21859,39 @@ impl<'a> FunctionLowering<'a> {
         call: &ast::CallExpr,
         span: Span,
     ) -> Option<Operand> {
+        if let ast::Expr::Field(field) = &*call.callee
+            && let ast::Expr::Path(base) = &*field.object
+            && base.name == "Channel"
+            && field.name.name == "unbounded"
+        {
+            let &ty = self.checked.expr_types.get(&call.span)?;
+            let Base::Channel(id) = ty.base else {
+                return None;
+            };
+            let limit = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::U64));
+            let capacity = self.emit(
+                InstKind::ConstInt(i64::MAX.into()),
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+            let element = self.module.channel_types[id as usize];
+            return Some(self.emit(
+                InstKind::ChannelNew {
+                    capacity,
+                    limit,
+                    element,
+                },
+                IrType::Channel(id),
+                span,
+            ));
+        }
         let ast::Expr::Path(callee) = &*call.callee else {
             return None;
         };
-        if !matches!(callee.name.as_str(), "Array" | "List" | "Map" | "Set") {
+        if !matches!(
+            callee.name.as_str(),
+            "Array" | "List" | "Map" | "Set" | "Channel"
+        ) {
             return None;
         }
         let &ty = self.checked.expr_types.get(&call.span)?;
@@ -17069,6 +21926,144 @@ impl<'a> FunctionLowering<'a> {
             }
             ("Set", Base::Set(id)) if call.args.is_empty() => {
                 Some(self.emit(InstKind::SetNew { set_id: id }, IrType::Set(id), span))
+            }
+            ("Channel", Base::Channel(id)) if call.args.len() <= 1 => {
+                let capacity = if let Some(argument) = call.args.first() {
+                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                } else {
+                    self.emit(
+                        InstKind::ConstInt(i64::MAX.into()),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    )
+                };
+                let limit = if call.args.is_empty() {
+                    self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::U64), span)
+                } else {
+                    capacity
+                };
+                let element = self.module.channel_types[id as usize];
+                Some(self.emit(
+                    InstKind::ChannelNew {
+                        capacity,
+                        limit,
+                        element,
+                    },
+                    IrType::Channel(id),
+                    span,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    fn lower_channel_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        if let ast::Expr::Path(ident) = &*field.object {
+            if ident.name == "Channel" && field.name.name == "unbounded" {
+                return None;
+            }
+            self.try_lookup_slot(&ident.name)?;
+        }
+        let receiver_ty = self.type_of(&field.object, field.object.span());
+        let IrType::Channel(id) = receiver_ty else {
+            return None;
+        };
+        let receiver = self.lower_expr(&field.object);
+        let element = self.module.channel_types[id as usize];
+        match (field.name.name.as_str(), call.args.len()) {
+            ("send", 1) => {
+                let value = self.lower_expr_as(&call.args[0].value, element);
+                let status = self.emit(
+                    InstKind::ChannelSend {
+                        channel: receiver,
+                        value,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let closed_status = self.const_int_at(2, IrType::Int(IntWidth::I32), span);
+                let closed = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: closed_status,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let fail = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: closed,
+                    then_block: fail,
+                    else_block: cont,
+                });
+                self.current = fail;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("a channel send registered the exception hierarchy");
+                self.throw_native_failure(native.native_error, "channel is closed", span);
+                self.current = cont;
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("receive", 0) => {
+                let nullable = Nullable::of(element)?;
+                Some(self.emit(
+                    InstKind::ChannelRecv {
+                        channel: receiver,
+                        element,
+                    },
+                    IrType::Nullable(nullable),
+                    span,
+                ))
+            }
+            ("try_send", 1) => {
+                let value = self.lower_expr_as(&call.args[0].value, element);
+                Some(self.emit(
+                    InstKind::ChannelTrySend {
+                        channel: receiver,
+                        value,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ))
+            }
+            ("try_receive", 0) => {
+                let result = self
+                    .checked
+                    .expr_types
+                    .get(&call.span)
+                    .copied()
+                    .map(|ty| self.ir_type(ty))
+                    .expect("checker records the receive outcome type");
+                Some(self.emit(
+                    InstKind::ChannelTryRecv {
+                        channel: receiver,
+                        element,
+                    },
+                    result,
+                    span,
+                ))
+            }
+            ("close", 0) => Some(self.emit(
+                InstKind::ChannelClose { channel: receiver },
+                IrType::Void,
+                span,
+            )),
+            ("drain", 0) => {
+                let list_id = self.list_id_for(element);
+                Some(self.emit(
+                    InstKind::ChannelDrain {
+                        channel: receiver,
+                        element_id: list_id,
+                    },
+                    IrType::List(list_id),
+                    span,
+                ))
             }
             _ => None,
         }
@@ -17720,9 +22715,9 @@ impl<'a> FunctionLowering<'a> {
             // blocks of their own — spilling them is mandatory.
             ast::Expr::Slice(_) => true,
             ast::Expr::Call(_) => true,
-            ast::Expr::Println(e) => e.args.iter().any(|arg| self.opens_blocks(arg)),
+            ast::Expr::Println(e) => e.args.iter().any(|arg| self.to_string_opens_blocks(arg)),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
-                ast::InterpolatedPart::Expr(inner) => self.opens_blocks(inner),
+                ast::InterpolatedPart::Expr(inner) => self.to_string_opens_blocks(inner),
                 ast::InterpolatedPart::Literal(_) => false,
             }),
             ast::Expr::Record(r) => r.elements.iter().any(|e| match e {
@@ -18163,23 +23158,78 @@ impl<'a> FunctionLowering<'a> {
             return object;
         }
 
-        let index = self.constructor_index(id, call.args.len());
-        let params: Vec<IrType> = self
+        // The default constructor is semantic sugar only: no AST member or
+        // constructor symbol exists for it, so allocation is its whole body.
+        if self.checked.classes[id as usize].constructors.is_empty() {
+            let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
+            // A synthesized subclass constructor delegates to a written
+            // zero-argument base constructor.  An implicit base has no
+            // symbol; its defaults are handled by the allocation path below.
+            if let Some(base) = self.checked.classes[id as usize].base
+                && let Some(index) = self.checked.classes[base as usize]
+                    .constructors
+                    .iter()
+                    .position(|params| params.is_empty())
+            {
+                let name = self.module.objects[base as usize].name.clone();
+                self.emit_effect(
+                    InstKind::Call {
+                        callee: constructor_symbol(&name, index),
+                        args: vec![object],
+                    },
+                    span,
+                );
+            }
+            let fields: Vec<(IrType, Option<ast::Expr>)> = self.module.objects[id as usize]
+                .fields
+                .iter()
+                .map(|field| field.ty)
+                .zip(
+                    self.checked.classes[id as usize]
+                        .fields
+                        .iter()
+                        .filter(|field| !field.is_static)
+                        .map(|field| field.default.clone()),
+                )
+                .collect();
+            for (index, (ty, default)) in fields.into_iter().enumerate() {
+                let value = match default {
+                    Some(expr) => self.lower_expr(&expr),
+                    None => match self.default_value(ty, span) {
+                        Some(value) => value,
+                        None => continue,
+                    },
+                };
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object,
+                        index: index as u32,
+                        value,
+                    },
+                    span,
+                );
+            }
+            return object;
+        }
+
+        let index = *self
+            .checked
+            .resolved_constructor_indices
+            .get(&call.span)
+            .expect("the checker selected the constructor");
+        let params = self
             .checked
             .classes
             .get(id as usize)
             .and_then(|c| c.constructors.get(index))
-            .map(|p| p.iter().map(|param| self.ir_type(param.ty)).collect())
+            .cloned()
             .expect("the checker resolved the constructor");
 
         // Arguments are lowered first, so any branch introduced by them (e.g.
         // integer arithmetic overflow checks) is finished before the object is
         // allocated. The object and the `Call` to the constructor are then
         // emitted in the same block, and the object never crosses a branch.
-        let mut args: Vec<Operand> = Vec::new();
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
-        }
+        let args = self.lower_args_for_params(call, &params);
 
         let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
         let mut call_args = vec![object];
@@ -18622,22 +23672,6 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Retype(value_loaded), target_ty, span)
     }
 
-    /// Which `construct` a call of this arity resolves to.
-    fn constructor_index(&self, id: u32, arity: usize) -> usize {
-        self.checked.classes[id as usize]
-            .constructors
-            .iter()
-            .position(|params| {
-                let required = params
-                    .iter()
-                    .filter(|p| !p.optional && !p.variadic && !p.has_default)
-                    .count();
-                let variadic = params.iter().any(|p| p.variadic);
-                arity >= required && (variadic || arity <= params.len())
-            })
-            .expect("the checker resolved the constructor")
-    }
-
     /// Lowers `a.b`, which is a variant access or a field read.
     ///
     /// The checker already decided which one it is and recorded the answer, so
@@ -18681,6 +23715,34 @@ impl<'a> FunctionLowering<'a> {
         {
             let job = self.lower_expr(&expr.object);
             return self.emit(InstKind::JobDone { job }, IrType::Boolean, span);
+        }
+
+        // Typed-channel status properties are runtime queries, not fields in
+        // the opaque endpoint representation.
+        let channel_object = match &*expr.object {
+            ast::Expr::Path(path) => self.try_lookup_slot(&path.name).is_some(),
+            _ => true,
+        } && matches!(
+            self.type_of(&expr.object, expr.object.span()),
+            IrType::Channel(_)
+        );
+        if channel_object && matches!(expr.name.name.as_str(), "length" | "capacity" | "is_closed")
+        {
+            let channel = self.lower_expr(&expr.object);
+            return match expr.name.name.as_str() {
+                "length" => self.emit(
+                    InstKind::ChannelLength(channel),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ),
+                "capacity" => self.emit(
+                    InstKind::ChannelCapacity(channel),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ),
+                "is_closed" => self.emit(InstKind::ChannelIsClosed(channel), IrType::Boolean, span),
+                _ => unreachable!(),
+            };
         }
 
         // `.is_alive` (roadmap Phase 4e, `fase-4e-weak`, design D4): the same
@@ -19020,6 +24082,16 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_safe_field(expr, span);
         }
 
+        if let Some((view_slot, mut path, object_ty)) = self.borrowed_view_field_path(&expr.object)
+        {
+            let (index, ty) = self
+                .field_position_for_ir_type(object_ty, &expr.name.name)
+                .expect("sema validated a field on the borrowed payload");
+            path.push(index);
+            let view_ty = self.slot_type(view_slot);
+            let view = self.emit(InstKind::Load(view_slot), view_ty, span);
+            return self.emit(InstKind::BorrowViewFieldLoad { view, path }, ty, span);
+        }
         let object = self.lower_expr(&expr.object);
         let (index, ty) = self.field_position(&expr.object, &expr.name.name);
         self.emit(InstKind::LoadField { object, index }, ty, span)
@@ -19718,7 +24790,19 @@ impl<'a> FunctionLowering<'a> {
         match inner.inner() {
             IrType::Object(id) => {
                 let class = &self.checked.classes[id as usize];
-                let method = class.method(&field.name.name)?;
+                let Some(method) = class.method(&field.name.name) else {
+                    // `x?.to_string()` on a class that declares none renders
+                    // through the universal default, like any other
+                    // receiver shape (`universal-to-string-and-multiline-strings`).
+                    return (field.name.name == "to_string" && call.args.is_empty()).then(|| {
+                        (
+                            IrType::String,
+                            Vec::new(),
+                            SafeDispatch::ToString,
+                            inner.inner(),
+                        )
+                    });
+                };
                 let name = body_symbol(self.checked, method);
                 let returns = self.ir_type(method.returns);
                 let params = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
@@ -19741,6 +24825,17 @@ impl<'a> FunctionLowering<'a> {
             }
             // A generic parameter's constraint has no concrete body to call
             // yet — gated at the checker (`Self::check_call`'s `?.` branch).
+            //
+            // Every other receiver shape answers `x?.to_string()` through the
+            // universal conversion (`universal-to-string-and-multiline-strings`):
+            // the present block renders the unwrapped value exactly like the
+            // `.` form would, so no dispatch target is needed at all.
+            _ if field.name.name == "to_string" && call.args.is_empty() => Some((
+                IrType::String,
+                Vec::new(),
+                SafeDispatch::ToString,
+                inner.inner(),
+            )),
             _ => None,
         }
     }
@@ -19856,6 +24951,15 @@ impl<'a> FunctionLowering<'a> {
                 returns,
                 span,
             ),
+            SafeDispatch::ToString => {
+                let inner = self
+                    .semantic_type(&field.object)
+                    .map(|ty| ty.without_null());
+                match inner {
+                    Some(ty) => self.lower_to_string_of(unwrapped, ty, span),
+                    None => self.lower_to_string(unwrapped, unwrapped_ty, span),
+                }
+            }
         };
         if let Some(result) = result {
             let IrType::Nullable(base) = result_type else {
@@ -21182,6 +26286,44 @@ impl<'a> FunctionLowering<'a> {
         (index as u32, fields[index].ty)
     }
 
+    fn field_position_for_ir_type(&self, ty: IrType, name: &str) -> Option<(u32, IrType)> {
+        let (fields, index) = match ty {
+            IrType::Value(id) => {
+                let layout = self.module.values.get(id as usize)?;
+                (layout.fields.as_slice(), layout.field_index(name)?)
+            }
+            _ => return None,
+        };
+        Some((index as u32, fields[index].ty))
+    }
+
+    /// Finds a field projection rooted in a compiler-owned Mutex borrow and
+    /// returns the root view slot, the already-resolved inline field path,
+    /// and the type at the end of that path.
+    fn borrowed_view_field_path(&self, expr: &ast::Expr) -> Option<(SlotId, Vec<u32>, IrType)> {
+        match expr {
+            ast::Expr::Path(path) => {
+                let slot = self.try_lookup_slot(&path.name)?;
+                let IrType::BorrowedView { mutex_type, .. } = self.slot_type(slot) else {
+                    return None;
+                };
+                Some((
+                    slot,
+                    Vec::new(),
+                    self.module.mutex_types[mutex_type as usize],
+                ))
+            }
+            ast::Expr::Field(field) => {
+                let (slot, mut path, object_ty) = self.borrowed_view_field_path(&field.object)?;
+                let (index, field_ty) =
+                    self.field_position_for_ir_type(object_ty, &field.name.name)?;
+                path.push(index);
+                Some((slot, path, field_ty))
+            }
+            _ => None,
+        }
+    }
+
     /// Lowers `cond ? a : b`.
     ///
     /// The same shape as the `if` expression — two blocks writing one slot —
@@ -21317,6 +26459,24 @@ impl<'a> FunctionLowering<'a> {
     /// them would leave a value nobody reads.
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
+            ast::Expr::Call(e) if self.is_mutex_constructor_call(e) => {
+                let _ = self.lower_mutex_construction(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.mutex_with_calls.contains_key(&e.span) => {
+                let _ = self.lower_mutex_with_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.concurrent_each_plans.contains_key(&e.span) => {
+                let _ = self.lower_concurrent_each(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_concurrent_protect_call(e) => {
+                self.lower_concurrent_protect_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_concurrent_detach_call(e) => {
+                let _ = self.lower_concurrent_detach(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_app_shutdown_grace_call(e) => {
+                let _ = self.lower_app_shutdown_grace_call(e, expr.span());
+            }
             // `Timer.*` / `job.wait()` / `job.cancel()` / `spawn` as bare
             // statements: recognized before any arm that would resolve the
             // receiver (`Timer` is not a value; `method_of` would panic).
@@ -21339,6 +26499,38 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Println(e) => {
                 self.lower_print_expr(e, expr.span());
             }
+            ast::Expr::Call(e) if self.checked.standard_stream_calls.contains_key(&e.span) => {
+                if let Some(result) = self.try_lower_stdio_host_call(e, expr.span()) {
+                    let returns = self.type_of_operand(result);
+                    self.lower_throws_check(result, returns, expr.span());
+                } else {
+                    // Source-level wrappers such as `stdin.read_line` and
+                    // `stdout.println` are ordinary calls even though their
+                    // inner leaves carry std.io provenance.
+                    self.lower_expr(expr);
+                }
+            }
+            ast::Expr::Call(e)
+                if matches!(
+                    &*e.callee,
+                    ast::Expr::Field(field)
+                        if self.checked.aliases.contains_key(&field.name.span)
+                            || self.checked.standard_stream_calls.contains_key(&e.span)
+                ) =>
+            {
+                if let Some(result) = self.try_lower_stdio_host_call(e, expr.span()) {
+                    let returns = self.type_of_operand(result);
+                    self.lower_throws_check(result, returns, expr.span());
+                    return;
+                }
+                // Published modules are namespaces rather than runtime
+                // objects; this must precede method probes below.
+                let name = self.callee_name(e);
+                let args = self.lower_args(e);
+                let returns = self.signature_return(&name);
+                let result = self.emit(InstKind::Call { callee: name, args }, returns, expr.span());
+                self.lower_throws_check(result, returns, expr.span());
+            }
             // `super(...)` and a method call know their own target, so they
             // need none of the name resolution the arm below does.
             ast::Expr::Call(e)
@@ -21346,6 +26538,15 @@ impl<'a> FunctionLowering<'a> {
                     || matches!(&*e.callee, ast::Expr::Field(f) if matches!(&*f.object, ast::Expr::Super(_))) =>
             {
                 self.lower_super_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_thread_run_call(e) => {
+                self.lower_thread_run_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.service_spawns.contains_key(&e.span) => {
+                self.lower_service_start(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.service_ready_calls.contains_key(&e.span) => {
+                self.lower_service_ready(e, expr.span());
             }
             ast::Expr::Call(e) if self.contract_method_of(e).is_some() => {
                 let span = expr.span();
@@ -21383,6 +26584,14 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(result) = self.lower_map_set_method_call(e, expr.span()) {
                     let _ = result;
                 }
+            }
+            ast::Expr::Call(e) if self.is_channel_method_call(e) => {
+                let _ = self.lower_channel_method_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_atomic_call(e) => {
+                let result = self.lower_atomic_call(e, expr.span());
+                let ty = self.type_of_operand(result);
+                self.lower_throws_check(result, ty, expr.span());
             }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
@@ -21464,20 +26673,37 @@ impl<'a> FunctionLowering<'a> {
             }
 
             // Default rendering for tuples and records that do
-            // not declare their own `to_string`.
-            let layout_name = self.module.values[id as usize].name.clone();
-            let is_tuple = layout_name.starts_with("Tuple(");
-            let prefix = if is_tuple {
-                "("
-            } else {
-                &format!("{layout_name}(")
-            };
-            let fields: Vec<_> = self.module.values[id as usize]
+            // not declare their own `to_string`. A `$local$N` suffix —
+            // produced by a class declared inside a block — is cut back to
+            // the surface name (`universal-to-string-and-multiline-strings`).
+            let is_tuple = id >= self.checked.tuple_base;
+            if is_tuple {
+                let tuple_id = id - self.checked.tuple_base;
+                let fields: Vec<(u32, String, zirk_sema::Type)> = self.checked.tuple_types
+                    [tuple_id as usize]
+                    .elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &ty)| (i as u32, format!("_{i}"), ty))
+                    .collect();
+                return self.lower_default_render_to_string(operand, "(", &fields, true, span);
+            }
+            let class = &self.checked.classes[id as usize];
+            let layout_name = surface_name(&class.name);
+            let fields: Vec<(u32, String, zirk_sema::Type)> = class
                 .fields
                 .iter()
-                .map(|f| (f.name.clone(), f.ty))
+                .enumerate()
+                .filter(|(_, f)| !(f.is_static || f.name == "outer" && class.enclosing.is_some()))
+                .map(|(i, f)| (i as u32, f.name.clone(), f.ty))
                 .collect();
-            return self.lower_default_render_to_string(operand, prefix, &fields, is_tuple, span);
+            return self.lower_default_render_to_string(
+                operand,
+                &format!("{layout_name}("),
+                &fields,
+                false,
+                span,
+            );
         }
 
         if let IrType::Object(id) = ty {
@@ -21505,11 +26731,16 @@ impl<'a> FunctionLowering<'a> {
                 };
             }
 
-            let layout_name = self.module.objects[id as usize].name.clone();
-            let fields: Vec<_> = self.module.objects[id as usize]
+            // Same default for classes without their own `to_string` — the
+            // surface name (no `$local$N`) and no hidden `outer` reference.
+            let class = &self.checked.classes[id as usize];
+            let layout_name = surface_name(&class.name);
+            let fields: Vec<(u32, String, zirk_sema::Type)> = class
                 .fields
                 .iter()
-                .map(|f| (f.name.clone(), f.ty))
+                .enumerate()
+                .filter(|(_, f)| !(f.is_static || f.name == "outer" && class.enclosing.is_some()))
+                .map(|(i, f)| (i as u32, f.name.clone(), f.ty))
                 .collect();
             return self.lower_default_render_to_string(
                 operand,
@@ -21545,8 +26776,119 @@ impl<'a> FunctionLowering<'a> {
             return self.const_string("<Weak>", span);
         }
 
+        // `universal-to-string-and-multiline-strings`: a callable renders
+        // `<Function name>` when the operand still names its target — the
+        // `MakeCallable` that built it — and `<Function>` once the value has
+        // been moved through a slot and the target is no longer visible.
         if matches!(ty, IrType::Callable(_)) {
-            return self.const_string("<Callable>", span);
+            if let Some(target) = self.make_callable_target(operand) {
+                return self.const_string(&format!("<Function {target}>"), span);
+            }
+            return self.const_string("<Function>", span);
+        }
+
+        // `universal-to-string-and-multiline-strings`: the remaining opaque
+        // handles render their `<TypeName>`, matching `<Weak>`'s convention.
+        if matches!(ty, IrType::Job) {
+            return self.const_string("<Job>", span);
+        }
+        if matches!(ty, IrType::Channel(_)) {
+            return self.const_string("<Channel>", span);
+        }
+        if matches!(ty, IrType::Pointer(_)) {
+            return self.const_string("<Pointer>", span);
+        }
+        if matches!(ty, IrType::NativeSlice(_)) {
+            return self.const_string("<NativeSlice>", span);
+        }
+        if matches!(ty, IrType::NativeSliceMut(_)) {
+            return self.const_string("<NativeSliceMut>", span);
+        }
+        if matches!(ty, IrType::Dependent(_)) {
+            return self.const_string("<Dependent>", span);
+        }
+        if matches!(ty, IrType::Pin(_)) {
+            return self.const_string("<Pin>", span);
+        }
+
+        if let IrType::Map(id) = ty {
+            return self.lower_map_to_string(operand, id, span);
+        }
+        if let IrType::Set(id) = ty {
+            return self.lower_set_to_string(operand, id, span);
+        }
+        // Reached only without a semantic type in hand — every real path
+        // comes through `lower_to_string_of`, which knows the element type.
+        // `Int` is the only non-`Duration` element the checker allows, so
+        // `is_duration = 0` is the right fallback.
+        if ty == IrType::Range {
+            let not_duration = self.const_i64(0, span);
+            return self.emit(
+                InstKind::Call {
+                    callee: "zirk_range_to_string".to_string(),
+                    args: vec![operand, not_duration],
+                },
+                IrType::String,
+                span,
+            );
+        }
+        if ty == IrType::Regex {
+            let pattern = self.emit(
+                InstKind::Call {
+                    callee: "zirk_regex_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            );
+            let open = self.const_string("re'", span);
+            let close = self.const_string("'", span);
+            let wrapped = self.emit(
+                InstKind::Concat {
+                    left: open,
+                    right: pattern,
+                },
+                IrType::String,
+                span,
+            );
+            return self.emit(
+                InstKind::Concat {
+                    left: wrapped,
+                    right: close,
+                },
+                IrType::String,
+                span,
+            );
+        }
+        // An `IrType`-only caller (`lower_tuple_method_call`'s operand-typed
+        // dispatch) has no semantic `Type` to unwrap into — the inner
+        // renders through the same instruction set with its `IrType`.
+        if let IrType::Nullable(nullable) = ty {
+            let inner = nullable.inner();
+            let result = self.declare_slot("<nullable_to_string>", IrType::String, span);
+            let holder = self.declare_slot("<nullable_receiver>", ty, span);
+            self.emit_effect(InstKind::Store(holder, operand), span);
+            let test = self.emit(InstKind::IsNull(operand), IrType::Boolean, span);
+            let absent_block = self.new_block();
+            let present_block = self.new_block();
+            let continue_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: test,
+                then_block: absent_block,
+                else_block: present_block,
+            });
+            self.current = absent_block;
+            let absent = self.const_string("<Null>", span);
+            self.emit_effect(InstKind::Store(result, absent), span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = present_block;
+            let held = self.emit(InstKind::Load(holder), ty, span);
+            let unwrapped = self.emit(InstKind::Unwrap(held), inner, span);
+            let text = self.lower_to_string(unwrapped, inner, span);
+            self.emit_effect(InstKind::Store(result, text), span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = continue_block;
+            return self.emit(InstKind::Load(result), IrType::String, span);
         }
 
         self.emit(InstKind::ToString(operand), IrType::String, span)
@@ -21555,60 +26897,81 @@ impl<'a> FunctionLowering<'a> {
     /// Renders a tuple, record, or class as `Name(f0: v0, f1: v1)` or, for
     /// tuples, `(v0, v1)`. Each field is read with `LoadField` and converted
     /// recursively.
+    /// Renders `operand` as `prefix(field: v, …)` — the semantic type of
+    /// each field is recovered from `checked` so nested values render with
+    /// their real representation (`Range<Duration>` inside a record still
+    /// prints `a..b:step`, not an opaque handle). The first tuple element is
+    /// the layout index into the value/object layout — filtering the hidden
+    /// `outer` reference of an `inner class` shifts nothing.
     fn lower_default_render_to_string(
         &mut self,
         operand: Operand,
         prefix: &str,
-        fields: &[(String, IrType)],
+        fields: &[(u32, String, zirk_sema::Type)],
         is_tuple: bool,
         span: Span,
     ) -> Operand {
-        let mut result = self.const_string(prefix, span);
-        for (i, (field_name, field_ty)) in fields.iter().enumerate() {
+        // `operand` and the accumulator go through slots: a field whose own
+        // render opens blocks (a nested nullable, collection or payload
+        // enum) moves `self.current` out from under a held operand.
+        let object_slot = self.spill(operand, self.type_of_operand(operand), span);
+        let object_ty = self.type_of_operand(operand);
+        let acc_slot = self.declare_slot("<render>", IrType::String, span);
+        let opening = self.const_string(prefix, span);
+        self.emit_effect(InstKind::Store(acc_slot, opening), span);
+        for (i, (index, field_name, field_ty)) in fields.iter().enumerate() {
             if i > 0 {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
                 let sep = self.const_string(", ", span);
-                result = self.emit(
+                let text = self.emit(
                     InstKind::Concat {
-                        left: result,
+                        left: text,
                         right: sep,
                     },
                     IrType::String,
                     span,
                 );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
             }
             if !is_tuple {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
                 let label = self.const_string(&format!("{field_name}: "), span);
-                result = self.emit(
+                let text = self.emit(
                     InstKind::Concat {
-                        left: result,
+                        left: text,
                         right: label,
                     },
                     IrType::String,
                     span,
                 );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
             }
+            let object = self.emit(InstKind::Load(object_slot), object_ty, span);
             let field = self.emit(
                 InstKind::LoadField {
-                    object: operand,
-                    index: i as u32,
+                    object,
+                    index: *index,
                 },
-                *field_ty,
+                self.ir_type(*field_ty),
                 span,
             );
-            let rendered = self.lower_to_string(field, *field_ty, span);
-            result = self.emit(
+            let rendered = self.lower_to_string_of(field, *field_ty, span);
+            let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+            let text = self.emit(
                 InstKind::Concat {
-                    left: result,
+                    left: text,
                     right: rendered,
                 },
                 IrType::String,
                 span,
             );
+            self.emit_effect(InstKind::Store(acc_slot, text), span);
         }
+        let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
         let close = self.const_string(")", span);
         self.emit(
             InstKind::Concat {
-                left: result,
+                left: text,
                 right: close,
             },
             IrType::String,
@@ -21617,12 +26980,18 @@ impl<'a> FunctionLowering<'a> {
     }
 
     /// Default `to_string` for an algebraic enum: switch on the discriminant
-    /// and return the matching variant's name.
+    /// and return the matching variant's name — `Variant(field: v, …)` when
+    /// the variant carries data, each payload field rendered through the
+    /// same universal conversion
+    /// (`universal-to-string-and-multiline-strings`). A lone field named
+    /// `value` or `error` renders positionally — `Ok(5)` and `Error(boom)`,
+    /// not `Ok(value: 5)`/`Error(error: boom)`.
     fn lower_enum_to_string(&mut self, operand: Operand, enum_id: u32, span: Span) -> Operand {
         let result_slot = self.declare_slot("<enum_to_string>", IrType::String, span);
 
+        let has_payload = enum_has_payload(self.checked, enum_id);
         let disc_ty = IrType::Int(IntWidth::I32);
-        let disc = if enum_has_payload(self.checked, enum_id) {
+        let disc = if has_payload {
             self.emit(InstKind::Discriminant(operand), disc_ty, span)
         } else {
             operand
@@ -21630,8 +26999,14 @@ impl<'a> FunctionLowering<'a> {
         let disc_slot = self.declare_slot("<enum_disc>", disc_ty, span);
         self.emit_effect(InstKind::Store(disc_slot, disc), span);
 
+        // Payload arms read the value's fields inside their own block —
+        // operands do not cross blocks (ADR-007), so the enum value itself
+        // is spilled too.
+        let object_slot = has_payload.then(|| self.spill(operand, IrType::Enum(enum_id), span));
+
         let continue_block = self.new_block();
         let variants = self.checked.enums[enum_id as usize].variants.clone();
+        let variant_fields: Vec<Vec<u32>> = self.module.enums[enum_id as usize].variants.clone();
         let mut current = self.current;
 
         for (i, variant) in variants.iter().enumerate() {
@@ -21655,8 +27030,92 @@ impl<'a> FunctionLowering<'a> {
                 else_block: next,
             });
             self.current = arm;
-            let name = self.const_string(&variant.name, span);
-            self.emit_effect(InstKind::Store(result_slot, name), span);
+
+            // The accumulator lives in a slot: a payload field whose own
+            // render opens blocks (a nested nullable, collection or enum)
+            // moves `self.current`, and a held operand would be stranded in
+            // this arm's entry block.
+            let acc_slot = self.declare_slot("<enum_render>", IrType::String, span);
+            let positional = variant.associated.len() == 1
+                && matches!(variant.associated[0].name.as_str(), "value" | "error");
+            let opening = self.const_string(
+                &if variant.associated.is_empty() {
+                    variant.name.clone()
+                } else {
+                    format!("{}(", variant.name)
+                },
+                span,
+            );
+            self.emit_effect(InstKind::Store(acc_slot, opening), span);
+            for (position, field) in variant.associated.iter().enumerate() {
+                if position > 0 {
+                    let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                    let sep = self.const_string(", ", span);
+                    let text = self.emit(
+                        InstKind::Concat {
+                            left: text,
+                            right: sep,
+                        },
+                        IrType::String,
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(acc_slot, text), span);
+                }
+                if !positional {
+                    let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                    let label = self.const_string(&format!("{}: ", field.name), span);
+                    let text = self.emit(
+                        InstKind::Concat {
+                            left: text,
+                            right: label,
+                        },
+                        IrType::String,
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(acc_slot, text), span);
+                }
+                let object = self.emit(
+                    InstKind::Load(object_slot.expect("a payload arm has the value spilled")),
+                    IrType::Enum(enum_id),
+                    span,
+                );
+                let field_index = variant_fields[i][position];
+                let field_ir = self.module.enums[enum_id as usize].fields[field_index as usize].ty;
+                let value = self.emit(
+                    InstKind::LoadField {
+                        object,
+                        index: field_index,
+                    },
+                    field_ir,
+                    span,
+                );
+                let rendered = self.lower_to_string_of(value, field.ty, span);
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                let text = self.emit(
+                    InstKind::Concat {
+                        left: text,
+                        right: rendered,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
+            }
+            if !variant.associated.is_empty() {
+                let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+                let close = self.const_string(")", span);
+                let text = self.emit(
+                    InstKind::Concat {
+                        left: text,
+                        right: close,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(acc_slot, text), span);
+            }
+            let text = self.emit(InstKind::Load(acc_slot), IrType::String, span);
+            self.emit_effect(InstKind::Store(result_slot, text), span);
             self.terminate(Terminator::Jump(continue_block));
             current = next;
         }
@@ -21763,7 +27222,21 @@ impl<'a> FunctionLowering<'a> {
             element_ty,
             span,
         );
-        let element_str = self.lower_to_string(element, element_ty, span);
+        // `module.array_types`/`list_types` share `checked`'s ids — the
+        // element's semantic type is recoverable, so a `List<Duration>`
+        // renders `1.5s` instead of bare nanos
+        // (`universal-to-string-and-multiline-strings`).
+        let element_str = match receiver_ty {
+            IrType::Array(id) => {
+                let ty = self.checked.array_types[id as usize];
+                self.lower_to_string_of(element, ty, span)
+            }
+            IrType::List(id) => {
+                let ty = self.checked.list_types[id as usize];
+                self.lower_to_string_of(element, ty, span)
+            }
+            _ => self.lower_to_string(element, element_ty, span),
+        };
         let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
         let result = self.emit(
             InstKind::Concat {
@@ -21807,114 +27280,719 @@ impl<'a> FunctionLowering<'a> {
     /// formatter instead. A bare enum variant access (`Color.Red`) is known
     /// at compile time, so its name is returned directly.
     fn lower_to_string_expr(&mut self, expr: &ast::Expr, operand: Operand, span: Span) -> Operand {
-        // `date-and-time-types`: the civil temporal types render through
-        // their ISO 8601 formatters in the runtime.
-        if let Some(callee) = match self.temporal_base(expr) {
-            Some(zirk_sema::Base::Date) => Some("zirk_rt_date_to_string"),
-            Some(zirk_sema::Base::Time) => Some("zirk_rt_time_to_string"),
-            Some(zirk_sema::Base::DateTime) => Some("zirk_rt_datetime_to_string"),
-            _ => None,
-        } {
-            return self.emit(
-                InstKind::Call {
-                    callee: callee.to_string(),
-                    args: vec![operand],
-                },
-                IrType::String,
-                span,
-            );
+        // A named function reference renders its name — the one piece of the
+        // universal conversion only the expression itself (not its type) can
+        // supply (`universal-to-string-and-multiline-strings`).
+        if let Some(name) = self.function_reference_name(expr) {
+            return self.const_string(&format!("<Function {name}>"), span);
         }
 
-        if self.is_duration(expr) {
-            return self.emit(
-                InstKind::Call {
-                    callee: "zirk_rt_duration_to_string".to_string(),
-                    args: vec![operand],
-                },
-                IrType::String,
-                span,
-            );
-        }
-
-        if let ast::Expr::Field(field) = expr
-            && self.checked.variant_accesses.contains(&field.span)
-            && let Some(&ty) = self.checked.expr_types.get(&expr.span())
-            && matches!(ty.base, Base::Enum(_) | Base::EnumInstance(_))
-        {
-            return self.const_string(&field.name.name, span);
-        }
-
-        if let Some(&ty) = self.checked.expr_types.get(&expr.span())
-            && let Base::Enum(enum_id) = ty.base
-        {
-            return self.lower_enum_to_string(operand, enum_id, span);
+        // `universal-to-string-and-multiline-strings`: the semantic type is
+        // the first dispatch — it alone carries what `IrType` erases:
+        // `Duration`/`Date`/`Time` share the integer `IrType`, `Range` drops
+        // its element type, `Map`/`Set` their parameter tables, and the
+        // `null` literal has no `IrType` at all.
+        if let Some(ty) = self.semantic_type(expr) {
+            return self.lower_to_string_of(operand, ty, span);
         }
 
         let ty = self.type_of(expr, expr.span());
         self.lower_to_string(operand, ty, span)
     }
 
-    /// Lowers the arguments of `print`/`println`, converting each via
-    /// `to_string()` when it is not already a `String`.
-    ///
-    /// `ZIRK_STDLIB_SPEC.md` section 3: every printable value goes through
-    /// `to_string()`. Without this the runtime would read an `Int32` as if it
-    /// were a pointer. Converted pieces are held across arguments that open
-    /// blocks; values do not cross blocks in this IR (ADR-007).
+    /// `expr.to_string()`/`println(expr)`/`"{expr}"` rendering dispatched on
+    /// the *semantic* type — the entry every recursive render shares, so a
+    /// `Range<Duration>` inside a `Map`'s values spells its bounds as
+    /// durations exactly like the top-level expression would
+    /// (`universal-to-string-and-multiline-strings`).
+    fn lower_to_string_of(&mut self, operand: Operand, ty: zirk_sema::Type, span: Span) -> Operand {
+        if ty.nullable {
+            return self.lower_nullable_to_string(operand, ty.without_null(), span);
+        }
+        match ty.base {
+            // `null` itself — the `Null` base has no `IrType`, so only this
+            // semantic dispatch can see it.
+            zirk_sema::Base::Null => self.const_string("<Null>", span),
+            zirk_sema::Base::Duration => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_duration_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            // `date-and-time-types`: the civil temporal types render through
+            // their ISO 8601 formatters in the runtime.
+            zirk_sema::Base::Date => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_date_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Time => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_time_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::DateTime => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Enum(enum_id) => self.lower_enum_to_string(operand, enum_id, span),
+            zirk_sema::Base::Range(id) => {
+                let element = self.checked.range_types[id as usize];
+                self.lower_range_to_string(operand, element, span)
+            }
+            zirk_sema::Base::Map(id) => self.lower_map_to_string(operand, id, span),
+            zirk_sema::Base::Set(id) => self.lower_set_to_string(operand, id, span),
+            // `re'...'` — the runtime's `zirk_regex_to_string` returns the
+            // bare pattern; the literal spelling wraps it.
+            zirk_sema::Base::Regex => {
+                let pattern = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_regex_to_string".to_string(),
+                        args: vec![operand],
+                    },
+                    IrType::String,
+                    span,
+                );
+                let open = self.const_string("re'", span);
+                let close = self.const_string("'", span);
+                let wrapped = self.emit(
+                    InstKind::Concat {
+                        left: open,
+                        right: pattern,
+                    },
+                    IrType::String,
+                    span,
+                );
+                self.emit(
+                    InstKind::Concat {
+                        left: wrapped,
+                        right: close,
+                    },
+                    IrType::String,
+                    span,
+                )
+            }
+            zirk_sema::Base::Job(_) => self.const_string("<Job>", span),
+            zirk_sema::Base::Channel(_) => self.const_string("<Channel>", span),
+            zirk_sema::Base::Pointer(_) => self.const_string("<Pointer>", span),
+            zirk_sema::Base::NativeSlice(_) => self.const_string("<NativeSlice>", span),
+            zirk_sema::Base::NativeSliceMut(_) => self.const_string("<NativeSliceMut>", span),
+            zirk_sema::Base::Dependent(_) => self.const_string("<Dependent>", span),
+            zirk_sema::Base::Pin(_) => self.const_string("<Pin>", span),
+            // A callable reached without an expression — a `Map` value, a
+            // record field — has no name to recover: `<Function>`.
+            zirk_sema::Base::Function(_) => self.const_string("<Function>", span),
+            _ => self.lower_to_string(operand, self.ir_type(ty), span),
+        }
+    }
+
+    /// `x.to_string()` on a `T?` receiver (`universal-to-string-and-multiline-strings`):
+    /// `<Null>` when absent, the inner value's own rendering when present —
+    /// the same absent/present block pair `lower_safe_method_call` builds.
+    fn lower_nullable_to_string(
+        &mut self,
+        operand: Operand,
+        inner: zirk_sema::Type,
+        span: Span,
+    ) -> Operand {
+        let ir_inner = self.ir_type(inner);
+        let nullable =
+            IrType::Nullable(Nullable::of(ir_inner).expect("the checker rejects `Void?`/`Never?`"));
+        let result = self.declare_slot("<nullable_to_string>", IrType::String, span);
+        let holder = self.declare_slot("<nullable_receiver>", nullable, span);
+        self.emit_effect(InstKind::Store(holder, operand), span);
+        let test = self.emit(InstKind::IsNull(operand), IrType::Boolean, span);
+
+        let absent_block = self.new_block();
+        let present_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: test,
+            then_block: absent_block,
+            else_block: present_block,
+        });
+
+        self.current = absent_block;
+        let absent = self.const_string("<Null>", span);
+        self.emit_effect(InstKind::Store(result, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = present_block;
+        let held = self.emit(InstKind::Load(holder), nullable, span);
+        let unwrapped = self.emit(InstKind::Unwrap(held), ir_inner, span);
+        let text = self.lower_to_string_of(unwrapped, inner, span);
+        self.emit_effect(InstKind::Store(result, text), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result), IrType::String, span)
+    }
+
+    /// `range.to_string()` — the runtime's `zirk_range_to_string` reproduces
+    /// the literal spelling; `is_duration` is all it needs to know about the
+    /// element type, the only two the checker allows being `Int` and
+    /// `Duration`.
+    fn lower_range_to_string(
+        &mut self,
+        operand: Operand,
+        element: zirk_sema::Type,
+        span: Span,
+    ) -> Operand {
+        let is_duration = self.const_i64(
+            matches!(element.base, zirk_sema::Base::Duration) as i128,
+            span,
+        );
+        self.emit(
+            InstKind::Call {
+                callee: "zirk_range_to_string".to_string(),
+                args: vec![operand, is_duration],
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// The surface name a `Path` expression refers to a declared function
+    /// by — `main` in `println(main)` — or `None` for anything else
+    /// (`universal-to-string-and-multiline-strings`). A local binding
+    /// shadowing the name is a variable, not a reference.
+    fn function_reference_name(&self, expr: &ast::Expr) -> Option<String> {
+        let ast::Expr::Path(ident) = expr else {
+            return None;
+        };
+        if self.try_lookup_slot(&ident.name).is_some() {
+            return None;
+        }
+        self.named_function_value(&ident.name, ident.span)
+            .map(|_| ident.name.clone())
+    }
+
+    /// The target name of the `MakeCallable` that produced `operand`, when
+    /// the operand is still that instruction — used by the `<Function name>`
+    /// rendering (`universal-to-string-and-multiline-strings`).
+    fn make_callable_target(&self, operand: Operand) -> Option<String> {
+        self.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find(|inst| inst.result == Some(operand.0))
+            .and_then(|inst| match &inst.kind {
+                InstKind::MakeCallable { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+    }
+
+    /// The `Array<Int64>` `IrType` the `Map`/`Set` snapshots come back as —
+    /// reusing a checker-interned `Array<Int64>` when one exists, else the
+    /// synthetic entry `lower` appends past the checker's own
+    /// (`universal-to-string-and-multiline-strings`).
+    fn word_array_type(&mut self) -> IrType {
+        let word = IrType::Int(IntWidth::I64);
+        let id = match self.module.array_types.iter().position(|&t| t == word) {
+            Some(id) => id as u32,
+            None => {
+                let id = self.module.array_types.len() as u32;
+                self.module.array_types.push(word);
+                id
+            }
+        };
+        IrType::Array(id)
+    }
+
+    /// `map.to_string()` (`universal-to-string-and-multiline-strings`):
+    /// `{k0: v0, k1: v1, …}` over the runtime's sorted key snapshot — the
+    /// same loop shape `lower_collection_to_string` builds, with each stored
+    /// `i64` word read back as the key's own type by `WordCast` and the
+    /// value fetched through the ordinary `MapGet`/`Unwrap` pair.
+    fn lower_map_to_string(&mut self, receiver: Operand, map_id: u32, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let u64_ty = IrType::Int(IntWidth::U64);
+        let map_ty = IrType::Map(map_id);
+        let key_sem = self.checked.map_types[map_id as usize].key;
+        let value_sem = self.checked.map_types[map_id as usize].value;
+        let (key_ir, value_ir) = self.module.map_types[map_id as usize];
+        let words_ty = self.word_array_type();
+
+        let receiver_slot = self.spill(receiver, map_ty, span);
+        let string_keys = self.const_i64(
+            matches!(
+                key_sem.base,
+                zirk_sema::Base::String | zirk_sema::Base::Char
+            ) as i128,
+            span,
+        );
+        let keys = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_map_sorted_keys".to_string(),
+                args: vec![receiver, string_keys],
+            },
+            words_ty,
+            span,
+        );
+        let keys_slot = self.spill(keys, words_ty, span);
+        let length = self.emit(InstKind::ArrayLength(keys), u64_ty, span);
+        let length_slot = self.spill(length, u64_ty, span);
+
+        let open = self.const_string("{", span);
+        let result_slot = self.spill(open, IrType::String, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let i_slot = self.spill(zero, u64_ty, span);
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let comma = self.new_block();
+        let after_comma = self.new_block();
+        let end = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let length = self.emit(InstKind::Load(length_slot), u64_ty, span);
+        let cond = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: cond,
+            then_block: body,
+            else_block: end,
+        });
+
+        self.current = body;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: i,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: after_comma,
+            else_block: comma,
+        });
+
+        self.current = comma;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let sep = self.const_string(", ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: sep,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        self.terminate(Terminator::Jump(after_comma));
+
+        self.current = after_comma;
+        let keys = self.emit(InstKind::Load(keys_slot), words_ty, span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let word = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: keys,
+                index: i,
+            },
+            i64_ty,
+            span,
+        );
+        let key = self.emit(InstKind::WordCast(word), key_ir, span);
+        let key_str = self.lower_to_string_of(key, key_sem, span);
+        // The key's text is held across the value's render: that render can
+        // open blocks (a nullable or collection value) and a plain operand
+        // would be stranded in this block.
+        let key_str_slot = self.spill(key_str, IrType::String, span);
+        let receiver = self.emit(InstKind::Load(receiver_slot), map_ty, span);
+        let nullable_value = self.emit(
+            InstKind::MapGet { receiver, key },
+            IrType::Nullable(
+                Nullable::of(value_ir).expect("a map's value type has a nullable form"),
+            ),
+            span,
+        );
+        // The key came from the map's own snapshot — it is always present.
+        let value = self.emit(InstKind::Unwrap(nullable_value), value_ir, span);
+        let value_str = self.lower_to_string_of(value, value_sem, span);
+
+        let key_str = self.emit(InstKind::Load(key_str_slot), IrType::String, span);
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let colon = self.const_string(": ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: key_str,
+            },
+            IrType::String,
+            span,
+        );
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: colon,
+            },
+            IrType::String,
+            span,
+        );
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: value_str,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let one = self.const_int_at(1, u64_ty, span);
+        let i = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: i,
+                right: one,
+            },
+            u64_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(i_slot, i), span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = end;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let close = self.const_string("}", span);
+        self.emit(
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// `set.to_string()` (`universal-to-string-and-multiline-strings`):
+    /// `{v0, v1, …}` over the runtime's sorted element snapshot — the same
+    /// loop `lower_map_to_string` builds, minus the value lookup.
+    fn lower_set_to_string(&mut self, receiver: Operand, set_id: u32, span: Span) -> Operand {
+        let i64_ty = IrType::Int(IntWidth::I64);
+        let u64_ty = IrType::Int(IntWidth::U64);
+        let _ = IrType::Set(set_id);
+        let elem_sem = self.checked.set_types[set_id as usize];
+        let elem_ir = self.module.set_types[set_id as usize];
+        let words_ty = self.word_array_type();
+
+        let string_elements = self.const_i64(
+            matches!(
+                elem_sem.base,
+                zirk_sema::Base::String | zirk_sema::Base::Char
+            ) as i128,
+            span,
+        );
+        let elements = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_set_sorted_elements".to_string(),
+                args: vec![receiver, string_elements],
+            },
+            words_ty,
+            span,
+        );
+        let elements_slot = self.spill(elements, words_ty, span);
+        let length = self.emit(InstKind::ArrayLength(elements), u64_ty, span);
+        let length_slot = self.spill(length, u64_ty, span);
+
+        let open = self.const_string("{", span);
+        let result_slot = self.spill(open, IrType::String, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let i_slot = self.spill(zero, u64_ty, span);
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let comma = self.new_block();
+        let after_comma = self.new_block();
+        let end = self.new_block();
+
+        self.terminate(Terminator::Jump(header));
+
+        self.current = header;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let length = self.emit(InstKind::Load(length_slot), u64_ty, span);
+        let cond = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: i,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: cond,
+            then_block: body,
+            else_block: end,
+        });
+
+        self.current = body;
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let zero = self.const_int_at(0, u64_ty, span);
+        let is_first = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: i,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: is_first,
+            then_block: after_comma,
+            else_block: comma,
+        });
+
+        self.current = comma;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let sep = self.const_string(", ", span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: sep,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        self.terminate(Terminator::Jump(after_comma));
+
+        self.current = after_comma;
+        let elements = self.emit(InstKind::Load(elements_slot), words_ty, span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let word = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: elements,
+                index: i,
+            },
+            i64_ty,
+            span,
+        );
+        let element = self.emit(InstKind::WordCast(word), elem_ir, span);
+        let element_str = self.lower_to_string_of(element, elem_sem, span);
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let result = self.emit(
+            InstKind::Concat {
+                left: result,
+                right: element_str,
+            },
+            IrType::String,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, result), span);
+        let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
+        let one = self.const_int_at(1, u64_ty, span);
+        let i = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: i,
+                right: one,
+            },
+            u64_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(i_slot, i), span);
+        self.terminate(Terminator::Jump(header));
+
+        self.current = end;
+        let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
+        let close = self.const_string("}", span);
+        self.emit(
+            InstKind::Concat {
+                left: result,
+                right: close,
+            },
+            IrType::String,
+            span,
+        )
+    }
+
+    /// Lowers the opened `print`/`println` convenience syntax into the same
+    /// ordinary `std.io` function call as `stdout.print(...)`. The parser
+    /// preserves this historical shorthand as a separate node, but it is not
+    /// a second output implementation: it builds `List<Stringifiable>` and
+    /// calls the bundled Zirk body, whose private `write*` leaf reaches the
+    /// host only at the final boundary.
     fn lower_print_expr(&mut self, expr: &ast::PrintlnExpr, span: Span) -> Operand {
-        let mut pieces = Vec::with_capacity(expr.args.len());
+        let name = if expr.newline { "println" } else { "print" };
+        let stream = self
+            .checked
+            .standard_stream_source_modules
+            .get(&expr.span.file)
+            .map(String::as_str)
+            .or(expr.stream.as_deref())
+            .unwrap_or("stdout");
+        let binding = zirk_sema::stdlib::compiler_binding(
+            "std.io",
+            stream,
+            name,
+            &format!("fn {name}(...args: Stringifiable): Void"),
+        )
+        .expect("the compiler-owned std.io output declaration has a binding");
+        let signature = self
+            .checked
+            .functions
+            .get(binding)
+            .or_else(|| {
+                binding
+                    .rsplit_once('.')
+                    .and_then(|(_, member)| self.checked.functions.get(member))
+            })
+            .expect("the checked standard output declaration has a signature");
+        let element_ty = self.ir_type(signature.params[0].ty);
+        let list_id = self
+            .checked
+            .list_types
+            .iter()
+            .position(|&ty| self.ir_type(ty) == element_ty)
+            .expect("the checker interns the output variadic list") as u32;
+        let list_ty = IrType::List(list_id);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            list_ty,
+            span,
+        );
+        let list_slot = self.spill(list, list_ty, span);
+
         for (position, arg) in expr.args.iter().enumerate() {
-            let operand = self.lower_expr(arg);
-            let text = self.lower_to_string_expr(arg, operand, span);
             let branches_later = expr.args[position + 1..]
                 .iter()
-                .any(|later| self.opens_blocks(later));
-            pieces.push(if branches_later {
-                let slot = self.declare_slot("<print>", IrType::String, arg.span());
-                self.emit_effect(InstKind::Store(slot, text), arg.span());
-                Held::Spilled(slot, IrType::String)
-            } else {
-                Held::Value(text)
-            });
+                .any(|later| self.to_string_opens_blocks(later));
+            let held = self.lower_and_hold_as(arg, element_ty, branches_later);
+            let receiver = self.emit(InstKind::Load(list_slot), list_ty, span);
+            let value = self.reload(held, span);
+            self.emit_effect(InstKind::ListAdd { receiver, value }, span);
         }
+        let args = vec![self.emit(InstKind::Load(list_slot), list_ty, span)];
+        self.emit(
+            InstKind::Call {
+                callee: binding.into(),
+                args,
+            },
+            IrType::Void,
+            span,
+        )
+    }
 
-        let mut rendered = None;
-        for piece in pieces {
-            let text = self.reload(piece, span);
-            rendered = Some(match rendered {
-                None => text,
-                Some(prefix) => {
-                    let separator = self.const_string(" ", span);
-                    let with_separator = self.emit(
-                        InstKind::Concat {
-                            left: prefix,
-                            right: separator,
-                        },
-                        IrType::String,
-                        span,
-                    );
-                    self.emit(
-                        InstKind::Concat {
-                            left: with_separator,
-                            right: text,
-                        },
-                        IrType::String,
-                        span,
-                    )
+    /// Intercepts a semantically proven `std.io` call before it would
+    /// otherwise lower to a generic `InstKind::Call`, for the minimal host
+    /// leaves that cannot be expressed in Zirk source: `print`, `flush`, and
+    /// `stdin`'s `read_line_result`/`read_char`/
+    /// `read_bytes`/`read_exact`.
+    ///
+    /// Returns `None` for every other module-member call, which falls
+    /// through to ordinary `Call` lowering unchanged — including a
+    /// same-named function in a different (non-`std.io`) package, since
+    /// `zirk_sema::stdlib::compiler_binding` only ever matches the closed,
+    /// provenance-keyed registry (`external-same-name-never-acquires-a-
+    /// standard-binding`, `crates/zirk-sema/src/stdlib.rs`'s own test).
+    fn try_lower_stdio_host_call(&mut self, e: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let binding = self.checked.standard_stream_calls.get(&e.span)?.as_str();
+        let name = binding.rsplit_once('.').map(|(_, name)| name)?;
+        let returns = self.signature_return(name);
+        Some(match binding {
+            "std.io.stdout.write" | "std.io.stderr.write" => {
+                let text = self.lower_expr_as(&e.args[0].value, IrType::String);
+                match binding {
+                    "std.io.stdout.write" => self.emit_effect(InstKind::Print(text), span),
+                    "std.io.stderr.write" => self.emit_effect(InstKind::PrintStderr(text), span),
+                    _ => unreachable!(),
                 }
-            });
-        }
-
-        // `println()` is a newline-only operation. An empty String gives the
-        // existing runtime newline intrinsic a valid handle; `print()` writes
-        // that same empty string and therefore nothing.
-        let rendered = rendered.unwrap_or_else(|| self.const_string("", span));
-        if expr.newline {
-            self.emit_effect(InstKind::Println(rendered), span);
-        } else {
-            self.emit_effect(InstKind::Print(rendered), span);
-        }
-        self.emit(InstKind::Undefined, IrType::Void, span)
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            "std.io.stdout.write_line" | "std.io.stderr.write_line" => {
+                let empty = self.const_string("", span);
+                match binding {
+                    "std.io.stdout.write_line" => self.emit_effect(InstKind::Println(empty), span),
+                    "std.io.stderr.write_line" => {
+                        self.emit_effect(InstKind::PrintlnStderr(empty), span)
+                    }
+                    _ => unreachable!(),
+                }
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            // Both public operations are Zirk source. Their arguments are
+            // rendered at the compiler-owned universal `Stringifiable`
+            // boundary and the source loops only perform joining and writes.
+            "std.io.stdout.print"
+            | "std.io.stderr.print"
+            | "std.io.stdout.println"
+            | "std.io.stderr.println" => return None,
+            // `read_line` is ordinary Zirk source: its body projects the
+            // leaf `read_line_result()` outcome into `String?`. Only that
+            // leaf reaches the host runtime.
+            "std.io.stdin.read_line" => return None,
+            "std.io.stdout.flush" | "std.io.stderr.flush" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!("every intercepted std.io flush returns an enum")
+                };
+                match binding {
+                    "std.io.stdout.flush" => {
+                        self.emit(InstKind::FlushStdout { enum_id }, returns, span)
+                    }
+                    "std.io.stderr.flush" => {
+                        self.emit(InstKind::FlushStderr { enum_id }, returns, span)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            "std.io.stdin.read_line_result" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                self.emit(InstKind::StdinReadLineResult { enum_id }, returns, span)
+            }
+            "std.io.stdin.read_char" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                self.emit(InstKind::StdinReadChar { enum_id }, returns, span)
+            }
+            "std.io.stdin.read_bytes" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                let max = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                self.emit(InstKind::StdinReadBytes { max, enum_id }, returns, span)
+            }
+            "std.io.stdin.read_exact" => {
+                let IrType::Enum(enum_id) = returns else {
+                    unreachable!()
+                };
+                let count = self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                self.emit(InstKind::StdinReadExact { count, enum_id }, returns, span)
+            }
+            _ => unreachable!("the std.io host-call lowering only requests these bindings"),
+        })
     }
 
     /// Lowers `"text {expr} text"` into a chain of `Concat`, converting each
@@ -21928,9 +28006,9 @@ impl<'a> FunctionLowering<'a> {
     fn lower_interpolated(&mut self, expr: &ast::InterpolatedStrExpr, span: Span) -> Operand {
         let mut held: Vec<Held> = Vec::with_capacity(expr.parts.len());
         for (position, part) in expr.parts.iter().enumerate() {
-            let branches_later = expr.parts[position + 1..]
-                .iter()
-                .any(|p| matches!(p, ast::InterpolatedPart::Expr(e) if self.opens_blocks(e)));
+            let branches_later = expr.parts[position + 1..].iter().any(
+                |p| matches!(p, ast::InterpolatedPart::Expr(e) if self.to_string_opens_blocks(e)),
+            );
 
             let value = match part {
                 ast::InterpolatedPart::Literal(text) => {
@@ -21938,7 +28016,7 @@ impl<'a> FunctionLowering<'a> {
                     self.emit(InstKind::ConstString(id), IrType::String, span)
                 }
                 ast::InterpolatedPart::Expr(inner) => {
-                    let operand = self.lower_expr(inner);
+                    let operand = self.lower_render_operand(inner, span);
                     self.lower_to_string_expr(inner, operand, span)
                 }
             };
@@ -22005,6 +28083,10 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .functions
             .get(&name)
+            .or_else(|| {
+                name.rsplit_once('.')
+                    .and_then(|(_, member)| self.checked.functions.get(member))
+            })
             .expect("a verified program only calls declared functions")
             .clone();
 
@@ -22133,6 +28215,134 @@ impl<'a> FunctionLowering<'a> {
         args
     }
 
+    /// Lowers a checked argument list against an already-resolved parameter
+    /// list. Member and `super` calls do not have a free-function declaration
+    /// to look up, but named arguments still need the same source-order
+    /// evaluation and declaration-order materialization as a direct call.
+    fn lower_args_for_params(
+        &mut self,
+        call: &ast::CallExpr,
+        params: &[ParamInfo],
+    ) -> Vec<Operand> {
+        let variadic_index = params.iter().position(|p| p.variadic);
+        let fixed_count = variadic_index.unwrap_or(params.len());
+        let variadic_info = variadic_index.map(|i| {
+            let element_ty = self.ir_type(params[i].ty);
+            let list_id =
+                self.checked
+                    .list_types
+                    .iter()
+                    .position(|&t| self.ir_type(t) == element_ty)
+                    .expect("the checker interned the variadic list type") as u32;
+            let list_ty = IrType::List(list_id);
+            let list = self.emit(
+                InstKind::ListNew {
+                    element_id: list_id,
+                },
+                list_ty,
+                call.span,
+            );
+            let list_slot = self.spill(list, list_ty, call.span);
+            (list_id, element_ty, list_ty, list_slot)
+        });
+
+        let mut fixed_slots: Vec<Option<Held>> = (0..fixed_count).map(|_| None).collect();
+        let mut next = 0usize;
+
+        for (position, arg) in call.args.iter().enumerate() {
+            let branches_later = call.args[position + 1..]
+                .iter()
+                .any(|a| self.opens_blocks(&a.value));
+
+            if arg.is_spread {
+                let (_list_id, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker allows spread only into variadic parameters");
+                let source = self.lower_expr(&arg.value);
+                let source_ty = self.type_of_operand(source);
+                let source_slot = self.declare_slot("<spread source>", source_ty, arg.value.span());
+                self.emit_effect(InstKind::Store(source_slot, source), arg.value.span());
+                self.lower_iterable_elements(
+                    source_slot,
+                    source_ty,
+                    element_ty,
+                    arg.span,
+                    |this, element| {
+                        let receiver = this.emit(InstKind::Load(list_slot), list_ty, arg.span);
+                        this.emit_effect(
+                            InstKind::ListAdd {
+                                receiver,
+                                value: element,
+                            },
+                            arg.span,
+                        );
+                    },
+                );
+                continue;
+            }
+
+            if let Some(named) = &arg.name {
+                let index = params
+                    .iter()
+                    .position(|p| p.name == named.name)
+                    .expect("the checker resolved every named argument");
+                if index < fixed_count {
+                    let ty = self.ir_type(params[index].ty);
+                    fixed_slots[index] =
+                        Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                } else {
+                    let (_, element_ty, list_ty, list_slot) =
+                        variadic_info.expect("the checker resolved a named variadic argument");
+                    let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                    let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                    let element = self.reload(value, call.span);
+                    self.emit_effect(
+                        InstKind::ListAdd {
+                            receiver,
+                            value: element,
+                        },
+                        call.span,
+                    );
+                }
+                continue;
+            }
+
+            while next < fixed_count && fixed_slots[next].is_some() {
+                next += 1;
+            }
+            if next < fixed_count {
+                let ty = self.ir_type(params[next].ty);
+                fixed_slots[next] = Some(self.lower_and_hold_as(&arg.value, ty, branches_later));
+                next += 1;
+            } else {
+                let (_, element_ty, list_ty, list_slot) =
+                    variadic_info.expect("the checker rejects too many positional arguments");
+                let value = self.lower_and_hold_as(&arg.value, element_ty, branches_later);
+                let receiver = self.emit(InstKind::Load(list_slot), list_ty, call.span);
+                let element = self.reload(value, call.span);
+                self.emit_effect(
+                    InstKind::ListAdd {
+                        receiver,
+                        value: element,
+                    },
+                    call.span,
+                );
+            }
+        }
+
+        let mut args = Vec::with_capacity(fixed_count + variadic_info.is_some() as usize);
+        for (index, slot) in fixed_slots.into_iter().enumerate() {
+            let ty = self.ir_type(params[index].ty);
+            args.push(match slot {
+                Some(held) => self.reload(held, call.span),
+                None => self.lower_param_default(&params[index], ty, call.span),
+            });
+        }
+        if let Some((list_id, _, _, list_slot)) = variadic_info {
+            args.push(self.emit(InstKind::Load(list_slot), IrType::List(list_id), call.span));
+        }
+        args
+    }
+
     /// The value a parameter takes when the call omits it.
     fn lower_default(
         &mut self,
@@ -22158,6 +28368,22 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    /// Materializes an omitted parameter using the resolved signature.  Unlike
+    /// the old free-function-only declaration lookup, `ParamInfo` is shared by
+    /// functions, methods, constructors, and both forms of `super`.
+    fn lower_param_default(&mut self, param: &ParamInfo, ty: IrType, span: Span) -> Operand {
+        match &param.default {
+            Some(expr) => self.lower_expr_as(expr, ty),
+            None if param.optional => {
+                let IrType::Nullable(base) = ty else {
+                    unreachable!("an omitted parameter without a default is nullable")
+                };
+                self.emit(InstKind::NullValue(base), ty, span)
+            }
+            None => panic!("the checker rejects a call missing a required parameter"),
+        }
+    }
+
     /// Whether a call goes through a closure value rather than a name.
     /// Whether `call` is `myScalar.to_string()` — the explicit spelling of
     /// the conversion `println`/interpolation reach implicitly (roadmap
@@ -22170,6 +28396,7 @@ impl<'a> FunctionLowering<'a> {
         };
         if field.name.name != "to_string"
             || !call.args.is_empty()
+            || field.safe
             || self.checked.variant_accesses.contains(&field.span)
         {
             return false;
@@ -22356,6 +28583,21 @@ impl<'a> FunctionLowering<'a> {
         )
     }
 
+    fn is_channel_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if let ast::Expr::Path(ident) = &*field.object
+            && self.try_lookup_slot(&ident.name).is_none()
+        {
+            return false;
+        }
+        matches!(
+            self.type_of(&field.object, field.object.span()),
+            IrType::Channel(_)
+        )
+    }
+
     /// Whether `call` is a recursive lambda calling itself by its own
     /// binding name (`ZIRK_LANGUAGE_SPEC.md` section 6, roadmap Phase 4d)
     /// — see `Self::recursive_call`'s own doc comment.
@@ -22366,11 +28608,128 @@ impl<'a> FunctionLowering<'a> {
         matches!(&*call.callee, ast::Expr::Path(ident) if &ident.name == source)
     }
 
+    fn is_thread_run_call(&self, call: &ast::CallExpr) -> bool {
+        self.checked.thread_run_calls.contains(&call.span)
+    }
+
+    fn lower_thread_run_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let arg = call.args.first().expect("sema validates Thread.run arity");
+        let callable = self.lower_expr(&arg.value);
+        let callable_ty = self.type_of_operand(callable);
+        let IrType::Callable(layout_id) = callable_ty else {
+            return self.emit(InstKind::Undefined, IrType::Void, span);
+        };
+        let returns = self.module.closures[layout_id as usize].returns;
+        let callable_slot = self.declare_slot("<thread_callable>", callable_ty, span);
+        self.emit_effect(InstKind::Store(callable_slot, callable), span);
+        let result_slot =
+            (returns != IrType::Void).then(|| self.declare_slot("<thread_result>", returns, span));
+        let throwable_ty = IrType::Object(self.throwable_object_id());
+        let exception_slot = self.declare_slot("<thread_exception>", throwable_ty, span);
+
+        let status = self.emit(
+            InstKind::ThreadRun {
+                callable_slot,
+                result_slot,
+                exception_slot,
+            },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let succeeded = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success_block = self.new_block();
+        let failure_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: succeeded,
+            then_block: success_block,
+            else_block: failure_block,
+        });
+
+        self.current = failure_block;
+        let failure_status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let thrown_status = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let thrown = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: failure_status,
+                right: thrown_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let thrown_block = self.new_block();
+        let panic_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: thrown,
+            then_block: thrown_block,
+            else_block: panic_block,
+        });
+
+        self.current = thrown_block;
+        let exception = self.emit(InstKind::Load(exception_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(exception), span);
+        self.lower_pending_exception_dispatch(span);
+
+        self.current = panic_block;
+        let native_error = self
+            .checked
+            .native_exceptions
+            .expect("Thread.run uses the checked exception hierarchy")
+            .native_error;
+        self.throw_native_failure(
+            native_error,
+            "managed thread callback failed internally",
+            span,
+        );
+
+        self.current = success_block;
+        let result = match result_slot {
+            Some(slot) => self.emit(InstKind::Load(slot), returns, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        };
+        self.lower_throws_check(result, returns, span)
+    }
+
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        if self.checked.mutex_with_calls.contains_key(&call.span)
+            || self.is_mutex_constructor_call(call)
+        {
+            return false;
+        }
+        if self.checked.settled_plans.contains_key(&call.span)
+            || self.checked.concurrent_each_plans.contains_key(&call.span)
+            || self.is_atomic_call(call)
+        {
+            return false;
+        }
+        if matches!(
+            &*call.callee,
+            ast::Expr::Field(field) if self.checked.aliases.contains_key(&field.name.span)
+        ) {
+            return false;
+        }
         // `Timer.*` and `job.wait()`/`.cancel()` (`concurrent-blocks-and-timers`):
         // `Timer` is not a value and a `Job` handle has no method table, so the
         // `type_of` probes below would fault on the callee.
-        if self.is_timer_call(call) || self.is_job_method_call(call) {
+        if self.is_timer_call(call)
+            || self.is_job_method_call(call)
+            || self.is_concurrent_detach_call(call)
+            || self.is_app_shutdown_grace_call(call)
+        {
             return false;
         }
 
@@ -22471,6 +28830,7 @@ impl<'a> FunctionLowering<'a> {
             || self.is_range_method_call(call)
             || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
+            || self.is_channel_method_call(call)
             || self.result_method(call).is_some()
         {
             return false;
@@ -22513,6 +28873,11 @@ impl<'a> FunctionLowering<'a> {
         if let Some(signature) = self.checked.functions.get(name) {
             return self.ir_type(signature.returns);
         }
+        if let Some((_, member)) = name.rsplit_once('.')
+            && let Some(signature) = self.checked.functions.get(member)
+        {
+            return self.ir_type(signature.returns);
+        }
         // `extern "C" fn` (roadmap Phase 4e, design D7) — a call to one
         // reaches the same `Call`-lowering path as an ordinary function,
         // named by its own real symbol; only its declaration differs.
@@ -22528,6 +28893,23 @@ impl<'a> FunctionLowering<'a> {
     /// Total on a verified program. It is derivation, not checking: everything
     /// the checker would have rejected never reaches this point.
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
+        if let ast::Expr::Call(call) = expr
+            && (self.checked.service_spawns.contains_key(&call.span)
+                || self.checked.service_ready_calls.contains_key(&call.span))
+        {
+            return IrType::Void;
+        }
+        if let ast::Expr::Call(call) = expr
+            && (self.checked.mutex_with_calls.contains_key(&call.span)
+                || self.is_mutex_constructor_call(call))
+        {
+            return self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .map(|ty| self.ir_type(*ty))
+                .expect("the checker records Mutex construction and with result types");
+        }
         // The checker records the contextual width for numeric literals and the
         // result type for binary operations; use it when available so lowering
         // matches the semantic type. Other expressions keep their IR-derived type
@@ -22550,7 +28932,12 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Regex(_) => IrType::Regex,
             ast::Expr::Char(_) => IrType::Char,
             ast::Expr::Path(ident) => match self.try_lookup_slot(&ident.name) {
-                Some(slot) => self.slot_type(slot),
+                Some(slot) => match self.slot_type(slot) {
+                    IrType::BorrowedView { mutex_type, .. } => {
+                        self.module.mutex_types[mutex_type as usize]
+                    }
+                    ty => ty,
+                },
                 None => {
                     // `outer` inside an `inner class` names the hidden field.
                     if ident.name == "outer"
@@ -22632,6 +29019,14 @@ impl<'a> FunctionLowering<'a> {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
             ast::Expr::Call(e) if self.is_recursive_self_call(e) => self.return_type,
+            ast::Expr::Call(e) if self.is_atomic_call(e) => self
+                .checked
+                .expr_types
+                .get(&e.span)
+                .map(|ty| self.ir_type(*ty))
+                .expect("sema records the Atomic operation result type"),
+            ast::Expr::Call(e) if self.is_concurrent_protect_call(e) => IrType::Void,
+            ast::Expr::Call(e) if self.is_concurrent_detach_call(e) => IrType::Void,
             // `concurrent-blocks-and-timers`: `Timer.*` and `job.wait/cancel`.
             ast::Expr::Call(e) if self.is_timer_call(e) => {
                 let ast::Expr::Field(field) = &*e.callee else {
@@ -22663,6 +29058,17 @@ impl<'a> FunctionLowering<'a> {
                 .get(&e.span)
                 .map(|ty| self.ir_type(*ty))
                 .expect("checker recorded Parallel.each type"),
+            ast::Expr::Call(e)
+                if matches!(&*e.callee, ast::Expr::Field(field)
+                    if matches!(&*field.object, ast::Expr::Path(base) if base.name == "Channel")
+                        && field.name.name == "unbounded") =>
+            {
+                self.checked
+                    .expr_types
+                    .get(&e.span)
+                    .map(|ty| self.ir_type(*ty))
+                    .expect("checker recorded Channel.unbounded type")
+            }
             ast::Expr::Call(e) if self.is_callable_call(e) => {
                 let IrType::Callable(id) = self.type_of(&e.callee, e.callee.span()) else {
                     unreachable!("checked by `is_callable_call`")
@@ -23738,6 +30144,11 @@ enum SafeDispatch {
     },
     /// Through a contract's table.
     Contract { contract: u32, index: u32 },
+    /// `x?.to_string()` where the present value has no declared `to_string`
+    /// to call — scalars, collections, classes without one
+    /// (`universal-to-string-and-multiline-strings`). The present block
+    /// renders the unwrapped value through the universal conversion.
+    ToString,
 }
 
 /// The arguments `FunctionLowering::lower_native_slice_construction` needs

@@ -31,6 +31,7 @@
 //! walks. The source collection a region iterates stays rooted in the region
 //! branch's frame for the region's whole duration.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
@@ -64,6 +65,17 @@ pub(crate) fn detected_cores() -> usize {
         .max(1)
 }
 
+/// Hard ceiling for the process-wide CPU worker pool. Environment overrides
+/// and large hosts cannot create an unbounded number of native threads.
+pub const MAX_POOL_WORKERS: usize = 64;
+
+fn bound_pool_size(requested: Option<usize>, detected: usize) -> usize {
+    requested
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| detected.max(1))
+        .clamp(1, MAX_POOL_WORKERS)
+}
+
 /// The configured worker-pool size. Defaults to hardware concurrency
 /// (`parallel-cpu-regions` task 3.5); `ZIRK_PARALLEL_CORES` overrides it, and
 /// `ZIRK_PARALLEL_CORES=1` is the documented single-threaded fallback that
@@ -72,11 +84,10 @@ pub(crate) fn detected_cores() -> usize {
 pub(crate) fn configured_pool_size() -> usize {
     static SIZE: OnceLock<usize> = OnceLock::new();
     *SIZE.get_or_init(|| {
-        std::env::var("ZIRK_PARALLEL_CORES")
+        let requested = std::env::var("ZIRK_PARALLEL_CORES")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n >= 1)
-            .unwrap_or_else(detected_cores)
+            .and_then(|v| v.parse::<usize>().ok());
+        bound_pool_size(requested, detected_cores())
     })
 }
 
@@ -140,15 +151,92 @@ pub(crate) fn active_region_budget() -> Option<usize> {
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// Hard ceiling for queued parallel chunks. The per-pool window is smaller on
+/// machines with fewer workers (`workers * 4`) and never exceeds this cap.
+const MAX_PENDING_POOL_JOBS: usize = 1024;
+
+fn pool_queue_capacity(workers: usize) -> usize {
+    workers.saturating_mul(4).clamp(1, MAX_PENDING_POOL_JOBS)
+}
+
+fn parallel_for_ranges(count: usize) -> Vec<std::ops::Range<usize>> {
+    let chunks = count.min(pool_queue_capacity(configured_pool_size()));
+    if chunks == 0 {
+        return Vec::new();
+    }
+    let base = count / chunks;
+    let remainder = count % chunks;
+    let mut start = 0;
+    (0..chunks)
+        .map(|chunk| {
+            let len = base + usize::from(chunk < remainder);
+            let range = start..start + len;
+            start += len;
+            range
+        })
+        .collect()
+}
+
+struct JobQueue {
+    jobs: Mutex<VecDeque<Job>>,
+    available: Condvar,
+    space: Condvar,
+    capacity: usize,
+}
+
+impl JobQueue {
+    fn new(capacity: usize) -> Self {
+        assert!(capacity > 0);
+        Self {
+            jobs: Mutex::new(VecDeque::new()),
+            available: Condvar::new(),
+            space: Condvar::new(),
+            capacity,
+        }
+    }
+
+    fn submit(&self, job: Job) {
+        let mut jobs = self.jobs.lock().unwrap();
+        while jobs.len() >= self.capacity {
+            let (next, timed_out) = self
+                .space
+                .wait_timeout(jobs, std::time::Duration::from_millis(1))
+                .unwrap();
+            jobs = next;
+            if timed_out.timed_out() {
+                // The executor can be the producer while a pool worker has
+                // requested stop-the-world. Do not sleep indefinitely in
+                // admission: its next safepoint coordinates that collection.
+                drop(jobs);
+                if crate::executor::in_task_context() {
+                    crate::collector::safepoint_poll();
+                }
+                jobs = self.jobs.lock().unwrap();
+            }
+        }
+        jobs.push_back(job);
+        self.available.notify_one();
+    }
+
+    fn take(&self) -> Job {
+        let mut jobs = self.jobs.lock().unwrap();
+        loop {
+            if let Some(job) = jobs.pop_front() {
+                self.space.notify_one();
+                return job;
+            }
+            jobs = self.available.wait(jobs).unwrap();
+        }
+    }
+}
+
 struct Pool {
-    queue: Arc<(Mutex<Vec<Job>>, Condvar)>,
+    queue: Arc<JobQueue>,
 }
 
 impl Pool {
     fn submit(&self, job: Job) {
-        let (lock, cv) = &*self.queue;
-        lock.lock().unwrap().push(job);
-        cv.notify_one();
+        self.queue.submit(job);
     }
 }
 
@@ -156,9 +244,9 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 
 fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
-        let queue: Arc<(Mutex<Vec<Job>>, Condvar)> =
-            Arc::new((Mutex::new(Vec::new()), Condvar::new()));
         let workers = configured_pool_size();
+        let capacity = pool_queue_capacity(workers);
+        let queue = Arc::new(JobQueue::new(capacity));
         for _ in 0..workers {
             let queue = Arc::clone(&queue);
             std::thread::Builder::new()
@@ -170,24 +258,11 @@ fn pool() -> &'static Pool {
     })
 }
 
-fn worker_loop(queue: Arc<(Mutex<Vec<Job>>, Condvar)>) {
-    // Publish this thread's shadow-stack chain so a stop-the-world collection
-    // can walk the roots of whatever chunk it is running (`ADR-019` D4).
-    crate::collector::register_worker_chain();
-
-    let (lock, cv) = &*queue;
+fn worker_loop(queue: Arc<JobQueue>) {
     loop {
-        let job = {
-            let mut jobs = lock.lock().unwrap();
-            loop {
-                if let Some(job) = jobs.pop() {
-                    break job;
-                }
-                jobs = cv.wait(jobs).unwrap();
-            }
-        };
-        // The job itself owns `worker_active_enter` / the post-chunk safepoint /
-        // `worker_active_leave` / the region's completion decrement, in that
+        let job = queue.take();
+        // The job itself owns the mutator registration / post-chunk safepoint /
+        // unregistration / region completion decrement, in that
         // order (see `run_region`). A chunk panic must not poison the worker or
         // the queue, but the job's own bookkeeping still runs — it is inside a
         // further `catch_unwind` in `run_region`'s job wrapper.
@@ -203,11 +278,15 @@ fn worker_loop(queue: Arc<(Mutex<Vec<Job>>, Condvar)>) {
 ///   safepoint between chunks.
 /// - Otherwise → submits the chunks to the worker pool and blocks the calling
 ///   branch cooperatively until they join.
-pub(crate) fn run_region<T, F>(budget: CoreBudget, chunks: Vec<F>) -> Result<Vec<T>, RegionError>
+pub(crate) fn run_region<T, F, I>(budget: CoreBudget, chunks: I) -> Result<Vec<T>, RegionError>
 where
+    I: IntoIterator<Item = F>,
+    I::IntoIter: ExactSizeIterator,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    let chunks = chunks.into_iter();
+    let n = chunks.len();
     let mut workers = resolve_budget(budget, detected_cores())?;
     workers = workers.min(configured_pool_size());
     if let Some(outer) = active_region_budget() {
@@ -223,7 +302,6 @@ where
     }
     let _restore_budget = RestoreBudget(previous);
 
-    let n = chunks.len();
     let on_executor_task = crate::executor::in_task_context();
 
     if workers <= 1 || n <= 1 || configured_pool_size() <= 1 || !on_executor_task {
@@ -248,26 +326,30 @@ where
     }
     let _restore_region_count = RestoreRegionCount;
 
-    for (index, chunk) in chunks.into_iter().enumerate() {
+    for (index, chunk) in chunks.enumerate() {
         let results = Arc::clone(&results);
         let remaining = Arc::clone(&remaining);
         pool().submit(Box::new(move || {
-            // This worker joins the executor's world for the chunk: its
-            // allocations go to the published heap and it takes the
-            // stop-the-world path at a safepoint.
-            let world = crate::collector::enter_executor_world();
-            crate::collector::worker_active_enter();
-            let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(chunk)).ok();
-            if let Some(value) = value {
+            // Register this OS thread and its shadow roots before it can
+            // access the published heap. The RAII guard closes registration
+            // only after any in-flight collection has released the thread.
+            let mutator = crate::collector::register_managed_mutator();
+            let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(chunk));
+            if value.is_err() {
+                // Generated frames below the caught panic no longer exist;
+                // remove their shadow entries before a GC safepoint can scan
+                // the registered chain.
+                crate::collector::clear_unwound_mutator_roots();
+            }
+            if let Ok(value) = value {
                 *results[index].lock().unwrap() = Some(value);
             }
-            // Post-chunk safepoint, then leave the active set and the world —
-            // all heap access from this job must be finished *before* the
-            // completion decrement, because that decrement is what unblocks
+            // Post-chunk safepoint, then unregister from the world — all heap
+            // access from this job must be finished *before* the completion
+            // decrement, because that decrement is what unblocks
             // `run_region` and, at the end of the run, frees the heap.
             crate::collector::safepoint_poll();
-            crate::collector::worker_active_leave();
-            drop(world);
+            drop(mutator);
             if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
                 crate::executor::notify_pool_event();
             }
@@ -377,8 +459,9 @@ pub unsafe extern "C" fn zirk_rt_pool_join() {
 /// region whose collection is an `Array`/`List`. `body` must be a valid
 /// function pointer taking the compiler-emitted capture-block pointer (or
 /// null) and an index in `0..count`, and must not retain either past its own
-/// return — each index runs its own chunk closure exactly once, and the
-/// capture block is not rooted once every chunk has returned.
+/// return. The runtime may invoke `body` concurrently for disjoint index
+/// ranges; compiler-emitted capture access must obey the parallel ownership
+/// contract. The capture block must remain rooted until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_parallel_for(
     kind: u8,
@@ -396,22 +479,26 @@ pub unsafe extern "C" fn zirk_rt_parallel_for(
     };
 
     struct CaptureArg(*mut std::ffi::c_void);
-    // SAFETY: mirrors `zirk_rt_spawn`'s `TaskArg` — each index below runs
-    // its own chunk closure exactly once, so the capture pointer is never
-    // touched by two chunks at the same time.
+    // SAFETY: the compiler-emitted capture block remains rooted for the full
+    // `zirk_rt_parallel_for` call and its ownership checks guarantee safe
+    // concurrent access by disjoint iteration indices. Each range closure
+    // gets the same opaque pointer and processes only its own indices.
     unsafe impl Send for CaptureArg {}
     let capture = CaptureArg(capture);
 
     let n = count.max(0) as usize;
-    let chunks: Vec<_> = (0..n)
-        .map(|i| {
-            let capture = CaptureArg(capture.0);
-            move || {
-                let capture = capture;
+    let chunks = parallel_for_ranges(n).into_iter().map(|range| {
+        let capture = CaptureArg(capture.0);
+        move || {
+            let capture = capture;
+            for i in range {
                 body(capture.0, i as i64);
+                // Preserve the previous per-iteration post-job safepoint
+                // while grouping work to bound closure and queue memory.
+                safepoint_poll_rust();
             }
-        })
-        .collect();
+        }
+    });
 
     if let Err(e) = run_region(budget, chunks) {
         crate::failure::fatal(&e.message);
@@ -430,8 +517,7 @@ where
     T: Send + 'static,
     R: Send + 'static,
 {
-    let chunks: Vec<_> = input.into_iter().map(|x| move || f(x)).collect();
-    run_region(budget, chunks)
+    run_region(budget, input.into_iter().map(|x| move || f(x)))
 }
 
 /// A parallel `reduce` with an associative `combine` and an `identity`
@@ -457,8 +543,103 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_job_queue_applies_backpressure_and_releases_capacity() {
+        let queue = Arc::new(JobQueue::new(1));
+        queue.submit(Box::new(|| {}));
+
+        let (submitted_tx, submitted_rx) = std::sync::mpsc::channel();
+        let submitter_queue = Arc::clone(&queue);
+        let submitter = std::thread::spawn(move || {
+            submitter_queue.submit(Box::new(|| {}));
+            submitted_tx.send(()).unwrap();
+        });
+
+        assert!(matches!(
+            submitted_rx.recv_timeout(std::time::Duration::from_millis(10)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(queue.take());
+        submitted_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("submitter should proceed after one queued job is removed");
+        submitter.join().unwrap();
+        drop(queue.take());
+    }
+
+    #[test]
+    fn bounded_job_queue_survives_concurrent_producer_consumer_churn() {
+        const PRODUCERS: usize = 4;
+        const CONSUMERS: usize = 3;
+        const JOBS_PER_PRODUCER: usize = 400;
+        const TOTAL: usize = PRODUCERS * JOBS_PER_PRODUCER;
+
+        let queue = Arc::new(JobQueue::new(7));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let consumers = (0..CONSUMERS)
+            .map(|consumer_index| {
+                let queue = Arc::clone(&queue);
+                let completed = Arc::clone(&completed);
+                std::thread::spawn(move || {
+                    let take_count =
+                        TOTAL / CONSUMERS + usize::from(consumer_index < TOTAL % CONSUMERS);
+                    for _ in 0..take_count {
+                        queue.take()();
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let producers = (0..PRODUCERS)
+            .map(|_| {
+                let queue = Arc::clone(&queue);
+                std::thread::spawn(move || {
+                    for _ in 0..JOBS_PER_PRODUCER {
+                        queue.submit(Box::new(|| {}));
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for producer in producers {
+            producer.join().unwrap();
+        }
+        for consumer in consumers {
+            consumer.join().unwrap();
+        }
+        assert_eq!(completed.load(Ordering::SeqCst), TOTAL);
+    }
+
+    #[test]
     fn exact_budget_resolves_to_itself() {
         assert_eq!(resolve_budget(CoreBudget::Exact(4), 8), Ok(4));
+    }
+
+    #[test]
+    fn configured_worker_count_has_a_finite_ceiling() {
+        assert_eq!(bound_pool_size(None, 8), 8);
+        assert_eq!(
+            bound_pool_size(None, MAX_POOL_WORKERS + 10),
+            MAX_POOL_WORKERS
+        );
+        assert_eq!(bound_pool_size(Some(3), 8), 3);
+        assert_eq!(
+            bound_pool_size(Some(MAX_POOL_WORKERS + 1), 8),
+            MAX_POOL_WORKERS
+        );
+        assert_eq!(bound_pool_size(Some(0), 8), 8);
+    }
+
+    #[test]
+    fn parallel_for_partitions_large_inputs_into_a_bounded_number_of_jobs() {
+        let count = 1_000_003;
+        let ranges = parallel_for_ranges(count);
+        assert!(ranges.len() <= pool_queue_capacity(MAX_POOL_WORKERS));
+        assert!(!ranges.is_empty());
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, count);
+        assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+        assert!(ranges.iter().all(|range| !range.is_empty()));
+        assert!(parallel_for_ranges(0).is_empty());
     }
 
     #[test]
@@ -511,6 +692,65 @@ mod tests {
             crate::task::TaskOutcome::Value(n) => assert_eq!(n, 64),
             crate::task::TaskOutcome::Panicked(p) => std::panic::resume_unwind(p),
         }
+    }
+
+    #[test]
+    fn cancellation_waits_for_parallel_workers_before_resuming_owner() {
+        use std::sync::atomic::AtomicBool;
+
+        if configured_pool_size() <= 1 {
+            // The single-worker fallback runs regions inline and cannot
+            // exercise cancellation while the owner is parked on the pool.
+            return;
+        }
+
+        let release_workers = Arc::new(AtomicBool::new(false));
+        let resumed_early = Arc::new(AtomicBool::new(false));
+        let outcome = crate::executor::Executor::new().run_with_root({
+            let release_workers = Arc::clone(&release_workers);
+            let resumed_early = Arc::clone(&resumed_early);
+            move || {
+                let release = Arc::clone(&release_workers);
+                let early = Arc::clone(&resumed_early);
+                let task = crate::executor::spawn(move || {
+                    let chunks: Vec<_> = (0..2)
+                        .map(|_| {
+                            let release = Arc::clone(&release);
+                            move || {
+                                while !release.load(Ordering::SeqCst) {
+                                    std::thread::yield_now();
+                                }
+                                1_u8
+                            }
+                        })
+                        .collect();
+                    if run_region(CoreBudget::All, chunks).is_err() {
+                        early.store(true, Ordering::SeqCst);
+                    }
+                    0
+                });
+
+                crate::executor::yield_now();
+                crate::executor::cancel_current(task);
+                crate::executor::yield_now();
+                assert!(
+                    !resumed_early.load(Ordering::SeqCst),
+                    "cancellation resumed the owner before worker results were ready"
+                );
+
+                release_workers.store(true, Ordering::SeqCst);
+                let cancelled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::executor::await_task(task)
+                }));
+                match cancelled {
+                    Err(payload) => assert!(payload.is::<crate::executor::Cancelled>()),
+                    Ok(_) => panic!("the task should observe cancellation after the region joins"),
+                }
+                0
+            }
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+        assert!(!resumed_early.load(Ordering::SeqCst));
     }
 
     /// `parallel-cpu-regions` task 3.4 — the stop-the-world safepoint under

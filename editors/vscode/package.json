@@ -2,7 +2,7 @@
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
   "description": "Syntax highlighting, diagnostics, build/run commands, and language support for the Zirk programming language",
-  "version": "0.4.2",
+  "version": "0.6.0",
   "publisher": "ChristianSmith",
   "author": "Christian Smith",
   "icon": "images/icon.png",
@@ -45,6 +45,11 @@
           "type": "boolean",
           "default": true,
           "description": "Apply the Zirk brand syntax palette (zirk-lang-site colors) to .zrk files, replacing the current theme's colors for Zirk scopes only."
+        },
+        "zirk.lspPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the zirk-lsp language server executable. If empty, the extension searches target/debug/zirk-lsp, target/release/zirk-lsp, and PATH. When the server runs it provides live diagnostics, hover, document symbols, and formatting; without it the CLI bridge remains the fallback."
         }
       }
     },
@@ -62,9 +67,19 @@
       {
         "command": "zirk.run",
         "title": "Run File",
-        "category": "Zirk"
+        "category": "Zirk",
+        "icon": "$(play)"
       }
     ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "zirk.run",
+          "when": "resourceLangId == zirk",
+          "group": "navigation"
+        }
+      ]
+    },
     "taskDefinitions": [
       {
         "type": "zirk",
@@ -144,5 +159,8 @@
         "path": "./snippets/zirk.json"
       }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }

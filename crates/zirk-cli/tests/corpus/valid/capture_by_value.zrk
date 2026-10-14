@@ -1,9 +1,11 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     // Capture is by value (design D2): the closure copies what it captured
     // when it was created, so changing the original afterwards does not reach
     // it. This is the property the whole decision rests on.
     mut n = 1;
-    inmut F = (): Int32 => n;
+    inmut F =(): Int32 => n;
     n = 99;
     stdout.println(F());
     stdout.println(n);
@@ -13,7 +15,7 @@ fn main(): Void {
     // a capture, only about sharing its name (D10, `ordinary_shadowing.zrk`
     // in the invalid corpus covers that case).
     inmut outer = 5;
-    inmut G = (factor: Int32): Int32 => outer * factor;
+    inmut G =(factor: Int32): Int32 => outer * factor;
     stdout.println(G(3));
     stdout.println(outer);
 }

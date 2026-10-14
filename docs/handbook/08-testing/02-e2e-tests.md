@@ -9,8 +9,8 @@ import { assert } from std.testing;
 import { HTTP } from std.http;
 
 @e2e
-fn serves_health(): Task<Result<Void, TestError>> {
-    mut response = await HTTP.get(test_server.url("/health"), timeout: 2s);
+fn serves_health(): Result<Void, TestError> {
+    mut response = HTTP.get(test_server.url("/health"), timeout: 2s);
     assert.is_ok(response);
     return Ok();
 }

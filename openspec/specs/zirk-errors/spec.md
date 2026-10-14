@@ -3,7 +3,9 @@
 ## Purpose
 Defines mandatory expected-failure handling, checked and implicit exceptions,
 throwable provenance, and the extensible throwable hierarchy.
+
 ## Requirements
+
 ### Requirement: Expected failure uses mandatory Result handling
 The language SHALL define `Result<T,E>` as `Ok(T)` or `Error(E)`, SHALL reject a discarded `Result`, and SHALL permit intentional discard only through explicit `_ = expression`. `Result` SHALL provide the accepted inspection, nullable extraction, fallback, mapping, chaining, unwrap, and exception-conversion API. Using the wrong `unwrap` variant SHALL invoke `fatalError`.
 
@@ -209,3 +211,36 @@ to a `Result.Error`.
 - **WHEN** a branch body lets a custom exception escape
 - **THEN** the branch fails, active siblings are cancelled and cleaned, and the exception propagates with secondary failures suppressed
 
+### Requirement: Channel closure is not an error
+
+`channel.close()` SHALL never raise. `send` after close SHALL raise the
+compiler-known channel-closed failure, while `try_send` after close SHALL return
+`SendOutcome.Closed`. A drained closed `receive` SHALL return `None` and a
+drained closed `try_receive` SHALL return `ReceiveOutcome.Closed`. A branch
+cancelled while suspended in a channel operation SHALL raise `CancelledError`.
+
+#### Scenario: try send after close is typed
+- **WHEN** `try_send` is called after a channel closes
+- **THEN** it returns `SendOutcome.Closed` without raising
+
+#### Scenario: Blocking send after close raises
+
+- **WHEN** `send` is called after a channel closes
+- **THEN** the compiler-known channel-closed failure is raised
+
+#### Scenario: Suspended receiver observes closure
+
+- **WHEN** a branch is suspended in `receive` and another branch closes the channel
+- **THEN** the receiver drains remaining values and then observes `None`
+
+### Requirement: Exception-owned cached references follow exception reachability
+
+Cached stack-trace strings and suppressed-exception references SHALL be traced as edges owned by their exception. They SHALL remain valid while the owner is reachable and SHALL be removed when that owner is reclaimed. A stale entry SHALL NOT be returned for a later object allocated at the same address.
+
+#### Scenario: Reachable exception retains its stack trace
+- **WHEN** a reachable exception has requested `stack_trace()` and collection runs
+- **THEN** the cached string remains valid and repeated access returns the same cached value
+
+#### Scenario: Dead exception cache entry is pruned
+- **WHEN** an exception and its cache become unreachable and its address is later reused
+- **THEN** lookup for the new exception cannot return the former exception's metadata

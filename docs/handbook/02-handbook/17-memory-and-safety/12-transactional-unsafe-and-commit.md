@@ -4,8 +4,8 @@ An ordinary unsafe block isolates writes to managed state and validated native
 ranges. Success commits; a controlled `Error`, exception, trap, or cancellation
 before commit closes new resources and restores the original values.
 
-The transaction cannot `await`, spawn a task/thread, or publish tentative state.
-Those actions would let another observer see data that might later roll back.
+The transaction cannot suspend, spawn work, or publish tentative state. Those
+actions would let another observer see data that might later roll back.
 
 Irreversible work is explicit:
 

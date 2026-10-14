@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Los cinco aritméticos, los seis comparadores y los tres lógicos.
 fn main(): Void {
     inmut A: Int32 = 17;
@@ -21,5 +23,5 @@ fn main(): Void {
     mut f: Boolean = false;
     stdout.println(t && f);
     stdout.println(t || f);
-    stdout.println(!t);
+    stdout.println(! t);
 }

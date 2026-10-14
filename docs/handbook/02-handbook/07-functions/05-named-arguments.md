@@ -34,6 +34,12 @@ expression such as `config.url:` is invalid; write `url: config.url` instead.
 
 Named arguments are valuable for Boolean flags, similar adjacent types, and optional settings. They do not replace a configuration record when many values evolve together.
 
+Constructor labels can select among declarations with different parameter
+types, but they cannot make two constructors with the same positional
+signature valid. For example, a class cannot declare both
+`construct(x: Int32)` and `construct(y: Int32)`: `Point(1)` would otherwise
+have no deterministic target.
+
 ---
 
 **Previous:** [← Default Parameters](04-default-parameters.md) · **Next:** [ Variadic Functions](06-variadic-functions.md)

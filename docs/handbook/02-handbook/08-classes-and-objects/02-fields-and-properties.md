@@ -24,7 +24,7 @@ class Box {
     width: Int32 = 10;
     height: Int32 = 20;
 
-    construct() {}
+    construct() { }
 }
 ```
 

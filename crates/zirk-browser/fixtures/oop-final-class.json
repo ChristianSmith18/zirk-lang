@@ -1,0 +1,11 @@
+{
+  "name": "oop-final-class",
+  "source": "import { stdout } from std.io;\nfinal class Seal {\n    construct() { }\n    name(): String { return \"seal\"; }\n}\nclass Base {\n    construct() { }\n    final id(): Int32 { return 1; }\n    other(): Int32 { return 2; }\n}\nclass Child extends Base {\n    construct() { super(); }\n    #override other(): Int32 { return 3; }\n}\nfn main(): Void {\n    stdout.println(Seal().name());\n    inmut c = Child();\n    stdout.println(c.id() + c.other());\n}\n",
+  "virtualName": "fixtures/oop-final-class.zrk",
+  "expectedOutput": [
+    "seal\n",
+    "4\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

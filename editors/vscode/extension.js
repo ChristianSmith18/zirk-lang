@@ -11,10 +11,23 @@ const CONFIG_SECTION = 'zirk';
 let diagnosticCollection;
 let outputChannel;
 let statusBarItem;
+let tripleQuoteGuide;
+let tripleQuoteEndpoint;
+
+// Set while a `zirk-lsp` language client is running. The server then owns
+// diagnostics, hover and formatting for `zirk` documents, and the CLI bridge
+// code paths below stay silent (spec `zirk-lsp`, "Editor integration with
+// CLI fallback").
+let languageClient;
 
 const pendingLiveChecks = new Map();
 const runningLiveChecks = new Set();
 const liveTempFiles = new Set();
+
+// `zirk check --types` output, per document URI — refreshed by the same
+// bridge pass that produces diagnostics, so hover never spawns the
+// compiler on its own (`editor-cli-bridge`, "Type-map retrieval").
+const typeMaps = new Map();
 
 // Brand syntax palette (zirk-lang-site tokens). Every scope ends in `.zirk`,
 // so the rules only ever touch Zirk files — the active theme stays in charge
@@ -39,7 +52,7 @@ const BRAND_TEXTMATE_RULES = [
     // llamadas
     { scope: 'entity.name.function.call.zirk', settings: { foreground: '#38BDF8' } },
     // strings, chars, regex
-    { scope: ['string.quoted.double.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
+    { scope: ['string.quoted.double.zirk', 'string.quoted.triple.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
     // números y duraciones
     { scope: ['constant.numeric.integer.zirk', 'constant.numeric.float.zirk', 'constant.numeric.hex.zirk', 'constant.numeric.octal.zirk', 'constant.numeric.binary.zirk', 'constant.numeric.duration.zirk'], settings: { foreground: '#60A5FA' } },
     // constantes: true, false, null, Ok, Err, Some, None
@@ -106,16 +119,50 @@ const DEPRECATED_TYPES = new Map([
     ['Decimal128', 'Decimal'],
 ]);
 
-function activate(context) {
+async function activate(context) {
     outputChannel = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
     diagnosticCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
 
     context.subscriptions.push(outputChannel, diagnosticCollection);
 
+    // The language server takes over diagnostics, hover and formatting when
+    // its binary exists; everything else below is untouched either way.
+    const serverRunning = await startLanguageClient(context);
+    if (serverRunning) {
+        // The bridge may already have run once while the client started —
+        // its entries would sit next to the server's own diagnostics.
+        diagnosticCollection.clear();
+    }
+
+    tripleQuoteGuide = vscode.window.createTextEditorDecorationType({
+        // Each content row gets the same `│` cap as the delimiters, anchored
+        // at the opening delimiter column. The thin space keeps content clear
+        // of the guide without changing the source or its indentation.
+        before: {
+            contentText: '│\u2009',
+            color: '#FF4FA3',
+        },
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    });
+    // The first quote becomes a cap for the ruler (`│''`) only when the
+    // scanner found a complete `''' … '''` pair. The source stays unchanged.
+    tripleQuoteEndpoint = vscode.window.createTextEditorDecorationType({
+        color: 'transparent',
+        before: {
+            contentText: '│',
+            color: '#FF4FA3',
+            margin: '0 -1ch 0 0',
+        },
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+    });
+    context.subscriptions.push(tripleQuoteGuide, tripleQuoteEndpoint);
+
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    statusBarItem.text = 'Zirk';
-    statusBarItem.tooltip = 'Click to re-check the active Zirk file';
-    statusBarItem.command = 'zirk.check';
+    statusBarItem.text = serverRunning ? '$(server) Zirk: LSP' : 'Zirk';
+    statusBarItem.tooltip = serverRunning
+        ? 'The Zirk language server is handling this file'
+        : 'Click to re-check the active Zirk file';
+    statusBarItem.command = serverRunning ? undefined : 'zirk.check';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
@@ -156,6 +203,7 @@ function activate(context) {
 
     const changeDisposable = vscode.workspace.onDidChangeTextDocument(event => {
         const document = event.document;
+        updateTripleQuoteGuideForDocument(document);
         if (document.languageId !== LANGUAGE_ID || document.isUntitled || document.uri.scheme !== 'file') {
             return;
         }
@@ -175,12 +223,14 @@ function activate(context) {
         runningLiveChecks.delete(key);
         removeLiveTempFile(document.uri.fsPath);
         diagnosticCollection.delete(document.uri);
+        typeMaps.delete(document.uri.toString());
     });
 
     const activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
         if (editor?.document.languageId === LANGUAGE_ID) {
             updateStatusBarForDocument(editor.document);
         }
+        updateTripleQuoteGuide(editor);
     });
 
     context.subscriptions.push(openDisposable, saveDisposable, changeDisposable, closeDisposable, activeEditorDisposable);
@@ -198,6 +248,7 @@ function activate(context) {
             checkDocument(document);
         }
     }
+    updateTripleQuoteGuide(vscode.window.activeTextEditor);
 
     const taskProvider = vscode.tasks.registerTaskProvider('zirk', {
         provideTasks() {
@@ -218,19 +269,69 @@ function activate(context) {
     });
     context.subscriptions.push(codeActions);
 
-    const formatter = vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, {
-        async provideDocumentFormattingEdits(document, options, token) {
-            const formatted = await tryZirkFormat(document);
-            if (formatted !== undefined) {
-                const lastLine = document.lineAt(document.lineCount - 1);
-                const fullRange = new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
-                return [vscode.TextEdit.replace(fullRange, formatted)];
+    if (!serverRunning) {
+        const formatter = vscode.languages.registerDocumentFormattingEditProvider(LANGUAGE_ID, {
+            async provideDocumentFormattingEdits(document, options, token) {
+                const formatted = await tryZirkFormat(document);
+                if (formatted !== undefined) {
+                    const lastLine = document.lineAt(document.lineCount - 1);
+                    const fullRange = new vscode.Range(0, 0, document.lineCount - 1, lastLine.text.length);
+                    return [vscode.TextEdit.replace(fullRange, formatted)];
+                }
+                return provisionalFormat(document, options);
             }
-            return provisionalFormat(document, options);
-        }
-    });
+        });
 
-    context.subscriptions.push(formatter);
+        context.subscriptions.push(formatter);
+
+        const hover = vscode.languages.registerHoverProvider(LANGUAGE_ID, {
+            provideHover(document, position) {
+                return provideTypeHover(document, position);
+            }
+        });
+        context.subscriptions.push(hover);
+    }
+}
+
+/** Paints the opening delimiter column strictly between each `'''` pair. */
+function updateTripleQuoteGuide(editor) {
+    if (!tripleQuoteGuide || !editor || editor.document.languageId !== LANGUAGE_ID) {
+        return;
+    }
+    const delimiters = [];
+    const matcher = /'''/g;
+    const text = editor.document.getText();
+    let match;
+    while ((match = matcher.exec(text)) !== null) {
+        delimiters.push(match.index);
+    }
+
+    const ranges = [];
+    const endpoints = [];
+    for (let i = 0; i + 1 < delimiters.length; i += 2) {
+        const open = editor.document.positionAt(delimiters[i]);
+        const close = editor.document.positionAt(delimiters[i + 1]);
+        endpoints.push(
+            new vscode.Range(open, open.translate(0, 1)),
+            new vscode.Range(close, close.translate(0, 1))
+        );
+        for (let line = open.line + 1; line < close.line; line += 1) {
+            const character = Math.min(open.character, editor.document.lineAt(line).text.length);
+            // Place the virtual cap at the same source column as the opening
+            // delimiter. The line's first content character remains editable.
+            const position = new vscode.Position(line, character);
+            ranges.push(new vscode.Range(position, position));
+        }
+    }
+    editor.setDecorations(tripleQuoteGuide, ranges);
+    editor.setDecorations(tripleQuoteEndpoint, endpoints);
+}
+
+function updateTripleQuoteGuideForDocument(document) {
+    const editor = vscode.window.activeTextEditor;
+    if (editor?.document === document) {
+        updateTripleQuoteGuide(editor);
+    }
 }
 
 function provisionalFormat(document, options) {
@@ -366,6 +467,7 @@ function deactivate() {
     }
     pendingLiveChecks.clear();
     runningLiveChecks.clear();
+    typeMaps.clear();
     for (const tempPath of liveTempFiles) {
         try {
             fs.unlinkSync(tempPath);
@@ -408,6 +510,10 @@ function scheduleLiveCheck(document) {
 }
 
 function liveCheckDocument(document) {
+    if (languageClient) {
+        // The server owns diagnostics for this document.
+        return;
+    }
     const key = document.uri.toString();
     if (runningLiveChecks.has(key)) {
         scheduleLiveCheck(document);
@@ -438,7 +544,7 @@ function liveCheckDocument(document) {
 }
 
 function checkDocument(document, manual = false) {
-    if (document.languageId !== LANGUAGE_ID) {
+    if (languageClient || document.languageId !== LANGUAGE_ID) {
         return;
     }
 
@@ -478,7 +584,12 @@ function runBuildOrRun(document, action) {
     }
 
     const filePath = document.uri.fsPath;
-    const commandName = action === 'build' ? 'Zirk: Build File' : 'Zirk: Run File';
+    if (action === 'run') {
+        runInTerminal(executable, document);
+        return;
+    }
+
+    const commandName = 'Zirk: Build File';
     outputChannel.appendLine(`> ${executable} ${action} ${filePath}`);
 
     const child = spawn(executable, [action, filePath], {
@@ -514,6 +625,86 @@ function runBuildOrRun(document, action) {
             }
         }
     });
+}
+
+/** Reused across runs; recreated when the user closes the panel. */
+let runTerminal;
+
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Runs `zirk run <file>` in an integrated terminal, like the Python play button. */
+async function runInTerminal(executable, document) {
+    if (document.isDirty) {
+        await document.save();
+    }
+    if (!runTerminal || runTerminal.exitStatus !== undefined) {
+        runTerminal = vscode.window.createTerminal({ name: 'Zirk', cwd: path.dirname(document.uri.fsPath) });
+    }
+    runTerminal.show();
+    runTerminal.sendText(`${shellQuote(executable)} run ${shellQuote(document.uri.fsPath)}`);
+}
+
+/**
+ * Finds the `zirk-lsp` executable: `zirk.lspPath` first, then the same search
+ * roots the compiler discovery uses (`target/{debug,release}/zirk-lsp`), then
+ * PATH.
+ */
+function findLanguageServer() {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
+    const config = vscode.workspace.getConfiguration(CONFIG_SECTION, root);
+    const configured = config.get('lspPath', '');
+    if (configured) {
+        if (fs.existsSync(configured)) {
+            return configured;
+        }
+        outputChannel.appendLine(`Configured zirk.lspPath not found: ${configured}`);
+    }
+    return findInSearchRoots(collectSearchRoots(root), ['zirk-lsp'])
+        ?? findOnAnyPath(['zirk-lsp']);
+}
+
+/**
+ * Spawns `zirk-lsp` through vscode-languageclient. Returns true when the
+ * client is running — the CLI bridge then stays silent for `zirk` documents.
+ */
+async function startLanguageClient(context) {
+    let LanguageClient;
+    try {
+        ({ LanguageClient } = require('vscode-languageclient/node'));
+    } catch (error) {
+        outputChannel.appendLine(`vscode-languageclient is not bundled: ${error.message}`);
+        outputChannel.appendLine('Falling back to the CLI bridge.');
+        return false;
+    }
+
+    const executable = findLanguageServer();
+    if (!executable) {
+        outputChannel.appendLine('No zirk-lsp executable found; falling back to the CLI bridge.');
+        outputChannel.appendLine('Build it with `cargo build -p zirk-lsp`.');
+        return false;
+    }
+
+    const client = new LanguageClient(
+        'zirk-lsp',
+        'Zirk Language Server',
+        { command: executable },
+        { documentSelector: [{ scheme: 'file', language: LANGUAGE_ID }] }
+    );
+
+    try {
+        await client.start();
+    } catch (error) {
+        outputChannel.appendLine(`zirk-lsp failed to start: ${error.message ?? error}`);
+        outputChannel.appendLine('Falling back to the CLI bridge.');
+        return false;
+    }
+
+    context.subscriptions.push({ dispose: () => client.stop() });
+    languageClient = client;
+    outputChannel.appendLine(`zirk-lsp running: ${executable}`);
+    return true;
 }
 
 function collectSearchRoots(documentUri) {
@@ -644,10 +835,107 @@ function runCheck(document, executable, filePath, cleanup) {
             updateStatusBar(document.uri, false, 'check failed');
         }
 
+        refreshTypeMap(document, executable, filePath);
+
         if (cleanup) {
             cleanup();
         }
     });
+}
+
+/**
+ * Refreshes the cached type map for `document` by invoking the same
+ * executable the diagnostic check used, with `--types` (`editor-cli-bridge`).
+ * A failed or malformed response leaves the previous cache in place — the
+ * bridge reports no hover rather than an incorrect one.
+ */
+function refreshTypeMap(document, executable, filePath) {
+    const baseName = path.basename(executable, path.extname(executable));
+    const isZirkCheck = baseName === 'zirk-check';
+    const args = isZirkCheck ? [filePath, '--types'] : ['check', '--types', filePath];
+
+    const child = spawn(executable, args, {
+        cwd: path.dirname(filePath),
+    });
+
+    let stdout = '';
+    child.stdout.on('data', chunk => {
+        stdout += chunk.toString();
+    });
+
+    child.on('error', () => {
+        // keep the previous map
+    });
+    child.on('close', code => {
+        if (code !== 0 || !stdout.trim()) {
+            return;
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(stdout);
+        } catch {
+            return;
+        }
+        if (!parsed || !Array.isArray(parsed.types)) {
+            return;
+        }
+        const entries = parsed.types.filter(entry =>
+            entry
+            && typeof entry.start === 'number'
+            && typeof entry.end === 'number'
+            && typeof entry.kind === 'string'
+            && typeof entry.type === 'string'
+        );
+        typeMaps.set(document.uri.toString(), entries);
+    });
+}
+
+/**
+ * Answers a hover from the cached `zirk check --types` map: the smallest
+ * span containing the position wins, declaration kinds beat expressions on
+ * a tie (`editor-cli-bridge`, "Hover mapping").
+ */
+function provideTypeHover(document, position) {
+    const entries = typeMaps.get(document.uri.toString());
+    if (!entries) {
+        return undefined;
+    }
+
+    const offset = document.offsetAt(position);
+    let best;
+    for (const entry of entries) {
+        if (entry.start > offset || offset > entry.end) {
+            continue;
+        }
+        const better = !best
+            || (entry.end - entry.start) < (best.end - best.start)
+            || ((entry.end - entry.start) === (best.end - best.start) && best.kind === 'expression');
+        if (better) {
+            best = entry;
+        }
+    }
+    if (!best) {
+        return undefined;
+    }
+
+    let display;
+    if (best.kind === 'function' && best.name) {
+        display = `fn ${best.name}${best.type.slice(2)}`;
+    } else if ((best.kind === 'method' || best.kind === 'variable'
+        || best.kind === 'parameter' || best.kind === 'field') && best.name) {
+        display = best.kind === 'method'
+            ? `${best.name}${best.type.slice(2)}`
+            : `${best.name}: ${best.type}`;
+    } else {
+        display = best.type;
+    }
+
+    const markdown = new vscode.MarkdownString();
+    markdown.appendCodeblock(display, 'zirk');
+    if (best.inferred) {
+        markdown.appendMarkdown('\n\n*(inferred)*');
+    }
+    return new vscode.Hover(markdown);
 }
 
 function updateStatusBar(documentUri, ok, detail) {
@@ -666,7 +954,7 @@ function updateStatusBar(documentUri, ok, detail) {
 }
 
 function updateStatusBarForDocument(document) {
-    if (!statusBarItem) {
+    if (!statusBarItem || languageClient) {
         return;
     }
 

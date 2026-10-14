@@ -1,0 +1,35 @@
+# Extern parity matrix
+
+Extern names registered by lowering (`zirk-ir/src/lower.rs`) classified by
+browser-interpreter availability. 242 externs total.
+
+## Implemented as interpreter intrinsics (236)
+
+| Family | Count | Names |
+| --- | --- | --- |
+| `char` | 17 | `zirk_char_ascii_code`, `zirk_char_byte_length`, `zirk_char_bytes`, `zirk_char_codepoint_count`, `zirk_char_codepoints`, `zirk_char_is_alphabetic`, `zirk_char_is_alphanumeric`, `zirk_char_is_ascii`, `zirk_char_is_digit`, `zirk_char_is_letter`, `zirk_char_is_lowercase`, `zirk_char_is_numeric`, `zirk_char_is_uppercase`, `zirk_char_is_whitespace`, `zirk_char_normalize`, `zirk_char_to_lowercase`, `zirk_char_to_uppercase` |
+| `collections` | 3 | `zirk_rt_array_from_list`, `zirk_rt_map_sorted_keys`, `zirk_rt_set_sorted_elements` |
+| `decimal` | 32 | `zirk_rt_decimal_abs`, `zirk_rt_decimal_add`, `zirk_rt_decimal_ceil`, `zirk_rt_decimal_clamp`, `zirk_rt_decimal_cmp`, `zirk_rt_decimal_div`, `zirk_rt_decimal_div_ex`, `zirk_rt_decimal_floor`, `zirk_rt_decimal_fraction`, `zirk_rt_decimal_from_f64`, `zirk_rt_decimal_from_i128`, `zirk_rt_decimal_from_literal`, `zirk_rt_decimal_is_integer`, `zirk_rt_decimal_is_negative`, `zirk_rt_decimal_is_zero`, `zirk_rt_decimal_max`, `zirk_rt_decimal_min`, `zirk_rt_decimal_mul`, `zirk_rt_decimal_neg`, `zirk_rt_decimal_parse_ok`, `zirk_rt_decimal_parse_value`, `zirk_rt_decimal_pow`, `zirk_rt_decimal_pow_i`, `zirk_rt_decimal_rem`, `zirk_rt_decimal_round`, `zirk_rt_decimal_scale`, `zirk_rt_decimal_sign`, `zirk_rt_decimal_sqrt`, `zirk_rt_decimal_sub`, `zirk_rt_decimal_to_f64`, `zirk_rt_decimal_to_i128_checked`, `zirk_rt_decimal_truncate` |
+| `duration` | 36 | `zirk_duration_abs`, `zirk_duration_ceil`, `zirk_duration_days`, `zirk_duration_floor`, `zirk_duration_format`, `zirk_duration_hours`, `zirk_duration_humanize`, `zirk_duration_microseconds`, `zirk_duration_milliseconds`, `zirk_duration_minutes`, `zirk_duration_nanoseconds`, `zirk_duration_round`, `zirk_duration_seconds`, `zirk_duration_sign`, `zirk_duration_to_iso_string`, `zirk_duration_total_days`, `zirk_duration_total_hours`, `zirk_duration_total_microseconds`, `zirk_duration_total_milliseconds`, `zirk_duration_total_minutes`, `zirk_duration_total_nanoseconds`, `zirk_duration_total_seconds`, `zirk_duration_total_weeks`, `zirk_duration_truncate`, `zirk_duration_whole_days`, `zirk_duration_whole_hours`, `zirk_duration_whole_microseconds`, `zirk_duration_whole_milliseconds`, `zirk_duration_whole_minutes`, `zirk_duration_whole_nanoseconds`, `zirk_duration_whole_seconds`, `zirk_duration_whole_weeks`, `zirk_rt_duration_div_duration`, `zirk_rt_duration_div_f64`, `zirk_rt_duration_mul_f64`, `zirk_rt_duration_to_string` |
+| `float` | 20 | `zirk_float_abs`, `zirk_float_ceil`, `zirk_float_clamp`, `zirk_float_floor`, `zirk_float_format`, `zirk_float_fraction`, `zirk_float_is_finite`, `zirk_float_is_infinite`, `zirk_float_is_negative`, `zirk_float_is_zero`, `zirk_float_max`, `zirk_float_min`, `zirk_float_parse_ok`, `zirk_float_parse_value`, `zirk_float_pow`, `zirk_float_powf`, `zirk_float_round`, `zirk_float_sign`, `zirk_float_sqrt`, `zirk_float_truncate` |
+| `int` | 36 | `zirk_int_abs`, `zirk_int_bit_count`, `zirk_int_checked_add_ok`, `zirk_int_checked_add_value`, `zirk_int_checked_div_ok`, `zirk_int_checked_div_value`, `zirk_int_checked_mul_ok`, `zirk_int_checked_mul_value`, `zirk_int_checked_pow_ok`, `zirk_int_checked_pow_value`, `zirk_int_checked_rem_ok`, `zirk_int_checked_rem_value`, `zirk_int_checked_sub_ok`, `zirk_int_checked_sub_value`, `zirk_int_clamp`, `zirk_int_is_even`, `zirk_int_is_odd`, `zirk_int_is_zero`, `zirk_int_leading_zeros`, `zirk_int_max`, `zirk_int_min`, `zirk_int_parse_ok`, `zirk_int_parse_radix_ok`, `zirk_int_parse_radix_value`, `zirk_int_parse_value`, `zirk_int_rotate_left`, `zirk_int_rotate_right`, `zirk_int_saturating_add`, `zirk_int_saturating_mul`, `zirk_int_saturating_sub`, `zirk_int_sign`, `zirk_int_to_string_radix`, `zirk_int_trailing_zeros`, `zirk_int_wrapping_add`, `zirk_int_wrapping_mul`, `zirk_int_wrapping_sub` |
+| `range` | 9 | `zirk_range_element_at`, `zirk_range_end`, `zirk_range_inclusive`, `zirk_range_length`, `zirk_range_new`, `zirk_range_slice`, `zirk_range_start`, `zirk_range_step`, `zirk_range_to_string` |
+| `regex` | 10 | `zirk_regex_find`, `zirk_regex_find_all`, `zirk_regex_from_pattern`, `zirk_regex_is_match`, `zirk_regex_is_valid_pattern`, `zirk_regex_match_group_name`, `zirk_regex_match_group_pos`, `zirk_regex_replace`, `zirk_regex_split`, `zirk_regex_to_string` |
+| `string` | 26 | `zirk_str_byte_length`, `zirk_str_bytes`, `zirk_str_chars`, `zirk_str_clone`, `zirk_str_codepoints`, `zirk_str_contains`, `zirk_str_ends_with`, `zirk_str_find`, `zirk_str_from_decimal`, `zirk_str_is_empty`, `zirk_str_length`, `zirk_str_lines`, `zirk_str_normalize`, `zirk_str_replace`, `zirk_str_search`, `zirk_str_set`, `zirk_str_slice`, `zirk_str_split`, `zirk_str_split_whitespace`, `zirk_str_starts_with`, `zirk_str_substring`, `zirk_str_to_lowercase`, `zirk_str_to_uppercase`, `zirk_str_trim`, `zirk_str_trim_end`, `zirk_str_trim_start` |
+| `temporal` | 47 | `zirk_rt_date_day`, `zirk_rt_date_day_of_week`, `zirk_rt_date_day_of_year`, `zirk_rt_date_days`, `zirk_rt_date_days_in_month`, `zirk_rt_date_days_in_year`, `zirk_rt_date_end_of_ok`, `zirk_rt_date_end_of_value`, `zirk_rt_date_format`, `zirk_rt_date_is_leap`, `zirk_rt_date_is_valid`, `zirk_rt_date_month`, `zirk_rt_date_parse_ok`, `zirk_rt_date_parse_value`, `zirk_rt_date_quarter`, `zirk_rt_date_start_of_ok`, `zirk_rt_date_start_of_value`, `zirk_rt_date_to_string`, `zirk_rt_date_week_of_year`, `zirk_rt_date_year`, `zirk_rt_datetime_days`, `zirk_rt_datetime_end_of_ok`, `zirk_rt_datetime_end_of_value`, `zirk_rt_datetime_format`, `zirk_rt_datetime_nanos`, `zirk_rt_datetime_new`, `zirk_rt_datetime_parse_ok`, `zirk_rt_datetime_parse_value`, `zirk_rt_datetime_start_of_ok`, `zirk_rt_datetime_start_of_value`, `zirk_rt_datetime_to_string`, `zirk_rt_time_add_nanos`, `zirk_rt_time_diff`, `zirk_rt_time_end_of_ok`, `zirk_rt_time_end_of_value`, `zirk_rt_time_format`, `zirk_rt_time_hour`, `zirk_rt_time_is_valid`, `zirk_rt_time_minute`, `zirk_rt_time_nanos`, `zirk_rt_time_nanosecond`, `zirk_rt_time_parse_ok`, `zirk_rt_time_parse_value`, `zirk_rt_time_second`, `zirk_rt_time_start_of_ok`, `zirk_rt_time_start_of_value`, `zirk_rt_time_to_string` |
+
+## Excluded — host authority (6)
+
+| Extern | Reason |
+| --- | --- |
+| `zirk_rt_date_today` | Host clock — no wall-clock authority in the browser baseline |
+| `zirk_rt_time_now_utc` | Host clock |
+| `zirk_rt_time_now_local` | Host clock |
+| `zirk_rt_datetime_now_utc` | Host clock |
+| `zirk_rt_datetime_now_local` | Host clock |
+| `zirk_rt_journal_record_string_backing` | Journaling — host-only capability |
+
+Excluded names fail preflight with `ZB001`. Instruction- and type-level
+exclusions (jobs, channels, `NativeSlice`, `Pin`, `Dependent`, `Clone`,
+`Journal*`, `ParallelFor*`, `TimerSleep`, `ResourceTransfer`, `Scope*`,
+`Lock*`) fail preflight separately as `ZB002`/`ZB003`/`ZB004`.

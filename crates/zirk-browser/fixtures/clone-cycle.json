@@ -1,0 +1,13 @@
+{
+  "name": "clone-cycle",
+  "source": "import { stdout } from std.io;\nclass Node {\n    v: Int32;\n    next: Node?;\n    construct(v: Int32) { this.v = v; this.next = null; }\n}\nfn main(): Void {\n    mut a = Node(1);\n    a.next = a;\n    mut b = a.clone();\n    stdout.println(b is a);\n    stdout.println(b.next is b);\n    stdout.println(b.next is a);\n    b.v = 7;\n    stdout.println(a.v);\n}\n",
+  "virtualName": "fixtures/clone-cycle.zrk",
+  "expectedOutput": [
+    "false\n",
+    "true\n",
+    "false\n",
+    "1\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

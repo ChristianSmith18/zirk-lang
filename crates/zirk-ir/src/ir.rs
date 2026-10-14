@@ -109,6 +109,13 @@ impl FloatWidth {
 /// frontend's type representation changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IrType {
+    /// A borrowed pointer to a mutex payload, available only as the first
+    /// parameter of a dedicated synchronous MutexWithCall callback. It is a
+    /// non-storable capability, not a runtime value or GC reference.
+    BorrowedView {
+        region: u32,
+        mutex_type: u32,
+    },
     Void,
     /// The bottom type (roadmap Phase 4a) — no instruction ever produces a
     /// real value of it; only `InstKind::FatalError` declares it, and the
@@ -170,6 +177,16 @@ pub enum IrType {
     /// the source-level `Job<T>` and is recovered by `JobWait`; the portable
     /// IR only carries the opaque scheduler id.
     Job,
+    /// A one-word typed-channel endpoint. Its element type is kept in the
+    /// module's intern table; the handle itself is a managed reference.
+    Channel(u32),
+    /// A GC-managed atomic object whose payload kind is fixed by the source
+    /// type. The object address is a managed reference; its scalar payload is
+    /// inline and is never traced by the collector.
+    Atomic(crate::AtomicKind),
+    /// A GC-managed mutex handle. Its protected payload type is interned in
+    /// `Module::mutex_types`; the handle itself is a traced reference.
+    Mutex(u32),
     /// A reference to an object, identified by its layout in the module.
     ///
     /// It is a reference and not a value: an object has identity, and identity
@@ -302,6 +319,7 @@ pub enum Nullable {
     Enum(u32),
     Array(u32),
     List(u32),
+    Atomic(crate::AtomicKind),
 }
 
 impl Nullable {
@@ -318,6 +336,7 @@ impl Nullable {
             Nullable::Enum(id) => IrType::Enum(id),
             Nullable::Array(id) => IrType::Array(id),
             Nullable::List(id) => IrType::List(id),
+            Nullable::Atomic(kind) => IrType::Atomic(kind),
         }
     }
 
@@ -335,6 +354,7 @@ impl Nullable {
             IrType::Enum(id) => Nullable::Enum(id),
             IrType::Array(id) => Nullable::Array(id),
             IrType::List(id) => Nullable::List(id),
+            IrType::Atomic(kind) => Nullable::Atomic(kind),
             _ => return None,
         })
     }
@@ -344,6 +364,7 @@ impl IrType {
     pub const fn as_str(self) -> &'static str {
         match self {
             IrType::Void => "Void",
+            IrType::BorrowedView { .. } => "BorrowedView",
             IrType::Never => "Never",
             IrType::Int(width) => width.as_str(),
             IrType::Float(width) => width.as_str(),
@@ -356,6 +377,9 @@ impl IrType {
             IrType::Closure(_) => "closure",
             IrType::Callable(_) => "Callable",
             IrType::Job => "Job",
+            IrType::Channel(_) => "Channel",
+            IrType::Atomic(_) => "Atomic",
+            IrType::Mutex(_) => "Mutex",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
             IrType::Value(_) => "value",
@@ -376,6 +400,7 @@ impl IrType {
                 Nullable::Enum(_) => "enum?",
                 Nullable::Array(_) => "Array?",
                 Nullable::List(_) => "List?",
+                Nullable::Atomic(_) => "Atomic?",
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
@@ -437,6 +462,9 @@ impl IrType {
             | IrType::Char
             | IrType::Array(_)
             | IrType::List(_)
+            | IrType::Channel(_)
+            | IrType::Atomic(_)
+            | IrType::Mutex(_)
             | IrType::Range
             | IrType::Map(_)
             | IrType::Set(_) => true,
@@ -468,6 +496,10 @@ impl IrType {
 /// Identifier of a basic block within a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u32);
+
+/// Function-local mutex identity tracked by verifier dataflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MutexId(pub u32);
 
 /// Identifier of a local slot within a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -506,6 +538,10 @@ pub struct Module {
     /// Interned `Pointer<T>` pointee types, indexed by the id
     /// [`IrType::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<IrType>,
+    /// Interned `Channel<T>` element types, indexed by [`IrType::Channel`].
+    pub channel_types: Vec<IrType>,
+    /// Interned protected payload types indexed by [`IrType::Mutex`].
+    pub mutex_types: Vec<IrType>,
     /// Interned `Weak<T>` referent types, indexed by the id
     /// [`IrType::Weak`] carries (roadmap Phase 4e, `fase-4e-weak`, design
     /// D1).
@@ -710,6 +746,16 @@ impl Module {
         (self.pointer_types.len() - 1) as u32
     }
 
+    /// Interns a `Channel<T>` element type, returning the id its endpoint
+    /// [`IrType::Channel`] carries.
+    pub fn intern_channel_type(&mut self, element: IrType) -> u32 {
+        if let Some(index) = self.channel_types.iter().position(|&t| t == element) {
+            return index as u32;
+        }
+        self.channel_types.push(element);
+        (self.channel_types.len() - 1) as u32
+    }
+
     /// Interns a `Weak<T>` referent type, returning the id
     /// [`IrType::Weak`] carries.
     pub fn intern_weak_type(&mut self, referent: IrType) -> u32 {
@@ -854,8 +900,129 @@ impl Instruction {
 /// What an instruction does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstKind {
+    /// Abstract lock ownership marker. Source lowering remains gated until a
+    /// runtime ABI and cleanup-edge implementation consume this operation.
+    MutexAcquire {
+        id: MutexId,
+        mutex: SlotId,
+    },
+    /// Abstract lock release marker paired with `MutexAcquire`.
+    MutexRelease {
+        id: MutexId,
+        mutex: SlotId,
+    },
+    /// Opens a lexical borrow region over the protected payload of `mutex`.
+    /// The result must have type
+    /// `BorrowedView { region, mutex_type }` and may only be consumed by the matching end.
+    BorrowViewStart {
+        region: u32,
+        mutex: Operand,
+    },
+    /// Closes the region represented by `view`.
+    BorrowViewEnd {
+        view: Operand,
+    },
+    /// Loads the typed payload through a live mutex borrow capability.
+    BorrowViewLoad {
+        view: Operand,
+    },
+    /// Stores a value of the exact mutex payload type through a live borrow.
+    BorrowViewStore {
+        view: Operand,
+        value: Operand,
+    },
+    /// Reads an inline field from a typed borrowed payload. Paths may cross
+    /// Value layouts but never Enum layouts (which require a variant guard).
+    BorrowViewFieldLoad {
+        view: Operand,
+        path: Vec<u32>,
+    },
+    /// Writes an inline field through a typed borrowed payload capability.
+    BorrowViewFieldStore {
+        view: Operand,
+        path: Vec<u32>,
+        value: Operand,
+    },
+    /// Calls a synchronous mutex callback through the runtime's scoped ABI.
+    /// The callback layout has exactly one parameter: a BorrowedView tied to
+    /// this handle's payload type. A non-Void callback result is written to
+    /// `result_slot` by the generated adapter after the callback returns.
+    MutexWithCall {
+        mutex: Operand,
+        callback: Operand,
+        layout: u32,
+        result_slot: Option<SlotId>,
+    },
+    /// Allocates a GC-managed mutex containing an inline payload. The backend
+    /// roots every managed reference in its staging value across allocation.
+    MutexNew {
+        payload: Operand,
+        mutex_type: u32,
+        object_slot: SlotId,
+    },
+    /// Polls the runtime safepoint on an ordinary control-flow back-edge.
+    /// This has no operands or result; backend emission maps it to the
+    /// existing `zirk_rt_safepoint_poll` runtime ABI call.
+    SafepointPoll,
     ConstInt(i128),
     ConstBool(bool),
+    /// Allocates a source-language Atomic<T> as a GC-managed object. The
+    /// runtime writes it directly to `object`, which must be a rooted slot
+    /// of `Atomic(kind)`. Produces the runtime status (0 on success).
+    AtomicNew {
+        kind: crate::AtomicKind,
+        value: Operand,
+        object: SlotId,
+    },
+    /// Managed Atomic scalar load. `order=None` means SeqCst; otherwise the
+    /// order operand is the AtomicOrder enum discriminant. Writes `out` and
+    /// returns an i32 runtime status.
+    AtomicLoad {
+        object: Operand,
+        order: Option<Operand>,
+        out: SlotId,
+    },
+    /// Managed Atomic scalar store. `order=None` means SeqCst; returns i32
+    /// runtime status.
+    AtomicStore {
+        object: Operand,
+        value: Operand,
+        order: Option<Operand>,
+    },
+    /// Managed Atomic exchange. Writes the previous scalar value to `out`
+    /// and returns i32 runtime status.
+    AtomicExchange {
+        object: Operand,
+        value: Operand,
+        order: Option<Operand>,
+        out: SlotId,
+    },
+    /// Managed Atomic integer fetch-add. Writes the previous value to `out`.
+    AtomicFetchAdd {
+        object: Operand,
+        value: Operand,
+        order: Option<Operand>,
+        out: SlotId,
+    },
+    /// Managed Atomic integer fetch-sub. Writes the previous value to `out`.
+    AtomicFetchSub {
+        object: Operand,
+        value: Operand,
+        order: Option<Operand>,
+        out: SlotId,
+    },
+    /// Managed compare-exchange. On success writes the observed value and
+    /// exchanged flag to output slots; lowerer builds Result<T,T> only after
+    /// checking the returned status.
+    AtomicCompareExchange {
+        object: Operand,
+        current: Operand,
+        new_value: Operand,
+        success_order: Operand,
+        failure_order: Operand,
+        observed: SlotId,
+        exchanged: SlotId,
+    },
     /// Materializes a string literal. This is the only allocating operation of
     /// the subset, and it is expressed without naming a memory strategy.
     ConstString(StringId),
@@ -901,6 +1068,10 @@ pub enum InstKind {
     /// `phase-4c-resources`) — consulted before a resource `close()` action.
     /// Produces `IrType::Boolean`.
     IsCancelled,
+    /// Temporarily suppresses cancellation delivery while generated cleanup
+    /// code runs. Enter/exit are paired by cancellation lowering.
+    CancelShieldEnter,
+    CancelShieldExit,
     /// Takes the pending exception, clearing the slot (roadmap Phase 4b) —
     /// a matching `catch`'s own lowering, right after `IsInstance` confirms
     /// it. Typed as whichever class the matching `catch` declared: the
@@ -1007,6 +1178,13 @@ pub enum InstKind {
     /// operand's own signedness from its recorded type to choose sign- vs
     /// zero-extension when widening; truncation needs no such choice.
     IntCast(Operand),
+    /// Reads the `i64` word a `Map`/`Set` stores back as the key/element's
+    /// own type (`universal-to-string-and-multiline-strings`): the inverse
+    /// of the sign-extension/`ptr_to_int` codegen applies at
+    /// `MapSet`/`SetAdd` — truncation to narrower integers, `int_to_ptr`
+    /// for reference types, exactly the conversion `MapGet` performs
+    /// inline for values. The instruction's own `ty` is the destination.
+    WordCast(Operand),
     /// A fractional or scientific literal (roadmap Phase 3b). The text is
     /// carried verbatim rather than parsed to `f64` here, for the same
     /// reason `zirk_ast::FloatLit` keeps it as text: `Float128` may exceed
@@ -1137,6 +1315,57 @@ pub enum InstKind {
     /// `stdout.print`, using the same already-converted `String` contract as
     /// `Println` but without appending a platform line break.
     Print(Operand),
+    /// `stderr.println`, with the same rendering contract as `stdout`.
+    PrintlnStderr(Operand),
+    /// `stderr.print`, with the same rendering contract as `stdout`.
+    PrintStderr(Operand),
+    /// `stdout.flush()`: `0` on success, mapped by codegen/interpreter to
+    /// `Result<Void, IoError>` — `Ok` on `0`, `Error(IoError.Io)` otherwise
+    /// (`add-stdin-stdout-standard-library`, design D3). `enum_id` is the
+    /// concrete `Result<Void, IoError>` instantiation the call site resolved
+    /// (the same `IrType::Enum` id `BuildEnum` would use for a literal
+    /// `Error(IoError.Io)` at this call site).
+    FlushStdout {
+        enum_id: u32,
+    },
+    /// `stderr.flush()`, otherwise identical to [`InstKind::FlushStdout`].
+    FlushStderr {
+        enum_id: u32,
+    },
+
+    /// `stdin.read_line_result()`: performs one real line read (native
+    /// process stdin, or the interpreter's injected bounded fixture) and
+    /// returns the already-tagged `ReadResult<String>` value directly.
+    ///
+    /// This does not go through [`InstKind::BuildEnum`] at the IR level: the
+    /// discriminant and payload are only known once the host read actually
+    /// happens, so codegen and the interpreter build the tagged value
+    /// themselves from the host's outcome, reusing the same enum layout
+    /// `BuildEnum` reads (`add-stdin-stdout-standard-library`, design D2).
+    /// `enum_id` is `ReadResult<String>`'s concrete instantiation. The nested
+    /// `error: IoError` field's own enum id is not carried separately: it is
+    /// read off `enum_id`'s own `Error` variant field type, the same way any
+    /// other consumer of `EnumLayout` would.
+    StdinReadLineResult {
+        enum_id: u32,
+    },
+    /// `stdin.read_char()`, otherwise identical in shape to
+    /// [`InstKind::StdinReadLineResult`] but for `ReadResult<Char>`.
+    StdinReadChar {
+        enum_id: u32,
+    },
+    /// `stdin.read_bytes(max)`: bounded byte read, `ReadResult<Array<Byte>>`.
+    /// `max` is the requested cap (`UInt64`).
+    StdinReadBytes {
+        max: Operand,
+        enum_id: u32,
+    },
+    /// `stdin.read_exact(count)`: exact byte read, `Result<Array<Byte>,
+    /// IoError>`. `count` is the requested length (`UInt64`).
+    StdinReadExact {
+        count: Operand,
+        enum_id: u32,
+    },
 
     /// The absent value of a nullable type.
     NullValue(Nullable),
@@ -1202,18 +1431,49 @@ pub enum InstKind {
         callable: Operand,
         args: Vec<Operand>,
     },
+    /// Executes a checked zero-argument callable on the bounded managed OS
+    /// worker pool and cooperatively joins it. The callable, optional result,
+    /// and Throwable slots live in the suspended caller frame; the runtime
+    /// worker remains registered as a collector mutator until it publishes
+    /// its terminal status and leaves the heap world.
+    ThreadRun {
+        callable_slot: SlotId,
+        result_slot: Option<SlotId>,
+        exception_slot: SlotId,
+    },
 
     /// Opens a structured-concurrency scope (`concurrent-blocks-and-timers`,
     /// `concurrent { }` / `spawn` / `Timer`). Produces the runtime scope id as
     /// a one-word `IrType::Int(I64)`; `ScopeExit` and `BranchStart` thread it
     /// back. A function body that opens no scope emits none of these.
     ScopeEnter,
+    /// Opens a structured scope that retains every child's terminal outcome.
+    ScopeEnterCollectAll,
     /// Runs the join-or-cancel-and-clean protocol for the scope named by
     /// `scope` and does not return until it completes — a suspension point,
     /// installed on every exit edge of a `concurrent` block the same way
     /// `finally` cleanup is.
     ScopeExit {
         scope: Operand,
+    },
+    /// Joins every child without propagating child failures.
+    ScopeExitCollectAll {
+        scope: Operand,
+    },
+    /// Requests cancellation of every still-active child in a scope.
+    ScopeCancel {
+        scope: Operand,
+    },
+    /// Waits for the earliest terminal branch in a collect-all scope and
+    /// transfers its managed payload and Throwable into caller-provided GC
+    /// root slots. `ordinal_slot` receives the registration ordinal; the
+    /// UInt32 result is the runtime outcome status (including drained and
+    /// caller-cancelled states).
+    ScopeOutcomeWaitTake {
+        scope: Operand,
+        ordinal_slot: SlotId,
+        value_slot: SlotId,
+        throwable_slot: SlotId,
     },
     /// Starts a branch of `scope` from the boxed capture block of `body` (an
     /// `IrType::Callable`). `target` names the lifted branch-body function,
@@ -1230,6 +1490,30 @@ pub enum InstKind {
         scope: Operand,
         kind: BranchKind,
         delay: Option<Operand>,
+        /// U32 status output: 0 success, 1 task capacity, 2 timer capacity.
+        status_slot: SlotId,
+    },
+    /// Starts detached work owned by the executor's bounded application
+    /// background supervisor. Unlike `BranchStart`, it has no lexical scope
+    /// or joinable `Job` result; the callable capture block remains rooted by
+    /// the background task until terminal cleanup. `status_slot` receives the
+    /// runtime admission status.
+    BackgroundStart {
+        target: String,
+        body: Operand,
+        status_slot: SlotId,
+    },
+    /// Registers a required long-lived service with a rooted callable capture.
+    /// The runtime writes its admission status to `status_slot`.
+    ServiceStart {
+        target: String,
+        body: Operand,
+        status_slot: SlotId,
+    },
+    /// Publishes readiness for a running service and writes the checked status.
+    ServiceReady {
+        context: Operand,
+        status_slot: SlotId,
     },
     /// `parallel { for x in coll { ... } }` (`parallel-cpu-regions` task 6.1,
     /// interim work-splitting lowering — no `InstKind::ParallelRegion`/
@@ -1259,6 +1543,39 @@ pub enum InstKind {
         job: Operand,
         result: IrType,
     },
+    /// Cooperatively waits for the first terminal state among 2..=8 jobs.
+    /// Produces the winning index as `UInt64`; `u64::MAX` means that the
+    /// caller was cancelled before any job completed.
+    JobWaitAny {
+        jobs: Vec<Operand>,
+    },
+    /// Like `JobWaitAny`, with room for a private deadline task: at most eight
+    /// source jobs plus one compiler-generated timer job. The regular ABI
+    /// retains its original 2..=8 operand bound.
+    JobWaitAnyWithTimer {
+        jobs: Vec<Operand>,
+    },
+    /// Cooperatively waits for one job to reach a terminal state and transfers
+    /// its managed value/exception into caller-provided, GC-rooted pointer
+    /// slots. The returned UInt32 is the runtime outcome status.
+    JobOutcomeWaitTake {
+        job: Operand,
+        value_slot: SlotId,
+        throwable_slot: SlotId,
+    },
+    /// Consumes one already-terminal job outcome without suspending. Used to
+    /// drain handles after collect-all cancellation cleanup.
+    JobOutcomeTake {
+        job: Operand,
+        value_slot: SlotId,
+        throwable_slot: SlotId,
+    },
+    /// Loads the exact statically-known payload `T` from a descriptor-backed
+    /// task result box held in an opaque GC-rooted pointer slot.
+    JobResultLoad {
+        box_pointer: Operand,
+        result: IrType,
+    },
     /// Whether the branch named by `job` has reached a terminal state
     /// (`job.done`). Produces `IrType::Boolean`.
     JobDone {
@@ -1269,11 +1586,73 @@ pub enum InstKind {
     JobCancel {
         job: Operand,
     },
+    /// Cancels a losing `Concurrent.first()` branch and asks the runtime to
+    /// report exceptions raised by its cancellation cleanup as branch failure.
+    JobCancelWithCleanupFailure {
+        job: Operand,
+    },
     /// `Timer.sleep(d)` — suspends the current branch until a monotonic
     /// deadline `nanos` (an `Int64` nanosecond `Duration`) from now. A
-    /// cancellation safe point; produces `IrType::Void`.
+    /// cancellation safe point; returns U32 status (0 success, 2 timer
+    /// capacity, 3 invalid duration) for language-level typed error lowering.
     TimerSleep {
         nanos: Operand,
+    },
+    /// Updates the active executor's cooperative background-shutdown grace.
+    /// Returns U32 status (0 success, 1 negative duration).
+    AppSetShutdownGrace {
+        nanos: Operand,
+    },
+    /// Installs the app-scoped managed handler for detached Throwable values.
+    AppSetBackgroundError {
+        callable: Operand,
+        layout: u32,
+    },
+
+    /// Creates a typed channel. `capacity` is `usize::MAX` for growable
+    /// channels; `limit` remains its defensive growth bound. The concrete
+    /// element layout is recovered from `element` by codegen.
+    ChannelNew {
+        capacity: Operand,
+        limit: Operand,
+        element: IrType,
+    },
+    /// Sends an element through an indirect source slot. The runtime may
+    /// cooperatively suspend when a bounded channel is full.
+    ChannelSend {
+        channel: Operand,
+        value: Operand,
+    },
+    /// Receives into an indirect destination slot. The result is a runtime
+    /// status word; codegen owns the slot and reconstructs the value.
+    ChannelRecv {
+        channel: Operand,
+        element: IrType,
+    },
+    /// Non-suspending send; returns the runtime status word.
+    ChannelTrySend {
+        channel: Operand,
+        value: Operand,
+    },
+    /// Non-suspending receive; returns the runtime status word.
+    ChannelTryRecv {
+        channel: Operand,
+        element: IrType,
+    },
+    /// Idempotently closes a channel.
+    ChannelClose {
+        channel: Operand,
+    },
+    /// Channel queue length.
+    ChannelLength(Operand),
+    /// Whether a channel has been closed.
+    ChannelIsClosed(Operand),
+    /// Channel declared capacity (`-1` for growable channels).
+    ChannelCapacity(Operand),
+    /// Drains queued values into a newly allocated `List<T>`.
+    ChannelDrain {
+        channel: Operand,
+        element_id: u32,
     },
 
     /// `Pointer.from(place)` where `place` is a local/parameter slot
@@ -1693,6 +2072,9 @@ impl BinaryOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
     Return(Option<Operand>),
+    /// Propagates cooperative cancellation after this function's cleanup.
+    /// This is distinct from exceptions and cannot be handled by `catch`.
+    Cancel,
     /// Control never arrives here.
     ///
     /// A block still needs a terminator even when nothing can reach it — the
@@ -1712,7 +2094,7 @@ impl Terminator {
     /// Blocks this terminator can transfer control to.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
-            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
+            Terminator::Return(_) | Terminator::Cancel | Terminator::Unreachable => Vec::new(),
             Terminator::Jump(target) => vec![*target],
             Terminator::Branch {
                 then_block,

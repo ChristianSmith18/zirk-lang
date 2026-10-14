@@ -109,6 +109,25 @@ The real check is the workspace test suite, which includes the LLVM sanity check
 cargo test --workspace
 ```
 
+## Canonical formatting
+
+`zirk format <target>...` formats files or recursively discovered `.zrk` files
+under directory targets. Use `--check` in automation to report drift without
+writing, or `--diff` to print a preview. `fmt off` / `fmt on` directive comments
+protect exceptional regions verbatim:
+
+```sh
+zirk format src/ examples/main
+zirk format --check src/
+zirk format --diff examples/main.zrk
+```
+
+```zirk
+// zirk-compiler: fmt off
+// formatter leaves this region byte-for-byte unchanged
+// zirk-compiler: fmt on
+```
+
 If the LLVM pin is wrong, the build fails before compiling, with a diagnostic naming the version found and the version expected. There is no need to interpret linker errors.
 
 ## Platform notes
@@ -118,4 +137,28 @@ If the LLVM pin is wrong, the build fails before compiling, with a diagnostic na
 - **Linux:** the required package is `llvm-20-dev`, not `llvm-20`. The former includes the static libraries; the latter only the binaries.
 
 Per-platform installation is automated in `.github/workflows/ci.yml`, which is the executable reference for this document.
+
+## Browser interpreter package (tooling only)
+
+The optional browser package is a Rust/WASM distribution of the frontend and
+verified-IR interpreter; it is not a Zirk compilation target. It does not need
+LLVM. Install the pinned binding tool and build only from a clean revision:
+
+```sh
+./scripts/ensure-wasm-bindgen.sh
+./scripts/ensure-wasm-opt.sh   # binaryen version_133 (brew install binaryen)
+./scripts/audit-browser-dependencies.sh
+./scripts/build-browser-package.sh /absolute/empty/output/zirk-browser
+./scripts/check-browser-package-size.sh /absolute/empty/output/zirk-browser
+node ./scripts/smoke-browser-package.mjs /absolute/empty/output/zirk-browser
+```
+
+The build runs `wasm-opt -Oz` (binaryen `version_133`) and refuses to continue
+unless the optimized binary is observably identical to the unoptimized one over
+every conformance fixture and valid corpus program
+(`scripts/verify-browser-package-behavior.mjs`). The handoff procedure and
+provenance requirements are in
+[`browser-package-handoff.md`](./browser-package-handoff.md). The generated
+artifact is for a module worker and has no filesystem, network, storage, DOM,
+clock, random, shell, or process authority.
 </content>

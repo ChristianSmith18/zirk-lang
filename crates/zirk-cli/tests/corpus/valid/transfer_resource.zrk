@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 class OpenError implements Error {
     inmut reason: String;
 
@@ -5,18 +7,15 @@ class OpenError implements Error {
         this.reason = reason;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "OPEN";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 }
@@ -30,22 +29,20 @@ class FakeFile implements Resource<OpenError>, TransferableResource {
         this.closed = false;
     }
 
-     read_all(): String {
+    read_all(): String {
         return "contents of " + this.name;
     }
 
-     nothing(): Void {
+    nothing(): Void {
         return;
     }
 
-    #override
-      close(): Result<Void, OpenError> {
+    #override close(): Result<Void, OpenError> {
         this.closed = true;
         return Ok(this.nothing());
     }
 
-    #override
-      is_closed(): Boolean {
+    #override is_closed(): Boolean {
         return this.closed;
     }
 }
@@ -60,7 +57,7 @@ fn open_file(name: String, fail: Boolean): Result<FakeFile, OpenError> {
 fn main(): Void {
     match open_file("a", false) with a, open_file("b", false) with b {
         stdout.println(a.read_all());
-        mut moved = transfer(a);
+        mut moved = transfer (a);
         stdout.println(moved.read_all());
         stdout.println(b.read_all());
     }

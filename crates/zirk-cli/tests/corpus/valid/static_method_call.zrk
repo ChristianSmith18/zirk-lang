@@ -1,5 +1,7 @@
+import { stdout } from std.io;
+
 class Math {
-    static  add(a: Int32, b: Int32): Int32 { return a + b; }
+    static add(a: Int32, b: Int32): Int32 { return a + b; }
 }
 
 fn main(): Void {

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A `parallel { }` block used where an expression is expected (spec
 // `parallel-regions`, "parallel block as an expression") types as its final
 // expression. The spec's own scenario is `rows.map(cost).sum()`, but that

@@ -478,7 +478,10 @@ impl<'a> Parser<'a> {
 
     fn parse_program(mut self) -> Program {
         let start = self.peek_span();
+        let mut package = None;
         let mut imports = Vec::new();
+        let mut modules = Vec::new();
+        let mut module_reexports = Vec::new();
         let mut uses = Vec::new();
         let mut enums = Vec::new();
         let mut classes = Vec::new();
@@ -488,6 +491,10 @@ impl<'a> Parser<'a> {
         let mut externs = Vec::new();
 
         while !self.at_eof() {
+            if self.check_keyword(Keyword::Package) {
+                package = self.parse_package();
+                continue;
+            }
             if self.check_keyword(Keyword::Import) {
                 if let Some(i) = self.parse_import() {
                     imports.push(i);
@@ -508,6 +515,19 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 span
             });
+
+            if self.check_keyword(Keyword::Mod) {
+                if let Some(shared_at) = shared_at
+                    && matches!(self.peek_at(2), TokenKind::Keyword(Keyword::From))
+                {
+                    if let Some(reexport) = self.parse_module_reexport(shared_at) {
+                        module_reexports.push(reexport);
+                    }
+                } else if let Some(module) = self.parse_module(shared_at.is_some()) {
+                    modules.push(module);
+                }
+                continue;
+            }
 
             if self.check_keyword(Keyword::Extern) {
                 if let Some(e) = self.parse_extern_fn() {
@@ -662,7 +682,10 @@ impl<'a> Parser<'a> {
 
         let end = self.peek_span();
         Program {
+            package,
             imports,
+            modules,
+            module_reexports,
             uses,
             enums,
             classes,
@@ -674,7 +697,74 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `import { A, B -> C } from "./path";` or `... from std.io;`
+    fn parse_package(&mut self) -> Option<PackageDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Package);
+        let path = self.parse_dotted_path("in the package declaration")?;
+        let end = self.peek_span();
+        self.eat(&TokenKind::Semicolon);
+        Some(PackageDecl {
+            path,
+            span: start.to(end),
+        })
+    }
+
+    fn parse_module(&mut self, shared: bool) -> Option<ModuleDecl> {
+        let start = self.peek_span();
+        self.eat_keyword(Keyword::Mod);
+        let name = self.expect_identifier("after `mod`")?;
+        self.expect(&TokenKind::LBrace, "after the module name");
+        let mut body_tokens = Vec::new();
+        let mut depth = 1usize;
+        while depth > 0 && !self.at_eof() {
+            let token = self.tokens[self.pos].clone();
+            self.pos += 1;
+            match token.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                body_tokens.push(token);
+            }
+        }
+        let end = self.peek_span();
+        let eof_span = Span::empty_in(start.file, end.start);
+        body_tokens.push(Token::new(TokenKind::Eof, eof_span));
+        let body = Parser::new(self.source, &body_tokens, self.sink).parse_program();
+        Some(ModuleDecl {
+            name,
+            shared,
+            body: Box::new(body),
+            span: start.to(end),
+        })
+    }
+
+    fn parse_module_reexport(&mut self, start: Span) -> Option<ModuleReexport> {
+        self.eat_keyword(Keyword::Mod);
+        let name = self.expect_identifier("after `share mod`")?;
+        self.expect(&TokenKind::Keyword(Keyword::From), "after the module name");
+        let span = self.peek_span();
+        let TokenKind::Str(source_path) = self.peek().clone() else {
+            self.error(
+                codes::INVALID_IMPORT_SOURCE,
+                span,
+                "expected a quoted local path",
+                "package-root reexports use a relative quoted path",
+                Some("write `share mod name from \"./name\";`".into()),
+            );
+            return None;
+        };
+        self.pos += 1;
+        self.eat(&TokenKind::Semicolon);
+        Some(ModuleReexport {
+            name,
+            source_path,
+            span: start.to(span),
+        })
+    }
+
+    /// `import { A, B -> C } from "./path";` or `... from acme.web;`
     fn parse_import(&mut self) -> Option<ImportDecl> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Import);
@@ -727,26 +817,19 @@ impl<'a> Parser<'a> {
             return Some(ImportSource::Local { path, span });
         }
 
-        // A standard module is a dotted name: `std.io`.
+        // Packages are unquoted dotted names: `std.io` or `acme.web`.
         if matches!(self.peek(), TokenKind::Identifier(_)) {
-            let mut path = String::new();
-            let mut end;
-
-            loop {
-                let segment = self.expect_identifier("in the module name")?;
-                if !path.is_empty() {
-                    path.push('.');
-                }
-                path.push_str(&segment.name);
-                end = segment.span;
-
-                if !self.eat(&TokenKind::Dot) {
-                    break;
-                }
+            let path = self.parse_dotted_path("in the package name")?;
+            let mut full_path = path;
+            let mut end = self.peek_span();
+            if self.eat(&TokenKind::ColonColon) {
+                let member = self.expect_identifier("after `::` in an import source")?;
+                full_path.push_str("::");
+                full_path.push_str(&member.name);
+                end = member.span;
             }
-
-            return Some(ImportSource::Std {
-                path,
+            return Some(ImportSource::Package {
+                path: full_path,
                 span: span.to(end),
             });
         }
@@ -758,12 +841,44 @@ impl<'a> Parser<'a> {
             "expected the source of the import",
             format!("found {found}"),
             Some(
-                "a local path goes in quotes (`\"./user\"`); a standard module does not (`std.io`)"
-                    .into(),
+                "a local path goes in quotes (`\"./user\"`); a package does not (`std.io`)".into(),
             ),
         );
         self.synchronize();
         None
+    }
+
+    fn parse_dotted_path(&mut self, context: &str) -> Option<String> {
+        let mut path = String::new();
+        loop {
+            // A package segment may coincide with a reserved word (`demo.package`),
+            // because package paths are logical names rather than declarations.
+            let segment = match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    let span = self.peek_span();
+                    self.pos += 1;
+                    Ident::new(name, span)
+                }
+                TokenKind::Keyword(Keyword::Package | Keyword::Mod) => {
+                    let span = self.peek_span();
+                    let name = match self.peek() {
+                        TokenKind::Keyword(keyword) => keyword.as_str(),
+                        _ => unreachable!(),
+                    };
+                    self.pos += 1;
+                    Ident::new(name, span)
+                }
+                _ => self.expect_identifier(context)?,
+            };
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(&segment.name);
+            if !self.eat(&TokenKind::Dot) {
+                break;
+            }
+        }
+        Some(path)
     }
 
     /// `use stdout;`
@@ -976,12 +1091,33 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
-        let return_type = self.parse_return_type(&name)?;
+        // A contract method's annotation is optional only when a body follows:
+        // a `trait` default may infer its return; a signature-only member of
+        // either contract kind has nothing to infer from
+        // (`return-type-inference`).
+        let had_colon = matches!(self.peek(), TokenKind::Colon);
+        let return_type = self.parse_optional_return_type();
         let throws = self.parse_throws_clause();
 
         let has_body = matches!(self.peek(), TokenKind::LBrace);
+
+        if !has_body && return_type.is_none() && !had_colon {
+            let span = self.peek_span();
+            self.error(
+                codes::MISSING_RETURN_TYPE,
+                span,
+                "missing return type on signature",
+                "a signature without a body must declare its return type",
+                Some(format!(
+                    "write `{}(...): Void` if the method returns nothing",
+                    name.name
+                )),
+            );
+            self.synchronize();
+            return None;
+        }
 
         if has_body && kind == ContractKind::Interface {
             let span = self.peek_span();
@@ -1344,7 +1480,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Construct);
 
         self.expect(&TokenKind::LParen, "after `construct`");
-        let params = self.parse_params();
+        let params = self.parse_params(true);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -1369,9 +1505,15 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
-        let return_type = self.parse_return_type(&name)?;
+        // An `abstract` method has no body to infer a return type from; a
+        // concrete one may omit it (`return-type-inference`).
+        let return_type = if is_abstract {
+            Some(self.require_return_type(&name)?)
+        } else {
+            self.parse_optional_return_type()
+        };
         let throws = self.parse_throws_clause();
 
         // An `abstract` method declares a signature and stops there.
@@ -1554,10 +1696,10 @@ impl<'a> Parser<'a> {
         let type_params = self.parse_type_params();
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
-        let return_type = self.parse_return_type(&name)?;
+        let return_type = self.parse_optional_return_type();
         let throws = self.parse_throws_clause();
 
         let body = self.parse_block()?;
@@ -1618,10 +1760,10 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("after `fn`")?;
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
-        let return_type = self.parse_return_type(&name)?;
+        let return_type = self.require_return_type(&name)?;
 
         let span = if matches!(self.peek(), TokenKind::LBrace) {
             let body_span = self.peek_span();
@@ -1651,8 +1793,21 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// The mandatory return type of a function or method.
-    fn parse_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
+    /// The return type of a `fn` or method with a body, which may omit it
+    /// (`return-type-inference`): `None` marks the signature for inference
+    /// by the checker. When a `:` is written the type parses as usual —
+    /// an explicit annotation stays the contract the body must satisfy.
+    fn parse_optional_return_type(&mut self) -> Option<TypeRef> {
+        if self.eat(&TokenKind::Colon) {
+            return self.parse_type();
+        }
+        None
+    }
+
+    /// The mandatory return type of a signature with no body to infer from:
+    /// `interface` members, `abstract` methods, `extern` declarations and
+    /// `fn dec`.
+    fn require_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
         if self.eat(&TokenKind::Colon) {
             return self.parse_type();
         }
@@ -1661,8 +1816,8 @@ impl<'a> Parser<'a> {
         self.error(
             codes::MISSING_RETURN_TYPE,
             span,
-            "missing return type on function",
-            "every function declares its return type",
+            "missing return type on signature",
+            "a signature without a body must declare its return type",
             Some(format!(
                 "write `fn {}(...): Void` if the function returns nothing",
                 name.name
@@ -1683,7 +1838,7 @@ impl<'a> Parser<'a> {
 
     /// Parameters, with the optional, default and variadic forms of
     /// `ZIRK_LANGUAGE_SPEC.md` section 6.
-    fn parse_params(&mut self) -> Vec<Param> {
+    fn parse_params(&mut self, allow_promotion: bool) -> Vec<Param> {
         let mut params = Vec::new();
         let mut variadic_at: Option<Span> = None;
 
@@ -1701,6 +1856,44 @@ impl<'a> Parser<'a> {
                     Some("move `...` to the end of the list".into()),
                 );
                 break;
+            }
+
+            let visibility = self.parse_visibility();
+            let mutability = if self.eat_keyword(Keyword::Mut) {
+                Some(Mutability::Mutable)
+            } else if self.eat_keyword(Keyword::Inmut) {
+                if self.eat(&TokenKind::ColonColon) {
+                    if matches!(self.peek(), TokenKind::Identifier(name) if name == "strict") {
+                        self.pos += 1;
+                        Some(Mutability::Strict)
+                    } else {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            self.peek_span(),
+                            "expected `strict` after `inmut::`",
+                            "`inmut::strict` is the only qualified form of `inmut`",
+                            None,
+                        );
+                        return params;
+                    }
+                } else {
+                    Some(Mutability::Immutable)
+                }
+            } else {
+                None
+            };
+            let promoted = visibility.is_some() || mutability.is_some();
+            if promoted && !allow_promotion {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "member modifiers apply only to `construct` parameters",
+                    "this parameter is not in a class constructor",
+                    Some(
+                        "move the modifier to a class field, or use it on a `construct` parameter"
+                            .into(),
+                    ),
+                );
             }
 
             let variadic = self.eat(&TokenKind::DotDotDot);
@@ -1732,6 +1925,10 @@ impl<'a> Parser<'a> {
             params.push(Param {
                 name,
                 ty,
+                promoted: promoted.then_some(PromotedParam {
+                    visibility: visibility.unwrap_or(Visibility::Public),
+                    mutability: mutability.unwrap_or(Mutability::Mutable),
+                }),
                 optional,
                 default,
                 variadic,
@@ -3068,7 +3265,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
 
         self.expect(&TokenKind::LParen, "to open the lambda parameters");
-        let params = self.parse_params();
+        let params = self.parse_params(false);
         self.expect(&TokenKind::RParen, "to close the lambda parameters");
 
         self.expect(&TokenKind::Colon, "before the lambda return type");
@@ -4245,27 +4442,17 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// What may follow an identifier: a call, `stdout.println`, or nothing.
+    /// What may follow an identifier: a call, a standard-stream print, or nothing.
     fn parse_after_ident(&mut self, ident: Ident) -> Option<Expr> {
-        // `stdout.println(expr)` is a special syntactic form while neither
-        // modules nor a standard library exist. See decision D4 of the design.
-        if ident.name == "stdout" && matches!(self.peek(), TokenKind::Dot) {
+        // Opened `print`/`println` retain a dedicated expression so values
+        // can be rendered through `to_string()` before reaching the host
+        // leaf. Qualified calls (`stdout.println(...)`) deliberately fall
+        // through to ordinary module-member resolution below: this lets the
+        // compiler execute the Zirk body published by that module.
+        if matches!(ident.name.as_str(), "print" | "println")
+            && matches!(self.peek(), TokenKind::LParen)
+        {
             self.pos += 1;
-            let method_span = self.peek_span();
-            let method = self.expect_identifier("after `stdout.`")?;
-
-            if !matches!(method.name.as_str(), "print" | "println") {
-                self.error(
-                    codes::NOT_IMPLEMENTED,
-                    method_span,
-                    format!("`stdout.{}` is not available yet", method.name),
-                    "only `stdout.print` and `stdout.println` exist in this phase",
-                    Some("the full standard library arrives in Phase 7".into()),
-                );
-                return None;
-            }
-
-            self.expect(&TokenKind::LParen, "after `println`");
             let mut args = Vec::new();
             if !matches!(self.peek(), TokenKind::RParen) {
                 loop {
@@ -4276,11 +4463,12 @@ impl<'a> Parser<'a> {
                 }
             }
             let end = self.peek_span();
-            self.expect(&TokenKind::RParen, "to close the call");
-
+            self.expect(&TokenKind::RParen, "to close the print argument list");
             return Some(Expr::Println(PrintlnExpr {
                 args,
-                newline: method.name == "println",
+                newline: ident.name == "println",
+                requires_import: true,
+                stream: None,
                 span: ident.span.to(end),
             }));
         }
@@ -4339,6 +4527,7 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 TokenKind::Dot | TokenKind::QuestionDot => {
                     let safe = matches!(self.peek(), TokenKind::QuestionDot);
+                    let access = FieldAccess::Dot;
                     self.pos += 1;
 
                     // `TraitName.super.method()` — the `super` itself is a
@@ -4366,7 +4555,7 @@ impl<'a> Parser<'a> {
                     // `parallel-cpu-regions`), the adapter that runs one
                     // pipeline chain across cores.
                     let name = if let TokenKind::Keyword(
-                        Keyword::From | Keyword::Type | Keyword::Parallel,
+                        Keyword::From | Keyword::Type | Keyword::Parallel | Keyword::With,
                     ) = self.peek()
                     {
                         let span = self.peek_span();
@@ -4384,6 +4573,7 @@ impl<'a> Parser<'a> {
                         object: Box::new(object),
                         name,
                         safe,
+                        access,
                     });
                 }
                 TokenKind::LParen => {
@@ -4534,8 +4724,8 @@ impl<'a> Parser<'a> {
             // `name: value` matches by name. A bare identifier followed by `:`
             // is unambiguous here: a type annotation cannot appear in a call.
             // Spread arguments cannot be named.
-            let name = if is_spread {
-                None
+            let (name, name_colon) = if is_spread {
+                (None, None)
             } else {
                 match self.peek().clone() {
                     TokenKind::Identifier(name)
@@ -4543,16 +4733,34 @@ impl<'a> Parser<'a> {
                             == Some(&TokenKind::Colon) =>
                     {
                         let span = self.peek_span();
+                        let colon = self.tokens[self.pos + 1].span;
                         self.pos += 2;
-                        Some(Ident::new(name, span))
+                        (Some(Ident::new(name, span)), Some(colon))
                     }
-                    _ => None,
+                    _ => (None, None),
                 }
             };
 
-            let value = self.parse_expr()?;
+            // `name:` is shorthand for `name: name`. It is recognized only
+            // after the unambiguous `identifier :` prefix above, so a member
+            // expression such as `config.url:` still fails as ordinary call
+            // syntax and cannot be mistaken for shorthand. The synthesized
+            // path carries the name's span, so the argument's own span must
+            // reach the `:` — tools slicing the written argument need it.
+            let shorthand =
+                name.is_some() && matches!(self.peek(), TokenKind::Comma | TokenKind::RParen);
+            let value = if shorthand {
+                Expr::Path(name.clone().expect("shorthand implies a name"))
+            } else {
+                self.parse_expr()?
+            };
+            let end = if shorthand {
+                name_colon.expect("shorthand implies a colon")
+            } else {
+                value.span()
+            };
             args.push(Arg {
-                span: start.to(value.span()),
+                span: start.to(end),
                 name,
                 value,
                 is_spread,
@@ -4628,6 +4836,7 @@ fn pow_call(base: Expr, exponent: Expr, op_span: Span) -> Expr {
                 span: op_span,
             },
             safe: false,
+            access: FieldAccess::Dot,
             span,
         })),
         args: vec![Arg {

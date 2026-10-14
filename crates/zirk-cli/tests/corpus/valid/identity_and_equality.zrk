@@ -1,7 +1,9 @@
+import { stdout } from std.io;
+
 class Point {
     x: Int32;
     construct(x: Int32) { this.x = x; }
-     _equals(other: Point): Boolean { return this.x == other.x; }
+    _equals(other: Point): Boolean { return this.x == other.x; }
 }
 fn main(): Void {
     mut a = Point(1);

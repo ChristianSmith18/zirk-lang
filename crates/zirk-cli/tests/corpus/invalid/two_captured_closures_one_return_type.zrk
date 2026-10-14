@@ -7,9 +7,9 @@ fn make(pick: Boolean): Fn() => Int32 {
     mut a = 1;
     mut b = 2;
     if pick {
-        return (): Int32 => a;
+        return(): Int32 => a;
     }
-    return (): Int32 => b;
+    return(): Int32 => b;
 }
 
 fn main(): Void {

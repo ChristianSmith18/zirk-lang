@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The exact base-ten `Decimal` type: `0.1 + 0.2 == 0.3` holds, arithmetic is
 // exact, `to_string` renders the exact decimal, and the type is kept apart
 // from the IEEE 754 binary `Float` family.

@@ -1,6 +1,6 @@
 fn main(): Void {
     mut base = 1;
-    mut F: Fn() => Int32 = (): Int32 => base + 1;
-    F = (): Int32 => base + 2;
+    mut F: Fn() => Int32 =(): Int32 => base + 1;
+    F =(): Int32 => base + 2;
     stdout.println(F());
 }

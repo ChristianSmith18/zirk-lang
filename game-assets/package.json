@@ -1,0 +1,28 @@
+{
+  "name": "zirk-game-assets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Procedural Three.js assets for the Zirk learning game: characters, items, goals, world tiles and teaching props.",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./catalog": "./src/catalog.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "preview": "node preview/serve.mjs",
+    "shots": "node preview/shots.mjs preview/shots",
+    "export-check": "node preview/export-check.mjs",
+    "curriculum:verify": "node curriculum/verify.mjs",
+    "curriculum:export": "node curriculum/export.mjs",
+    "level": "node curriculum/play.mjs"
+  },
+  "peerDependencies": {
+    "three": ">=0.170.0"
+  },
+  "devDependencies": {
+    "three": "^0.180.0"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,3 @@
+fn inspect(value: Atomic<Int32>): Void { }
+
+fn main(): Void { }

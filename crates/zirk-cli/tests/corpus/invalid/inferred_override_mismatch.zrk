@@ -1,0 +1,15 @@
+// An inferred method still has to satisfy the contract: `Sized` asks for
+// `Int32` and this body gives `String`.
+interface Sized {
+    size(): Int32;
+}
+
+class Box implements Sized {
+    construct() { }
+    size() {
+        return "big";
+    }
+}
+
+fn main() {
+}

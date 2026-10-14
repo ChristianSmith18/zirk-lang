@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut rows: List<Int32> = [1];
+    Thread.run((): Int32 => rows[0]);
+}

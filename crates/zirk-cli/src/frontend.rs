@@ -19,7 +19,7 @@ pub struct FrontendResult {
 /// On failure it returns `None` and `sink` contains the diagnostics that
 /// explain why. On success it returns the merged program and the checked tree.
 pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendResult> {
-    let loaded = crate::modules::load(path, sink)?;
+    let loaded = load_target(path, sink)?;
     if sink.has_errors() {
         // Loading recovered enough to continue, but the errors already make the
         // program invalid. Returning None keeps the contract simple: a Some
@@ -40,10 +40,103 @@ pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendRe
     })
 }
 
+/// Like [`run_frontend`], but keeps the checked program when the checker
+/// reported errors: `zirk check --types` still renders the entries it
+/// managed to resolve (spec `zirk-check`, "Type map on a file with
+/// errors").
+pub fn run_frontend_lenient(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendResult> {
+    run_frontend_lenient_with_overlay(path, &std::collections::HashMap::new(), sink)
+}
+
+/// [`run_frontend_lenient`] reading entry text from `overlay` before the
+/// filesystem — the language server's entry point, where the open document
+/// is the editor's in-memory text rather than the bytes on disk.
+pub fn run_frontend_lenient_with_overlay(
+    path: &Path,
+    overlay: &std::collections::HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<FrontendResult> {
+    let loaded = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        crate::modules::load_project(path, sink)?
+    } else {
+        crate::modules::load_with_overlay(path, overlay, sink)?
+    };
+    if sink.has_errors() {
+        return None;
+    }
+
+    let program = merge(&loaded);
+    let checked = zirk_sema::check(&loaded.sources, &program, sink);
+    Some(FrontendResult {
+        program,
+        checked,
+        sources: loaded.sources,
+    })
+}
+
+fn load_target(path: &Path, sink: &mut DiagnosticSink) -> Option<crate::modules::Crate> {
+    if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        crate::modules::load_project(path, sink)
+    } else {
+        crate::modules::load(path, sink)
+    }
+}
+
+/// Renders the checker's type map as structured JSON — sibling to the
+/// diagnostics, on stdout (spec `zirk-check`, "Type-map output mode").
+pub fn render_type_map(checked: &zirk_sema::CheckedProgram, sources: &SourceMap) -> String {
+    let mut out = String::from("{\"types\":[");
+    for (index, entry) in checked.type_map.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let file = sources.file(entry.span.file).name();
+        out.push_str(&format!(
+            "{{\"file\":\"{}\",\"start\":{},\"end\":{},\"kind\":\"{}\"",
+            json_escape(file),
+            entry.span.start,
+            entry.span.end,
+            entry.kind.as_str(),
+        ));
+        if let Some(name) = &entry.name {
+            out.push_str(&format!(",\"name\":\"{}\"", json_escape(name)));
+        }
+        out.push_str(&format!(
+            ",\"type\":\"{}\",\"inferred\":{}}}",
+            json_escape(&entry.text),
+            entry.inferred,
+        ));
+    }
+    out.push_str("]}");
+    out
+}
+
+/// Escapes a string for embedding in the JSON `render_type_map` writes —
+/// quotes, backslashes and control characters only; the type map's own
+/// field names are fixed ASCII.
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Merges the files of a crate into the program the checker sees.
 fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
     let mut program = zirk_ast::Program {
+        package: None,
         imports: Vec::new(),
+        modules: Vec::new(),
+        module_reexports: Vec::new(),
         uses: Vec::new(),
         enums: Vec::new(),
         classes: Vec::new(),
@@ -55,7 +148,14 @@ fn merge(loaded: &crate::modules::Crate) -> zirk_ast::Program {
     };
 
     for unit in &loaded.units {
+        if unit.program.span.file == zirk_diagnostics::FileId::ENTRY {
+            program.package = unit.program.package.clone();
+        }
         program.imports.extend(unit.program.imports.iter().cloned());
+        program.modules.extend(unit.program.modules.iter().cloned());
+        program
+            .module_reexports
+            .extend(unit.program.module_reexports.iter().cloned());
         program.uses.extend(unit.program.uses.iter().cloned());
         program.enums.extend(unit.program.enums.iter().cloned());
         program.classes.extend(unit.program.classes.iter().cloned());

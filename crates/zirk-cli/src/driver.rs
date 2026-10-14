@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use zirk_codegen_llvm::compile_to_object;
+#[cfg(unix)]
+use std::process::ExitStatus;
+pub use zirk_codegen_llvm::CodegenOptimizationLevel;
+use zirk_codegen_llvm::{compile_to_object, compile_to_object_with_optimization};
 use zirk_diagnostics::{Diagnostic, DiagnosticSink};
 
 use crate::codes;
@@ -39,6 +42,17 @@ impl Compilation {
 
 /// Compiles a source file into a native executable.
 pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
+    compile_with_optimization(path, output_dir, CodegenOptimizationLevel::None)
+}
+
+/// Compiles a source file at an explicit backend optimization level.
+/// Higher levels are for parity/benchmark experiments; the CLI continues to
+/// call [`compile`] and therefore always selects the unoptimized oracle.
+pub fn compile_with_optimization(
+    path: &Path,
+    output_dir: &Path,
+    optimization: CodegenOptimizationLevel,
+) -> Compilation {
     let mut sink = DiagnosticSink::new();
 
     let Some(crate::frontend::FrontendResult {
@@ -87,7 +101,12 @@ pub fn compile(path: &Path, output_dir: &Path) -> Compilation {
     let object = output_dir.join(format!("{stem}{}", object_extension()));
     let executable = output_dir.join(exe_name(&stem));
 
-    if let Err(diagnostic) = compile_to_object(&ir, &stem, &object) {
+    let emission = if optimization == CodegenOptimizationLevel::None {
+        compile_to_object(&ir, &stem, &object)
+    } else {
+        compile_to_object_with_optimization(&ir, &stem, &object, optimization)
+    };
+    if let Err(diagnostic) = emission {
         sink.emit(*diagnostic);
         return Compilation::failed(sink);
     }
@@ -244,17 +263,320 @@ fn exe_name(stem: &str) -> String {
 }
 
 /// Runs an already compiled executable and returns its exit code.
+///
+/// On Unix, SIGINT received by the CLI is forwarded to the direct child and
+/// the child's resulting status is preserved. Other platforms retain the
+/// standard-library wait behavior; signal forwarding is not implemented
+/// there yet.
 pub fn run(executable: &Path) -> Result<i32, Box<Diagnostic>> {
-    let status = Command::new(executable).status().map_err(|error| {
-        Diagnostic::error(
-            codes::EXECUTION_FAILED,
-            format!("could not run `{}`", executable.display()),
-        )
-        .with_cause(error.to_string())
-        .boxed()
-    })?;
+    let mut command = Command::new(executable);
+    run_command(&mut command, executable)
+}
+
+fn run_command(command: &mut Command, executable: &Path) -> Result<i32, Box<Diagnostic>> {
+    #[cfg(unix)]
+    let status = run_command_with_sigint_forwarding(command, executable)?;
+
+    // No portable, safe standard-library API currently forwards console
+    // signals to one child on non-Unix targets. Keep the existing wait
+    // behavior there; in particular, this does not promise Windows handling.
+    #[cfg(not(unix))]
+    let status = command
+        .status()
+        .map_err(|error| execution_error(executable, error))?;
 
     // A process killed by a signal has no code. 130 is the convention for
     // SIGINT and keeps the caller from reading it as success.
     Ok(status.code().unwrap_or(130))
+}
+
+fn execution_error(executable: &Path, error: std::io::Error) -> Box<Diagnostic> {
+    Diagnostic::error(
+        codes::EXECUTION_FAILED,
+        format!("could not run `{}`", executable.display()),
+    )
+    .with_cause(error.to_string())
+    .boxed()
+}
+
+#[cfg(unix)]
+fn run_command_with_sigint_forwarding(
+    command: &mut Command,
+    executable: &Path,
+) -> Result<ExitStatus, Box<Diagnostic>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::time::Duration;
+
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use signal_hook::consts::SIGINT;
+    use signal_hook::low_level::unregister;
+
+    // Respect an inherited ignore disposition. Unix preserves SIG_IGN across
+    // exec; replacing it in the CLI would unexpectedly make both the parent
+    // and generated child respond to Ctrl-C.
+    let mut inherited: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: query the disposition for SIGINT without changing it.
+    if unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut inherited) } == 0
+        && inherited.sa_sigaction == libc::SIG_IGN
+    {
+        return command
+            .status()
+            .map_err(|error| execution_error(executable, error));
+    }
+
+    // signal-hook confines the OS signal handler to an atomic flag. Process
+    // signaling and child waiting happen on this ordinary thread.
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let signal_id = signal_hook::flag::register(SIGINT, Arc::clone(&interrupted))
+        .map_err(|error| execution_error(executable, error))?;
+    struct SignalRegistration(signal_hook::SigId);
+    impl Drop for SignalRegistration {
+        fn drop(&mut self) {
+            unregister(self.0);
+        }
+    }
+    let _signal_registration = SignalRegistration(signal_id);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| execution_error(executable, error))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                // Keep ownership of the child until it is reaped, including
+                // when polling fails, so an I/O error cannot orphan it.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(execution_error(executable, error));
+            }
+        }
+
+        if interrupted.swap(false, Ordering::Relaxed) {
+            // Forward only to this direct child. In particular, do not signal
+            // its process group or descendants.
+            let Ok(pid) = i32::try_from(child.id()) else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(execution_error(
+                    executable,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "child process ID is outside the Unix pid_t range",
+                    ),
+                ));
+            };
+            if let Err(error) = kill(Pid::from_raw(pid), Signal::SIGINT) {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        return child
+                            .wait()
+                            .map_err(|wait_error| execution_error(executable, wait_error));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(execution_error(executable, error.into()));
+                    }
+                    Err(wait_error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(execution_error(executable, wait_error));
+                    }
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod signal_forwarding_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    static NEXT_TEST: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_path(suffix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "zirk-cli-signal-{}-{}-{suffix}",
+            std::process::id(),
+            NEXT_TEST.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    // This test is re-entered as a helper process by the parent-only and
+    // direct-child cases below. It verifies the actual `run_command` wait and
+    // exit-code handling without requiring a compiled Zirk program.
+    #[test]
+    fn signal_helper_process() {
+        if std::env::var_os("ZIRK_CLI_SIGNAL_HELPER_IGNORE").is_some() {
+            // SAFETY: this subprocess intentionally inherits SIG_IGN into the
+            // child program so the CLI's forwarding layer can preserve it.
+            assert_ne!(
+                unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) },
+                libc::SIG_ERR
+            );
+            let executable = Path::new("/bin/sh");
+            let mut command = Command::new(executable);
+            command
+                .arg("-c")
+                .arg("echo READY; sleep 0.4; echo FINISHED");
+            assert_eq!(run_command(&mut command, executable).unwrap(), 0);
+            return;
+        }
+        let Ok(command_line) = std::env::var("ZIRK_CLI_SIGNAL_HELPER_COMMAND") else {
+            return;
+        };
+        let executable = Path::new("/bin/sh");
+        let mut command = Command::new(executable);
+        command.arg("-c").arg(command_line);
+        let actual = run_command(&mut command, executable).expect("helper child runs");
+        let expected: i32 = std::env::var("ZIRK_CLI_SIGNAL_HELPER_EXPECT")
+            .expect("expected child exit status")
+            .parse()
+            .expect("valid exit status");
+        assert_eq!(actual, expected);
+    }
+
+    fn exercise_signal(target: SignalTarget, expected: i32) {
+        let ready = test_path("ready");
+        let cleaned = test_path("cleaned");
+        let shell = format!(
+            "trap \"echo cleaned > '{}'; exit {}\" INT; echo $$ > '{}'; while :; do sleep 0.02; done",
+            cleaned.display(),
+            expected,
+            ready.display()
+        );
+        let mut helper = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "driver::signal_forwarding_tests::signal_helper_process",
+                "--nocapture",
+            ])
+            .env("ZIRK_CLI_SIGNAL_HELPER_COMMAND", shell)
+            .env("ZIRK_CLI_SIGNAL_HELPER_EXPECT", expected.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn helper process");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child did not report readiness");
+
+        let pid = match target {
+            SignalTarget::ParentOnly => helper.id() as i32,
+            SignalTarget::DirectChild => fs::read_to_string(&ready)
+                .expect("read child pid")
+                .trim()
+                .parse()
+                .expect("valid child pid"),
+        };
+        kill(Pid::from_raw(pid), Signal::SIGINT).expect("send SIGINT");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = helper.try_wait().expect("wait for helper") {
+                assert!(
+                    status.success(),
+                    "helper failed: {}",
+                    String::from_utf8_lossy(
+                        &helper
+                            .wait_with_output()
+                            .expect("collect helper output")
+                            .stderr
+                    )
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "helper did not exit after SIGINT"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(cleaned.exists(), "child cleanup handler did not run");
+        let _ = fs::remove_file(ready);
+        let _ = fs::remove_file(cleaned);
+    }
+
+    #[derive(Clone, Copy)]
+    enum SignalTarget {
+        ParentOnly,
+        DirectChild,
+    }
+
+    #[test]
+    fn parent_only_sigint_is_forwarded_and_child_exit_124_is_preserved() {
+        exercise_signal(SignalTarget::ParentOnly, 124);
+    }
+
+    #[test]
+    fn direct_child_sigint_keeps_its_exit_status() {
+        exercise_signal(SignalTarget::DirectChild, 37);
+    }
+
+    #[test]
+    fn inherited_ignored_sigint_is_not_forwarded_or_overridden() {
+        let mut helper = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "driver::signal_forwarding_tests::signal_helper_process",
+                "--nocapture",
+            ])
+            .env("ZIRK_CLI_SIGNAL_HELPER_IGNORE", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn ignored-signal helper");
+        let mut stdout = std::io::BufReader::new(helper.stdout.take().expect("helper stdout"));
+        let mut ready = String::new();
+        while !ready.contains("READY") {
+            let mut line = String::new();
+            if std::io::BufRead::read_line(&mut stdout, &mut line).expect("read helper output") == 0
+            {
+                break;
+            }
+            ready.push_str(&line);
+        }
+        if !ready.contains("READY") {
+            let output = helper.wait_with_output().expect("collect helper failure");
+            panic!(
+                "helper did not report readiness (output={ready:?}, status={}, stderr={:?})",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        kill(Pid::from_raw(helper.id() as i32), Signal::SIGINT)
+            .expect("send SIGINT to ignored helper");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if helper.try_wait().expect("poll helper").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "helper did not finish normally");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut remaining = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut remaining)
+            .expect("read remaining child output");
+        let output = helper.wait_with_output().expect("collect helper output");
+        assert!(output.status.success(), "stderr: {:?}", output.stderr);
+        assert!(remaining.contains("FINISHED"), "output: {remaining:?}");
+    }
 }

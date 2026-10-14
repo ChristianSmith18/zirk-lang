@@ -1,0 +1,11 @@
+{
+  "name": "oop-static-mutable",
+  "source": "import { stdout } from std.io;\nclass Counter {\n    static value: Int32 = 42;\n    static mut count: Int32 = 0;\n    static add(a: Int32, b: Int32): Int32 { return a + b; }\n}\nfn main(): Void {\n    stdout.println(Counter.add(2, 3));\n    stdout.println(Counter.value);\n}\n",
+  "virtualName": "fixtures/oop-static-mutable.zrk",
+  "expectedOutput": [
+    "5\n",
+    "42\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

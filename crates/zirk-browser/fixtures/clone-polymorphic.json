@@ -1,0 +1,11 @@
+{
+  "name": "clone-polymorphic",
+  "source": "import { stdout } from std.io;\nclass Animal { construct() { } speak(): String { return \"...\"; } }\nclass Dog extends Animal {\n    tricks: Int32 = 3;\n    construct() { super(); }\n    #override speak(): String { return \"woof\" + this.tricks.to_string(); }\n}\nfn main(): Void {\n    mut a: Animal = Dog();\n    mut b = a.clone();\n    stdout.println(b.speak());\n    stdout.println(a is b);\n}\n",
+  "virtualName": "fixtures/clone-polymorphic.zrk",
+  "expectedOutput": [
+    "woof3\n",
+    "false\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

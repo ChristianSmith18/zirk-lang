@@ -4,10 +4,9 @@
 periods and clock sources. Every value is immutable; transformations return new
 values. The detailed arithmetic contract belongs to the temporal-type chapters.
 
-> **Implementation status:** accepted Zirk 1.x contract. `Duration` literals,
-> arithmetic, comparison and `to_string()` are delivered by
-> `array-list-tuple-duration-regex`; the civil/zone temporal types, IANA data,
-> virtual clocks and timers remain ahead of the current runtime.
+> **Implementation status:** `Duration` literals, arithmetic, comparison,
+> `Timer`, `Timer.sleep`, `Timer.after`, and `Timer.every` are delivered. Civil
+> and zone-aware types, IANA data, virtual clocks, and `Ticker` remain planned.
 
 ## Getting the current time
 
@@ -47,26 +46,24 @@ localized calendars/names belong to an official internationalization package.
 
 `Duration` is signed exact elapsed time; `Period` is calendar-relative years,
 months, weeks and days. They do not convert implicitly. Differences may produce
-negative durations, while sleep, timeout and interval construction require a
+negative durations, while timer sleep and interval construction require a
 non-negative duration. Overflow, ambiguous local time and nonexistent DST time
 are typed failures resolved through explicit policies.
 
 ## Timers
 
 ```zirk
-await Timer.after(5s);
-
-match Ticker.every(1s, policy: TickerPolicy.FixedRate) with ticker {
-    Ok(ticker) => consume_ticks(ticker),
-    Error(error) => report(error),
+concurrent {
+    Timer.after(5s, (): Void => report_timeout());
+    Timer.every(1s, (): Void => refresh_status());
+    Timer.sleep(500ms);
 }
 ```
 
-`Timer` and `Ticker` are task-aware resources. `FixedRate` follows the original
-schedule and reports missed intervals; `FixedDelay` waits after each completed
-consumption. A tick records scheduled/observed instants and `missed`. Waiting is
-cancelable and never reserves a thread. Calendar/cron scheduling is intentionally
-an official package rather than `std.time`.
+`Timer.sleep` suspends the current branch and is a cancellation safe point.
+`Timer.after` and `Timer.every` return scope-owned `Job<T>` handles; the nearest
+`concurrent` scope cancels ambient timers when it closes. Calendar/cron
+scheduling is intentionally an official package rather than `std.time`.
 
 ---
 

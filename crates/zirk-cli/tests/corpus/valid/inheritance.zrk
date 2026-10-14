@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Herencia simple: `super(...)` para construir la base, `override fn` para
 // reemplazar, `super.method()` para alcanzar el cuerpo heredado, y el despacho
 // que hace que la redefinición se vea a través del tipo de la base.
@@ -14,10 +16,10 @@ class User {
         this.id = 1;
     }
 
-     describe(): String { return this.name; }
+    describe(): String { return this.name; }
 
     // Nadie la redefine: se llama directo.
-     label(): String { return this.role; }
+    label(): String { return this.role; }
 }
 
 class Manager extends User {
@@ -31,8 +33,7 @@ class Manager extends User {
         this.team = team;
     }
 
-    #override
-      describe(): String {
+    #override describe(): String {
         // El cuerpo heredado, sin pasar por el despacho.
         return super.describe();
     }

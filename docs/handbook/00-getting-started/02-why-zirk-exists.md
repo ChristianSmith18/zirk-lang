@@ -22,7 +22,7 @@ But some operations change the risk profile of a program. Zirk makes those opera
 - optional values use `T?` rather than allowing universal `null`;
 - expected failures use `Result<T, E>` rather than being hidden in ordinary return values;
 - libraries declare required capabilities and applications grant final permissions;
-- CPU parallelism, asynchronous tasks, and operating-system threads use distinct constructs;
+- structured scopes, CPU parallelism, and typed channels have distinct constructs; managed OS threads are not currently exposed;
 - cross-target builds name their target and reject incompatible native dependencies early.
 
 The boundary is the feature. It tells readers where ordinary reasoning stops and additional obligations begin.
@@ -37,15 +37,16 @@ Native output is not a promise that every cross-compilation combination always w
 
 ## Concurrency with different words for different work
 
-A single `async` abstraction can make unlike operations appear deceptively similar. Zirk instead names three major intentions:
+The implemented concurrency surface names the operations currently available:
+`concurrent { ... }`, `spawn` with `Job<T>`, `Timer`, CPU-oriented `parallel`,
+and typed `Channel<T>`. The former `task`, `await`, and `select` constructs were
+removed. Managed OS threads and synchronization primitives are not currently
+available as Zirk APIs.
 
-- A `task` is structured concurrent work that can be awaited and cancelled with its scope.
-- `parallel` asks the runtime to execute CPU work across cores when profitable and safe.
-- A `thread` is an operating-system thread for cases where that identity is semantically important.
-
-This separation lets the compiler, runtime, and reader reason about scheduling, cancellation, blocking, and shared state. Channels and synchronization primitives complete the model without reducing all concurrency to globally scheduled callbacks.
-
-Zirk deliberately excludes `async fn` from 1.x. `task` and `await` carry the asynchronous model directly, and the runtime's event reactor remains an implementation detail rather than a global object applications must manage.
+This separation helps readers reason about structured scheduling, cancellation,
+and CPU work. The cooperative executor is not an asynchronous I/O reactor;
+synchronous I/O may block it. The internal runtime may evolve without making
+unavailable APIs part of the language contract.
 
 ## Safety that extends beyond memory
 

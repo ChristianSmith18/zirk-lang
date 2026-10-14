@@ -1,0 +1,35 @@
+import { stdout } from std.io;
+
+// Normative examples for typed channels: producer/consumer values, a small
+// worker-pool-shaped queue, and a fan-out result stream.
+// Run: `zirk run examples/channel_examples.zrk`
+
+fn main(): Void {
+    // Producer/consumer: queued values remain available after close.
+    mut messages: Channel<Int32> = Channel(4);
+    messages.send(1);
+    messages.send(2);
+    messages.send(3);
+    messages.close();
+    mut consumed: List<Int32> = messages.drain();
+    stdout.println(consumed.sum());
+
+    // A bounded queue can hold work for a group of workers and preserves FIFO.
+    mut jobs: Channel<Int32> = Channel(8);
+    jobs.send(10);
+    jobs.send(20);
+    jobs.send(30);
+    jobs.close();
+    mut worker_queue: List<Int32> = jobs.drain();
+    stdout.println(worker_queue[0] + worker_queue[1] + worker_queue[2]);
+
+    // Fan-out results use the same typed conduit and keep arrival order.
+    mut results: Channel<Int32> = Channel(3);
+    results.send(4);
+    results.send(9);
+    results.send(16);
+    results.close();
+    mut streamed: List<Int32> = results.drain();
+    stdout.println(streamed[0]);
+    stdout.println(streamed[2]);
+}

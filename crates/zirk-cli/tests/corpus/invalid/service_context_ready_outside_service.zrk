@@ -1,0 +1,5 @@
+fn leak(context: ServiceContext): Void {
+    context.ready();
+}
+
+fn main(): Void {}

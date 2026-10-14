@@ -18,3 +18,7 @@ pub const INVALID_USAGE: Code = Code::new("E0507");
 pub const INTERNAL_ERROR: Code = Code::new("E0508");
 /// The imports of a crate form a cycle.
 pub const IMPORT_CYCLE: Code = Code::new("E0509");
+/// `.zkinit` or `zirk.lock` is malformed.
+pub const INVALID_PROJECT: Code = Code::new("E0510");
+/// A package import cannot be resolved from the declared project dependencies.
+pub const PACKAGE_RESOLUTION: Code = Code::new("E0511");

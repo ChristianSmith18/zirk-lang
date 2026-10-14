@@ -3,7 +3,9 @@
 ## Purpose
 Defines native collection types, copying and mutation rules, slicing,
 iteration validity, complexity, and collection capabilities.
+
 ## Requirements
+
 ### Requirement: Standard collection families are deterministic and ergonomic
 The standard library SHALL provide fixed `Array`, automatically growing `List`,
 insertion-ordered `Map`/`Set`, `Deque`, `PriorityQueue`, restricted
@@ -38,6 +40,22 @@ Array and fixed `T[n]` SHALL be ordered fixed-size references, List an ordered d
 #### Scenario: Indexed place mutation
 - **WHEN** `users[0].name = "Grace"` is assigned
 - **THEN** the User stored in the list is mutated
+
+### Requirement: Collection `length` is usable in loop-bound comparisons
+
+Every collection `length` member SHALL return a non-negative integer type that participates in the language's numeric comparison rules, so that the idiomatic `for mut i = 0; i < xs.length; i++` loop compiles and runs without explicit casts or counter-type annotations. The declared `length` types across `Array`, `List`, `Map`, and `Set` SHALL be consistent: either all signed or all unsigned, and the handbook SHALL document the same type for each.
+
+#### Scenario: Index loop over an array
+- **WHEN** `for mut i = 0; i < courses.length; i++ { stdout.println(courses[i]); }` is compiled
+- **THEN** no type-mismatch diagnostic is emitted and each element is printed in order
+
+#### Scenario: Index loop over a list
+- **WHEN** the same loop pattern iterates a `List<T>` by index
+- **THEN** it compiles and runs identically to the array case
+
+#### Scenario: Documented `length` types agree
+- **WHEN** the handbook entries for `Array`, `List`, `Map`, and `Set` are compared
+- **THEN** they declare `length` with a consistent signedness across all four families
 
 ### Requirement: Indexing and safe access
 String, Tuple, Array, and List SHALL accept normalized negative indexes. Direct missing index/key access SHALL produce a typed controlled exception; safe `get` SHALL return typed Result and `get_or_null` MAY deliberately collapse absence with nullable value.
@@ -108,8 +126,7 @@ accept negative indices, resolved as `length + index`.
 
 ### Requirement: Collection clone and rendering
 
-`Array<T>` and `List<T>` SHALL expose `clone()` producing an independent
-collection and `to_string()` producing a readable rendering.
+`Array<T>` and `List<T>` SHALL expose `clone()` producing an independent collection and `to_string()` producing `[e0, e1, …]`. `Map<K, V>`, `Set<T>`, and `Range<T>` SHALL expose deterministic `{k: v, …}`, `{e, …}`, and literal-mirroring rendering. All collection types SHALL be valid in print/println and string interpolation.
 
 #### Scenario: Clone separates
 
@@ -119,7 +136,11 @@ collection and `to_string()` producing a readable rendering.
 #### Scenario: Rendering
 
 - **WHEN** `List(1, 2).to_string()` runs
-- **THEN** the result renders both elements
+- **THEN** the result is `[1, 2]`
+
+#### Scenario: Map rendering
+- **WHEN** `Map<Int32, String>` holds keys `2` and `1`
+- **THEN** it renders `{1: a, 2: b}` in deterministic order
 
 ### Requirement: Array slicing
 
@@ -248,3 +269,26 @@ Any collection example or test that used `value class` for domain types SHALL be
 - **WHEN** `record UserId { value: UInt64; }` is used in a `List<UserId>`
 - **THEN** the program compiles and the list contains independent `UserId` values
 
+### Requirement: Collection elements retain nested managed references
+
+`Array<T>` and `List<T>` SHALL preserve every managed reference nested in a supported `T`, including references in tuples, records, enums, nullable values, and closures. Growth, slicing, cloning, and element replacement SHALL preserve valid tracing metadata.
+
+#### Scenario: Composite array element is the only owner
+- **WHEN** an array is the only reachable owner of an object nested in one of its composite elements and collection runs
+- **THEN** the object remains valid while that array element remains reachable
+
+#### Scenario: Composite list is resized and collected
+- **WHEN** a list containing composite reference-bearing elements grows or shrinks and collection runs
+- **THEN** all live element references remain valid and removed-element references are no longer retained by stale metadata
+
+### Requirement: Collection representation is checked before code generation
+
+Every collection element type accepted by semantic analysis SHALL have defined storage, equality or hashing where applicable, ABI conversion, and GC tracing behavior. Unsupported combinations SHALL fail in semantic analysis with a diagnostic naming the type and operation.
+
+#### Scenario: Unsupported map value is rejected early
+- **WHEN** a map operation uses a value representation that has no runtime encoding
+- **THEN** semantic analysis reports the unsupported representation before IR or LLVM emission
+
+#### Scenario: Supported composite element is lowered
+- **WHEN** a supported composite element type is used in an array or list
+- **THEN** lowering and code generation preserve its layout and managed-reference paths

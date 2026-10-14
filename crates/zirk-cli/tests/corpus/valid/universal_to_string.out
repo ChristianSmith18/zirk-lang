@@ -1,0 +1,63 @@
+255
+ff
+11111111
+-7
+18446744073709551615
+0.1
+2.5
+1.5
+0.001
+true
+π
+plain
+1.5s
+1.5h
+0s
+2026-09-05
+14:30:15
+2026-09-05T14:30:15
+[1, 2, 3]
+[[1, 2], [3]]
+list: [a, b]
+[]
+[1.5s, 2s]
+(Ada, 37, true)
+{a: 1, b: 2}
+{2: dos, 10: diez}
+{1, 2, 3}
+{a, z}
+1..10
+1..=10
+1..10:2
+1..=10:2
+10..0:-2
+0s..10s:2s
+Point(x: 1, y: 2)
+Person(name: Ana, age: 30)
+Doc<hi>
+Local(v: 4)
+Outer.Inner(f: 9)
+Red
+Circle(radius: 5)
+Rectangle(width: 2, height: 3)
+Dot
+Ok(5)
+Error(boom)
+Color
+Doc<via contract>
+<Function double>
+<Function>
+re'a+b*'
+<Null>
+<Null>
+<Null>
+7
+7
+<Null>
+[1, <Null>, 3]
+<Channel>
+<Job>
+<Weak>
+<Pointer>
+<Pin>
+no newline {a: 1, b: 2}

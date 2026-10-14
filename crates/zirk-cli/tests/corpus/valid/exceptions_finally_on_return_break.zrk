@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `finally` runs on every exit path out of its `try` (roadmap Phase 4b,
 // design D3), including a `return` or a `break`/`continue` written directly
 // inside the body — not only the normal-completion and propagating-exception
@@ -5,23 +7,19 @@
 class BoomError implements RuntimeError {
     construct() { }
 
-    #override
-      message(): String {
+    #override message(): String {
         return "boom";
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "BOOM";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 
-    #override
-      stack_trace(): StackTrace {
+    #override stack_trace(): StackTrace {
         return StackTrace();
     }
 }

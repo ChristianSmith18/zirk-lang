@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut values: List<Int32> = [1, 2];
+    Concurrent.each(values, (item: Int32): Int32 => item);
+}

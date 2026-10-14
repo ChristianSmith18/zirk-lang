@@ -3,7 +3,7 @@
 //! `ZIRK_LANGUAGE_SPEC.md` section 2 defines block, function, file and module
 //! scopes. This phase implements the first two: modules arrive in Phase 2.
 
-use crate::types::Type;
+use crate::types::{ScopeId, Type};
 use zirk_ast::Mutability;
 use zirk_diagnostics::Span;
 
@@ -27,8 +27,9 @@ pub struct Binding {
 }
 
 /// One nesting level.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Level {
+    id: ScopeId,
     bindings: Vec<Binding>,
     /// Whether this level starts a new function body.
     ///
@@ -48,6 +49,11 @@ pub struct Scopes {
     levels: Vec<Level>,
 }
 
+/// Move flags for the currently visible bindings, used to conservatively join
+/// control-flow branches without rolling back diagnostics or captures.
+#[derive(Debug, Clone)]
+pub(crate) struct MoveSnapshot(Vec<Vec<bool>>);
+
 /// The outcome of resolving a name.
 #[derive(Debug, Clone)]
 pub struct Resolution {
@@ -62,15 +68,49 @@ impl Scopes {
     }
 
     pub fn push(&mut self) {
-        self.levels.push(Level::default());
+        self.push_level(false);
     }
 
     /// Opens a scope that begins a new function body.
     pub fn push_function(&mut self) {
+        self.push_level(true);
+    }
+
+    fn push_level(&mut self, barrier: bool) {
+        let id = ScopeId::fresh();
         self.levels.push(Level {
+            id,
             bindings: Vec::new(),
-            barrier: true,
+            barrier,
         });
+    }
+
+    #[allow(dead_code)] // Used by the first compiler consumer when borrowed views become source-expressible.
+    pub(crate) fn current_scope_id(&self) -> Option<ScopeId> {
+        self.levels.last().map(|level| level.id)
+    }
+
+    /// A view created in an ancestor scope may be used in a nested scope; a
+    /// view from a sibling or descendant scope may not flow into this one.
+    pub(crate) fn scope_outlives_current(&self, scope: ScopeId) -> bool {
+        let Some(origin) = self.levels.iter().position(|level| level.id == scope) else {
+            return false;
+        };
+        origin < self.levels.len()
+    }
+
+    pub(crate) fn binding_scope_outlives(&self, name: &str, scope: ScopeId) -> bool {
+        let Some(binding_level) = self
+            .levels
+            .iter()
+            .rposition(|level| level.bindings.iter().any(|binding| binding.name == name))
+        else {
+            return false;
+        };
+        self.levels
+            .iter()
+            .position(|level| level.id == scope)
+            .is_some_and(|origin| origin <= binding_level)
     }
 
     pub fn pop(&mut self) {
@@ -131,6 +171,40 @@ impl Scopes {
             if let Some(binding) = level.bindings.iter_mut().rev().find(|b| b.name == name) {
                 binding.moved = moved;
                 return;
+            }
+        }
+    }
+
+    pub(crate) fn move_snapshot(&self) -> MoveSnapshot {
+        MoveSnapshot(
+            self.levels
+                .iter()
+                .map(|level| level.bindings.iter().map(|binding| binding.moved).collect())
+                .collect(),
+        )
+    }
+
+    pub(crate) fn restore_moves(&mut self, snapshot: &MoveSnapshot) {
+        for (level, moved) in self.levels.iter_mut().zip(&snapshot.0) {
+            for (binding, moved) in level.bindings.iter_mut().zip(moved) {
+                binding.moved = *moved;
+            }
+        }
+    }
+
+    /// Joins alternative paths conservatively: a binding is moved after the
+    /// join if any path may have transferred it.
+    pub(crate) fn join_moves(&mut self, alternatives: &[MoveSnapshot]) {
+        for (level_index, level) in self.levels.iter_mut().enumerate() {
+            for (binding_index, binding) in level.bindings.iter_mut().enumerate() {
+                binding.moved = alternatives.iter().any(|snapshot| {
+                    snapshot
+                        .0
+                        .get(level_index)
+                        .and_then(|bindings| bindings.get(binding_index))
+                        .copied()
+                        .unwrap_or(binding.moved)
+                });
             }
         }
     }
@@ -218,6 +292,10 @@ pub struct ParamInfo {
     pub ty: Type,
     pub optional: bool,
     pub has_default: bool,
+    /// The default expression is retained so lowering can materialize it for
+    /// every callable form, not only free functions with an AST declaration
+    /// lookup.
+    pub default: Option<zirk_ast::Expr>,
     pub variadic: bool,
 }
 
@@ -303,5 +381,46 @@ mod tests {
         assert_eq!(scopes.lookup("x").map(|b| b.initialized), Some(false));
         scopes.mark_initialized("x");
         assert_eq!(scopes.lookup("x").map(|b| b.initialized), Some(true));
+    }
+
+    #[test]
+    fn borrowed_view_scope_must_be_an_active_ancestor_of_its_use() {
+        let mut scopes = Scopes::new();
+        scopes.push();
+        let origin = scopes.current_scope_id().unwrap();
+        assert!(scopes.scope_outlives_current(origin));
+
+        scopes.push();
+        assert!(scopes.scope_outlives_current(origin));
+        let sibling_candidate = scopes.current_scope_id().unwrap();
+        scopes.pop();
+        scopes.push();
+        assert!(!scopes.scope_outlives_current(sibling_candidate));
+        assert!(scopes.scope_outlives_current(origin));
+    }
+
+    #[test]
+    fn borrowed_view_cannot_be_assigned_to_an_outer_binding() {
+        let mut scopes = Scopes::new();
+        scopes.push();
+        let outer = scopes.current_scope_id().unwrap();
+        scopes.declare(binding("slot", Type::INT32));
+        scopes.push();
+        let inner = scopes.current_scope_id().unwrap();
+
+        assert!(scopes.binding_scope_outlives("slot", outer));
+        assert!(!scopes.binding_scope_outlives("slot", inner));
+    }
+
+    #[test]
+    fn popped_scope_identity_is_never_reused() {
+        let mut scopes = Scopes::new();
+        scopes.push();
+        let old = scopes.current_scope_id().unwrap();
+        scopes.pop();
+        scopes.push();
+        let new = scopes.current_scope_id().unwrap();
+        assert_ne!(old, new);
+        assert!(!scopes.scope_outlives_current(old));
     }
 }

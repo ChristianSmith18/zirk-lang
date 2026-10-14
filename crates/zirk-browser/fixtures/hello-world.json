@@ -1,0 +1,8 @@
+{
+  "name": "hello-world",
+  "source": "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"Hello World\"); }",
+  "virtualName": "fixtures/hello-world.zrk",
+  "expectedOutput": ["Hello World\n"],
+  "completion": "completed",
+  "exclusions": []
+}

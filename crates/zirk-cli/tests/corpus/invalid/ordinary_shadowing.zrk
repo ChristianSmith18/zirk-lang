@@ -3,6 +3,6 @@
 // silently hiding the outer one for the rest of the lambda's body.
 fn main(): Void {
     inmut outer = 5;
-    inmut g = (outer: Int32): Int32 => outer * 2;
+    inmut g =(outer: Int32): Int32 => outer * 2;
     stdout.println(g(3));
 }

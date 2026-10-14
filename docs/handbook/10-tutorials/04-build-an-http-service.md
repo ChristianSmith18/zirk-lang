@@ -27,7 +27,7 @@ fn main(): Void {
         header_limit: 32KiB,
     );
     server.route(HTTPMethod.Get, "/health", health);
-    await server.serve();
+    server.serve();
 }
 ```
 

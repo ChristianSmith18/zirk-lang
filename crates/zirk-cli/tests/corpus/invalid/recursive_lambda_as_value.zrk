@@ -6,7 +6,7 @@
 // way (here, reading it into a variable) has no value to give and must be
 // rejected in the checker, not reach a panic during lowering.
 fn main(): Void {
-    mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => {
+    mut fact: Fn(Int32) => Int32 =(n: Int32): Int32 => {
         mut self_ref = fact;
         return n <= 1 ? 1 : n * fact(n - 1);
     };

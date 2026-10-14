@@ -74,7 +74,7 @@ reverse lookup. DNSSEC validation is reported only when the configured resolver
 can provide trustworthy validation evidence.
 
 ```zirk
-match await DNS.resolve("example.com") {
+match DNS.resolve("example.com") {
     Ok(result) => {
         for address in result.addresses {
             stdout.println(address);
@@ -97,18 +97,18 @@ answers, and cancellation remain distinguishable error cases.
 
 ## TCP clients
 
-`TCPStream.connect` accepts a `SocketAddress` and returns
-`Task<Result<TCPStream, TCPConnectError>>`. For host names, connection racing
-follows a Happy Eyeballs v2 strategy so IPv6 and IPv4 can be attempted without
+`TCPStream.connect` accepts a `SocketAddress`, suspends the current cooperative
+branch while connecting, and returns `Result<TCPStream, TCPConnectError>`. For
+host names, connection racing follows a Happy Eyeballs v2 strategy so IPv6 and IPv4 can be attempted without
 making one family wait for a full timeout of the other.
 
 ```zirk
 mut endpoint = SocketAddress("example.com", 443);
 
-match await TCPStream.connect(endpoint, timeout: 5s) {
+match TCPStream.connect(endpoint, timeout: 5s) {
     Ok(stream) => {
         using stream {
-            match await stream.write_all(request_bytes) {
+            match stream.write_all(request_bytes) {
                 Ok(_) => stdout.println("request sent");
                 Error(error) => stderr.println(error);
             }
@@ -143,7 +143,7 @@ socket. `accept` suspends its task and returns a stream plus its peer address.
 match TCPListener.bind(SocketAddress(IPv4Address.any(), 8080)) {
     Ok(listener) => {
         using listener {
-            match await listener.accept() {
+            match listener.accept() {
                 Ok(connection) => {
                     mut stream = connection.stream;
                     mut peer = connection.peer;
@@ -173,9 +173,9 @@ a typed size-limit error according to the selected receive policy.
 match UDPSocket.bind(SocketAddress(IPv4Address.any(), 9000)) {
     Ok(socket) => {
         using socket {
-            match await socket.receive_from(max_bytes: 64KiB) {
+            match socket.receive_from(max_bytes: 64KiB) {
                 Ok(datagram) => {
-                    await socket.send_to(datagram.bytes, datagram.source);
+                    socket.send_to(datagram.bytes, datagram.source);
                 }
                 Error(error) => stderr.println(error);
             }
@@ -203,7 +203,7 @@ import { TLS, TLSConfiguration } from std.net.tls;
 
 mut configuration = TLSConfiguration.client();
 
-match await TLS.connect(
+match TLS.connect(
     SocketAddress("example.com", 443),
     server_name: HostName("example.com"),
     configuration: configuration,
@@ -299,4 +299,4 @@ explicit error rather than being ignored.
 
 ---
 
-**Previous:** [← std.parallel](10a-std-parallel.md) · **Next:** [std.http →](12-std-http.md)
+**Previous:** [← Parallel CPU operations](10a-std-parallel.md) · **Next:** [std.http →](12-std-http.md)

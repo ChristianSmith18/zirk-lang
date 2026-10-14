@@ -1,9 +1,11 @@
 # Standard Library Index
 
 Initial modules are `std.io`, `std.fs`, `std.path`, `std.process`, `std.net`,
-`std.http`, `std.json`, `std.crypto`, `std.time`, `std.task`, `std.thread`,
-`std.sync`, `std.collections`, `std.testing`, `std.reflect`, `std.system`, and
-`std.environment` (`Environment`, preferred alias `Env`).
+`std.http`, `std.json`, `std.crypto`, `std.time`, `std.thread`, `std.sync`,
+`std.collections`, `std.testing`, `std.reflect`, `std.system`, and
+`std.environment` (`Environment`, preferred alias `Env`). Structured task
+operations and CPU parallelism are language surfaces, not importable
+`std.task` or `std.parallel` modules.
 
 See the [Standard Library](../04-standard-library/README.md) for module chapters
 and the [Standard Library Indexes](../04-standard-library/19-standard-library-indexes.md)

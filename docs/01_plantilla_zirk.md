@@ -1275,7 +1275,7 @@ use APP_NAME;
 use REQUEST_COUNT;
 ```
 
-Un global `mut` utilizado desde `parallel` o `thread` deberá protegerse con `sync` o declararse como `Atomic<T>`; de lo contrario habrá un error de compilación.
+Un global escalar compartido puede usar `Atomic<T>` para operaciones individuales cuando el target admita su tipo y ancho. Esto no implementa `thread` ni `sync`, ni vuelve atómicas las invariantes de varios pasos.
 
 ---
 
@@ -2860,7 +2860,7 @@ Posibles respuestas:
 
 **Respuesta:**
 
-El compilador impedirá acceder sin protección a una variable mutable declarada en `globals` desde `parallel` o `thread`. Será obligatorio utilizar `sync` o declarar la variable mediante `Atomic<T>`; de lo contrario habrá un error de compilación.
+`Atomic<T>` está disponible para `Boolean` e enteros con signo o sin signo de hasta 64 bits, si el target ofrece el ancho. `Thread.run` y `sync` (incluidos Mutex, RwLock, Semaphore, Barrier y Once) siguen sin API de lenguaje.
 
 ```text
 // init.zrk
@@ -2915,7 +2915,7 @@ counter.increment();
 
 **Respuesta:**
 
-Sí. Existirá `Atomic<T>` para operaciones atómicas sobre los tipos compatibles.
+Sí. `Atomic<T>` está disponible para escalares compatibles. Guarda el escalar inline en un objeto administrado por el GC, usa `SeqCst` por defecto y exige `unsafe` para órdenes más débiles; los atomics de punteros no están soportados.
 
 ---
 
@@ -4893,13 +4893,13 @@ inmut INCREMENT = (): Void => {
 };
 ```
 
-Modificar una captura mutable sin protección desde `parallel` o `thread` producirá un error de compilación. Para compartir ese estado se utilizarán mecanismos como `Atomic<T>`, `sync` o channels:
+Modificar una captura mutable sin protección desde `parallel` produce un error de compilación. Para una operación escalar compartida puede usarse `Atomic<T>`; no reemplaza a `sync` para invariantes de varios pasos. `Thread.run` y las primitivas públicas de sincronización aún no están disponibles:
 
 ```text
 mut count: Atomic<UInt64> = Atomic(0);
 
 parallel {
-    count.increment();
+    count.fetch_add(1);
 }
 ```
 

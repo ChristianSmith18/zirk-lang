@@ -26,6 +26,15 @@ pub use token::{
 
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
 
+/// A comment retained by [`tokenize_with_trivia`]. Whitespace deliberately
+/// remains implicit, so the normal lexer hot path and token contract stay
+/// unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub text: String,
+    pub span: Span,
+}
+
 /// Diagnostic codes of the lexer.
 pub mod codes {
     use zirk_diagnostics::Code;
@@ -50,11 +59,77 @@ pub mod codes {
     pub const UNTERMINATED_REGEX: Code = Code::new("E0209");
     /// Interpolation inside a string that is never closed.
     pub const UNTERMINATED_INTERPOLATION: Code = Code::new("E0210");
+    /// A `'''` content line that starts left of the literal's left edge.
+    pub const STRING_CONTENT_LEFT_OF_EDGE: Code = Code::new("E0211");
+    /// A closing `'''` that starts left of the literal's left edge.
+    pub const STRING_CLOSING_LEFT_OF_EDGE: Code = Code::new("E0212");
+    /// A closing `'''` that does not start its own line.
+    pub const STRING_CLOSING_MID_LINE: Code = Code::new("E0213");
 }
 
 /// Turns a source file into tokens, accumulating any errors found.
 pub fn tokenize(source: &SourceFile, sink: &mut DiagnosticSink) -> Vec<Token> {
     Lexer::new(source, sink).run()
+}
+
+/// Tokenizes normally and additionally returns comments in source order.
+/// This additive API is intended for tools such as the formatter; callers
+/// that do not need trivia should keep using [`tokenize`].
+pub fn tokenize_with_trivia(
+    source: &SourceFile,
+    sink: &mut DiagnosticSink,
+) -> (Vec<Token>, Vec<Comment>) {
+    let tokens = tokenize(source, sink);
+    let text = source.text();
+    let mut comments = Vec::new();
+    let mut offset = 0usize;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        let relative = match (rest.find("//"), rest.find("/*")) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => break,
+        };
+        let start = offset + relative;
+        if tokens
+            .iter()
+            .any(|token| token.span.start as usize <= start && start < token.span.end as usize)
+        {
+            offset = start + 2;
+            continue;
+        }
+        let line = text[start..].starts_with("//");
+        let end = if line {
+            text[start..].find('\n').map_or(text.len(), |n| start + n)
+        } else if let Some(close) = text[start + 2..].find("*/") {
+            start + 2 + close + 2
+        } else {
+            text.len()
+        };
+        comments.push(Comment {
+            text: text[start..end].into(),
+            span: source.span(start as u32, end as u32),
+        });
+        offset = end.max(start + 2);
+    }
+    (tokens, comments)
+}
+
+#[cfg(test)]
+mod trivia_tests {
+    use super::*;
+
+    #[test]
+    fn trivia_mode_returns_comments_in_source_order() {
+        let source = SourceFile::new("comments.zrk", "// first\nfn main(): Void { /* second */ }");
+        let mut sink = DiagnosticSink::new();
+        let (_, comments) = tokenize_with_trivia(&source, &mut sink);
+        assert!(!sink.has_errors());
+        assert_eq!(
+            comments.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["// first", "/* second */"]
+        );
+    }
 }
 
 struct Lexer<'a> {
@@ -160,7 +235,13 @@ impl<'a> Lexer<'a> {
             } else if c == '"' {
                 self.string()
             } else if c == '\'' {
-                self.character()
+                // `'''` opens a multiline literal; anything shorter is a
+                // character literal. The longest match wins, as always.
+                if self.peek_at(1) == Some('\'') && self.peek_at(2) == Some('\'') {
+                    self.triple_string()
+                } else {
+                    self.character()
+                }
             } else {
                 self.punctuation()
             };
@@ -545,6 +626,202 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    /// Triple-quoted multiline string literal `'''…'''`.
+    ///
+    /// The column of the opening `'''` is the literal's left edge: every
+    /// non-empty content line must begin at or to the right of it, and
+    /// exactly that many leading whitespace characters are stripped from
+    /// each line. Empty or whitespace-only lines contribute a bare `\n` and
+    /// carry no indentation requirement. The closing `'''` must sit on its
+    /// own line at or right of the edge, and its line contributes nothing —
+    /// its preceding newline included.
+    ///
+    /// The token shapes are the same `Str`/`InterpolatedStr` a `"…"` literal
+    /// produces, so nothing downstream needs to know how the text was
+    /// written.
+    fn triple_string(&mut self) -> Option<TokenKind> {
+        let start_offset = self.offset();
+
+        // The edge is the opening delimiter's column, in characters (a tab
+        // counts as one): the count of characters back to the last newline.
+        let mut line_start = self.pos;
+        while line_start > 0 && self.chars[line_start - 1].1 != '\n' {
+            line_start -= 1;
+        }
+        let edge = self.pos - line_start;
+
+        self.pos += 3; // opening `'''`
+
+        // `''''''` is the empty literal — the only inline form.
+        if self.peek() == Some('\'')
+            && self.peek_at(1) == Some('\'')
+            && self.peek_at(2) == Some('\'')
+        {
+            self.pos += 3;
+            return Some(TokenKind::Str(String::new()));
+        }
+
+        // The newline right after the opening delimiter is not content, and
+        // the line that follows is the first one the edge applies to.
+        let saw_opening_newline = self.eat('\n');
+
+        let mut value = String::new();
+        let mut parts: Vec<StrPart> = Vec::new();
+        // Whitespace at the start of the current line, held back until the
+        // line proves to hold content — the edge is stripped from it then.
+        let mut indent = String::new();
+        let mut at_line_start = saw_opening_newline;
+        let mut saw_newline = saw_opening_newline;
+        let mut line_offset = self.offset();
+
+        loop {
+            match self.peek() {
+                None => {
+                    let span = self.source.span(start_offset, start_offset + 3);
+                    let d = self.error(
+                        codes::UNTERMINATED_STRING,
+                        span,
+                        "unterminated string literal",
+                    );
+                    self.emit(
+                        d.with_cause("the `'''` literal opens here and is never closed")
+                            .with_help("add the closing `'''` on its own line"),
+                    );
+                    return None;
+                }
+                Some('\n') => {
+                    // The line ends here; if it held only whitespace it was
+                    // empty, and empty lines are exempt from the edge rule.
+                    self.pos += 1;
+                    value.push('\n');
+                    indent.clear();
+                    at_line_start = true;
+                    saw_newline = true;
+                    line_offset = self.offset();
+                }
+                Some('\'') if self.peek_at(1) == Some('\'') && self.peek_at(2) == Some('\'') => {
+                    // The first `'''` run closes.
+                    if !saw_newline || !at_line_start {
+                        let span = self.source.span(self.offset(), self.offset() + 3);
+                        let d = self.error(
+                            codes::STRING_CLOSING_MID_LINE,
+                            span,
+                            "the closing `'''` must be on its own line",
+                        );
+                        self.emit(
+                            d.with_cause("other content shares its line")
+                                .with_help("move the closing `'''` to the start of a line"),
+                        );
+                    } else if indent.chars().count() < edge {
+                        let span = self.source.span(line_offset, self.offset());
+                        let d = self.error(
+                            codes::STRING_CLOSING_LEFT_OF_EDGE,
+                            span,
+                            "the closing `'''` escapes the literal's left edge",
+                        );
+                        self.emit(
+                            d.with_cause(format!(
+                                "it is indented {} characters, fewer than the {edge} of the opening `'''`",
+                                indent.chars().count()
+                            ))
+                            .with_help(format!(
+                                "indent the closing `'''` at least {edge} characters"
+                            )),
+                        );
+                    } else {
+                        // A proper closing line contributes nothing —
+                        // including the newline that ended the last content
+                        // line, which is always the last character pushed.
+                        value.pop();
+                    }
+                    self.pos += 3;
+                    if parts.is_empty() {
+                        return Some(TokenKind::Str(canonical(value)));
+                    }
+                    if !value.is_empty() {
+                        parts.push(StrPart::Literal(canonical(value)));
+                    }
+                    return Some(TokenKind::InterpolatedStr(parts));
+                }
+                Some(c @ (' ' | '\t')) if at_line_start => {
+                    indent.push(c);
+                    self.pos += 1;
+                }
+                Some('{') => {
+                    if at_line_start {
+                        self.commit_indent(&mut indent, edge, &mut value, line_offset);
+                        at_line_start = false;
+                    }
+                    let part = self.interpolation()?;
+                    if !value.is_empty() {
+                        parts.push(StrPart::Literal(canonical(std::mem::take(&mut value))));
+                    }
+                    parts.push(part);
+                }
+                Some('\\') => {
+                    if at_line_start {
+                        self.commit_indent(&mut indent, edge, &mut value, line_offset);
+                        at_line_start = false;
+                    }
+                    self.pos += 1;
+                    match self.escape('\'') {
+                        Some(c) => value.push(c),
+                        None => continue,
+                    }
+                }
+                Some(c) => {
+                    if at_line_start {
+                        self.commit_indent(&mut indent, edge, &mut value, line_offset);
+                        at_line_start = false;
+                    }
+                    value.push(c);
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Commits a content line's leading whitespace under the left-edge rule:
+    /// the first `edge` characters are stripped and the rest are content. A
+    /// non-empty line indented less than the edge escapes the literal's
+    /// boundary and is diagnosed; its text is kept so scanning can continue.
+    fn commit_indent(
+        &mut self,
+        indent: &mut String,
+        edge: usize,
+        value: &mut String,
+        line_offset: u32,
+    ) {
+        let width = indent.chars().count();
+        if width >= edge {
+            let rest: String = indent.chars().skip(edge).collect();
+            value.push_str(&rest);
+        } else {
+            let end = self.offset();
+            let span = if indent.is_empty() {
+                let char_len = self.peek().map(|c| c.len_utf8() as u32).unwrap_or(1);
+                self.source.span(end, end + char_len)
+            } else {
+                self.source.span(line_offset, end)
+            };
+            let d = self.error(
+                codes::STRING_CONTENT_LEFT_OF_EDGE,
+                span,
+                "content escapes the literal's left edge",
+            );
+            self.emit(
+                d.with_cause(format!(
+                    "the line is indented {width} characters, fewer than the {edge} of the opening `'''`"
+                ))
+                .with_help(format!(
+                    "indent the line at least {edge} characters, or run `zirk format`"
+                )),
+            );
+            value.push_str(indent);
+        }
+        indent.clear();
     }
 
     /// One `{ expression }` inside a string literal.

@@ -19,10 +19,12 @@ parallel; cores: -1 { for item in files { compress(item); } }   // leave one cor
 parallel; cores: 1..=8 { for item in files { compress(item); } } // runtime picks
 ```
 
-`cores: N` (`N > 0`) uses exactly `N` worker threads. `cores: -N` uses the
-detected core count minus `N` — a runtime error if that leaves zero or fewer.
-`cores: A..=B` lets the runtime choose within the range. Absent, the region
-uses every detected core. `cores: 0` is a compile-time error.
+`cores: N` (`N > 0`) requests `N` worker threads; the runtime caps the pool at
+64 workers. `cores: -N` requests the detected core count minus `N` — a runtime
+error if that leaves zero or fewer, then the same 64-worker cap applies.
+`cores: A..=B` lets the runtime choose within the range, subject to the cap.
+When absent, the region requests every detected core, also capped at 64.
+`cores: 0` is a compile-time error.
 
 A `parallel` region performs no I/O and no suspension: `Timer.*`, `spawn`,
 `concurrent { }`, and printing are all rejected inside one — pool threads have

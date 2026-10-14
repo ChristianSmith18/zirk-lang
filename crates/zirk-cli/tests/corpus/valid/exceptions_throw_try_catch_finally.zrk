@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `throw`/`try`/`catch`/`finally` (roadmap Phase 4b,
 // `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 3): a compiler-known
 // exception hierarchy, a user's own `implements Throwable`/`RuntimeError`
@@ -11,23 +13,19 @@ class NetworkError implements Throwable {
         this.reason = reason;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "NETWORK";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 
-    #override
-      stack_trace(): StackTrace {
+    #override stack_trace(): StackTrace {
         return StackTrace();
     }
 }

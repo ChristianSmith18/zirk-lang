@@ -1,0 +1,3 @@
+fn inspect(value: Once<Int32>): Void { }
+
+fn main(): Void { }

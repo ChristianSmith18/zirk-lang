@@ -1,0 +1,14 @@
+import { stdout } from std.io;
+
+fn fail_in_background(): Void throws InvalidArgumentError {
+    throw InvalidArgumentError("detached failure");
+}
+
+fn main(): Void {
+    inmut prefix: String = "retained";
+    App.on_background_error = (error: Throwable): Void => {
+        stdout.println(prefix + ":" + error.message());
+    };
+    Concurrent.detach(fail_in_background);
+    Timer.sleep(2ms);
+}

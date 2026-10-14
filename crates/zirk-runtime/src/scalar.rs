@@ -31,48 +31,19 @@
 use std::ffi::c_void;
 
 use crate::string::{alloc_owned, borrow};
+use zirk_runtime_core::scalar as core_scalar;
 
 /// Masks `value` to `bits` and sign-extends when `signed` is set, so
 /// arithmetic on narrow widths observes the same wrap points the type
 /// system promises.
 fn normalize(value: i128, bits: i32, signed: i32) -> i128 {
-    let bits = bits.clamp(1, 128) as u32;
-    if bits == 128 {
-        return value;
-    }
-    let mask: u128 = (1u128 << bits) - 1;
-    let narrowed = (value as u128) & mask;
-    if signed != 0 && (narrowed >> (bits - 1)) & 1 == 1 {
-        (narrowed | !mask) as i128
-    } else {
-        narrowed as i128
-    }
-}
-
-/// The minimum value of the `(bits, signed)` width.
-fn width_min(bits: i32, signed: i32) -> i128 {
-    if signed != 0 {
-        -(1i128 << (bits - 1))
-    } else {
-        0
-    }
-}
-
-/// The maximum value of the `(bits, signed)` width.
-fn width_max(bits: i32, signed: i32) -> i128 {
-    if signed != 0 {
-        (1i128 << (bits - 1)) - 1
-    } else if bits >= 128 {
-        -1 // u128::MAX reinterpreted
-    } else {
-        (1i128 << bits) - 1
-    }
+    core_scalar::normalize(value, bits, signed)
 }
 
 /// `v.abs()` — the magnitude. The `MIN` case never reaches here: lowering
 /// throws `ArithmeticOverflowError` first.
 fn abs_impl(value: i128, bits: i32, signed: i32) -> i128 {
-    normalize(value, bits, signed).wrapping_abs()
+    core_scalar::int_abs(value, bits, signed)
 }
 
 /// # Safety
@@ -85,7 +56,7 @@ pub unsafe extern "C" fn zirk_int_abs(out: *mut i128, value: *const i128, bits: 
 
 /// `v.sign()` — `-1`, `0`, or `1`.
 fn sign_impl(value: i128, bits: i32, signed: i32) -> i32 {
-    normalize(value, bits, signed).signum() as i32
+    core_scalar::int_sign(value, bits, signed)
 }
 
 /// # Safety
@@ -98,7 +69,7 @@ pub unsafe extern "C" fn zirk_int_sign(value: *const i128, bits: i32, signed: i3
 
 /// `v.min(other)`.
 fn min_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    normalize(value, bits, signed).min(normalize(other, bits, signed))
+    core_scalar::int_min(value, other, bits, signed)
 }
 
 /// # Safety
@@ -117,7 +88,7 @@ pub unsafe extern "C" fn zirk_int_min(
 
 /// `v.max(other)`.
 fn max_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    normalize(value, bits, signed).max(normalize(other, bits, signed))
+    core_scalar::int_max(value, other, bits, signed)
 }
 
 /// # Safety
@@ -136,7 +107,7 @@ pub unsafe extern "C" fn zirk_int_max(
 
 /// `v.clamp(lo, hi)`.
 fn clamp_impl(value: i128, lo: i128, hi: i128, bits: i32, signed: i32) -> i128 {
-    normalize(value, bits, signed).clamp(normalize(lo, bits, signed), normalize(hi, bits, signed))
+    core_scalar::int_clamp(value, lo, hi, bits, signed)
 }
 
 /// # Safety
@@ -186,13 +157,7 @@ pub unsafe extern "C" fn zirk_int_is_odd(value: *const i128) -> bool {
 
 /// `v.bit_count()` — one bits within the width.
 fn bit_count_impl(value: i128, bits: i32) -> i32 {
-    let bits = bits.clamp(1, 128) as u32;
-    let mask: u128 = if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    ((value as u128) & mask).count_ones() as i32
+    core_scalar::int_bit_count(value, bits)
 }
 
 /// # Safety
@@ -205,14 +170,7 @@ pub unsafe extern "C" fn zirk_int_bit_count(value: *const i128, bits: i32) -> i3
 
 /// `v.leading_zeros()` — width-scoped, so `(0: UInt8)` answers `8`.
 fn leading_zeros_impl(value: i128, bits: i32) -> i32 {
-    let bits = bits.clamp(1, 128) as u32;
-    let mask: u128 = if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    let narrowed = (value as u128) & mask;
-    (narrowed.leading_zeros() - (128 - bits)) as i32
+    core_scalar::int_leading_zeros(value, bits)
 }
 
 /// # Safety
@@ -225,14 +183,7 @@ pub unsafe extern "C" fn zirk_int_leading_zeros(value: *const i128, bits: i32) -
 
 /// `v.trailing_zeros()`.
 fn trailing_zeros_impl(value: i128, bits: i32) -> i32 {
-    let bits = bits.clamp(1, 128) as u32;
-    let mask: u128 = if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    let narrowed = (value as u128) & mask;
-    narrowed.trailing_zeros().min(bits) as i32
+    core_scalar::int_trailing_zeros(value, bits)
 }
 
 /// # Safety
@@ -245,19 +196,7 @@ pub unsafe extern "C" fn zirk_int_trailing_zeros(value: *const i128, bits: i32) 
 
 /// `v.rotate_left(n)` — wraps bits within the width.
 fn rotate_left_impl(value: i128, n: i64, bits: i32) -> i128 {
-    let bits = bits.clamp(1, 128) as u32;
-    let mask: u128 = if bits == 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    };
-    let narrowed = (value as u128) & mask;
-    let n = (n.rem_euclid(bits as i64)) as u32;
-    if n == 0 {
-        return narrowed as i128;
-    }
-    let rotated = (narrowed << n) | (narrowed >> (bits - n));
-    (rotated & mask) as i128
+    core_scalar::int_rotate_left(value, n, bits)
 }
 
 /// # Safety
@@ -275,8 +214,7 @@ pub unsafe extern "C" fn zirk_int_rotate_left(
 
 /// `v.rotate_right(n)`.
 fn rotate_right_impl(value: i128, n: i64, bits: i32) -> i128 {
-    let width = bits.clamp(1, 128) as i64;
-    rotate_left_impl(value, width - n.rem_euclid(width), bits)
+    core_scalar::int_rotate_right(value, n, bits)
 }
 
 /// # Safety
@@ -295,11 +233,7 @@ pub unsafe extern "C" fn zirk_int_rotate_right(
 /// `v.wrapping_add(other)` — and `sub`/`mul` below: arithmetic that wraps
 /// at the width, the deliberate form of what `+` traps on.
 fn wrapping_add_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    normalize(
-        normalize(value, bits, signed).wrapping_add(normalize(other, bits, signed)),
-        bits,
-        signed,
-    )
+    core_scalar::int_wrapping_add(value, other, bits, signed)
 }
 
 /// # Safety
@@ -318,11 +252,7 @@ pub unsafe extern "C" fn zirk_int_wrapping_add(
 
 /// `v.wrapping_sub(other)`.
 fn wrapping_sub_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    normalize(
-        normalize(value, bits, signed).wrapping_sub(normalize(other, bits, signed)),
-        bits,
-        signed,
-    )
+    core_scalar::int_wrapping_sub(value, other, bits, signed)
 }
 
 /// # Safety
@@ -341,11 +271,7 @@ pub unsafe extern "C" fn zirk_int_wrapping_sub(
 
 /// `v.wrapping_mul(other)`.
 fn wrapping_mul_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    normalize(
-        normalize(value, bits, signed).wrapping_mul(normalize(other, bits, signed)),
-        bits,
-        signed,
-    )
+    core_scalar::int_wrapping_mul(value, other, bits, signed)
 }
 
 /// # Safety
@@ -364,8 +290,7 @@ pub unsafe extern "C" fn zirk_int_wrapping_mul(
 
 /// `v.saturating_add(other)` — clamps at the width's bounds.
 fn saturating_add_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    let result = normalize(value, bits, signed).saturating_add(normalize(other, bits, signed));
-    result.clamp(width_min(bits, signed), width_max(bits, signed))
+    core_scalar::int_saturating_add(value, other, bits, signed)
 }
 
 /// # Safety
@@ -384,8 +309,7 @@ pub unsafe extern "C" fn zirk_int_saturating_add(
 
 /// `v.saturating_sub(other)`.
 fn saturating_sub_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    let result = normalize(value, bits, signed).saturating_sub(normalize(other, bits, signed));
-    result.clamp(width_min(bits, signed), width_max(bits, signed))
+    core_scalar::int_saturating_sub(value, other, bits, signed)
 }
 
 /// # Safety
@@ -404,8 +328,7 @@ pub unsafe extern "C" fn zirk_int_saturating_sub(
 
 /// `v.saturating_mul(other)`.
 fn saturating_mul_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    let result = normalize(value, bits, signed).saturating_mul(normalize(other, bits, signed));
-    result.clamp(width_min(bits, signed), width_max(bits, signed))
+    core_scalar::int_saturating_mul(value, other, bits, signed)
 }
 
 /// # Safety
@@ -424,18 +347,13 @@ pub unsafe extern "C" fn zirk_int_saturating_mul(
 
 /// Whether the operation fits the width — the `ok` half of `checked_*`.
 fn checked_ok(result: Option<i128>, bits: i32, signed: i32) -> bool {
-    match result {
-        Some(value) => value >= width_min(bits, signed) && value <= width_max(bits, signed),
-        None => false,
-    }
+    core_scalar::int_checked_ok(result, bits, signed)
 }
 
 /// `v.checked_add(other)` — `ok` flag; `zirk_int_checked_add_value` reads
 /// the wrapped result.
 fn checked_add_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    checked_ok(a.checked_add(b), bits, signed)
+    core_scalar::int_checked_add_ok(value, other, bits, signed)
 }
 
 /// # Safety
@@ -469,9 +387,7 @@ pub unsafe extern "C" fn zirk_int_checked_add_value(
 
 /// `v.checked_sub(other)` — `ok` flag.
 fn checked_sub_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    checked_ok(a.checked_sub(b), bits, signed)
+    core_scalar::int_checked_sub_ok(value, other, bits, signed)
 }
 
 /// # Safety
@@ -505,9 +421,7 @@ pub unsafe extern "C" fn zirk_int_checked_sub_value(
 
 /// `v.checked_mul(other)` — `ok` flag.
 fn checked_mul_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    checked_ok(a.checked_mul(b), bits, signed)
+    core_scalar::int_checked_mul_ok(value, other, bits, signed)
 }
 
 /// # Safety
@@ -542,12 +456,7 @@ pub unsafe extern "C" fn zirk_int_checked_mul_value(
 /// `v.checked_div(other)` — `ok` flag; `other == 0` and the `MIN / -1`
 /// wrap both fail.
 fn checked_div_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    if b == 0 {
-        return false;
-    }
-    checked_ok(a.checked_div(b), bits, signed)
+    core_scalar::int_checked_div_ok(value, other, bits, signed)
 }
 
 /// # Safety
@@ -565,12 +474,7 @@ pub unsafe extern "C" fn zirk_int_checked_div_ok(
 
 /// `v / other` — only read when `checked_div_ok` is true.
 fn checked_div_value_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    if b == 0 {
-        return 0;
-    }
-    normalize(a.wrapping_div(b), bits, signed)
+    core_scalar::int_checked_div_value(value, other, bits, signed)
 }
 
 /// # Safety
@@ -589,12 +493,7 @@ pub unsafe extern "C" fn zirk_int_checked_div_value(
 
 /// `v.checked_rem(other)` — `ok` flag.
 fn checked_rem_ok_impl(value: i128, other: i128, bits: i32, signed: i32) -> bool {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    if b == 0 {
-        return false;
-    }
-    checked_ok(a.checked_rem(b), bits, signed)
+    core_scalar::int_checked_rem_ok(value, other, bits, signed)
 }
 
 /// # Safety
@@ -612,12 +511,7 @@ pub unsafe extern "C" fn zirk_int_checked_rem_ok(
 
 /// `v % other` — only read when `checked_rem_ok` is true.
 fn checked_rem_value_impl(value: i128, other: i128, bits: i32, signed: i32) -> i128 {
-    let a = normalize(value, bits, signed);
-    let b = normalize(other, bits, signed);
-    if b == 0 {
-        return 0;
-    }
-    normalize(a.wrapping_rem(b), bits, signed)
+    core_scalar::int_checked_rem_value(value, other, bits, signed)
 }
 
 /// # Safety
@@ -646,11 +540,7 @@ pub unsafe extern "C" fn zirk_int_parse_ok(text: *const c_void, bits: i32, signe
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
         .trim();
-    let parsed = if signed != 0 {
-        text.parse::<i128>().ok()
-    } else {
-        text.parse::<u128>().ok().map(|v| v as i128)
-    };
+    let parsed = core_scalar::parse_integer(text, 10, signed != 0);
     checked_ok(parsed, bits, signed)
 }
 
@@ -672,11 +562,7 @@ pub unsafe extern "C" fn zirk_int_parse_value(
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
         .trim();
-    let parsed = if signed != 0 {
-        text.parse::<i128>().unwrap_or(0)
-    } else {
-        text.parse::<u128>().map(|v| v as i128).unwrap_or(0)
-    };
+    let parsed = core_scalar::parse_integer(text, 10, signed != 0).unwrap_or(0);
     unsafe { *out = normalize(parsed, bits, signed) };
 }
 
@@ -795,34 +681,13 @@ pub unsafe extern "C" fn zirk_float_parse_ok(text: *const c_void) -> bool {
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
         .trim();
-    // A NaN result is not a valid parse: Zirk's Float family has no NaN.
-    text.parse::<f64>().is_ok_and(|v| !v.is_nan())
+    core_scalar::parse_float(text).is_some()
 }
 
 /// `v.to_string(radix: n)` — integer rendering in radix 2–36.
+#[cfg(test)]
 fn to_string_radix_impl(value: i128, radix: i32) -> String {
-    let radix = radix.clamp(2, 36) as u32;
-    let unsigned = if value < 0 {
-        (-value) as u128
-    } else {
-        value as u128
-    };
-    let mut digits = Vec::new();
-    let mut remainder = unsigned;
-    if remainder == 0 {
-        return "0".to_string();
-    }
-    while remainder > 0 {
-        let d = (remainder % radix as u128) as u32;
-        digits.push(std::char::from_digit(d, radix).unwrap_or('?'));
-        remainder /= radix as u128;
-    }
-    digits.reverse();
-    let mut text: String = digits.into_iter().collect();
-    if value < 0 {
-        text.insert(0, '-');
-    }
-    text
+    core_scalar::format_integer_radix(value, radix)
 }
 
 /// # Safety
@@ -830,17 +695,12 @@ fn to_string_radix_impl(value: i128, radix: i32) -> String {
 /// `value` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_int_to_string_radix(value: *const i128, radix: i32) -> *mut c_void {
-    alloc_owned(&to_string_radix_impl(unsafe { *value }, radix))
+    alloc_owned(&core_scalar::format_integer_radix(unsafe { *value }, radix))
 }
 
 /// `v.checked_pow(exp)` — `ok` flag.
 fn checked_pow_ok_impl(value: i128, exp: i128, bits: i32, signed: i32) -> bool {
-    if exp < 0 || exp > i32::MAX as i128 {
-        return false;
-    }
-    let a = normalize(value, bits, signed);
-    let e = exp as u32;
-    checked_ok(a.checked_pow(e), bits, signed)
+    core_scalar::int_checked_pow_ok(value, exp, bits, signed)
 }
 
 /// # Safety
@@ -858,12 +718,7 @@ pub unsafe extern "C" fn zirk_int_checked_pow_ok(
 
 /// `v.checked_pow(exp)` value — only read when `ok` is true.
 fn checked_pow_value_impl(value: i128, exp: i128, bits: i32, signed: i32) -> i128 {
-    if exp < 0 {
-        return 0;
-    }
-    let a = normalize(value, bits, signed);
-    let e = exp as u32;
-    normalize(a.wrapping_pow(e), bits, signed)
+    core_scalar::int_checked_pow_value(value, exp, bits, signed)
 }
 
 /// # Safety
@@ -897,11 +752,7 @@ pub unsafe extern "C" fn zirk_int_parse_radix_ok(
         .unwrap_or("")
         .trim();
     let radix = radix.clamp(2, 36) as u32;
-    let parsed = if signed != 0 {
-        i128::from_str_radix(text, radix).ok()
-    } else {
-        u128::from_str_radix(text, radix).ok().map(|v| v as i128)
-    };
+    let parsed = core_scalar::parse_integer(text, radix, signed != 0);
     checked_ok(parsed, bits, signed)
 }
 
@@ -924,13 +775,7 @@ pub unsafe extern "C" fn zirk_int_parse_radix_value(
         .unwrap_or("")
         .trim();
     let radix = radix.clamp(2, 36) as u32;
-    let parsed = if signed != 0 {
-        i128::from_str_radix(text, radix).unwrap_or(0)
-    } else {
-        u128::from_str_radix(text, radix)
-            .map(|v| v as i128)
-            .unwrap_or(0)
-    };
+    let parsed = core_scalar::parse_integer(text, radix, signed != 0).unwrap_or(0);
     unsafe { *out = normalize(parsed, bits, signed) };
 }
 
@@ -946,13 +791,14 @@ pub unsafe extern "C" fn zirk_float_parse_value(text: *const c_void) -> f64 {
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("")
         .trim();
-    text.parse::<f64>().unwrap_or(0.0)
+    core_scalar::parse_float(text).unwrap_or(0.0)
 }
 
 /// Parses a small format spec and formats `value` accordingly.
 ///
 /// Supported shape: `[0][width][.precision][e|E]`.
 /// Examples: `".2"`, `"08.2"`, `"8"`, `"e"`, `"10.4E"`.
+#[cfg(test)]
 fn format_float(value: f64, spec: &str) -> String {
     let spec = spec.trim();
     let mut chars = spec.chars().peekable();
@@ -1035,7 +881,7 @@ pub unsafe extern "C" fn zirk_float_format(value: f64, spec: *const c_void) -> *
     let spec = unsafe { borrow(spec) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
-    alloc_owned(&format_float(value, spec))
+    alloc_owned(&core_scalar::format_float(value, spec))
 }
 
 /// Converts the raw bit pattern of an IEEE 754 binary128 (`Float128`)
@@ -1049,6 +895,7 @@ pub unsafe extern "C" fn zirk_float_format(value: f64, spec: *const c_void) -> *
 /// truncating `1.5_Float128` silently produced `0.0`). Decoding the bit
 /// pattern by hand sidesteps hardware/libcall quad-float support
 /// entirely, so the result is identical on every target.
+#[cfg(test)]
 fn f128_bits_to_f64(bits: u128) -> f64 {
     let sign = (bits >> 127) & 1;
     let biased_exp = ((bits >> 112) & 0x7FFF) as i32;
@@ -1131,7 +978,7 @@ fn f128_bits_to_f64(bits: u128) -> f64 {
 /// `bits` must be a valid `i128` pointer holding a `Float128`'s raw bits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_float128_to_f64(bits: *const i128) -> f64 {
-    f128_bits_to_f64(unsafe { *bits } as u128)
+    core_scalar::float128_bits_to_f64(unsafe { *bits } as u128)
 }
 
 /// Encodes `value` as the raw bit pattern of the equivalent IEEE 754
@@ -1140,6 +987,7 @@ pub unsafe extern "C" fn zirk_float128_to_f64(bits: *const i128) -> f64 {
 /// binary128 (112 fraction bits comfortably holds `f64`'s 52), so this
 /// is a widening, not a rounding, conversion — including subnormal `f64`
 /// inputs, which are renormalized rather than truncated.
+#[cfg(test)]
 fn f64_to_f128_bits(value: f64) -> u128 {
     let bits64 = value.to_bits();
     let sign = (bits64 >> 63) & 1;
@@ -1183,5 +1031,53 @@ fn f64_to_f128_bits(value: f64) -> u128 {
 /// `out` must be a valid `i128` pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_f64_to_float128(out: *mut i128, value: f64) {
-    unsafe { *out = f64_to_f128_bits(value) as i128 };
+    unsafe { *out = core_scalar::f64_to_float128_bits(value) as i128 };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_scalar_formatting_matches_the_native_reference() {
+        for (value, radix) in [(0, 10), (-255, 16), (i128::MIN, 36)] {
+            assert_eq!(
+                to_string_radix_impl(value, radix),
+                core_scalar::format_integer_radix(value, radix)
+            );
+        }
+        for (value, spec) in [(1.5, "08.2"), (-12.0, "8"), (1.5e8, ".3e")] {
+            assert_eq!(
+                format_float(value, spec),
+                core_scalar::format_float(value, spec)
+            );
+        }
+        for value in [0.0, -0.0, 1.5, f64::MIN_POSITIVE, f64::INFINITY] {
+            assert_eq!(
+                f64_to_f128_bits(value),
+                core_scalar::f64_to_float128_bits(value)
+            );
+            assert_eq!(
+                f128_bits_to_f64(f64_to_f128_bits(value)).to_bits(),
+                core_scalar::float128_bits_to_f64(core_scalar::f64_to_float128_bits(value))
+                    .to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn extracted_scalar_parsing_matches_native_width_validation() {
+        assert!(checked_ok(
+            core_scalar::parse_integer("255", 10, false),
+            8,
+            0
+        ));
+        assert!(!checked_ok(
+            core_scalar::parse_integer("256", 10, false),
+            8,
+            0
+        ));
+        assert_eq!(core_scalar::parse_float("NaN"), None);
+        assert_eq!(core_scalar::parse_float(" 1.5 "), Some(1.5));
+    }
 }

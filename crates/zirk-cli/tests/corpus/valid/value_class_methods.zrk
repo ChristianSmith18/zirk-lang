@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A record's own method dispatches statically (design.md's open question on
 // virtual methods, confirmed at closeout: no descriptor exists to carry a
 // table, so nothing here is ever virtual) — a real, preexisting gap found
@@ -6,7 +8,7 @@
 record Point {
     x: Int32;
     y: Int32;
-     lengthSquared(): Int32 { return this.x * this.x + this.y * this.y; }
+    lengthSquared(): Int32 { return this.x * this.x + this.y * this.y; }
 }
 
 fn main(): Void {

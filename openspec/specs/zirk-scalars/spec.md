@@ -3,7 +3,9 @@
 ## Purpose
 Defines integer and floating families, Boolean and grapheme Char semantics,
 checked arithmetic, final-result scalar conversion, and scalar formatting contracts.
+
 ## Requirements
+
 ### Requirement: Complete family of integer widths
 
 The type system SHALL recognize `Int8`, `Int16`, `Int32`, `Int64`, `Int128` signed and `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128` unsigned, with `Int`/`Integer` as an alias for `Int32` and `UInt`/`UInteger` as an alias for `UInt32`.
@@ -55,6 +57,26 @@ Every arithmetic operation on a numeric type, of any width and signedness, inclu
 #### Scenario: Postfix increment on a narrow signed integer
 - **WHEN** an `Int8` variable holds `127` and `i++` is evaluated
 - **THEN** the program terminates with a controlled `ArithmeticOverflowError` instead of wrapping to `-128`
+
+### Requirement: Ordering comparisons accept mixed numeric types
+
+The comparison operators `<`, `<=`, `>`, `>=` SHALL accept operands of any two numeric types — every integer width and signedness, `Decimal`, and the `Float` family — and SHALL evaluate the comparison in the smallest common numeric type that can represent every value of both operand types, following the same widening lattice as arithmetic. When no common type can represent both operands without loss, the program SHALL be rejected at compile time. `Decimal` SHALL be orderable: `expect_comparable`-style checks SHALL accept `Decimal` alongside integers, `Float`, `Duration`, `Date`, `Time`, and `DateTime`.
+
+#### Scenario: Signed counter against unsigned length
+- **WHEN** `for mut i = 0; i < xs.length; i++` compares an `Int32` counter with a `UInt64` length
+- **THEN** the comparison is evaluated in the smallest common type (`Int128`) and the loop compiles and runs
+
+#### Scenario: Decimal ordering
+- **WHEN** `price > qty` compares two `Decimal` values
+- **THEN** the checker accepts the expression and the result is the exact decimal ordering
+
+#### Scenario: Integer against Decimal
+- **WHEN** an `Int32` is compared with a `Decimal`
+- **THEN** the integer widens losslessly to `Decimal` and the comparison is exact
+
+#### Scenario: Unsafe mixed-family comparison is rejected
+- **WHEN** a `Decimal` and a `Float64` are compared without an explicit conversion
+- **THEN** compilation fails, because no common type represents both exactly
 
 ### Requirement: Conversion between integer widths
 
@@ -169,3 +191,15 @@ The `String * n` operator SHALL accept an integer of any width for `n`, widening
 #### Scenario: Repeating with a signed narrow count
 - **WHEN** `"x" * (3 as Int8)` is evaluated
 - **THEN** the count is converted to `Int32` and the result is the repeated string
+
+### Requirement: Binary floating conversions are range-safe
+
+Conversions from binary floating types to integer types SHALL reject non-finite values and values outside the destination range with a controlled language failure. In-range conversion SHALL follow one documented rounding rule across execution backends.
+
+#### Scenario: NaN or infinity is converted to an integer
+- **WHEN** a non-finite value reaches an integer conversion
+- **THEN** conversion fails deterministically without backend-dependent integer bits
+
+#### Scenario: Floating value exceeds integer bounds
+- **WHEN** a finite value is below the minimum or above the maximum of the destination integer type
+- **THEN** conversion fails with a controlled range error

@@ -2,6 +2,7 @@
 
 ## Purpose
 Defines tuples, records, enums, unions, aliases, and their value semantics.
+
 ## Requirements
 
 ### Requirement: Standard text utilities preserve native text semantics
@@ -284,12 +285,10 @@ and destructuring.
 
 #### Scenario: Tuple length
 
-
 - **WHEN** `(1, "x", true).length` is read
 - **THEN** the result is `3`
 
 #### Scenario: Tuple rendering
-
 
 - **WHEN** `(1, "x").to_string()` runs
 - **THEN** the result is a `String` naming both elements
@@ -302,28 +301,27 @@ A traditional-enum case SHALL expose `name` (declared case name,
 
 #### Scenario: Case name
 
-
 - **WHEN** `Color.Red.name` is read on `enum Color { Red, Green }`
 - **THEN** the result is `"Red"`
 
 #### Scenario: Mapped value
-
 
 - **WHEN** `Color.Red.value` is read on a `String`-mapped enum
 - **THEN** the result is the mapped value
 
 ### Requirement: Universal rendering on structured values
 
-`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL
-answer `to_string()` with a readable default rendering when the type does
-not declare its own.
+`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL answer `to_string()` with a readable default rendering when no method is declared. It SHALL use the surface type name (strip `$local$N`, keep `Outer.Inner`), include enum payloads as `Variant(field: v, …)`, and omit compiler-synthesized fields such as an inner class `outer` capture.
 
 #### Scenario: Record default rendering
 
-
 - **WHEN** `Point(x: 1, y: 2).to_string()` runs on a record without a
   declared `to_string`
-- **THEN** the result is a `String` naming the type
+- **THEN** the result is `Point(x: 1, y: 2)`
+
+#### Scenario: Local class surface name
+- **WHEN** a local class is rendered
+- **THEN** its output never exposes `$local$` mangling
 
 ### Requirement: Type categories updated
 
@@ -394,3 +392,27 @@ A user-defined generic `class` or `record` that `implements` a generic contract 
 
 - **WHEN** `record Pair<T, U> implements Iterable<T>` declares a custom iterator
 - **THEN** `for x in Pair<Int32, String>()` compiles and yields the first `Int32` element
+
+### Requirement: Compound values preserve managed-reference paths
+
+The representation of tuples, records, enums, closures, and nullable values SHALL expose every initialized managed-reference path to root enumeration and heap tracing. Inactive enum payloads SHALL never be interpreted as live references.
+
+#### Scenario: Enum variant contains managed references
+- **WHEN** a live enum selects one variant and another variant has reference-typed fields
+- **THEN** collection preserves the selected variant's references and ignores inactive storage safely
+
+#### Scenario: Inline value contains nested references
+- **WHEN** a tuple or record containing a managed reference is copied into a supported collection element
+- **THEN** the nested reference remains live while the collection element remains reachable
+
+### Requirement: Numeric conversions have defined boundary outcomes
+
+Conversions between binary floating values, exact-decimal values, integers, and durations SHALL either produce a representable result under the language's specified rounding rule or a controlled language failure. Native and interpreted execution SHALL agree on the value or failure category.
+
+#### Scenario: Float cannot be represented by the destination integer
+- **WHEN** a conversion receives NaN, infinity, or a value outside the destination integer range
+- **THEN** it produces a controlled conversion failure and never invokes an undefined backend conversion
+
+#### Scenario: Conversion is representable
+- **WHEN** a finite floating value lies within the destination range
+- **THEN** native and interpreted execution apply the same documented rounding rule

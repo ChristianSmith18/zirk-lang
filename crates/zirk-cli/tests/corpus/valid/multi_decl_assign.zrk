@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Comma-grouped declarations and simultaneous assignment (roadmap Phase 4d):
 // `openspec/specs/zirk-grammar/spec.md`'s "Comma-grouped declarations and
 // assignments are explicit" and `openspec/specs/zirk-type-system/spec.md`'s

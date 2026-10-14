@@ -1,0 +1,13 @@
+{
+  "name": "decimal-compare",
+  "source": "import { stdout } from std.io;\nfn main(): Void {\n    inmut a: Decimal = 1.5\n    inmut b: Decimal = 2.25\n    stdout.println(a < b);\n    stdout.println(a > b);\n    stdout.println(a <= 1.5);\n    stdout.println(a == 1.5);\n}\n",
+  "virtualName": "fixtures/decimal-compare.zrk",
+  "expectedOutput": [
+    "true\n",
+    "false\n",
+    "true\n",
+    "true\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

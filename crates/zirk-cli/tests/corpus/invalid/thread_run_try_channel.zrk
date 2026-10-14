@@ -1,0 +1,6 @@
+fn main(): Void {
+    mut channel: Channel<Int32> = Channel(1);
+    Thread.run((): Void => {
+        channel.try_send(1);
+    });
+}

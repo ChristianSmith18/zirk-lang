@@ -1,0 +1,21 @@
+import { stdout } from std.io;
+
+fn serve(context: ServiceContext): Void {
+    context.ready();
+    while true {
+        Timer.sleep(1ms);
+    }
+}
+
+fn main(): Void {
+    mut index: Int32 = 0;
+    try {
+        while index < 65 {
+            application.spawn_service(serve);
+            index = index + 1;
+        }
+    } catch ServiceCapacityError(error) {
+        stdout.println(error.code());
+    }
+    Timer.sleep(3ms);
+}

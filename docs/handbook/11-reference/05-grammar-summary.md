@@ -14,21 +14,11 @@ expression/declaration forms, braced or single-statement `if`, traditional
 or concurrent constructs.
 
 Low-level syntax includes `unsafe { ... }`, `unsafe fn`, and irreversible
-`commit { ... }` regions inside unsafe. Concurrent syntax includes task blocks
-or callable sugar, `task scope`, `await expression timeout duration`,
-`cancellation shield`, `parallel`, `parallel for`, `thread`, and `select`.
-
-```zirk
-select {
-    value = await operation => use(value),
-    after 5s => timeout(),
-    cancelled => cleanup(),
-    default => continue_work(),
-}
-```
-
-`select` runs one ready branch fairly and leaves losing operations alive.
-`commit` is invalid outside unsafe, and reversible unsafe regions cannot await
+`commit { ... }` regions inside unsafe. Delivered concurrency syntax includes
+`concurrent { ... }`, `spawn expression`, `parallel { ... }`, and
+`parallel for`. The former `task`, `await`, `select`, cancellation-shield, and
+`thread` constructs are not part of the current grammar.
+`commit` is invalid outside unsafe, and reversible unsafe regions cannot suspend
 or spawn concurrent work.
 
 Failure syntax includes `throws T | U`, `throw expression`, exact `throw;`

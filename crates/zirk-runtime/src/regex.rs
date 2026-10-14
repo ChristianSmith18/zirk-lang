@@ -3,16 +3,17 @@
 //! A `Regex` is represented as an opaque pointer produced by
 //! `zirk_regex_from_pattern`.  The handle is the address of a `regex::Regex`
 //! stored in a process-wide cache so that identical patterns are compiled only
-//! once, no matter how many times they appear in the source.
+//! once, no matter how many times they appear in the source. The cache has
+//! fixed entry and pattern-byte budgets. It rejects new unique patterns when
+//! full instead of evicting entries, because generated code may retain opaque
+//! handles with no release operation.
 //!
 //! # Memory
 //!
 //! The regex objects themselves live in the cache for the lifetime of the
-//! process.  They are intentionally leaked (`Box::leak`) because the current
-//! garbage collector has no finalizers and therefore cannot reclaim objects
-//! with native resources behind them.  This is a controlled, bounded leak: the
-//! number of distinct patterns in a program is finite and small, and the
-//! actual native resources are owned by the `regex` crate.
+//! process. They are intentionally leaked (`Box::leak`) because the current
+//! ABI has no release operation for opaque regex handles. The fixed cache
+//! budgets bound this retention, and each compiled regex has a size limit.
 //!
 //! Output buffers returned by `zirk_regex_replace` and `zirk_regex_to_string`
 //! are also leaked for the same reason: there is no runtime hook to free them
@@ -20,18 +21,72 @@
 //! expected to copy the bytes into a normal GC `String` and treat the returned
 //! pointer as an unowned, transient buffer.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 
-use regex::Regex;
+use zirk_runtime_core::regex::{self as core_regex, Regex};
 
-/// Process-wide cache of compiled regexes, keyed by their source pattern.
-///
-/// Each value is a `&'static Regex` pointing to a `Box::leak` allocation.
-/// Keeping the compiled form pinned makes the opaque handles returned to
-/// generated code safe to use as raw pointers.
-static REGEX_CACHE: LazyLock<Mutex<std::collections::HashMap<String, &'static Regex>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+const MAX_REGEX_CACHE_ENTRIES: usize = 128;
+const MAX_REGEX_PATTERN_BYTES: usize = 16 * 1024;
+const MAX_REGEX_CACHE_PATTERN_BYTES: usize = 256 * 1024;
+
+/// Compiled regexes keyed by source. Entries are never evicted: opaque handles
+/// have no release operation, so eviction would make still-live handles dangle.
+struct RegexCache {
+    entries: HashMap<String, &'static Regex>,
+    retained_pattern_bytes: usize,
+    max_entries: usize,
+    max_pattern_bytes: usize,
+    max_total_pattern_bytes: usize,
+    compilations: usize,
+}
+
+impl RegexCache {
+    fn new(max_entries: usize, max_pattern_bytes: usize, max_total_pattern_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            retained_pattern_bytes: 0,
+            max_entries,
+            max_pattern_bytes,
+            max_total_pattern_bytes,
+            compilations: 0,
+        }
+    }
+
+    fn get_or_compile(&mut self, pattern: &str) -> Option<*const Regex> {
+        if let Some(regex) = self.entries.get(pattern) {
+            return Some(*regex as *const Regex);
+        }
+        if pattern.is_empty()
+            || pattern.len() > self.max_pattern_bytes
+            || self.entries.len() >= self.max_entries
+            || self.retained_pattern_bytes.checked_add(pattern.len())?
+                > self.max_total_pattern_bytes
+        {
+            return None;
+        }
+
+        self.compilations += 1;
+        let regex = core_regex::compile(pattern).ok()?;
+        let leaked = Box::leak(Box::new(regex));
+        self.entries.insert(pattern.to_owned(), leaked);
+        self.retained_pattern_bytes += pattern.len();
+        Some(leaked as *const Regex)
+    }
+}
+
+static REGEX_CACHE: LazyLock<Mutex<RegexCache>> = LazyLock::new(|| {
+    Mutex::new(RegexCache::new(
+        MAX_REGEX_CACHE_ENTRIES,
+        MAX_REGEX_PATTERN_BYTES,
+        MAX_REGEX_CACHE_PATTERN_BYTES,
+    ))
+});
+
+fn cached_regex(pattern: &str) -> Option<*const Regex> {
+    REGEX_CACHE.lock().ok()?.get_or_compile(pattern)
+}
 
 unsafe fn regex_string(handle: *mut c_void) -> &'static str {
     if handle.is_null() {
@@ -52,28 +107,14 @@ unsafe fn regex_string(handle: *mut c_void) -> &'static str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_regex_from_pattern(pattern: *mut c_void) -> *mut c_void {
     let pattern = unsafe { regex_string(pattern) };
-    if pattern.is_empty() {
-        return std::ptr::null_mut();
-    }
-
-    let mut cache = REGEX_CACHE.lock().unwrap();
-    if let Some(re) = cache.get(pattern) {
-        return (*re) as *const Regex as *mut c_void;
-    }
-
-    let re = match Regex::new(pattern) {
-        Ok(re) => re,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let leaked = Box::leak(Box::new(re));
-    cache.insert(pattern.to_string(), leaked);
-    leaked as *const Regex as *mut c_void
+    cached_regex(pattern)
+        .map(|regex| regex as *mut c_void)
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// Whether `pattern` compiles — the `ok` half of `Regex.parse`
-/// (`native-type-member-surface`). The handle half is the existing
-/// `zirk_regex_from_pattern`, whose cache makes the double compile cheap.
+/// (`native-type-member-surface`). The validation call seeds the bounded cache;
+/// the following handle construction reuses that compiled instance.
 ///
 /// # Safety
 ///
@@ -81,7 +122,7 @@ pub unsafe extern "C" fn zirk_regex_from_pattern(pattern: *mut c_void) -> *mut c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_regex_is_valid_pattern(pattern: *mut c_void) -> bool {
     let pattern = unsafe { regex_string(pattern) };
-    !pattern.is_empty() && Regex::new(pattern).is_ok()
+    cached_regex(pattern).is_some()
 }
 
 /// Returns whether the regex in `handle` matches `text`.
@@ -100,7 +141,7 @@ pub unsafe extern "C" fn zirk_regex_is_match(handle: *mut c_void, text: *mut c_v
     }
     let re = unsafe { &*(handle as *const Regex) };
     let text = unsafe { regex_string(text) };
-    re.is_match(text)
+    core_regex::is_match(re, text)
 }
 
 /// Replaces all non-overlapping matches of the regex in `handle` in `text`
@@ -127,7 +168,7 @@ pub unsafe extern "C" fn zirk_regex_replace(
     let text = unsafe { regex_string(text) };
     let repl = unsafe { regex_string(repl) };
 
-    let result = re.replace_all(text, repl).into_owned();
+    let result = core_regex::replace(re, text, repl);
     crate::string::alloc_owned(&result)
 }
 
@@ -160,8 +201,8 @@ pub unsafe extern "C" fn zirk_regex_split(handle: *mut c_void, text: *mut c_void
         )
     };
 
-    for part in re.split(text) {
-        let value = crate::string::alloc_owned(part);
+    for part in core_regex::split(re, text) {
+        let value = crate::string::alloc_owned(&part);
         unsafe {
             crate::zirk_rt_list_add(
                 list,
@@ -194,6 +235,93 @@ pub unsafe extern "C" fn zirk_regex_to_string(handle: *mut c_void) -> *mut c_voi
     crate::string::alloc_owned(re.as_str())
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::{
+        MAX_REGEX_CACHE_ENTRIES, MAX_REGEX_CACHE_PATTERN_BYTES, MAX_REGEX_PATTERN_BYTES, RegexCache,
+    };
+
+    fn text(handle: *mut std::ffi::c_void) -> String {
+        unsafe { (*crate::string::payload_ptr(handle)).as_str().to_owned() }
+    }
+
+    #[test]
+    fn to_string_returns_the_original_pattern() {
+        let pattern = crate::string::alloc_owned("a+b*");
+        let regex = unsafe { super::zirk_regex_from_pattern(pattern) };
+        let rendered = unsafe { super::zirk_regex_to_string(regex) };
+        let text = unsafe { (*crate::string::payload_ptr(rendered)).as_str() };
+
+        assert_eq!(text, "a+b*");
+    }
+
+    #[test]
+    fn extracted_regex_operations_preserve_native_handle_results() {
+        let regex = unsafe { super::zirk_regex_from_pattern(crate::string::alloc_owned("a+")) };
+        let haystack = crate::string::alloc_owned("baacaa");
+        assert!(unsafe { super::zirk_regex_is_match(regex, haystack) });
+        let replacement =
+            unsafe { super::zirk_regex_replace(regex, haystack, crate::string::alloc_owned("x")) };
+        assert_eq!(text(replacement), "bxcx");
+        let mut found = super::NullableObject {
+            present: false,
+            value: std::ptr::null_mut(),
+        };
+        unsafe { super::zirk_regex_find(&mut found, regex, haystack) };
+        assert!(found.present);
+        let matched = unsafe { &*super::regex_match_payload(found.value) };
+        assert_eq!((matched.start, matched.end), (1, 3));
+    }
+
+    #[test]
+    fn regex_cache_reuses_compilation_and_keeps_handles_stable_at_capacity() {
+        let mut cache = RegexCache::new(2, 64, 64);
+        let first = cache.get_or_compile("alpha+").unwrap();
+        let same = cache.get_or_compile("alpha+").unwrap();
+        let second = cache.get_or_compile("beta+").unwrap();
+        assert_eq!(first, same);
+        assert_eq!(cache.compilations, 2);
+        assert!(cache.get_or_compile("gamma+").is_none());
+        assert_eq!(cache.get_or_compile("alpha+"), Some(first));
+        assert_eq!(cache.get_or_compile("beta+"), Some(second));
+        // A pointer returned before saturation still points to its original
+        // compiled program; there is no eviction/reuse of handle addresses.
+        assert!(unsafe { &*first }.is_match("alpha"));
+    }
+
+    #[test]
+    fn regex_cache_enforces_pattern_and_aggregate_byte_budgets() {
+        let mut cache = RegexCache::new(8, 8, 10);
+        assert!(cache.get_or_compile(&"a".repeat(9)).is_none());
+        assert!(cache.get_or_compile("alpha").is_some());
+        assert!(cache.get_or_compile("beta").is_some());
+        assert_eq!(cache.retained_pattern_bytes, 9);
+        assert!(cache.get_or_compile("c{2}").is_none());
+        const {
+            assert!(MAX_REGEX_CACHE_ENTRIES > 0);
+            assert!(MAX_REGEX_PATTERN_BYTES <= MAX_REGEX_CACHE_PATTERN_BYTES);
+        }
+        assert!(MAX_REGEX_CACHE_PATTERN_BYTES > cache.retained_pattern_bytes);
+    }
+
+    #[test]
+    fn validity_check_compiles_once_then_handle_creation_reuses_it() {
+        let pattern = crate::string::alloc_owned("(?:zirk-cache-reuse-unique)+");
+        assert!(unsafe { super::zirk_regex_is_valid_pattern(pattern) });
+        let first = unsafe { super::zirk_regex_from_pattern(pattern) };
+        let second = unsafe { super::zirk_regex_from_pattern(pattern) };
+        assert!(!first.is_null());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn runtime_rejects_patterns_over_the_per_entry_byte_limit() {
+        let pattern = crate::string::alloc_owned(&"a".repeat(MAX_REGEX_PATTERN_BYTES + 1));
+        assert!(!unsafe { super::zirk_regex_is_valid_pattern(pattern) });
+        assert!(unsafe { super::zirk_regex_from_pattern(pattern) }.is_null());
+    }
+}
 /// A `T?` value returned across the C ABI for object-typed optionals.
 #[repr(C)]
 pub struct NullableObject {
@@ -292,16 +420,16 @@ pub unsafe extern "C" fn zirk_regex_find(
     let re = unsafe { &*(handle as *const Regex) };
     let hay = unsafe { regex_string(text) };
 
-    let result = match re.find(hay) {
-        Some(m) => {
-            let text_handle = crate::string::alloc_owned(m.as_str());
+    let result = match core_regex::find(re, hay) {
+        Some((start, end)) => {
+            let text_handle = crate::string::alloc_owned(&hay[start..end]);
             let haystack_handle = crate::string::alloc_owned(hay);
             let object = unsafe {
                 alloc_regex_match(
                     text_handle,
                     haystack_handle,
-                    m.start() as i64,
-                    m.end() as i64,
+                    start as i64,
+                    end as i64,
                     handle,
                 )
             };
@@ -350,14 +478,14 @@ pub unsafe extern "C" fn zirk_regex_find_all(
     let hay = unsafe { regex_string(text) };
     let haystack_handle = crate::string::alloc_owned(hay);
 
-    for m in re.find_iter(hay) {
-        let text_handle = crate::string::alloc_owned(m.as_str());
+    for (start, end) in core_regex::find_all(re, hay) {
+        let text_handle = crate::string::alloc_owned(&hay[start..end]);
         let object = unsafe {
             alloc_regex_match(
                 text_handle,
                 haystack_handle,
-                m.start() as i64,
-                m.end() as i64,
+                start as i64,
+                end as i64,
                 handle,
             )
         };

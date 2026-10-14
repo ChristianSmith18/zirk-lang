@@ -5,7 +5,9 @@
 Defines the C ABI contract of the runtime for standard output and for the representation of `String`.
 
 The layout of a `String` is private to the runtime, which is what allows adding grapheme indexing later without touching the compiler.
+
 ## Requirements
+
 ### Requirement: Opaque representation of String
 
 The runtime SHALL expose `String` as an opaque handle whose layout is private,
@@ -32,19 +34,33 @@ having to know about them.
 
 ### Requirement: Standard output
 
-The runtime SHALL expose an `extern "C"` function that writes a `String` to standard output followed by a newline.
+Native runtime execution SHALL expose stable `extern "C"` functions that write a `String` to standard output with the requested newline behavior. Interpreted execution SHALL emit the same logical UTF-8 text and newline sequence through an injected bounded host output sink without requiring a native process stream.
 
 #### Scenario: Printing a string
-- **WHEN** a program invokes the print function with a `String`
-- **THEN** the content appears on standard output followed by a newline
+- **WHEN** a native program invokes the print function with a `String`
+- **THEN** the content appears on native standard output with the requested newline behavior
+
+#### Scenario: Print through the interpreter
+- **WHEN** an interpreted program invokes `stdout.print` or `stdout.println`
+- **THEN** the content is emitted to the host output sink in call order
+- **AND** `println` appends exactly one newline
 
 #### Scenario: Non-ASCII content
-- **WHEN** the string contains Unicode characters outside ASCII
-- **THEN** they are written correctly encoded in UTF-8
+- **WHEN** either execution engine prints Unicode characters outside ASCII
+- **THEN** the host receives them correctly encoded in UTF-8
 
 #### Scenario: Flushed before terminating
-- **WHEN** the program terminates
+- **WHEN** a native program terminates
 - **THEN** standard output is flushed before the process ends
+
+#### Scenario: Complete interpreted output before returning
+- **WHEN** an interpreted program terminates
+- **THEN** all accepted output events are present in the structured execution result before it is returned
+
+#### Scenario: Bound interpreted output
+- **WHEN** an interpreted output event would exceed the configured host sink limit
+- **THEN** the interpreter reports output truncation and a controlled limit failure
+- **AND** it does not allocate or emit bytes beyond that limit
 
 ### Requirement: Stability of runtime symbols
 

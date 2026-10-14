@@ -1,0 +1,11 @@
+{
+  "name": "clone-callable",
+  "source": "import { stdout } from std.io;\nclass Box { v: Int32; construct(v: Int32) { this.v = v; } }\nfn main(): Void {\n    mut c = Box(1);\n    inmut f = (): Int32 => c.v;\n    inmut g = f.clone();\n    c.v = 2;\n    stdout.println(f().to_string());\n    stdout.println(g().to_string());\n}\n",
+  "virtualName": "fixtures/clone-callable.zrk",
+  "expectedOutput": [
+    "2\n",
+    "1\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

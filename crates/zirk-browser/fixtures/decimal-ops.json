@@ -1,0 +1,13 @@
+{
+  "name": "decimal-ops",
+  "source": "import { stdout } from std.io;\nfn main(): Void {\n    inmut a: Decimal = 2.5\n    inmut b: Decimal = 1.25\n    stdout.println(a + b);\n    stdout.println(a - b);\n    stdout.println(a * b);\n    stdout.println(a / b);\n}\n",
+  "virtualName": "fixtures/decimal-ops.zrk",
+  "expectedOutput": [
+    "3.75\n",
+    "1.25\n",
+    "3.125\n",
+    "2\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

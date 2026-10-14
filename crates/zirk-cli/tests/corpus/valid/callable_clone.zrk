@@ -1,10 +1,12 @@
+import { stdout } from std.io;
+
 fn main(): Void {
-    inmut f = (): Int32 => 42;
+    inmut f =(): Int32 => 42;
     inmut g = f.clone();
     stdout.println(g().to_string());
 
     inmut n = 7;
-    inmut h = (x: Int32): Int32 => x + n;
+    inmut h =(x: Int32): Int32 => x + n;
     inmut i = h.clone();
     stdout.println(i(3).to_string());
 }

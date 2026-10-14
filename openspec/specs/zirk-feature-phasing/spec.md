@@ -5,7 +5,9 @@
 Defines the discipline that keeps the compiler honest about what it does not implement yet.
 
 The language is documented in full while it is built in phases. That gap is deliberate, and it is only safe as long as every documented feature has an owning phase and the compiler names that phase instead of failing as if the feature did not exist.
+
 ## Requirements
+
 ### Requirement: Every documented feature has an owning phase
 
 Every feature defined by the normative sources SHALL have exactly one
@@ -88,7 +90,7 @@ once Phase 5 steps 1 to 3 are delivered; they resolve as ordinary known types.
 
 The roadmap SHALL introduce safe reference and escape foundations before native unsafe APIs, transactional rollback before irreversible commit effects, and structured concurrency semantics before parallelism, OS threads, weak atomics, or advanced synchronization.
 
-Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` (`Channel<T>`) and `concurrency-completion` (`Concurrent.of` combinators, `Concurrent.detach`, `Thread.run`, `Atomic` / `Mutex` / the synchronizer library) remain deferred until their sub-change lands.
+Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-task-await-model` removes the old `task` / `await` surface and keeps the runtime. `concurrent-blocks-and-timers` delivers `concurrent { }`, `spawn`, `Job<T>`, and `Timer.sleep` / `Timer.after` / `Timer.every`. `parallel-cpu-regions` delivers `parallel`, `.parallel`, and `Parallel.each` on a separate worker pool. `typed-channels` delivers `Channel<T>` with bounded, rendezvous, and limited-growable construction, suspension-safe send/receive, typed `try_*`, idempotent close, and drain. Only `concurrency-completion` remains deferred.
 
 #### Scenario: Phase planning reaches concurrency
 - **WHEN** implementation work starts branch scheduling
@@ -98,9 +100,13 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 - **WHEN** a program uses `concurrent { }`, `spawn`, `Job<T>`, `Timer.sleep`, `Timer.after`, or `Timer.every`
 - **THEN** no phase diagnostic is emitted and the construct is compiled and run
 
-#### Scenario: Later concurrency sub-changes stay deferred
-- **WHEN** a program uses `Channel<T>`, `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
+#### Scenario: Completion sub-change stays deferred
+- **WHEN** a program uses `Concurrent.of`, `Concurrent.detach`, `Thread.run`, `Mutex`, or `Atomic`
 - **THEN** the diagnostic names the construct and the Phase 5 sub-change that delivers it
+
+#### Scenario: Channel surface is delivered
+- **WHEN** a program constructs `Channel<T>` and uses `send`, `receive`, `try_send`, `try_receive`, `close`, or `drain`
+- **THEN** no phase diagnostic is emitted
 
 #### Scenario: The parallel surface is delivered
 - **WHEN** a program uses `parallel`, `.parallel`, or `Parallel.each`
@@ -109,3 +115,40 @@ Roadmap Phase 5 SHALL deliver the concurrency surface in sub-changes. `remove-ta
 #### Scenario: Removed constructs are reported as removed
 - **WHEN** a program uses `task`, `await`, `select`, or `cancellation shield`
 - **THEN** the diagnostic states the construct was removed and names its replacement
+
+### Requirement: Browser interpretation is distinct from a WebAssembly language target
+
+Project phase and implementation-status documentation SHALL describe browser execution as compiler tooling in which the Rust frontend and IR interpreter are compiled to WebAssembly. It SHALL NOT claim that Zirk programs compile to WebAssembly or that `wasm32` is a supported Zirk target.
+
+#### Scenario: Publish browser playground availability
+- **WHEN** the browser interpreter and companion playground integration are complete
+- **THEN** status documentation may state that supported Zirk programs can be interpreted locally in the browser
+- **AND** it continues to list a Zirk-to-WebAssembly backend as excluded from Zirk 1.x or deferred to its future phase
+
+#### Scenario: Inspect target support
+- **WHEN** a user reads the target matrix after this change
+- **THEN** no WebAssembly target triple is listed as a supported Zirk compilation target
+
+### Requirement: Browser compatibility claims remain scoped
+
+Implementation-status and limitation documentation SHALL distinguish the native compiler's delivered language surface from the browser interpreter's compatibility surface. A feature SHALL NOT be marked browser-executable merely because the parser, checker, IR, native backend, or native runtime implements it.
+
+#### Scenario: Native-only feature is implemented
+- **WHEN** a language feature works through native compilation but requires an excluded browser capability
+- **THEN** browser compatibility documentation identifies it as unavailable or constrained
+
+#### Scenario: Browser-compatible feature is claimed
+- **WHEN** a feature is described as executable in the browser
+- **THEN** interpreter coverage, browser-package tests, and differential conformance evidence exist for that feature
+
+### Requirement: Cross-repository status is released coherently
+
+Public browser-execution status SHALL be updated in the compiler repository and `zirk-lang-site` within the same coordinated workstream. The website SHALL pin the exact clean compiler revision and browser artifact provenance that support its claim.
+
+#### Scenario: Compiler support lands before site integration
+- **WHEN** interpreter implementation exists but the website has not consumed and verified its package
+- **THEN** the public site continues to describe Run and Check as unavailable
+
+#### Scenario: Publish the integrated feature
+- **WHEN** compiler conformance, artifact provenance, site integration, accessibility, and Firebase build verification are complete
+- **THEN** both repositories describe the same supported browser execution surface and exclusions

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn describe(a: Int32, b: Int32): String {
     mut sum: Int32 = a + b;
     mut product: Int32 = a * b;

@@ -1,6 +1,16 @@
 # Workers by Composition
 
-Zirk 1.x has no standalone `worker` primitive. Build a dedicated worker from a supervised concurrent operation or thread plus one or more `Channel<T>` values. This keeps scheduling, ownership, shutdown, and backpressure visible through existing contracts.
+> **Status:** This page describes a design direction for worker composition. The
+> `thread` API is not currently available, and the examples are illustrative;
+> they are not guaranteed to compile with the current compiler. Check the
+> [Phase 5 feature status catalog](../../../init/ZIRK_FEATURE_STATUS.md) for
+> implemented concurrency capabilities.
+
+Zirk 1.x has no standalone `worker` primitive. A future dedicated worker could
+be composed from a supervised concurrent operation or a `thread` plus one or
+more `Channel<T>` values. This design keeps scheduling, ownership, shutdown,
+and backpressure visible through explicit contracts. `thread` is a proposed
+design element here, not an available language capability.
 
 ---
 

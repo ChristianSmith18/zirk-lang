@@ -1,0 +1,13 @@
+[package]
+name = "zirk-runtime-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+unicode-normalization.workspace = true
+unicode-segmentation.workspace = true
+regex.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true

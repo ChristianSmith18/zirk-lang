@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Resource<E>`/`match ... with` (roadmap Phase 4c,
 // `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4): a user class
 // `implements Resource<OpenError>`, acquisition returns
@@ -11,18 +13,15 @@ class OpenError implements Error {
         this.reason = reason;
     }
 
-    #override
-      message(): String {
+    #override message(): String {
         return this.reason;
     }
 
-    #override
-      code(): String {
+    #override code(): String {
         return "OPEN";
     }
 
-    #override
-      cause(): Error? {
+    #override cause(): Error? {
         return null;
     }
 }
@@ -36,23 +35,21 @@ class FakeFile implements Resource<OpenError> {
         this.closed = false;
     }
 
-     read_all(): String {
+    read_all(): String {
         return "contents of " + this.name;
     }
 
-     nothing(): Void {
+    nothing(): Void {
         return;
     }
 
-    #override
-      close(): Result<Void, OpenError> {
+    #override close(): Result<Void, OpenError> {
         this.closed = true;
         stdout.println("closed " + this.name);
         return Ok(this.nothing());
     }
 
-    #override
-      is_closed(): Boolean {
+    #override is_closed(): Boolean {
         return this.closed;
     }
 }

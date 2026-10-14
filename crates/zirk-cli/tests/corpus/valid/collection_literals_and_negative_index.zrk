@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut arr: Array<Int32> = Array(10, 20, 30, 40);
     stdout.println(arr[-1].to_string());
@@ -8,5 +10,5 @@ fn main(): Void {
     l.insert(-1, 99);
     stdout.println(l[-2].to_string());
 
-    stdout.println("hola"[-1]);
+    stdout.println("hola" [-1]);
 }

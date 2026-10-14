@@ -49,6 +49,8 @@ pub enum Keyword {
     Share,
     Import,
     Use,
+    Package,
+    Mod,
 
     // --- Whole language, later phases ---
     /// `do { } while cond;`
@@ -166,6 +168,8 @@ impl Keyword {
             "share" => Share,
             "import" => Import,
             "use" => Use,
+            "package" => Package,
+            "mod" => Mod,
             "public" => Public,
             "private" => Private,
             "protected" => Protected,
@@ -237,6 +241,8 @@ impl Keyword {
             Share => "share",
             Import => "import",
             Use => "use",
+            Package => "package",
+            Mod => "mod",
             Public => "public",
             Private => "private",
             Protected => "protected",

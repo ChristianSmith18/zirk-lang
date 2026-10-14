@@ -1,5 +1,7 @@
+import { stdout } from std.io;
+
 fn main(): Void {
-    mut (n, s) = (42, "hello");
+    mut (n, s) =(42, "hello");
     stdout.println(n);
     stdout.println(s);
     n = 100;

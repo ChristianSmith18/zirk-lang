@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn size(n: Int32): String {
     return match n {
         0 => "cero",
@@ -7,7 +9,7 @@ fn size(n: Int32): String {
 }
 
 fn main(): Void {
-    for i in 0..4 {
+    for i in 0 .. 4 {
         stdout.println(size(i));
     }
 }

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A user-declared generic enum (`fase-3-generic-enums`) instantiates and
 // lowers the same way the two compiler-native generic enums
 // (`Iteration<T>`, `Result<T,E>`) already do: `specialize_enum` builds one

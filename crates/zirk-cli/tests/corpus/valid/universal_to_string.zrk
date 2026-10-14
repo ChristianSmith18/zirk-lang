@@ -1,0 +1,195 @@
+import { stdout } from std.io;
+
+// `universal-to-string-and-multiline-strings`: every value-producing type
+// renders through `to_string()`, and `println`/`print`/`"{…}"` all go
+// through the same conversion. This file is the reference table — one
+// `stdout.println` per row, output asserted line for line in the .out.
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+    Circle(radius: Float64),
+    Rectangle(width: Float64, height: Float64),
+    Dot
+}
+
+record Point {
+    x: Int32;
+    y: Int32;
+}
+
+interface Printable {
+    to_string(): String;
+}
+
+class Doc implements Printable {
+    body: String;
+    construct(body: String) { this.body = body; }
+    #override to_string(): String { return "Doc<{this.body}>"; }
+}
+
+class Person {
+    name: String;
+    age: Int32;
+    construct(name: String, age: Int32) {
+        this.name = name;
+        this.age = age;
+    }
+}
+
+class Outer {
+    val: Int32;
+    construct(v: Int32) { this.val = v; }
+    inner class Inner {
+        f: Int32;
+        construct(f: Int32) { this.f = f; }
+    }
+}
+
+fn double(x: Int32): Int32 { return x * 2; }
+
+fn main(): Void {
+    // Scalars.
+    stdout.println(255);
+    stdout.println(255.to_string(radix: 16));
+    stdout.println(255.to_string(radix: 2));
+    inmut i8: Int8 = -7;
+    stdout.println(i8);
+    inmut u64: UInt64 = 18446744073709551615;
+    stdout.println(u64);
+    stdout.println(0.1);
+    inmut f16: Float16 = 2.5;
+    stdout.println(f16);
+    inmut f128: Float128 = 1.5;
+    stdout.println(f128);
+    inmut dec_val: Decimal = 0.001;
+    stdout.println(dec_val);
+    stdout.println(true);
+    stdout.println('π');
+    stdout.println("plain");
+
+    // Temporals.
+    stdout.println(1500ms);
+    stdout.println(90m);
+    stdout.println(0s);
+    stdout.println(Date(2026, 9, 5));
+    stdout.println(Time(14, 30, 15));
+    stdout.println(DateTime(Date(2026, 9, 5), Time(14, 30, 15)));
+
+    // Collections — println and interpolation share the render.
+    inmut arr: Array<Int32> = [1, 2, 3];
+    stdout.println(arr);
+    inmut nested = [[1, 2], [3]];
+    stdout.println(nested);
+    inmut words: List<String> = ["a", "b"];
+    stdout.println("list: {words}");
+    inmut empty: Array<Int32> = [];
+    stdout.println(empty);
+    inmut ds: List<Duration> = [1500ms, 2s];
+    stdout.println(ds);
+    inmut t =("Ada", 37, true);
+    stdout.println(t);
+
+    // Map/Set — sorted snapshots, numeric or lexicographic by key/element.
+    mut m: Map<String, Int32> = Map();
+    m.set("b", 2);
+    m.set("a", 1);
+    stdout.println(m);
+    mut mi: Map<Int32, String> = Map();
+    mi.set(10, "diez");
+    mi.set(2, "dos");
+    stdout.println(mi);
+    mut s: Set<Int32> = Set();
+    s.add(3);
+    s.add(1);
+    s.add(2);
+    stdout.println(s);
+    mut ss: Set<String> = Set();
+    ss.add("z");
+    ss.add("a");
+    stdout.println(ss);
+
+    // Ranges — every literal spelling is reproduced.
+    stdout.println(1 .. 10);
+    stdout.println(1 ..= 10);
+    stdout.println(1 .. 10: 2);
+    stdout.println(1 ..= 10: 2);
+    stdout.println(10 .. 0: -2);
+    stdout.println(0s .. 10s: 2s);
+
+    // Records, classes, and the surface name of a block-local class.
+    stdout.println(Point(x: 1, y: 2));
+    stdout.println(Person("Ana", 30));
+    stdout.println(Doc("hi"));
+    class Local {
+        v: Int32;
+        construct(v: Int32) { this.v = v; }
+    }
+    stdout.println(Local(4));
+    inmut o = Outer(1);
+    stdout.println(o.Inner(9));
+
+    // Enums — bare names, payloads, and Result's positional rendering.
+    stdout.println(Color.Red);
+    inmut c: Shape = Shape.Circle(5.0);
+    stdout.println(c);
+    inmut r2: Shape = Shape.Rectangle(2.0, 3.0);
+    stdout.println(r2);
+    stdout.println(Shape.Dot);
+    inmut ok: Result<Int32, String> = Result.Ok(5);
+    stdout.println(ok);
+    inmut err: Result<Int32, String> = Result.Error("boom");
+    stdout.println(err);
+    stdout.println(Color.to_string());
+
+    // Contract dispatch keeps the implementer's own method.
+    inmut p: Printable = Doc("via contract");
+    stdout.println(p);
+
+    // Callables — a named function keeps its name, a lambda does not.
+    stdout.println(double);
+    inmut lam =(a: Int32): Int32 => a + 1;
+    stdout.println(lam);
+
+    // Regex renders the literal spelling of its pattern.
+    inmut re = re'a+b*';
+    stdout.println(re);
+
+    // Nullability — absent renders <Null>, present renders the inner value;
+    // direct and safe calls both reach the conversion.
+    stdout.println(null);
+    inmut x: Int32? = null;
+    stdout.println(x);
+    stdout.println(x.to_string());
+    inmut y: Int32? = 7;
+    stdout.println(y);
+    stdout.println(y?.to_string());
+    stdout.println(x?.to_string());
+    inmut lnull: List<Int32?> = List(1, x, 3);
+    stdout.println(lnull);
+
+    // Opaque handles render their type name.
+    inmut ch: Channel<Int32> = Channel(1);
+    stdout.println(ch);
+    inmut j = spawn work();
+    stdout.println(j);
+    mut marker: Marker = Marker(1);
+    mut w: Weak<Marker> = Weak.from (marker);
+    stdout.println(w);
+    inmut x2: Int32 = 42;
+    mut ptr: Pointer<Int32> = unsafe { Pointer.from (x2) };
+    stdout.println(ptr);
+    inmut pinned: Pin<Marker> = Pin (marker);
+    stdout.println(pinned);
+
+    // `print` shares the conversion too.
+    stdout.print("no newline {m}");
+    stdout.println("");
+}
+
+fn work(): Void { }
+
+class Marker {
+    id: Int32;
+    construct(id: Int32) { this.id = id; }
+}

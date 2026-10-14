@@ -4,6 +4,6 @@
 fn main(): Void {
     inmut values: List<Int32> = [1, 2, 3];
     inmut total: Int32 = parallel {
-        values.reduce(0, (a: Int32, b: Int32): Int32 => a - b)
+        values.reduce(0,(a: Int32, b: Int32): Int32 => a - b)
     };
 }

@@ -1,0 +1,8 @@
+import { stdout } from std.io;
+fn main(): Void {
+    mut value: Int32 = Concurrent.of(
+        (): Int32 => { Timer.sleep(20ms); return 1; },
+        (): Int32 => 2,
+    ).within(1s).first();
+    stdout.println(value);
+}

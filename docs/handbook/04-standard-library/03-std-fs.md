@@ -147,7 +147,7 @@ task-aware without introducing `async fn` or `async for`:
 match Directory.watch("src", recursive: true, debounce: 100ms) with watcher {
     Ok(watcher) => {
         loop {
-            match await watcher.next() {
+            match watcher.next() {
                 Event(Created(path)) => rebuild(path),
                 Event(Modified(path)) => rebuild(path),
                 Event(Removed(path)) => invalidate(path),
@@ -162,9 +162,10 @@ match Directory.watch("src", recursive: true, debounce: 100ms) with watcher {
 }
 ```
 
-`await watcher.next()` suspends the current task; a separate `task` block is
-used only when watching must run concurrently with other work. Cancellation
-interrupts the wait, closes scope-owned watcher state and awaits cleanup.
+`watcher.next()` suspends the current cooperative branch; use `spawn` when
+watching must run concurrently with other work. Cancellation interrupts the
+wait, closes scope-owned watcher state and waits for cleanup. Watcher delivery
+is not part of the current compiler surface.
 Native systems may coalesce, duplicate or overflow notifications, so `Overflow`
 requires a rescan rather than pretending the event history is complete.
 

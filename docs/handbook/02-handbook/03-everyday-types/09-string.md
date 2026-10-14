@@ -96,6 +96,20 @@ interpolation:
 `String(expression)` evaluates the complete expression first and converts only
 its final result. It does not make `String("value=" + 42)` valid.
 
+## Universal text rendering
+
+Every value-producing type has `to_string(): String`. `print`, `println`, and
+`"{expression}"` use that same conversion; only `Void` and `Never` are
+rejected because they produce no value. Nullable values render their inner
+value when present and `<Null>` when absent.
+
+Collections render recursively (`[a, b]`, `{key: value}`, `{element}`), ranges
+mirror their literal (`1..=10:2`), regexes render as `re'pattern'`, opaque
+handles use `<TypeName>`, and a callable uses `<Function name>` or
+`<Function>`. Records, classes and payload enum variants render their visible
+fields; local-class compiler suffixes and synthetic inner-class `outer` fields
+never appear.
+
 ## Repetition
 
 `String * Integer` and `Integer * String` return a new repeated String:

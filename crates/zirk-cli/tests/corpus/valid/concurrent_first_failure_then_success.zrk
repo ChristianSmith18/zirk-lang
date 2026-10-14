@@ -1,0 +1,25 @@
+import { stdout } from std.io;
+
+class FirstFailure implements Throwable {
+    construct() { }
+    message(): String { return "first branch failed"; }
+    code(): String { return "FIRST_FAILURE"; }
+    cause(): Error? { return null; }
+    stack_trace(): StackTrace { return StackTrace(); }
+}
+
+fn fail_first(): Int32 throws FirstFailure {
+    Timer.sleep(1ms);
+    throw FirstFailure();
+}
+
+fn main(): Void {
+    mut winner: Int32 = Concurrent.of(
+        (): Int32 => fail_first(),
+        (): Int32 => {
+            Timer.sleep(10ms);
+            return 42;
+        },
+    ).first();
+    stdout.println(winner);
+}

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // One branch throws: the scope makes it the primary failure, cancels the
 // sibling (observed at its `Timer.sleep` safe point), and re-raises the
 // exception out of the block (`concurrent-blocks-and-timers`).
@@ -22,23 +24,86 @@ class Boom implements Throwable {
     }
 }
 
+class OpenError implements Error {
+    construct() { }
+    message(): String { return "open error"; }
+    code(): String { return "OPEN"; }
+    cause(): Error? { return null; }
+}
+
+class FakeFile implements Resource<OpenError> {
+    inmut name: String;
+    construct(name: String) { this.name = name; }
+    nothing(): Void { return; }
+    close(): Result<Void, OpenError> {
+        stdout.println("closed " + this.name);
+        return Ok(this.nothing());
+    }
+    is_closed(): Boolean { return true; }
+}
+
+class Counter {
+    mut value: Int32;
+    construct() { this.value = 0; }
+}
+
+fn open_file(name: String): Result<FakeFile, OpenError> {
+    return Ok(FakeFile(name));
+}
+
 fn explode(): Void throws Boom {
     throw Boom();
 }
 
-fn linger(): Void {
+fn fail_cleanup(): Void throws Boom {
+    throw Boom();
+}
+
+fn wait_deep(): Void {
     Timer.sleep(500ms);
-    stdout.println("linger finished");
+}
+
+fn linger(name: String, counter: Counter): Void throws Boom {
+    match open_file(name) with file {
+        Ok(file) => {
+            try {
+                try {
+                    unsafe {
+                        counter.value = 1;
+                        wait_deep();
+                    }
+                    stdout.println("linger finished");
+                } finally {
+                    stdout.println("inner cleanup");
+                    Timer.sleep(1ms);
+                }
+            } finally {
+                stdout.println("outer cleanup");
+                    fail_cleanup();
+            }
+        }
+        Error(_) => { }
+    }
 }
 
 fn main(): Void {
+    mut one = Counter();
+    mut two = Counter();
+    mut three = Counter();
+    mut four = Counter();
     try {
-        concurrent {
-            spawn explode();
-            spawn linger();
+        unsafe {
+            concurrent {
+                spawn explode();
+                spawn linger("one", one);
+                spawn linger("two", two);
+                spawn linger("three", three);
+                spawn linger("four", four);
+            }
         }
         stdout.println("block completed");
     } catch Boom(e) {
         stdout.println("caught: " + e.message());
     }
+    stdout.println("counters", one.value, two.value, three.value, four.value);
 }

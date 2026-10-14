@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn classify(value: Int32): String {
     if value > 100 {
         return "big";

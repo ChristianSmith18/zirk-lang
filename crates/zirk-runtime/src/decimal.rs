@@ -22,6 +22,10 @@ use std::ffi::c_void;
 
 use crate::failure;
 use crate::string::alloc_owned;
+use zirk_runtime_core::decimal as core_decimal;
+#[allow(unused_imports)]
+pub use zirk_runtime_core::decimal::MIN_DIV_SCALE;
+pub use zirk_runtime_core::decimal::{Decimal, RoundingMode};
 
 /// Rounding budget for an inexact result, in significant decimal digits.
 ///
@@ -30,56 +34,8 @@ use crate::string::alloc_owned;
 /// inexact results (`/`, `sqrt`, fractional `pow`) are rounded into this.
 pub const MAX_SIGNIFICANT_DIGITS: u32 = 28;
 
-/// Minimum fractional scale a division computes before rounding.
-pub const MIN_DIV_SCALE: u32 = 10;
-
 /// Hard ceiling on the coefficient: `i128` holds at most 38 decimal digits.
 const MAX_COEF_DIGITS: u32 = 38;
-
-/// The C-ABI representation of a `Float`. Always passed by pointer.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct Decimal {
-    /// Signed coefficient. The value is `coef * 10^-scale`.
-    pub coef: i128,
-    /// Number of decimal places. `0..=38`.
-    pub scale: u8,
-}
-
-impl Decimal {
-    const ZERO: Decimal = Decimal { coef: 0, scale: 0 };
-
-    fn new(coef: i128, scale: u32) -> Decimal {
-        normalize(coef, scale)
-    }
-}
-
-/// The rounding modes `RoundingMode` exposes, as encoded across the ABI.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RoundingMode {
-    HalfEven,
-    HalfUp,
-    HalfDown,
-    Up,
-    Down,
-    Ceil,
-    Floor,
-}
-
-impl RoundingMode {
-    fn from_abi(raw: i32) -> RoundingMode {
-        match raw {
-            0 => RoundingMode::HalfEven,
-            1 => RoundingMode::HalfUp,
-            2 => RoundingMode::HalfDown,
-            3 => RoundingMode::Up,
-            4 => RoundingMode::Down,
-            5 => RoundingMode::Ceil,
-            6 => RoundingMode::Floor,
-            _ => RoundingMode::HalfEven,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Normalization and digit helpers
@@ -105,25 +61,18 @@ fn digit_count(mut magnitude: u128) -> u32 {
     count
 }
 
-/// Strips trailing decimal zeros so a value has one canonical representation.
-fn normalize(mut coef: i128, mut scale: u32) -> Decimal {
-    if coef == 0 {
-        return Decimal::ZERO;
-    }
-    while scale > 0 && coef % 10 == 0 {
-        coef /= 10;
-        scale -= 1;
-    }
-    // A well-formed value never exceeds the ceiling here — callers that could
-    // produce one route through `overflow()` before building the `Decimal`.
-    Decimal {
-        coef,
-        scale: scale.min(MAX_COEF_DIGITS) as u8,
-    }
-}
-
 fn overflow() -> ! {
     failure::zirk_rt_overflow()
+}
+
+fn native_result<T>(result: Result<T, core_decimal::DecimalError>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(core_decimal::DecimalError::Overflow) => failure::zirk_rt_overflow(),
+        Err(core_decimal::DecimalError::DivisionByZero) => failure::zirk_rt_division_by_zero(),
+        Err(core_decimal::DecimalError::Domain) => failure::zirk_rt_decimal_domain(),
+        Err(core_decimal::DecimalError::InvalidCast) => failure::zirk_rt_invalid_cast(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,86 +208,20 @@ fn reduce_to_digits(coef: i128, scale: u32, max_digits: u32, mode: RoundingMode)
 // Alignment for + / - / comparison
 // ---------------------------------------------------------------------------
 
-/// Scales `coef` up by `10^raise`, or overflows the process if it will not fit.
-fn scale_up_or_overflow(coef: i128, raise: u32) -> i128 {
-    match pow10_i128(raise).and_then(|factor| coef.checked_mul(factor)) {
-        Some(value) => value,
-        None => overflow(),
-    }
-}
-
-/// Brings `a` and `b` to a common scale, returning `(coef_a, coef_b, scale)`.
-fn align(a: Decimal, b: Decimal) -> (i128, i128, u32) {
-    let scale = a.scale.max(b.scale) as u32;
-    let coef_a = scale_up_or_overflow(a.coef, scale - a.scale as u32);
-    let coef_b = scale_up_or_overflow(b.coef, scale - b.scale as u32);
-    (coef_a, coef_b, scale)
-}
-
 // ---------------------------------------------------------------------------
 // Core arithmetic
 // ---------------------------------------------------------------------------
 
 fn add(a: Decimal, b: Decimal) -> Decimal {
-    let (coef_a, coef_b, scale) = align(a, b);
-    match coef_a.checked_add(coef_b) {
-        Some(sum) => Decimal::new(sum, scale),
-        None => overflow(),
-    }
+    native_result(core_decimal::add(a, b))
 }
 
 fn sub(a: Decimal, b: Decimal) -> Decimal {
-    add(
-        a,
-        Decimal {
-            coef: -b.coef,
-            scale: b.scale,
-        },
-    )
+    native_result(core_decimal::sub(a, b))
 }
 
 fn mul(a: Decimal, b: Decimal) -> Decimal {
-    let scale = a.scale as u32 + b.scale as u32;
-    if let Some(product) = a.coef.checked_mul(b.coef) {
-        return Decimal::new(product, scale);
-    }
-    // The exact product needs more than 128 bits. Compute it wide, then round
-    // it back down. If the digit count still will not fit even at scale 0, the
-    // value is genuinely out of range.
-    let negative = (a.coef < 0) ^ (b.coef < 0);
-    let mut wide = mul_u128(a.coef.unsigned_abs(), b.coef.unsigned_abs());
-    let mut scale = scale;
-    loop {
-        if let Some(magnitude) = wide.to_u128()
-            && digit_count(magnitude) <= MAX_COEF_DIGITS
-        {
-            let signed = if negative {
-                -(magnitude as i128)
-            } else {
-                magnitude as i128
-            };
-            return Decimal::new(signed, scale);
-        }
-        if scale == 0 {
-            overflow();
-        }
-        // Drop one decimal digit, half-to-even. The quotient fits far inside
-        // `u128` well before this loop ends, so rounding on `.lo` is safe.
-        let (quotient, remainder) = divrem_u256(wide, 10);
-        wide = quotient;
-        if remainder * 2 > 10 || (remainder * 2 == 10 && quotient.lo % 2 == 1) {
-            wide = add_one_u256(wide);
-        }
-        scale -= 1;
-    }
-}
-
-fn add_one_u256(value: U256) -> U256 {
-    let (lo, carry) = value.lo.overflowing_add(1);
-    U256 {
-        hi: value.hi + carry as u128,
-        lo,
-    }
+    native_result(core_decimal::mul(a, b))
 }
 
 /// Divides `a` by `b` to `target_scale` fractional digits, rounding with `mode`.
@@ -424,108 +307,31 @@ fn scale_u256(value: u128, exp: u32) -> U256 {
 }
 
 fn div_default(a: Decimal, b: Decimal) -> Decimal {
-    if a.coef == 0 {
-        return Decimal::ZERO;
-    }
-    // Pick a fractional scale so the quotient carries about
-    // `MAX_SIGNIFICANT_DIGITS` significant digits: estimate the integer-part
-    // width from an `f64` ratio, then spend the rest of the budget on the
-    // fraction (never below `MIN_DIV_SCALE` while the integer part is small).
-    let ratio = (to_f64(a) / to_f64(b)).abs();
-    let int_digits = if ratio < 1.0 {
-        1
-    } else {
-        ratio.log10().floor() as u32 + 1
-    };
-    let target = MAX_SIGNIFICANT_DIGITS
-        .saturating_sub(int_digits.saturating_sub(1))
-        .max(if int_digits <= MAX_SIGNIFICANT_DIGITS - MIN_DIV_SCALE {
-            MIN_DIV_SCALE
-        } else {
-            0
-        });
-    let full = div_to_scale(a, b, target, RoundingMode::HalfEven);
-    reduce_to_digits(
-        full.coef,
-        full.scale as u32,
-        MAX_SIGNIFICANT_DIGITS,
-        RoundingMode::HalfEven,
-    )
+    native_result(core_decimal::div(a, b))
 }
 
 fn rem(a: Decimal, b: Decimal) -> Decimal {
-    // a % b = a - trunc(a / b) * b, computed exactly on aligned coefficients.
-    let (coef_a, coef_b, _scale) = align(a, b);
-    if coef_b == 0 {
-        failure::zirk_rt_division_by_zero();
-    }
-    let r = coef_a % coef_b;
-    let scale = a.scale.max(b.scale) as u32;
-    Decimal::new(r, scale)
+    native_result(core_decimal::rem(a, b))
 }
 
 fn pow_int(base: Decimal, exponent: i64) -> Decimal {
-    if exponent == 0 {
-        return Decimal { coef: 1, scale: 0 };
-    }
-    let negative_exp = exponent < 0;
-    let mut acc = Decimal { coef: 1, scale: 0 };
-    let mut base_acc = base;
-    let mut e = exponent.unsigned_abs();
-    while e > 0 {
-        if e & 1 == 1 {
-            acc = mul(acc, base_acc);
-        }
-        e >>= 1;
-        if e > 0 {
-            base_acc = mul(base_acc, base_acc);
-        }
-    }
-    if negative_exp {
-        div_default(Decimal { coef: 1, scale: 0 }, acc)
-    } else {
-        acc
-    }
+    native_result(core_decimal::pow_int(base, i128::from(exponent)))
 }
 
 fn to_f64(value: Decimal) -> f64 {
     value.coef as f64 / 10f64.powi(value.scale as i32)
 }
 
-/// Renders an `f64` as a plain decimal string with `digits` fractional places,
-/// never scientific notation, for feeding back through [`from_str`].
-fn f64_to_decimal_text(value: f64, digits: usize) -> String {
-    format!("{value:.digits$}")
-}
-
 fn sqrt(value: Decimal) -> Decimal {
-    if value.coef < 0 {
-        failure::zirk_rt_decimal_domain();
-    }
-    if value.coef == 0 {
-        return Decimal::ZERO;
-    }
-    // An exact perfect square stays exact; otherwise the result carries `f64`
-    // precision (about 15 significant digits) — an exact-to-28-digits irrational
-    // root is a documented non-goal.
-    let approx = to_f64(value).sqrt();
-    from_str(&f64_to_decimal_text(approx, 16)).unwrap_or(Decimal::ZERO)
+    native_result(core_decimal::sqrt(value))
 }
 
 fn pow_fractional(base: Decimal, exponent: Decimal) -> Decimal {
-    if exponent.scale == 0 {
-        return pow_int(base, exponent.coef as i64);
-    }
-    let result = to_f64(base).powf(to_f64(exponent));
-    if !result.is_finite() {
-        failure::zirk_rt_decimal_domain();
-    }
-    from_str(&f64_to_decimal_text(result, 16)).unwrap_or(Decimal::ZERO)
+    native_result(core_decimal::pow(base, exponent))
 }
 
 fn compare(a: Decimal, b: Decimal) -> i32 {
-    let (coef_a, coef_b, _scale) = align(a, b);
-    coef_a.cmp(&coef_b) as i32
+    native_result(core_decimal::compare(a, b))
 }
 
 // ---------------------------------------------------------------------------
@@ -533,22 +339,7 @@ fn compare(a: Decimal, b: Decimal) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn round_to_places(value: Decimal, places: i32, mode: RoundingMode) -> Decimal {
-    let places = places.max(0) as u32;
-    if (value.scale as u32) <= places {
-        return value;
-    }
-    let drop = value.scale as u32 - places;
-    let negative = value.coef < 0;
-    let magnitude = value.coef.unsigned_abs();
-    let divisor = pow10_u128_checked(drop).unwrap_or_else(|| overflow());
-    let remainder = magnitude % divisor;
-    let bumped = round_quotient(magnitude / divisor, remainder, divisor, negative, mode);
-    let signed = if negative {
-        -(bumped as i128)
-    } else {
-        bumped as i128
-    };
-    Decimal::new(signed, places)
+    native_result(core_decimal::round_to_places(value, places, mode))
 }
 
 // ---------------------------------------------------------------------------
@@ -557,20 +348,10 @@ fn round_to_places(value: Decimal, places: i32, mode: RoundingMode) -> Decimal {
 
 /// Renders a `Decimal` as an exact decimal string.
 fn format_decimal(value: Decimal) -> String {
-    let negative = value.coef < 0;
-    let digits = value.coef.unsigned_abs().to_string();
-    let scale = value.scale as usize;
-
-    let body = if scale == 0 {
-        digits
-    } else if digits.len() > scale {
-        let point = digits.len() - scale;
-        format!("{}.{}", &digits[..point], &digits[point..])
-    } else {
-        format!("0.{}{}", "0".repeat(scale - digits.len()), digits)
-    };
-
-    if negative { format!("-{body}") } else { body }
+    core_decimal::format(core_decimal::Decimal {
+        coef: value.coef,
+        scale: value.scale,
+    })
 }
 
 /// Parses exact decimal / scientific text into a `Decimal`.
@@ -578,64 +359,10 @@ fn format_decimal(value: Decimal) -> String {
 /// Returns `None` when the text is not a valid literal or its exact form needs
 /// more than 38 significant digits.
 fn from_str(text: &str) -> Option<Decimal> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-
-    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
-        Some((m, e)) => (m, e.parse::<i64>().ok()?),
-        None => (text, 0),
-    };
-
-    let (sign, rest) = match mantissa.strip_prefix('-') {
-        Some(r) => (-1i128, r),
-        None => (1i128, mantissa.strip_prefix('+').unwrap_or(mantissa)),
-    };
-    if rest.is_empty() {
-        return None;
-    }
-
-    let (int_part, frac_part) = match rest.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (rest, ""),
-    };
-    if !int_part
-        .bytes()
-        .chain(frac_part.bytes())
-        .all(|b| b.is_ascii_digit())
-        || (int_part.is_empty() && frac_part.is_empty())
-    {
-        return None;
-    }
-
-    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
-    digits.push_str(int_part);
-    digits.push_str(frac_part);
-    let digits = digits.trim_start_matches('0');
-    if digits.is_empty() {
-        return Some(Decimal::ZERO);
-    }
-    if digits.len() as u32 > MAX_COEF_DIGITS {
-        return None;
-    }
-
-    let magnitude: i128 = digits.parse().ok()?;
-    // scale before applying the scientific exponent
-    let base_scale = frac_part.len() as i64;
-    let scale = base_scale - exponent;
-
-    let (coef, scale) = if scale >= 0 {
-        (sign * magnitude, scale as u32)
-    } else {
-        // Negative scale: multiply the coefficient up.
-        let factor = pow10_i128((-scale) as u32)?;
-        (sign * magnitude.checked_mul(factor)?, 0)
-    };
-    if digit_count(coef.unsigned_abs()) > MAX_COEF_DIGITS {
-        return None;
-    }
-    Some(Decimal::new(coef, scale))
+    core_decimal::parse(text).map(|value| Decimal {
+        coef: value.coef,
+        scale: value.scale,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,5 +877,51 @@ mod tests {
     fn a_and_b_negative_and_a_true_overflow() {
         assert_eq!(s(mul(d("-2"), d("3"))), "-6");
         assert_eq!(s(mul(d("-2"), d("-3"))), "6");
+    }
+
+    #[test]
+    fn native_adapters_match_runtime_core_decimal_semantics() {
+        let pairs = [
+            ("0.1", "0.2"),
+            ("99999999999.9999999999", "0.5"),
+            ("-7.5", "2"),
+        ];
+        for (left, right) in pairs {
+            let (left, right) = (d(left), d(right));
+            assert_eq!(
+                add(left, right),
+                native_result(core_decimal::add(left, right))
+            );
+            assert_eq!(
+                sub(left, right),
+                native_result(core_decimal::sub(left, right))
+            );
+            assert_eq!(
+                mul(left, right),
+                native_result(core_decimal::mul(left, right))
+            );
+            assert_eq!(
+                div_default(left, right),
+                native_result(core_decimal::div(left, right))
+            );
+            assert_eq!(
+                compare(left, right),
+                native_result(core_decimal::compare(left, right))
+            );
+        }
+        let value = d("2.355");
+        assert_eq!(
+            round_to_places(value, 2, RoundingMode::HalfEven),
+            native_result(core_decimal::round_to_places(
+                value,
+                2,
+                RoundingMode::HalfEven
+            ))
+        );
+        assert!(core_decimal::parse("999999999999999999999999999999999999999").is_none());
+        assert_eq!(
+            core_decimal::div(d("1"), Decimal::ZERO),
+            Err(core_decimal::DecimalError::DivisionByZero)
+        );
     }
 }

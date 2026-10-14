@@ -1,0 +1,5 @@
+fn make_action(): Fn() => Void { return (): Void => { }; }
+fn main(): Void {
+    mut channel: Channel<Fn() => Void> = Channel(1);
+    channel.send(make_action());
+}

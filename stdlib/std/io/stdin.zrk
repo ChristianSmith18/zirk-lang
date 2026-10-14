@@ -1,0 +1,21 @@
+// The compiler validates these ordinary shared signatures against its closed
+// std.io registry. Host implementation remains an internal compiler concern.
+//
+// Host binding remains compiler-private. These ordinary declarations are the
+// public API surface; the compiler validates and lowers their std.io
+// provenance without exposing a source-level intrinsic marker.
+share fn read_line(): String? {
+    return match read_line_result() {
+        ReadResult.Value(text) => text;
+        ReadResult.End => null;
+        ReadResult.Error(_) => null;
+    };
+}
+
+share fn read_line_result(): ReadResult<String> { return ReadResult.End; }
+
+share fn read_char(): ReadResult<Char> { return ReadResult.End; }
+
+share fn read_bytes(max: UInt64): ReadResult<Array<Byte>> { return ReadResult.End; }
+
+share fn read_exact(count: UInt64): Result<Array<Byte>, IoError> { return Error(IoError.EndOfStream); }

@@ -1,0 +1,8 @@
+{
+  "name": "class-construction-sugar",
+  "source": "import { stdout } from std.io;\nclass User { construct(public name: String) { stdout.println(this.name); } } class Base { construct() { stdout.println(\"base\"); } } class Child extends Base { } fn main(): Void { mut user = User(\"Ana\"); mut child = Child(); }",
+  "virtualName": "fixtures/class-construction-sugar.zrk",
+  "expectedOutput": ["Ana\n", "base\n"],
+  "completion": "completed",
+  "exclusions": []
+}

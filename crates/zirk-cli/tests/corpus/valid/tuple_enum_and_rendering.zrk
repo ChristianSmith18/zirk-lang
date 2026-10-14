@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Tuple length/to_string, enum case members and default rendering for
 // records, classes, algebraic enums and callable values.
 fn double(x: Int32): Int32 { return x * 2; }
@@ -31,7 +33,7 @@ class Person {
 }
 
 fn main(): Void {
-    inmut t = (1, "a", true);
+    inmut t =(1, "a", true);
     stdout.println(t.length.to_string());
     stdout.println(t.to_string());
     stdout.println(Color.Red.name);

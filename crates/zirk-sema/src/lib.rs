@@ -19,9 +19,13 @@
 
 mod checker;
 mod scope;
+pub mod stdlib;
 mod types;
 
-pub use checker::{Capture, CheckedProgram, ConcurrentPlan, LambdaInfo, check};
+pub use checker::{
+    Capture, CheckedProgram, ConcurrentPlan, EffectSummary, LambdaInfo, OwnershipMarkers,
+    OwnershipProperties, ServiceSpawnInfo, SettledPlan, TypeMapEntry, TypeMapKind, check,
+};
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
@@ -76,6 +80,20 @@ pub mod codes {
     pub const UNKNOWN_VARIANT: Code = Code::new("E0420");
     /// A declaration whose name collides with another.
     pub const DUPLICATE_DECLARATION: Code = Code::new("E0421");
+    /// A promoted constructor parameter collides with a field.
+    pub const DUPLICATE_PROMOTED_FIELD: Code = Code::new("E0477");
+    /// Promotion is ambiguous when a class declares several constructors.
+    pub const PROMOTION_MULTIPLE_CONSTRUCTORS: Code = Code::new("E0478");
+    /// Member promotion belongs only to class constructors.
+    pub const PROMOTION_OUTSIDE_CLASS_CONSTRUCT: Code = Code::new("E0479");
+    /// A variadic parameter cannot become one field.
+    pub const PROMOTED_VARIADIC: Code = Code::new("E0480");
+    /// A promoted field is used outside the constructor that declares it.
+    pub const PROMOTED_FIELD_LEGIBILITY: Code = Code::new("W0465");
+    /// An implicit subclass constructor calls its zero-argument base constructor.
+    pub const IMPLICIT_SUPER: Code = Code::new("W0466");
+    /// A synthesized constructor cannot satisfy its base constructor.
+    pub const UNSATISFIABLE_IMPLICIT_CONSTRUCTION: Code = Code::new("E0481");
     /// An `if` used as a value without an `else`.
     pub const IF_WITHOUT_ELSE: Code = Code::new("E0422");
     /// A construct this phase checks but does not compile yet.
@@ -258,4 +276,20 @@ pub mod codes {
     pub const PARALLEL_REGION_IO: Code = Code::new("E0473");
     /// A parallel `reduce` combiner the checker cannot establish as associative.
     pub const PARALLEL_NONASSOCIATIVE_REDUCE: Code = Code::new("E0474");
+    /// Return-type inference found `return` expressions whose types do not join.
+    pub const INCOMPATIBLE_INFERRED_RETURNS: Code = Code::new("E0475");
+    /// A return type cannot be inferred because the inference is recursive —
+    /// directly or through a cycle — and no member declares it.
+    pub const CIRCULAR_RETURN_INFERENCE: Code = Code::new("E0476");
+    /// A resource move inside a loop whose body may run more than once.
+    pub const TRANSFER_IN_LOOP: Code = Code::new("E0477");
+    /// A captured resource moved by a reusable closure.
+    pub const TRANSFER_IN_REUSABLE_CLOSURE: Code = Code::new("E0478");
+    /// A concurrent boundary has no proven Transfer/Share capability.
+    pub const UNSAFE_CONCURRENT_BOUNDARY: Code = Code::new("E0482");
+    /// `Concurrent.protect` contains a blocking or suspending effect.
+    pub const SUSPENDING_PROTECTED_REGION: Code = Code::new("E0483");
+    /// `Thread.run` is unavailable, and its literal lambda has effects the
+    /// future managed-thread boundary cannot currently account for.
+    pub const THREAD_RUN_UNSUPPORTED_EFFECT: Code = Code::new("E0484");
 }

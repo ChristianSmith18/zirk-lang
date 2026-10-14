@@ -1,0 +1,16 @@
+{
+  "name": "oop-polymorphic-collection",
+  "source": "import { stdout } from std.io;\nabstract class Shape {\n    abstract area(): Int32;\n    abstract name(): String;\n}\nclass Sq implements Shape {\n    s: Int32;\n    construct(s: Int32) { this.s = s; }\n    area(): Int32 { return this.s * this.s; }\n    name(): String { return \"sq\"; }\n}\nclass Rect implements Shape {\n    w: Int32;\n    h: Int32;\n    construct(w: Int32, h: Int32) { this.w = w; this.h = h; }\n    area(): Int32 { return this.w * this.h; }\n    name(): String { return \"rect\"; }\n}\nclass Animal { construct() { } speak(): String { return \"...\"; } }\nclass Dog extends Animal { construct() { super(); } #override speak(): String { return \"woof\"; } }\nclass Cat extends Animal { construct() { super(); } #override speak(): String { return \"meow\"; } }\nfn main(): Void {\n    mut shapes: List<Shape> = List();\n    shapes.add(Sq(2));\n    shapes.add(Rect(2, 5));\n    for s in shapes {\n        stdout.println(s.name() + \"=\" + s.area().to_string());\n    }\n    mut zoo: List<Animal> = List();\n    zoo.add(Animal());\n    zoo.add(Dog());\n    zoo.add(Cat());\n    for a in zoo { stdout.println(a.speak()); }\n    mut m: Map<Int32, Animal> = Map();\n    m.set(1, Dog());\n    m.set(2, Cat());\n    stdout.println((m.get_or_null(1) ?? Animal()).speak());\n    stdout.println((m.get_or_null(9) ?? Animal()).speak());\n}\n",
+  "virtualName": "fixtures/oop-polymorphic-collection.zrk",
+  "expectedOutput": [
+    "sq=4\n",
+    "rect=10\n",
+    "...\n",
+    "woof\n",
+    "meow\n",
+    "woof\n",
+    "...\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

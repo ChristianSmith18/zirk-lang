@@ -14,10 +14,9 @@ fn creates_user(): Void {
 
 Unit tests should isolate one contract, avoid uncontrolled I/O, and remain deterministic under parallel execution.
 
-A test may return `Void`, `Result<Void,E>`, `Task<Void>`, or
-`Task<Result<Void,E>>`. The runner awaits tasks and reports returned errors
-without converting expected `Result.Error` values into task rejection. Uncaught
-throwables fail the test with their structured trace.
+A test may return `Void` or `Result<Void,E>`. Concurrent work created by a
+test belongs to its runner-owned scope and is joined or cancelled before the
+case completes. Uncaught throwables fail the test with their structured trace.
 
 Use fixtures for repeated setup and explicit test data for edge cases. A unit
 test has the same visibility as another ordinary module: it cannot access

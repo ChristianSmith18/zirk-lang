@@ -1,0 +1,184 @@
+import { stdout } from std.io;
+
+// to_string() baseline examples
+//
+// This file is executable documentation for the CURRENT `to_string()`
+// surface, before the `universal-to-string-and-multiline-strings` change.
+// Every supported type is exercised below; types without `to_string()`
+// today are listed at the bottom as commented-out compile errors.
+
+enum Color { Red, Green, Blue }
+
+enum Shape {
+    Circle(radius: Float64),
+    Rectangle(width: Float64, height: Float64)
+}
+
+record Point {
+    x: Int32;
+    y: Int32;
+}
+
+interface Printable {
+    to_string(): String;
+}
+
+class Doc implements Printable {
+    body: String;
+    construct(body: String) { this.body = body; }
+    to_string(): String { return "Doc<{this.body}>"; }
+}
+
+class Person {
+    name: String;
+    age: Int32;
+    construct(name: String, age: Int32) {
+        this.name = name;
+        this.age = age;
+    }
+}
+
+fn helper(x: Int32): Int32 { return x * 2; }
+
+fn show_scalars(): Void {
+    stdout.println("== scalars ==");
+
+    // String returns itself; Char renders its grapheme.
+    stdout.println("hola".to_string()); // Expected: hola
+    stdout.println('π'.to_string()); // Expected: π
+
+    // Signed and unsigned integers render base ten.
+    stdout.println((-7).to_string()); // Expected: -7
+    stdout.println((42 as Int8).to_string()); // Expected: 42
+    mut big64: Int64 = 1234567890123;
+    stdout.println(big64.to_string()); // Expected: 1234567890123
+    mut base: Int128 = 123456789;
+    mut wide128: Int128 = base * base * base * base;
+    stdout.println(wide128.to_string());
+    // Expected: 232305722798259244150093798251441
+    stdout.println((255 as UInt8).to_string()); // Expected: 255
+    mut bigu64: UInt64 = 18000000000000000000;
+    stdout.println(bigu64.to_string()); // Expected: 18000000000000000000
+
+    // Radix overload: bases 2..36, sign-magnitude, lowercase digits.
+    stdout.println(255.to_string(radix: 16)); // Expected: ff
+    stdout.println((-255).to_string(radix: 2)); // Expected: -11111111
+
+    // Binary floats round-trip through the shortest display form;
+    // note `1.0` renders as `1` (no decimal point).
+    stdout.println((2.5f16).to_string()); // Expected: 2.5
+    stdout.println((0.1f32).to_string()); // Expected: 0.1
+    stdout.println(1.5f64.to_string()); // Expected: 1.5
+    stdout.println(1.0.to_string()); // Expected: 1
+
+    // Decimal (exact base-ten float) preserves coefficient + scale.
+    stdout.println(0.001.to_string()); // Expected: 0.001
+
+    stdout.println(true.to_string()); // Expected: true
+    stdout.println(false.to_string()); // Expected: false
+}
+
+fn show_temporals(): Void {
+    stdout.println("== temporals ==");
+
+    // Duration normalizes to the largest exact unit; 0 renders `0s`.
+    stdout.println(1500ms.to_string()); // Expected: 1.5s
+    stdout.println(250ms.to_string()); // Expected: 250ms
+    stdout.println(90m.to_string()); // Expected: 1.5h
+    stdout.println(0s.to_string()); // Expected: 0s
+    stdout.println((-5s).to_string()); // Expected: -5s
+
+    stdout.println(Date(2026, 9, 5).to_string());
+    // Expected: 2026-09-05
+    stdout.println(Time(14, 30, 15).to_string());
+    // Expected: 14:30:15
+    stdout.println(Time(14, 30, 15, 500000000).to_string());
+    // Expected: 14:30:15.5
+    stdout.println(DateTime(Date(2026, 9, 5), Time(14, 30, 15)).to_string());
+    // Expected: 2026-09-05T14:30:15
+}
+
+fn show_collections(): Void {
+    stdout.println("== collections ==");
+
+    inmut numbers = [1, 2, 3];
+    stdout.println(numbers.to_string()); // Expected: [1, 2, 3]
+
+    inmut nested = [[1, 2], [3]];
+    stdout.println(nested.to_string()); // Expected: [[1, 2], [3]]
+
+    inmut empty: Array<Int32> = [];
+    stdout.println(empty.to_string()); // Expected: []
+
+    inmut words: List<String> = ["a", "b"];
+    stdout.println(words.to_string()); // Expected: [a, b]
+
+    inmut t =("Ada", 37, true);
+    stdout.println(t.to_string()); // Expected: (Ada, 37, true)
+
+    // KNOWN ASYMMETRY (today): `list.to_string()` compiles but
+    // `println(list)` and `"items: {list}"` are rejected.
+    // stdout.println(numbers);          // error: Array<Int32> cannot be printed
+    // stdout.println("{numbers}");      // error: interpolation rejects it too
+}
+
+fn show_structured(): Void {
+    stdout.println("== structured ==");
+
+    // Record default rendering: Name(field: value, …) recursively.
+    inmut p = Point(x: 1, y: 2);
+    stdout.println(p.to_string()); // Expected: Point(x: 1, y: 2)
+
+    // Class without to_string gets the same structural default.
+    inmut person = Person("Ana", 30);
+    stdout.println(person.to_string());
+    // Expected: Person(name: Ana, age: 30)
+
+    // A class may declare to_string(); it wins over the default and is
+    // also used by println/interpolation.
+    inmut d = Doc("hello");
+    stdout.println(d.to_string()); // Expected: Doc<hello>
+    stdout.println("via contract: {d}"); // Expected: via contract: Doc<hello>
+
+    // Traditional enum renders the variant name only.
+    inmut c = Color.Green;
+    stdout.println(c.to_string()); // Expected: Green
+    stdout.println(Color.to_string()); // Expected: Color
+
+    // Algebraic enum: ONLY the variant name — the payload is not shown.
+    inmut s: Shape = Shape.Circle(5.0);
+    stdout.println(s.to_string()); // Expected: Circle
+}
+
+fn show_handles(): Void {
+    stdout.println("== handles ==");
+
+    // Named functions and lambdas both render <Callable> today.
+    stdout.println(helper.to_string()); // Expected: <Callable>
+    stdout.println("fn: {helper}"); // Expected: fn: <Callable>
+    inmut lam =(x: Int32): Int32 => x + 1;
+    stdout.println(lam.to_string()); // Expected: <Callable>
+
+    mut live = Doc("target");
+    mut w: Weak<Doc> = Weak.from (live);
+    stdout.println(w.to_string()); // Expected: <Weak>
+}
+
+fn main(): Void {
+    show_scalars();
+    show_temporals();
+    show_collections();
+    show_structured();
+    show_handles();
+
+    // Types WITHOUT to_string() today (each is a compile error if
+    // uncommented — they are the gap this proposal closes):
+    //
+    // inmut m = Map("a", 1);            // Map<String, Int32> has no member to_string
+    // inmut st = Set(1, 2);             // Set<Int32> has no member to_string
+    // inmut r = 1..10;                  // Range only exposes start/end/step
+    // inmut re = re'a+';                // Regex has no member to_string
+    // inmut n: Int32? = null;           // Int32? may be absent
+    // stdout.println(null.to_string()); // Null has no members
+    // Job<T>, Channel<T>, Pointer<T>, NativeSlice, Dependent, Pin: no member
+}

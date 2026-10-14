@@ -5,22 +5,29 @@ for signatures, ownership, errors, permissions, cancellation, limits, platform
 behavior, and implementation status. When this page and a module chapter differ,
 the module chapter and its normative specification own the contract.
 
+> **Concurrency status:** entries marked **delivered** describe compiler/runtime
+> capabilities available today. `std.thread` and `std.sync` below are specified
+> target APIs, not available Zirk source APIs. Scalar `Atomic<T>` is available
+> as a compiler-known source type; it is not evidence that the rest of `std.sync`
+> is implemented. See the [feature
+> status catalog](../../init/ZIRK_FEATURE_STATUS.md) for the current matrix.
+
 ## Find an API by task
 
 | Goal | Start here | Related modules |
 | --- | --- | --- |
 | Read terminal input or write output | [`std.io`](02-std-io.md) | `std.text`, `std.encoding`, `std.terminal` |
-| Read, write, watch, or inspect files | [`std.fs`](03-std-fs.md) | `std.path`, `std.encoding`, `std.task` |
+| Read, write, watch, or inspect files | [`std.fs`](03-std-fs.md) | `std.path`, `std.encoding`, structured branches |
 | Construct or compare paths | [`std.path`](04-std-path.md) | `std.fs`, `std.system.Platform` |
-| Run a child program or pipeline | [`std.process`](05-std-process.md) | `std.io`, `std.environment`, `std.task` |
+| Run a child program or pipeline | [`std.process`](05-std-process.md) | `std.io`, `std.environment`, structured branches |
 | Build, format, search, or match text | [`std.text`](05a-std-text.md) | native `String`/`Char`, `std.encoding` |
 | Store and transform in-memory values | [`std.collections`](06-std-collections.md) | iteration and functional-style handbook |
-| Work with dates, time zones, clocks, or timers | [`std.time`](07-std-time.md) | temporal-types handbook, `std.task` |
-| Coordinate concurrent work | structured-concurrency handbook | `std.sync`, typed channels, and the pending concurrency surface |
-| Use a dedicated system thread | [`std.thread`](09-std-thread.md) | `std.sync`, `std.task` |
-| Protect shared state or coordinate threads | [`std.sync`](10-std-sync.md) | atomics and memory-safety handbook |
-| Parallelize CPU work | [`std.parallel`](10a-std-parallel.md) | `std.task`, collections |
-| Resolve DNS or use TCP, UDP, TLS, or local sockets | [`std.net`](11-std-net.md) | permissions, `std.task` |
+| Work with dates, time zones, clocks, or timers | [`std.time`](07-std-time.md) | temporal-types handbook, structured branches |
+| Coordinate concurrent work (**delivered:** `concurrent`, `spawn`, `Job<T>`, channels) | structured-concurrency handbook | `std.sync` remains specified, not implemented |
+| Use a dedicated system thread (**specified, not implemented**) | [`std.thread`](09-std-thread.md) | future `std.sync` contract |
+| Protect shared state (**specified, not implemented**) | [`std.sync`](10-std-sync.md) | future atomics and memory-safety contract |
+| Parallelize CPU work (**delivered**) | [Parallel CPU operations](10a-std-parallel.md) | worker-pool operations and collections |
+| Resolve DNS or use TCP, UDP, TLS, or local sockets | [`std.net`](11-std-net.md) | permissions, structured branches |
 | Build an HTTP client/server, SSE, or WebSocket endpoint | [`std.http`](12-std-http.md) | `std.net`, `std.json`, `std.crypto` |
 | Parse, produce, stream, or bind JSON | [`std.json`](13-std-json.md) | generated codecs, `std.text` |
 | Hash, encrypt, sign, derive keys, or generate secure randomness | [`std.crypto`](14-std-crypto.md) | secret handling, TLS |
@@ -42,10 +49,10 @@ the module chapter and its normative specification own the contract.
 | `std.text` | builder, formatting, regex and Unicode text helpers | none |
 | `std.collections` | list, array, map, set, queue/deque and iteration contracts | none |
 | `std.time` | temporal family, clocks, timers, task-aware sleep | clock/time-zone access where scoped |
-| `std.task` | task handles/scopes, aggregation, channels and blocking bridge | inherited from work |
-| `std.thread` | dedicated thread creation, join and transfer | thread/system capability where scoped |
-| `std.sync` | mutex, read/write lock, semaphore, barrier, once and atomics | none |
-| `std.parallel` | bounded parallel map/filter/reduce and settlement | inherited from work |
+| `std.task` | No delivered public module API; concurrent scopes, `Job<T>`, timers and channels use the current compiler/runtime surface | inherited from work |
+| `std.thread` | **Specified, not implemented:** dedicated thread creation, join and transfer | planned thread/system capability |
+| `std.sync` | **Specified, not implemented:** mutex, read/write lock, semaphore, barrier and once; scalar `Atomic<T>` is available as a language type | shared-state coordination; see atomic limitations |
+| CPU parallelism (language surface; no importable `std.parallel` module) | `parallel {}`, `.parallel` collection adapter, `Parallel.each` | inherited from work |
 | `std.net` | addresses, DNS, TCP, UDP, TLS, local sockets and interfaces | network connect/listen |
 | `std.http` | client/server, URL, headers, bodies, cookies, SSE and WebSocket | network connect/listen |
 | `std.json` | exact tree, parse/stringify, typed codecs and streams | none by itself |
@@ -68,9 +75,10 @@ This index lists prominent entry types rather than every helper or enum.
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
 | collection families | [`std.collections`](06-std-collections.md) | owned/reference collections and iterators |
 | `Date`, `Time`, `DateTime`, `Instant`, `Duration`, `Period` | [`std.time`](07-std-time.md) | civil and monotonic temporal domains |
-| Channels and concurrent scopes | structured-concurrency handbook | structured concurrent work |
-| `Thread<T>` | [`std.thread`](09-std-thread.md) | explicit dedicated OS thread |
-| `Mutex<T>`, `RWLock<T>`, `Semaphore`, atomics | [`std.sync`](10-std-sync.md) | shared-state coordination |
+| `Channel<T>`, `concurrent`, `Job<T>`, `Timer` | structured-concurrency handbook | delivered structured concurrent work |
+| `Thread<T>` | [`std.thread`](09-std-thread.md) | **Specified, not implemented:** explicit dedicated OS thread |
+| `Mutex<T>`, `RWLock<T>`, `Semaphore` | [`std.sync`](10-std-sync.md) | **Specified, not implemented:** shared-state coordination |
+| `Atomic<T>` | [Atomics](../02-handbook/18-concurrency/13-atomics.md) | Native scalar source API; target-supported Boolean and signed/unsigned integers through 64 bits, GC-inline payload; no pointer atomics |
 | `IPAddress`, `HostName`, `Port`, `SocketAddress` | [`std.net`](11-std-net.md) | immutable network addressing |
 | `TCPStream`, `TCPListener`, `UDPSocket` | [`std.net`](11-std-net.md) | transport resources |
 | `TLSConfiguration` | [`std.net`](11-std-net.md) | authenticated TLS policy |
@@ -99,7 +107,7 @@ error/resource rules are in [Common API Contracts](01-common-api-contracts.md).
 | Text | format, regex and encoding errors | invalid pattern differs from no match |
 | Collections | bounds, mutation/iteration and capacity/limit errors | absence differs from invalid access |
 | Temporal | parse, range, zone, ambiguity and clock errors | calendar ambiguity differs from exact-duration failure |
-| Tasks/threads/sync | cancellation, join, channel, lock and blocking errors | cancellation is not assertion/application failure |
+| Tasks/threads/sync | delivered scope/job/channel failures; future thread, lock and blocking error contracts | thread/synchronization error APIs are not currently exposed in Zirk |
 | Network | `IPAddressError`, `HostNameError`, `DNSError`, `TCPError`, `UDPError`, `TLSError`, `LocalSocketError`, `NetworkPermissionError` | resolution, connect, protocol, TLS and denial remain distinct |
 | HTTP | `URLError`, `HTTPProtocolError`, `HTTPHeaderError`, `HTTPBodyError`, `HTTPBodyConsumedError`, redirect/cookie/timeout/permission/server variants | status responses are not transport failures |
 | JSON | parse, encode/decode, number, limit, path and codec errors | syntax location and typed path are preserved |
@@ -135,21 +143,22 @@ project-level authorization model.
 
 | Operation family | Scheduler behavior | Cancellation and cleanup |
 | --- | --- | --- |
-| terminal/file/network/process task-aware I/O | suspends the task through the reactor where supported | removes waiter and closes or restores owned resources |
-| legacy blocking operation | requires the explicit task blocking bridge | runs in a separate bounded pool; cancellation cannot pretend native work stopped |
-| `Task` aggregation | suspends parent task | follows all/first/settled ownership policy and joins descendants |
-| channel send/receive | suspends under backpressure | canceled waiter is removed without consuming another result |
-| thread join | task-aware join bridge | thread cancellation remains cooperative; no arbitrary kill |
-| mutex/lock acquisition | waits through synchronization primitive | canceled wait does not acquire; guarded callback cannot `await` |
-| parallel collection work | managed worker pool | stops scheduling, joins started work, preserves settlement rules |
-| DNS/connect/TLS | reactor and bounded connection attempts | cancels races/handshake and closes runtime-owned transports |
-| HTTP body/pool/server | stream backpressure and structured handler tasks | disconnect cancels owned request scope; shutdown has bounded grace |
-| timers/sleep | task timer queue | cancellation removes timer/waiter |
-| filesystem watcher/signals | task-aware bounded event flow | slow observers cannot create unbounded queues or block root shutdown |
-| test case/fixture | runner-owned task scope | timeout/cancel runs cleanup and reports leaks distinctly |
+| terminal/file/network/process I/O | follows the behavior documented by that API; the general I/O reactor is not implemented | cancellation cannot preempt a blocking native call |
+| blocking operation | runs on the calling thread unless its API documents otherwise | no managed blocking pool or cancellation guarantee is available |
+| `concurrent` scope / `Job<T>` wait | **Delivered:** suspends the current branch or consumes its job result | scope joins or cancels owned branches on exit |
+| channel send/receive/drain | **Delivered:** send/receive suspend under backpressure; drain receives until closed or cancelled | bounded/rendezvous/growable behavior; `select` is unavailable |
+| thread join | **Specified, not implemented:** intended task-aware join contract | no Zirk thread API is currently available |
+| mutex/lock acquisition | **Specified, not implemented:** intended synchronization contract | no Zirk lock API is currently available |
+| parallel collection work | **Delivered:** managed worker pool | stops scheduling, joins started work, preserves input order where specified |
+| DNS/connect/TLS | target contract; current module support is partial | cancellation and transport cleanup depend on the delivered API |
+| HTTP body/pool/server | target contract; current language/runtime integration is incomplete | backpressure and structured cleanup are not general runtime guarantees yet |
+| timers/sleep | **Delivered:** cooperative timer service | cancellation removes the timer waiter |
+| filesystem watcher/signals | specified module contracts; current task-aware delivery is unavailable | no general watcher/signal event flow is exposed |
+| test case/fixture | target runner contract | runner-scoped timeout and leak handling are not general guarantees yet |
 
-No API spelled as task-aware implies an `async fn` language feature. Zirk uses
-`Task<T>`, `task`, and `await` under the structured-concurrency rules.
+No API spelled as task-aware implies an `async fn` language feature. The
+available structured-concurrency surface is `concurrent`, `spawn`, `Job<T>`,
+and `Timer`; the former `Task<T>`, `task`, and `await` surface was removed.
 
 ## Complexity and allocation index
 
@@ -166,7 +175,7 @@ API choice.
 | Queue/deque end operations | amortized constant time at supported ends |
 | Iterator pipelines | lazy unless a terminal operation or concrete collection is requested |
 | Temporal exact arithmetic | constant with bounded validation; zone/calendar lookup depends on zone data |
-| Task/channel operations | bounded scheduler/synchronization work; no unbounded hidden queue |
+| concurrent-scope/channel operations | bounded scheduler/synchronization work on delivered paths; no public `Task<T>` aggregation API |
 | Parallel map | preserves input order and uses one managed bounded worker pool |
 | DNS | cache lookup is bounded; network resolution and record count obey limits |
 | TCP/HTTP streaming | bounded buffering with backpressure; full-body helpers allocate up to configured limit |

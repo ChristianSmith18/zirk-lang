@@ -22,9 +22,10 @@ a reference.
 14. [Boolean](./07-boolean.md)
 15. [Char](./08-char.md)
 16. [String](./09-string.md)
-17. [Void, Never, Null, and Object](./10-void-never-null-object.md)
-18. [Duration](./11-duration.md)
-19. [Regex](./12-regex.md)
+17. [Triple-Quoted Strings](./09a-triple-quoted-strings.md)
+18. [Void, Never, Null, and Object](./10-void-never-null-object.md)
+19. [Duration](./11-duration.md)
+20. [Regex](./12-regex.md)
 
 Temporal values now have their own [Temporal Types](../03a-temporal/README.md)
 unit immediately after everyday types.

@@ -1,0 +1,9 @@
+fn cleanup_a(): Void { return; }
+fn cleanup_b(): Void { return; }
+
+fn main(): Void {
+    mut outcomes = Concurrent.of(
+        (): Void => cleanup_a(),
+        (): Void => cleanup_b(),
+    ).settled();
+}

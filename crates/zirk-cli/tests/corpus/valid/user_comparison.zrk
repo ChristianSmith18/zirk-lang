@@ -1,8 +1,10 @@
+import { stdout } from std.io;
+
 // Los operadores de comparación se resuelven por los métodos reservados _less etc.
 class Money {
     amount: Int32;
     construct(amount: Int32) { this.amount = amount; }
-     _less(other: Money): Boolean { return this.amount < other.amount; }
+    _less(other: Money): Boolean { return this.amount < other.amount; }
 }
 
 fn main(): Void {

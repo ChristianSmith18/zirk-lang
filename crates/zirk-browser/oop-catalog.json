@@ -1,0 +1,262 @@
+{
+  "schemaVersion": 1,
+  "constructs": [
+    {
+      "id": "classes",
+      "handbook": "08-classes-and-objects/01-declaring-classes",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-constructors"
+      ],
+      "corpus": [
+        "classes"
+      ]
+    },
+    {
+      "id": "fields-and-initializers",
+      "handbook": "08-classes-and-objects/02-fields-and-properties",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-constructors"
+      ],
+      "corpus": [
+        "field_default_honored"
+      ]
+    },
+    {
+      "id": "constructors",
+      "handbook": "08-classes-and-objects/03-constructors",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-constructors"
+      ],
+      "corpus": [
+        "named_constructor_overload",
+        "class_construction_sugar",
+        "constructor_override_default"
+      ]
+    },
+    {
+      "id": "this",
+      "handbook": "08-classes-and-objects/05-this",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-constructors"
+      ],
+      "corpus": [
+        "closure_captures_this"
+      ]
+    },
+    {
+      "id": "visibility",
+      "handbook": "08-classes-and-objects/06-visibility",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-visibility-inheritance"
+      ],
+      "corpus": []
+    },
+    {
+      "id": "inheritance",
+      "handbook": "08-classes-and-objects/07-inheritance",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-inheritance-chain",
+        "oop-subclass-adds-method"
+      ],
+      "corpus": [
+        "inheritance",
+        "subclass_adds_method"
+      ]
+    },
+    {
+      "id": "final",
+      "handbook": "08-classes-and-objects/07-inheritance",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-final-class"
+      ],
+      "corpus": []
+    },
+    {
+      "id": "abstract-classes",
+      "handbook": "08-classes-and-objects/08-abstract-classes",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-polymorphic-collection"
+      ],
+      "corpus": [
+        "abstract_class_dynamic_dispatch",
+        "abstract_class_and_interface"
+      ]
+    },
+    {
+      "id": "static-members",
+      "handbook": "08-classes-and-objects/09-static-members",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-static-mutable"
+      ],
+      "corpus": [
+        "static_field",
+        "static_method_call"
+      ]
+    },
+    {
+      "id": "object-identity",
+      "handbook": "08-classes-and-objects/10-object-identity",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-identity-aliasing"
+      ],
+      "corpus": [
+        "identity_and_equality"
+      ]
+    },
+    {
+      "id": "equality-contract",
+      "handbook": "08-classes-and-objects/10-object-identity",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-equality-contract"
+      ],
+      "corpus": [
+        "structural_equality"
+      ]
+    },
+    {
+      "id": "deep-clone",
+      "handbook": "08-classes-and-objects/11-cloning",
+      "verdict": "supported",
+      "fixtures": [
+        "clone-tree",
+        "clone-shared-child",
+        "clone-cycle",
+        "clone-polymorphic",
+        "clone-callable"
+      ],
+      "corpus": [
+        "clone_record",
+        "callable_clone"
+      ]
+    },
+    {
+      "id": "nested-inner-local-classes",
+      "handbook": "08-classes-and-objects/12-nested-classes",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-nested-inner-local"
+      ],
+      "corpus": []
+    },
+    {
+      "id": "interfaces",
+      "handbook": "09-interfaces-and-traits/01-interfaces",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-interface-trait-default"
+      ],
+      "corpus": [
+        "contracts",
+        "diamond_contracts"
+      ]
+    },
+    {
+      "id": "contract-composition",
+      "handbook": "09-interfaces-and-traits/02-implementing-contracts",
+      "verdict": "supported",
+      "fixtures": [],
+      "corpus": [
+        "transitive_contracts",
+        "generic_contract_composition"
+      ]
+    },
+    {
+      "id": "traits-and-defaults",
+      "handbook": "09-interfaces-and-traits/03-traits",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-interface-trait-default"
+      ],
+      "corpus": [
+        "inferred_trait_default",
+        "trait_super_method"
+      ]
+    },
+    {
+      "id": "generic-classes",
+      "handbook": "11-generics/02-generic-types",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-generics-two-params"
+      ],
+      "corpus": [
+        "generic_class_dispatch",
+        "generic_class_specialization",
+        "generic_contract_dispatch"
+      ]
+    },
+    {
+      "id": "records-and-enums-with-classes",
+      "handbook": "10-data-types/01-records",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-records-enums-in-classes"
+      ],
+      "corpus": [
+        "enum_class_payload",
+        "record_contract_dispatch"
+      ]
+    },
+    {
+      "id": "polymorphic-collections",
+      "handbook": "12-collections",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-polymorphic-collection"
+      ],
+      "corpus": []
+    },
+    {
+      "id": "exceptions-from-methods",
+      "handbook": "15-errors/04-exceptions",
+      "verdict": "supported",
+      "fixtures": [
+        "oop-exceptions-in-methods"
+      ],
+      "corpus": [
+        "exceptions_throw_try_catch_finally",
+        "exceptions_finally_on_return_break"
+      ]
+    },
+    {
+      "id": "operator-contracts",
+      "handbook": "05-operators-and-expressions/11-operator-overloading",
+      "verdict": "supported",
+      "fixtures": [],
+      "corpus": [
+        "operator_contracts",
+        "user_comparison",
+        "user_iterable"
+      ]
+    },
+    {
+      "id": "to-string-contract",
+      "handbook": "08-classes-and-objects/01-declaring-classes",
+      "verdict": "supported",
+      "fixtures": [],
+      "corpus": [
+        "to_string_contract",
+        "class_without_to_string"
+      ]
+    },
+    {
+      "id": "weak-references",
+      "handbook": "17-memory-and-safety",
+      "verdict": "excluded",
+      "fixtures": [],
+      "corpus": [],
+      "note": "Weak<T> instructions are excluded by ADR-020 (collector semantics); no browser claim."
+    }
+  ]
+}

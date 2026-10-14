@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut rows: List<Int32> = [1];
+    Concurrent.detach((): Void => { rows[0]; });
+}

@@ -1,0 +1,16 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    application.spawn_service((context: ServiceContext): Void => {
+        context.ready();
+        try {
+            context.ready();
+        } catch ServiceLifecycleError(error) {
+            stdout.println(error.code());
+        }
+        while true {
+            Timer.sleep(1ms);
+        }
+    });
+    Timer.sleep(3ms);
+}

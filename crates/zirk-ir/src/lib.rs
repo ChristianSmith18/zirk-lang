@@ -24,14 +24,20 @@
 //! of our own. The decision and its alternative are in decision D2 of the
 //! Phase 1 design.
 
+pub mod atomic;
 mod ir;
 mod lower;
 mod verify;
 
+pub use atomic::{
+    AtomicKind, AtomicOrder, ManagedAtomicOperation, declare_abi as declare_atomic_cell_abi,
+    declare_managed_abi as declare_managed_atomic_abi,
+};
 pub use ir::{
     BinaryOp, Block, BlockId, BranchKind, ClosureLayout, ContractTable, EnumLayout, ExternFn,
-    FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, Nullable, ObjectField,
-    ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId, ValueLayout,
+    FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, MutexId, Nullable,
+    ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId,
+    ValueLayout,
 };
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use verify::{IrError, verify};

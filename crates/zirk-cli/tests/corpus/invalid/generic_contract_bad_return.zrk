@@ -1,11 +1,11 @@
 interface Container<T> {
-     get(): T;
+    get(): T;
 }
 
 class Box<T> implements Container<T> {
     value: T;
     construct(v: T) { this.value = v; }
-     get(): Int32 { return this.value; }
+    get(): Int32 { return this.value; }
 }
 
-fn main(): Void {}
+fn main(): Void { }

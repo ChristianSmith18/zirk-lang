@@ -1,0 +1,21 @@
+import { stdout } from std.io;
+fn slow(label: String): Int32 {
+    try {
+        Timer.sleep(100ms);
+        return 1;
+    } finally {
+        stdout.println(label);
+    }
+    return 0;
+}
+fn main(): Void {
+    try {
+        mut value: Int32 = Concurrent.of(
+            (): Int32 => slow("cleaned-a"),
+            (): Int32 => slow("cleaned-b"),
+        ).within(1ms).first();
+        stdout.println(value);
+    } catch TimeoutError(e) {
+        stdout.println("timeout");
+    }
+}

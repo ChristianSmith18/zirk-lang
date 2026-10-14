@@ -1,0 +1,13 @@
+import { stdout } from std.io;
+
+class Point {
+    text: String;
+
+    construct(x: Int32) { this.text = "int"; }
+    construct(s: String) { this.text = s; }
+}
+
+fn main(): Void {
+    inmut point = Point(s: "string");
+    stdout.println(point.text);
+}

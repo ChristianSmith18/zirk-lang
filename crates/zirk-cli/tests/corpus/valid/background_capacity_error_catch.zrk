@@ -1,0 +1,10 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        throw BackgroundCapacityError("background quota reached");
+    } catch RuntimeError(error) {
+        stdout.println(error.code());
+        stdout.println(error.message());
+    }
+}

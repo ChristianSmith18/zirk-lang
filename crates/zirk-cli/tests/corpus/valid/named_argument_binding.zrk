@@ -1,0 +1,53 @@
+import { stdout } from std.io;
+
+fn join(prefix: String, suffix: String): String {
+    return prefix + suffix;
+}
+
+class Pair {
+    left: String;
+    right: String;
+
+    construct(left: String, right: String) {
+        this.left = left;
+        this.right = right;
+    }
+
+    render(prefix: String, suffix: String): String {
+        return prefix + this.left + this.right + suffix;
+    }
+}
+
+class Base {
+    left: String;
+    right: String;
+
+    construct(left: String, right: String) {
+        this.left = left;
+        this.right = right;
+    }
+
+    surround(prefix: String, suffix: String): String {
+        return prefix + this.left + this.right + suffix;
+    }
+}
+
+class Child extends Base {
+    construct() {
+        super(right: "B", left: "A");
+    }
+
+    render(): String {
+        return super.surround(suffix: ">", prefix: "<");
+    }
+}
+
+fn main(): Void {
+    inmut prefix = "PRE";
+    inmut suffix = "SUF";
+    stdout.println(join(suffix:, prefix:));
+    inmut pair = Pair(right: "R", left: "L");
+    stdout.println(pair.render(suffix: ">", prefix: "<"));
+    inmut child = Child();
+    stdout.println(child.render());
+}

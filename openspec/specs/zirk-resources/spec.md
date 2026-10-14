@@ -3,7 +3,9 @@
 ## Purpose
 Defines deterministic resource acquisition, cleanup, failure composition,
 responsibility transfer, and lifetime enforcement.
+
 ## Requirements
+
 ### Requirement: Match with closes successful acquisitions exactly once
 
 The language SHALL define `Resource<E from Error>` with typed `close` and
@@ -107,3 +109,14 @@ Resource cleanup SHALL observe an active cancellation token and avoid starting n
 - **WHEN** a `match with` scope is cancelled before cleanup begins
 - **THEN** the close is either skipped or returns a cancellation-specific error
 
+### Requirement: Cancellation closes active resources through structured cleanup
+
+Cancellation of a structured branch SHALL execute active `finally` blocks, close acquired resources in reverse acquisition order, and roll back any uncommitted unsafe journal before the branch is reported terminal. Cancellation SHALL NOT bypass language cleanup through a foreign panic unwind.
+
+#### Scenario: Branch is cancelled while holding a resource
+- **WHEN** cancellation reaches a branch with an acquired resource and a `finally` block
+- **THEN** `finally` runs and the resource is closed before the branch becomes terminal
+
+#### Scenario: Cancellation exits an uncommitted unsafe block
+- **WHEN** a branch is cancelled inside an unsafe block with journaled writes
+- **THEN** the journal is rolled back after inner cleanup and before cancellation is reported

@@ -21,7 +21,7 @@ mod source;
 
 pub use color::Color;
 pub use render::RenderStyle;
-pub use source::{FileId, SourceFile, SourceMap, Span};
+pub use source::{FileId, SourceFile, SourceIdentity, SourceMap, Span};
 
 /// A phase of `docs/init/ZIRK_ROADMAP.md`.
 ///

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // The `mut`/`inmut`/`inmut::strict` matrix on object references (D11, task
 // 5.15): sharing a plain `inmut` alias of a mutable object is unrestricted,
 // and a strict reference can alias another strict reference.

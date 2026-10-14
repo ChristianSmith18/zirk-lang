@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `?.` calling a `Void`-returning method (found via ADR-003's fase-4
 // investigation): the checker types the result as plain `Void`, not `Void?`
 // — there is no nullable form of "no value" to widen to — and the lowering
@@ -6,7 +8,7 @@
 class Counter {
     mut value: Int32;
     construct(value: Int32) { this.value = value; }
-     bump(): Void { this.value = this.value + 1; }
+    bump(): Void { this.value = this.value + 1; }
 }
 
 fn main(): Void {
@@ -14,5 +16,5 @@ fn main(): Void {
     mut absent: Counter? = null;
     present?.bump();
     absent?.bump();
-    stdout.println(present?.value ?? -1);
+    stdout.println(present?.value ?? - 1);
 }

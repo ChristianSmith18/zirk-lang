@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A multi-type-parameter user generic enum (`fase-3-generic-enums`, design
 // D2's first shape): constructed and matched on both variants.
 enum Either<L, R> {

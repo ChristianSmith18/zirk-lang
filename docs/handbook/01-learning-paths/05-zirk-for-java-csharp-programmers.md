@@ -26,7 +26,11 @@ failures are typed instead of relying on finalizers.
 
 ## Concurrency is structured
 
-There is no public global event loop and no `async fn` in Zirk 1.x. A `task` belongs to a scope, cancellation propagates through the structure, `parallel` requests multicore CPU work, and `thread` represents a real system thread.
+There is no public global event loop and no `async fn` in Zirk 1.x. Structured
+concurrency uses `concurrent { ... }`, `spawn`, and `Job<T>`; cancellation is
+cooperative. `parallel` requests CPU work that may use the worker pool. The old
+`task` syntax was removed, and a managed `thread` API is not currently
+available.
 
 ## Applications decide capabilities
 

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Rule B: a dependent binding's branch starts only after the branch it names
 // has produced its value (`concurrent-blocks-and-timers`, design D2).
 

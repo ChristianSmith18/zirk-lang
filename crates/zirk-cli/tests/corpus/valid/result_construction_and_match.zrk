@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Result<T,E>` (roadmap Phase 4a, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
 // section 2): construction (`Ok(...)`/`Error(...)`), destructuring
 // `match`, and the seven in-scope methods (`get_or_else` and the four
@@ -28,8 +30,8 @@ fn main(): Void {
     stdout.println(error.is_ok());
     stdout.println(error.is_error());
 
-    stdout.println(ok.ok_or_null() ?? -1);
-    stdout.println(error.ok_or_null() ?? -1);
+    stdout.println(ok.ok_or_null() ?? - 1);
+    stdout.println(error.ok_or_null() ?? - 1);
     stdout.println(ok.error_or_null() ?? "none");
     stdout.println(error.error_or_null() ?? "none");
 

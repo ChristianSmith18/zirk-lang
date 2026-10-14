@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Never`, the bottom type, and `fatalError(message: String): Never`
 // (roadmap Phase 4a, `ZIRK_LANGUAGE_SPEC.md` section 9). No value of `Never`
 // exists, so it is assignable anywhere and unifies with any type at a
@@ -11,7 +13,7 @@ fn pick(cond: Boolean): Int32 {
 }
 
 fn pick_reversed(cond: Boolean): Int32 {
-    return cond ? fatalError("unreachable in this test") : 7;
+    return cond ? fatalError("unreachable in this test"): 7;
 }
 
 fn pick_if(cond: Boolean): Int32 {

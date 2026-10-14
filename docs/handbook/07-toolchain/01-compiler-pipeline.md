@@ -36,6 +36,14 @@ LLVM IR → object → linker → native artifact
 > [`COMPILER_IMPROVEMENT_SUGGESTIONS.md`](../../../COMPILER_IMPROVEMENT_SUGGESTIONS.md)
 > for the observed integration state and implementation guidance.
 
+The LLVM backend now exposes `None`, `Less`, `Default`, and `Aggressive` object
+optimization levels for controlled parity experiments. The CLI continues to
+compile at `None`; optimized levels are not enabled for release builds because
+the current runtime benchmark matrix still shows hardening overhead and has not
+established a repeatable optimized-runtime gain. Checked numeric conversions,
+verified IR, and runtime allocation membership form part of the safety boundary
+before backend optimization is considered.
+
 ## Stage ownership
 
 | Stage | Compiler owner | Produces | Must not do |

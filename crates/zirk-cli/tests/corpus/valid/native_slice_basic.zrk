@@ -1,10 +1,12 @@
+import { stdout } from std.io;
+
 // NativeSlice<T>/NativeSliceMut<T> (roadmap Phase 4e, `fase-4e-native-slice`):
 // construction requires `unsafe`, but indexing (`view[i]`/`view[i] = x`),
 // `.length` and `.is_empty` do not — this fixture confirms that end to end.
 fn main(): Void {
     mut x: Int32 = 41;
     mut view: NativeSliceMut<Int32> = unsafe {
-        mut p: Pointer<Int32> = Pointer.from(x);
+        mut p: Pointer<Int32> = Pointer.from (x);
         p.as_slice_mut(1).unwrap()
     };
 

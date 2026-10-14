@@ -5,7 +5,9 @@
 Defines the translation from the IR into LLVM and the production of the linked executable.
 
 It includes the runtime safety guarantees the spec requires: ordinary overflow is a controlled error, and a division by zero never becomes undefined behaviour.
+
 ## Requirements
+
 ### Requirement: Translation from IR to LLVM
 
 The backend SHALL translate the typed IR to LLVM IR, preserving type semantics and control flow, including block graphs with cycles.
@@ -325,3 +327,45 @@ loop back-edge.
 #### Scenario: region submits to the pool and joins
 - **WHEN** codegen processes a `ParallelRegion`
 - **THEN** emitted code submits work to the pool and joins it before producing the region result
+
+### Requirement: Codegen for channel operations
+
+Code generation SHALL emit the `zirk_rt_chan_new`, send, receive, try, close,
+and accessor C-ABI calls. In the stackful executor model, a blocking send and
+receive SHALL follow the runtime suspension path, which parks and later resumes
+the current branch; no separate `zirk_rt_suspend` symbol is required. The try
+operations SHALL be plain calls that construct their typed outcome without a
+resume label.
+
+Construction SHALL pass the element size, alignment, and GC-reference offsets;
+send and receive SHALL pass source or destination element slots indirectly.
+
+#### Scenario: try receive is a plain call
+- **WHEN** codegen processes channel `try_receive`
+- **THEN** it calls the try-receive ABI without a suspension point
+
+#### Scenario: blocking receive uses stackful suspension
+
+- **WHEN** codegen processes a blocking channel `receive`
+- **THEN** it calls `zirk_rt_chan_recv` through the cooperative runtime path and
+  the generated function is unwind-capable
+
+### Requirement: Floating-to-integer code generation is checked
+
+Native code generation SHALL check finiteness and destination range before every floating-to-integer conversion. An out-of-range or non-finite operand SHALL use the language's controlled conversion failure path and SHALL never reach an LLVM conversion with undefined result semantics.
+
+#### Scenario: Out-of-range conversion is compiled
+- **WHEN** generated code converts a floating value outside the destination integer range
+- **THEN** it branches to a controlled failure before executing the conversion instruction
+
+#### Scenario: In-range conversion is compiled
+- **WHEN** generated code converts a finite representable floating value
+- **THEN** it applies the same rounding rule as the interpreter
+
+### Requirement: Optimized code preserves checked language semantics
+
+Any non-baseline LLVM optimization level enabled for release code SHALL preserve the observable values, diagnostics, and controlled failure categories of the unoptimized native build and the interpreter for the supported corpus and defined edge cases.
+
+#### Scenario: Optimized overflow and conversion paths are compared
+- **WHEN** optimized code is checked against baseline native and interpreted execution
+- **THEN** all outputs and failure categories agree for checked arithmetic and numeric boundary fixtures

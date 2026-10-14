@@ -1,11 +1,13 @@
+import { stdout } from std.io;
+
 interface Container<T> {
-     get(): T;
+    get(): T;
 }
 
 class Box<T> implements Container<T> {
     value: T;
     construct(v: T) { this.value = v; }
-     get(): T { return this.value; }
+    get(): T { return this.value; }
 }
 
 fn value_int(c: Container<Int32>): Int32 { return c.get(); }

@@ -15,11 +15,33 @@ Status values for the pipeline columns:
   `NOT_IMPLEMENTED` (parser), `NOT_LOWERED` (IR), `PENDING_FEATURE`
   (checker), or equivalent diagnostic.
 
-The evidence for each row is the archived OpenSpec change, the relevant
+The evidence for each row is the relevant active or archived OpenSpec change, the
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last updated with `spread-rest-operators`, **2026-09-13**.
+Last reviewed for `concurrency-completion`, **2026-10-13**.
+
+## Browser-hosted interpreter tooling
+
+`add-browser-ir-interpreter` adds an optional, versioned WASM tooling package,
+not a Zirk target. It executes verified IR for scalar and text values, exact
+Decimal through `zirk-runtime-core`, closures, collections, regex, temporal
+values, the object model (classes, inheritance, abstract classes, interfaces,
+traits, static and nested classes, generic classes, records, enums, typed
+exceptions) and bounded output. The package contract has deterministic compiler,
+capability, runtime, and resource-limit responses.
+
+The conformance evidence is the native end-to-end corpus: 184 of its 218 programs
+reproduce their native output in the browser, and the remaining 34 are the
+listed capability exclusions (concurrency, timers, `parallel`, channels,
+pointers, native slices, `unsafe` journals, `Pin`/`Dependent` and resource
+transfer); deep `clone()` runs on the interpreter heap. Object-model coverage is catalogued in
+[`browser-oop-coverage.md`](../browser-oop-coverage.md). `run` can also return an opt-in, bounded, read-only execution trace of object
+events (ADR-022). Native effects and multi-file/package execution remain
+outside the browser baseline. The exhaustive
+policy is [`browser-interpreter-support-matrix.md`](../browser-interpreter-support-matrix.md);
+no native feature becomes browser-available merely because its frontend or
+native backend is delivered.
 
 ---
 
@@ -63,7 +85,7 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | `mut`/`inmut` | yes | yes | yes | yes | yes | yes | — |
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
 | `if`/`else` | yes | yes | yes | yes | yes | yes | — |
-| `stdout.println` | yes | yes | yes | yes | yes | yes | Hardcoded intrinsic, not the full `std.io` contract. |
+| `std.io` standard streams | yes | yes | yes | yes | yes | yes | Source-defined `stdin`, `stdout`, and `stderr`; synchronous native/interpreter input, destination-labelled output, and browser stdin preflight. Async and terminal controls remain deferred. |
 
 ## Phase 2 — Core language surface
 
@@ -85,6 +107,7 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `class`, `construct` | yes | yes | yes | yes | yes | yes | — |
+| Promoted constructor parameters and implicit constructors | yes | yes | yes | yes | yes | yes | `add-class-construction-sugar`: member-modified class constructor parameters become fields; constructor-less classes accept zero arguments; an implicit subclass constructor delegates to an accessible zero-argument base constructor. |
 | Visibility (`public`/`private`/`protected`) | yes | yes | yes | yes | yes | yes | — |
 | Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`#override`; `final` seals classes and methods. |
 | `interface`/`trait` | yes | yes | yes | yes | yes | yes | `Keyword::Interface`/`Trait` in subset. |
@@ -115,11 +138,11 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | All 10 integer widths | yes | yes | yes | yes | yes | yes | `Int8`–`Int128`, `UInt8`–`UInt128`; `Type::from_name` resolves. |
-| Exact base-ten `Float` | yes | yes | yes | yes | yes | yes | `Base::Decimal`; 128-bit coefficient + scale, no `NaN`/infinity; the fractional default. `0.1 + 0.2 == 0.3`. |
+| Exact base-ten `Float` | yes | yes | yes | yes | yes | yes | `Base::Decimal`; 128-bit coefficient + scale, no `NaN`/infinity; the fractional default. Division precision uses exact decimal magnitude and integer powers retain the full `i128` exponent. `0.1 + 0.2 == 0.3`. |
 | `Float16`/`Float32`/`Float64`/`Float128` | yes | yes | yes | yes | yes | yes | `Float` aliases `Float64`; IEEE 754, `f` literal suffix. The old `BinaryFloat*` spellings no longer resolve (redirect diagnostic). |
 | `Char` as grapheme | yes | yes | yes | yes | yes | yes | `ADR-014`; runtime exposes grapheme helpers. |
 | Bitwise/shift operators | yes | yes | yes | yes | yes | yes | `TokenKind` `Amp`/`Pipe`/`Caret`/`Tilde`/`Shl`/`Shr`. |
-| Final-result scalar conversion | yes | yes | yes | yes | yes | yes | `T(expr)` evaluates `expr`, then converts its completed value. |
+| Final-result scalar conversion | yes | yes | yes | yes | yes | yes | `T(expr)` evaluates `expr`, then converts its completed value. Float-to-integer native conversion checks finiteness and exact target bounds before LLVM conversion; interpreter and native boundary failures are compared. |
 | String interpolation | yes | yes | yes | yes | yes | yes | `to_string()` contract. |
 | `Float128` on Windows | yes | yes | yes | yes | partial | partial | Excluded from Windows corpus; crashes the MSVC linker due to soft-float lib calls. |
 | Contextual numeric literal typing / mixed-width arithmetic | yes | yes | yes | yes | yes | yes | Every width resolves; literals take the destination context where applicable; binary operators promote to the smallest common numeric type, except integer `/`, which returns `Decimal`. `Float.format(spec)` is implemented with `spec` syntax `[0][width][.precision][e|E]`; `Float128` `to_string()`/`format()` still truncates to `Float64` (lossy for values not exactly representable in `f64`). |
@@ -165,6 +188,7 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Recursive lambda with explicit binding | yes | yes | yes | yes | yes | yes | `fase-4d-callables` corpus. |
 | Multiple declarations, simultaneous assignment | yes | yes | yes | yes | yes | yes | `fase-4d-declaraciones-multiples`; `left, right = right, left` swaps. |
 | General callable polymorphism | yes | yes | yes | yes | yes | yes | `MakeCallable`/`CallCallable` works end-to-end. `.clone()` on callables, GC tracking of capture blocks, and stored/returned callables are implemented. |
+| Optional return annotation (inferred return types) | yes | yes | yes | yes | yes | yes | `inferred-return-types`: `fn`, methods, and trait default bodies may omit `: T`; demand-driven inference unifies the body's `return`s, detects recursion cycles, and keeps the explicit annotation authoritative. `zirk check --types` emits the declaration/expression type map consumed by the VS Code hover. |
 
 ## Phase 4e — Managed memory and unsafe
 
@@ -191,15 +215,20 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Cooperative executor + scheduler control block + timer + per-task GC roots | n/a | n/a | n/a | n/a | yes | n/a | `fase-5-executor-core` runtime infrastructure: `executor.rs` / `task.rs` / `timer.rs` and `collector.rs` per-task root chains. `zirk_rt_run_main` runs `main` as the executor's root scheduler task. The scope table, join-or-cancel-and-clean protocol, and ambient-timer registration were added by `concurrent-blocks-and-timers`. |
 | removed `task` / `await` / `select` surface | n/a | targeted diagnostic | n/a | n/a | retained runtime only | yes | `remove-task-await-model`: `task`, `await`, `Task<T>`, task scope, selection, and shields were removed from lexer, AST, sema, IR, codegen, and corpus. Construct-shaped legacy syntax reports `E0318` with its replacement. |
 | `concurrent { }` / `spawn` / `Job<T>` / `Timer` | yes | yes | yes | yes | yes | yes | `concurrent-blocks-and-timers`: the `concurrent` block hoists its bindings and orders branches by a Rule B dataflow DAG; `spawn` adds a dynamic branch yielding a linear must-use `Job<T>` (`wait`/`cancel`/`done`); `Timer.sleep` is a cancellation safe point, `Timer.after` / `Timer.every` are ambient branches the scope cancels on exit. IR: `ScopeEnter` / `ScopeExit` / `BranchStart` / `JobWait`; codegen emits a per-site `extern "C" fn(ptr) -> i64` branch thunk and the renamed C-ABI (`zirk_rt_spawn` / `zirk_rt_job_wait` / `zirk_rt_scope_*` / `zirk_rt_timer_*` / `zirk_rt_sleep`). A branch's cancellation or unhandled exception unwinds natively through its own `uwtable`-marked stack; `main` runs in an implicit scope when it starts a branch directly. |
-| `parallel` | yes | yes | yes | yes | yes | yes | `parallel-cpu-regions`: `parallel { }` (`;`-separated `cores`/`chunk` header) opens a CPU region on a worker pool (`crates/zirk-runtime/src/pool.rs`), separate from the cooperative executor. `for` over `Array`/`List` work-splits through `InstKind::ParallelForStart`; ordered `map`/`filter`, `for_each`, `Parallel.each`, `sum`, and associative `reduce` use the same worker dispatch, with input-order materialization. `reduce_ordered` remains sequential. I/O/suspension is rejected in a region and mutable reference capture is rejected at its boundary. The stop-the-world safepoint collector is delivered alongside it (`ADR-019`). `thread`/`Sync` remain gated by `concurrency-completion`. |
-| `Channel<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (`fase-5-select-and-channels`). |
-| `Atomic<T>` | yes | no | no | no | no | no | `pending_type` Phase 5 (steps 4–6). |
+| `Concurrent.of(...).first()` / `.settled()` / `.within(Duration)` | n/a | yes | yes | yes | yes | yes | `concurrency-completion`: direct homogeneous thunk pipelines, deterministic completion selection, ordered `Outcome<T>` payload roots, cleanup-aware cancellation, and timeout with caller-cancellation precedence. `.settled()` maps a thrown `CancelledError` to `Outcome.Cancelled` after cleanup; a cleanup failure becomes `Rejected`. `Void` and `Never` result types are rejected. |
+| `Concurrent.each` / `Concurrent.each_settled` | n/a | yes | yes | yes | yes | yes | Native scheduler only; Array/List of at most 256 elements, input held through `inmut::strict` with a deeply `Share` element graph, default concurrency 32 and explicit limit 1..=256. Both preserve input order and validate bounds before admission. `each` cancels and joins siblings after callback failure; `each_settled` returns one typed outcome per callback. Caller cancellation joins admitted work and returns no partial list. Browser interpreter excludes native managed scopes/outcomes. |
+| `parallel` | yes | yes | yes | yes | yes | yes | `parallel-cpu-regions`: `parallel { }` (`;`-separated `cores`/`chunk` header) opens a CPU region on a worker pool (`crates/zirk-runtime/src/pool.rs`), separate from the cooperative executor. `for` over `Array`/`List` work-splits through `InstKind::ParallelForStart`; ordered `map`/`filter`, `for_each`, `Parallel.each`, `sum`, and associative `reduce` use the same worker dispatch, with input-order materialization. `reduce_ordered` remains sequential. I/O/suspension is rejected in a region and mutable reference capture is rejected at its boundary. The stop-the-world safepoint collector is delivered alongside it (`ADR-019`). Language-level synchronization and full `Transfer`/`Share` enforcement remain incomplete. |
+| `Thread.run(fn)` | n/a | yes | yes | yes | yes | yes | Native supported 64-bit targets only. Uses a 64-worker process-wide managed pool with 1,024 queued callbacks and cooperative backpressure. Sema enforces callback shape, complete effects, no suspension/spawn, capture ownership, and result ownership. Runtime registers worker roots and joins before releasing caller slots; codegen fails closed on Wasm and 32-bit pointer ABIs. Blocking FFI whose effects/collector transition cannot be proven remains rejected; browser interpreter excludes the operation. |
+| `Mutex<T>` / `mutex.with` | n/a | yes | yes | yes | yes | yes | Native managed mutex with inline, descriptor-traced payload. Only `with` exposes a writable borrowed view; sema rejects escape and transitive suspension/block/spawn, IR verifies region/lock/root invariants, and LLVM calls the FIFO cooperative runtime ABI. Unwind and source-exception cleanup are verified; other public synchronizers remain unavailable. |
+| `Channel<T>` | yes | yes | yes | yes | yes | yes | `typed-channels`: bounded/rendezvous/growable channels, cooperative send/receive, try outcomes, closure, GC tracing, and indirect native ABI. `select`/drain follow-ups remain. |
+| `Atomic<T>` language feature | yes | yes | yes | yes | yes | yes | Native source API and managed lowering support `Boolean` and signed/unsigned 8/16/32/64-bit integers when the target provides that atomic width; the scalar payload is inline in the GC-managed object. Operations default to `SeqCst`; weaker orders require `unsafe`, and a dynamically invalid order raises `InvalidArgumentError`. Pointer atomics are unsupported. Native-host E2E coverage passes. Runtime build checks pass on nine configured LLVM triples plus `wasm32-unknown-unknown`, but are compile-only and do not establish non-host execution support. `Thread<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` remain unavailable. |
+| Detached background work and supervisor | n/a | yes | yes | yes | partial | yes | `concurrency-completion`: native `Concurrent.detach` validates zero-argument `Void` callbacks and capture ownership, lowers to the bounded executor-owned supervisor, retains capture roots, reports per-job diagnostics, and maps 256-job saturation to `BackgroundCapacityError`; native E2E covers execution, root drain, exact saturation, rejection, and permit reuse. The supervisor uses a fixed five-second cooperative shutdown grace. Language-level `App.on_background_error` delivery and `application.spawn_service`, configurable grace, host signals, and service lifecycle integration remain unavailable. |
 
 ## Phase 6 — Project system and CLI
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zkinit` / multi-file projects | no | no | no | no | no | partial | `zirk build`/`zirk run` operate on a single file today. |
+| `.zkinit` / multi-file projects | yes | yes | yes | partial | no | yes | `add-packages-and-module-exports`: project discovery, package/application identity, quoted local imports, logical package imports, `share mod` roots, local/vendored graph traversal and lock metadata validation reach `check`/`build`/`run`. Registry/Git acquisition, verified archive hashes and publication remain pending. |
 | `requires`/`during: build` manifest | no | no | no | no | no | no | Spec defined; not started. |
 
 ## Phase 7 — Standard library
@@ -207,12 +236,12 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `Array<T>`, `List<T>` | yes | yes | yes | yes | yes | yes | `collection-sequence-pipeline` adds eager `map`/`filter`/`for_each`/`reduce`/`sum`/`count`/`collect`, membership, in-place reverse/sort, and nullable first/last/pop; existing indexing, slicing, cloning, rendering, and mutations remain supported. |
-| `Map<K,V>`, `Set<T>` | yes | yes | yes | yes | partial | yes | `map-set-collections`; constructors, `.length`/`.is_empty`, `Map.set`/`contains_key`/`get_or_null`/`remove`, `Set.add`/`contains`/`remove`, and end-to-end fixtures. Runtime is a minimal i64 hash map/set; it does not trace GC references yet. |
+| `Map<K,V>`, `Set<T>` | yes | yes | yes | yes | partial | yes | `map-set-collections` plus `type-safety-and-runtime-hardening`; the public operations and end-to-end fixtures are present. The runtime stores one-word keys/values/elements, traces declared managed references, snapshots normalized String keys/elements to keep hashes stable after mutation, and reclaims backing storage with its managed handle. Sema rejects unsupported aggregate representations; this remains a deliberately limited implementation, not full generic collection support. |
 | `Range<T>` | yes | yes | yes | yes | yes | yes | `collection-sequence-pipeline` adds eager `map`/`filter`/`for_each`/`reduce`/`sum`/`count`/`collect`; ranges retain their arithmetic properties and materialize as `List<T>` at the terminal boundary. |
 | `Duration` (literals, arithmetic, printing) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; exact signed nanosecond duration with suffixes `ns`–`w`. `native-type-member-surface` added `abs()`, `sign()`, `is_zero()`, `is_positive()`, and `is_negative()`. |
-| `Date` / `Time` / `DateTime` (civil temporal) | yes | yes | yes | yes | yes | yes | `date-and-time-types` + `temporal-rich-api`: validated constructors throwing `InvalidDateError`/`InvalidTimeError`; component, calendrical (`day_of_week`, `day_of_year`, ISO `week_of_year`, `quarter`, `days_in_month`/`days_in_year`, `is_leap_year`) and sub-second (`millisecond`, `microsecond`, `nanosecond`) properties; `is_before`/`is_after`/`is_same`/`is_same_or_before`/`is_same_or_after`/`is_between`/`is_weekday`/`is_weekend` queries; validated `with_*` replacements; `start_of`/`end_of(unit)` → `Result<_, ParseError>`; strict ISO `Date.parse`/`Time.parse`/`DateTime.parse`; `format(pattern)`; `to_iso_string`; `Date ± Int`, `Date - Date`, `Time ± Duration` (wrapping), `Time - Time`, `Date + Time`, `DateTime ± Duration`, `Date ± Duration` → `DateTime`, `DateTime - DateTime` → `Duration`; `Date.today()`/`Time.now_local()`/`now_utc()`/`DateTime.now_*`. |
+| `Date` / `Time` / `DateTime` (civil temporal) | yes | yes | yes | yes | yes | yes | `date-and-time-types` + `temporal-rich-api`: validated constructors throwing `InvalidDateError`/`InvalidTimeError`; component, calendrical (`day_of_week`, `day_of_year`, ISO `week_of_year`, `quarter`, `days_in_month`/`days_in_year`, `is_leap_year`) and sub-second (`millisecond`, `microsecond`, `nanosecond`) properties; `is_before`/`is_after`/`is_same`/`is_same_or_before`/`is_same_or_after`/`is_between`/`is_weekday`/`is_weekend` queries; validated `with_*` replacements; `start_of`/`end_of(unit)` → `Result<_, ParseError>`; strict ISO `Date.parse`/`Time.parse`/`DateTime.parse`; `format(pattern)`; `to_iso_string`; `Date ± Int`, `Date - Date`, `Time ± Duration` (wrapping with checked wide intermediates), `Time - Time`, `Date + Time`, `DateTime ± Duration`, `Date ± Duration` → `DateTime`, `DateTime - DateTime` → `Duration`; `Date.today()`/`Time.now_local()`/`now_utc()`/`DateTime.now_*`. |
 | Zone-aware temporal family (`Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift`, locales) | yes | no | no | no | no | no | `pending_type` Phase 7; `date-and-time-types` + `temporal-rich-api` delivered the civil surface. |
-| `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`; `re'...'` literal, `matches`, `find` (returns `Regex.Match?` with `group(n)`/`group(name)`/`start`/`end`/`text`), `replace`, `split()`, `find_all()`, `Regex.parse()`, and `match`-expression pattern integration delivered. |
+| `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`; includes `re'...'`, `matches`, `find`, `replace`, `split`, `find_all`, `Regex.parse`, and `match` integration. Runtime cache is bounded to 128 entries, 16 KiB per source pattern, and 256 KiB total retained source; compiled regex size is capped at 256 KiB. New patterns are rejected when limits are reached; entries are not evicted because handles may refer to them. |
 
 ## Phase 7b — Functional style
 
@@ -226,8 +255,8 @@ Last updated with `spread-rest-operators`, **2026-09-13**.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zpkg` / package manager | no | no | no | no | no | no | Phase 8. |
-| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | no | Phase 9. |
+| `.zpkg` / package manager | partial | partial | partial | no | no | partial | Package API/artifact inspection scaffolding exists, but publication remains gated on reproducible archives and cryptographic integrity verification. |
+| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-format` provides canonical whole-document formatting to the CLI, `zirk-lsp`, and browser package; the LSP MVP also serves diagnostics, hover, and document symbols over stdio. Incremental snapshots, completion, navigation, rename, range formatting, and a debugger remain Phase 9. |
 | Decorators (`fn dec`) | yes | no | no | no | no | no | `Keyword::Dec` gated to Phase 10. |
 
 ---

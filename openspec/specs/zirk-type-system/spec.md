@@ -5,7 +5,9 @@
 Defines the types of the language, name resolution, mutability, inference and flow analysis.
 
 This is where the rules of `ZIRK_LANGUAGE_SPEC.md` that most often surprise someone coming from another language are enforced: no numeric truthiness, no implicit conversions and no function overloading.
+
 ## Requirements
+
 ### Requirement: Runtime type identity is safe and representation-independent
 Every value and declared type MUST expose compiler-provided `Type` identity.
 Identity SHALL distinguish constructed generic arguments and provide broad
@@ -177,7 +179,7 @@ The checker SHALL verify the arity and types of the arguments of every call agai
 
 ### Requirement: Return coherence
 
-The checker SHALL verify that the returned value matches the declared return type, and that every path of a non-`Void` function returns a value, considering that `if`, `match`, and blocks terminated by an infinite loop (`loop` without an exiting `break`) may form part of that path.
+The checker SHALL verify that the returned value matches the function's resolved return type — the declared `: T` annotation when present, or the type inferred from the body under `return-type-inference` when absent — and that every path of a non-`Void` function returns a value, considering that `if`, `match`, and blocks terminated by an infinite loop (`loop` without an exiting `break`) may form part of that path.
 
 #### Scenario: Return of an incorrect type
 - **WHEN** a function declared `Int32` returns a string
@@ -195,6 +197,10 @@ The checker SHALL verify that the returned value matches the declared return typ
 - **WHEN** a non-`Void` function ends in an `if`/`else` where both branches return
 - **THEN** the check succeeds without requiring an additional return afterward
 
+#### Scenario: Inferred type checked like a declared one
+- **WHEN** a function's return type is inferred as `Int32` and a later `return` yields `String`
+- **THEN** the same return-mismatch diagnostic as with a declared `Int32` is emitted
+
 ### Requirement: Overflow of integer literals
 
 The checker SHALL reject integer literals that do not fit their type, per the `ZIRK_LANGUAGE_SPEC.md` section 3 rule that ordinary overflow produces a controlled error.
@@ -205,15 +211,19 @@ The checker SHALL reject integer literals that do not fit their type, per the `Z
 
 ### Requirement: Entrypoint
 
-The checker SHALL require the existence of a `main` function with the signature `fn main(): Void`, per `ZIRK_RUNTIME_SPEC.md` section 2.
+The checker SHALL require the existence of a `main` function whose resolved signature is `fn main(): Void`, per `ZIRK_RUNTIME_SPEC.md` section 2. The resolved signature is the declared one when `main` annotates its return type, or the inferred one when it does not; `fn main() { }` is therefore valid because it infers `Void`.
 
 #### Scenario: Missing entrypoint
 - **WHEN** the compiled file does not declare `main`
 - **THEN** a diagnostic indicating that the entrypoint is missing is emitted
 
 #### Scenario: Entrypoint with an incorrect signature
-- **WHEN** `main` is declared with parameters or with a return type other than `Void`
+- **WHEN** `main` is declared with parameters or resolves to a return type other than `Void`
 - **THEN** a diagnostic indicating the expected signature is emitted
+
+#### Scenario: Unannotated entrypoint
+- **WHEN** `main` is declared as `fn main() { }`
+- **THEN** its inferred `Void` return satisfies the entrypoint signature
 
 ### Requirement: Typing of loops and of `break`/`continue`
 
@@ -402,7 +412,12 @@ Every variadic parameter SHALL remain an ordered read-only `Iterable<T>`. A rest
 - **THEN** `tail` has an ordered collection type whose element type is `Int32`
 
 ### Requirement: Class defaults and constructor resolution
-An unmodified class field SHALL be `public mut`. A class MAY declare multiple constructors with distinct effective signatures. Selection SHALL consider arity, types, optional parameters, and names and SHALL reject ambiguous or duplicate effective signatures.
+An unmodified class field SHALL be `public mut`. A class MAY declare multiple
+constructors with distinct effective positional signatures. Constructor
+declarations whose parameter types and accepted arities admit the same
+positional call SHALL be rejected regardless of parameter labels. Selection
+among the remaining declarations SHALL consider arity, types, optional
+parameters, and names and SHALL reject genuinely ambiguous calls.
 
 #### Scenario: Default field modifiers
 - **WHEN** a class declares `name: String;`
@@ -772,11 +787,20 @@ acquired while a mutable alias remains accessible.
 
 ### Requirement: Constructor resolution
 
-The checker SHALL select among multiple `construct` declarations by arity, types, optionals and names, SHALL allow reordering named arguments, and SHALL reject duplicate effective signatures or ambiguous calls.
+The checker SHALL reject constructor declarations whose parameter types and
+accepted arities admit the same positional call, regardless of parameter
+labels. It SHALL select among the remaining `construct` declarations by arity,
+types, optionals and names, SHALL allow reordering named arguments, and SHALL
+reject genuinely ambiguous calls.
 
 #### Scenario: Reordered named construction
 - **WHEN** `User(name: "Cristian", id: 1)` matches `construct(id: UInt64, name: String)`
 - **THEN** that signature is selected and each value binds by name
+
+#### Scenario: Duplicate positional constructor signature
+- **WHEN** a class declares `construct(x: Int32)` and `construct(y: Int32)`
+- **THEN** the class declaration is rejected because `Point(1)` has no label
+  with which to distinguish the constructors
 
 ### Requirement: Checked casts
 
@@ -841,11 +865,7 @@ per `docs/CORE_LANGUAGE_SEMANTICS.md`.
 
 ### Requirement: `to_string()` contract
 
-The language SHALL define `to_string()` as a reserved contract, in the same
-family as the operator contracts (`ZIRK_LANGUAGE_SPEC.md` section 4): every
-scalar native type implements it, and a user type —class, record, enum— may
-implement it to produce its own textual representation. `print`/`println` SHALL
-route through it instead of accepting only a closed list of types.
+The language SHALL define `to_string()` as a reserved contract: every value-producing type answers it through a compiler default or a user-declared method. This includes collections, structured values, callables, weak references, opaque handles, Regex, Range, Map, Set, and nullable types. Only Void and Never have no text form; print/println route through it rather than a closed list.
 
 #### Scenario: Native type printable without declaring anything
 - **WHEN** an `Int32`, `Float64`, `Boolean` or `Char` is printed
@@ -855,13 +875,17 @@ route through it instead of accepting only a closed list of types.
 - **WHEN** a class declares `to_string(): String` and an instance is passed to `println`
 - **THEN** the check succeeds and the printed value is the one produced by that method
 
-#### Scenario: User type that does not implement it
-- **WHEN** a class without `to_string()` is passed to `println`
-- **THEN** a diagnostic naming the type is emitted, distinct from a generic `TYPE_MISMATCH`
+#### Scenario: Nullable receiver
+- **WHEN** `x: Int32?` is passed to `x.to_string()` or `println(x)`
+- **THEN** it succeeds and absence renders `<Null>`
+
+#### Scenario: Non-value types rejected
+- **WHEN** Void or Never is printed, converted, or interpolated
+- **THEN** a dedicated diagnostic states that it has no text form
 
 ### Requirement: String interpolation
 
-A `String` literal SHALL allow `{expr}` inside it, desugared to concatenating
+A String literal, including `'''…'''`, SHALL allow `{expr}` inside it, desugared to concatenating
 the literal text with `expr.to_string()` for each interpolated expression, in
 the order they appear.
 
@@ -869,8 +893,8 @@ the order they appear.
 - **WHEN** `"User: {user.name}"` is written
 - **THEN** the result concatenates the literal text with `user.name.to_string()`
 
-#### Scenario: Interpolation of a non-printable type
-- **WHEN** the interpolated expression has a type without `to_string()`
+#### Scenario: Interpolation of a non-value type
+- **WHEN** the interpolated expression is Void or Never
 - **THEN** the same diagnostic is emitted as passing that value directly to `println`
 
 ### Requirement: Conversion rules use new scalar names
@@ -1033,6 +1057,25 @@ block's bindings SHALL be a compile-time error.
 - **WHEN** `inmut a = f(b)` and `inmut b = g(a)` appear in the same block
 - **THEN** compilation fails naming the cycle
 
+### Requirement: Channel type and members
+
+`Channel<T>` SHALL be a known one-parameter generic. It SHALL support the
+bounded constructor, the zero-capacity rendezvous form, and the explicitly
+limited `Channel.unbounded<T>(limit: N)` form. Its members are `send`,
+`receive: T?`, `try_send: SendOutcome`, `try_receive: ReceiveOutcome<T>`,
+`close`, `is_closed`, `length`, `capacity`, and `drain: List<T>`.
+`Channel<T>` SHALL be `Share`, so a branch may capture an endpoint without
+consuming it.
+
+#### Scenario: Endpoint can be captured by a branch
+- **WHEN** a `spawn` body captures a channel and the outer scope still uses it
+- **THEN** checking succeeds because the endpoint is shared
+
+#### Scenario: try receive exposes a typed closed outcome
+
+- **WHEN** `ch.try_receive()` is checked for `Channel<Int32>`
+- **THEN** its type is `ReceiveOutcome<Int32>` with `Received`, `Empty`, and `Closed` variants
+
 ### Requirement: Parallel block and adapter typing
 
 A `parallel` expression SHALL have its final expression's type. `cores` SHALL
@@ -1045,3 +1088,15 @@ not established associative SHALL be rejected unless `reduce_ordered` is used.
 #### Scenario: adapter chain retains its sequential result type
 - **WHEN** `rows.parallel.map(cost).sum()` is checked
 - **THEN** its type equals the sequential `rows.map(cost).sum()` result type
+
+### Requirement: Accepted types have end-to-end representations
+
+The type checker SHALL accept a type use only when semantic operations, IR representation, native ABI, runtime storage, and GC behavior are defined for that use. The checker SHALL reject unsupported generic collection keys, values, or elements before lowering, with a stable diagnostic that identifies the type and operation.
+
+#### Scenario: Type passes checking but lacks a backend layout
+- **WHEN** a collection operation uses a type with no supported LLVM/runtime layout
+- **THEN** semantic analysis rejects it and compilation does not reach a code-generation panic
+
+#### Scenario: Type has a complete runtime representation
+- **WHEN** a generic value has defined storage, equality, and GC metadata
+- **THEN** it remains accepted and those semantics are preserved through code generation

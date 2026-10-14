@@ -1,0 +1,14 @@
+{
+  "name": "clone-shared-child",
+  "source": "import { stdout } from std.io;\nclass Child {\n    v: Int32;\n    construct(v: Int32) { this.v = v; }\n}\nclass Parent {\n    left: Child;\n    right: Child;\n    construct(c: Child) { this.left = c; this.right = c; }\n}\nfn main(): Void {\n    mut c = Child(1);\n    mut p = Parent(c);\n    mut q = p.clone();\n    stdout.println(p.left is p.right);\n    stdout.println(q.left is q.right);\n    stdout.println(q.left is p.left);\n    q.left.v = 5;\n    stdout.println(q.right.v);\n    stdout.println(p.left.v);\n}\n",
+  "virtualName": "fixtures/clone-shared-child.zrk",
+  "expectedOutput": [
+    "true\n",
+    "true\n",
+    "false\n",
+    "5\n",
+    "1\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

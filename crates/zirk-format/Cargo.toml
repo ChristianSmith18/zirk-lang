@@ -1,0 +1,12 @@
+[package]
+name = "zirk-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zirk-diagnostics.workspace = true
+zirk-ast.workspace = true
+zirk-lexer.workspace = true
+zirk-parser.workspace = true

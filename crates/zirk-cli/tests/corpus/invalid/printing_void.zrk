@@ -1,0 +1,5 @@
+fn nothing(): Void { }
+
+fn main(): Void {
+    stdout.println(nothing());
+}

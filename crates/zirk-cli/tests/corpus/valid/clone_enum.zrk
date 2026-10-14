@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 enum Shape {
     Circle(radius: Int32),
     Point,

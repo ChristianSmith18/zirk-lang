@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `for ... in` over a `String` produces `Char`, one Unicode extended
 // grapheme at a time (roadmap Phase 3b, task 6.3 — the debt Phase 2 first
 // noted). A byte offset threads the walk, so a multi-byte code point and an

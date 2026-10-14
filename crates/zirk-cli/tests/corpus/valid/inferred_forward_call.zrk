@@ -1,0 +1,15 @@
+import { stdout } from std.io;
+
+// Inference is demand-driven: `caller` is inferred first and asks for
+// `later`'s type even though it is declared afterwards.
+fn caller() {
+    return later() + 1;
+}
+
+fn later() {
+    return 41;
+}
+
+fn main() {
+    stdout.println(caller());
+}

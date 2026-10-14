@@ -5,8 +5,13 @@ Compiled, object-oriented programming language with static typing and inference.
 > **Easy by default, explicit when you need control.**
 
 Zirk's structured concurrency surface uses `concurrent` blocks, `spawn`,
-`Job<T>`, `Timer`, and `parallel` for real multi-core CPU regions. Typed
-channels and explicit thread APIs remain planned. Binaries are standalone:
+`Job<T>`, `Timer`, and `parallel` for real multi-core CPU regions, plus typed
+channels for cooperative communication. Explicit thread and synchronization
+APIs remain planned; scalar atomics currently exist only as an internal
+runtime/ABI foundation, not as Zirk source types. See the
+[concurrency implementation status](docs/init/ZIRK_FEATURE_STATUS.md#phase-5-concurrency-and-parallelism)
+and [runtime limits](docs/ZIRK_RUNTIME_SPEC.md) for exact guarantees.
+Binaries are standalone:
 they require no Node.js, Python, Java, or any other installation.
 
 ```zirk
@@ -26,8 +31,10 @@ fn main(): Void {
 Phase 4d — callable and binding completion — is **complete for its scoped delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` archived). Phase 4e — managed memory and unsafe boundaries — delivered the non-moving mark-sweep collector, `Weak<T>`, deep `clone()`, `Pointer<T>`/`extern "C"`, transactional `unsafe {}`/`commit {}`, and `NativeSlice<T>`/`NativeSliceMut<T>`. The active change is **`array-list-tuple-duration-regex`**, which adds `Tuple`, `Array<T>`, `List<T>`, `Duration`, `Regex`, the `String`/`Char` method surface, `Range<T>`, `type` alias lowering, and removes `value class`.
 
 ```
-   .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ binary
-               ✅          ✅          ✅         ✅         ✅          ✅
+   .zrk ──▶ [lexer] ──▶ [parser] ──▶ [sema] ──▶ [ir] ──▶ [codegen] ──▶ native binary
+               ✅          ✅          ✅         ✅         ✅
+                                                    └──▶ [interpreter] ──▶ browser WASM package
+                                                         optional; no Zirk-to-WASM code generation
 ```
 
 The complete, feature-by-feature status is in [docs/init/ZIRK_FEATURE_STATUS.md](docs/init/ZIRK_FEATURE_STATUS.md). Use it before assuming a construct is available; this README no longer repeats that enumeration.
@@ -39,7 +46,12 @@ zirk build hello.zrk    # compiles to a native executable
 zirk run hello.zrk      # compiles and runs
 ```
 
-Artifacts land in `build/`. Still in progress or not yet implemented: remaining collection operations beyond the delivered eager sequence pipeline, `Regex.split`/`String.split`, derived `Clone` for `record`/`enum`, and user-defined generic contract lowering (`array-list-tuple-duration-regex`); remaining concurrency (channels/atomics/threads, Phase 5); the multi-file project system and `.zkinit` (Phase 6); `Map<K,V>`/`Set<T>` and the rest of the standard library and temporal family (Phase 7); generators and the pipe operator (Phase 7b); and packaging/decorators/tooling (Phases 8–10). See the feature catalog for the exact, per-pipeline-stage status of each one.
+Artifacts land in `build/`. The delivered project slice includes quoted local
+imports, package roots declared in `.zkinit`, `share mod` barrel exports,
+unquoted package imports and lockfile validation for local/vendored
+dependencies. Registry/Git acquisition, reproducible `.zpkg` publication and
+the rest of the standard library remain pending. See the feature catalog for
+the exact, per-pipeline-stage status of each one.
 
 ## Architecture
 
@@ -53,11 +65,17 @@ A Cargo workspace with one crate per pipeline stage of `ZIRK_COMPILER_SPEC.md` s
 | `zirk-sema` | name resolution, types, flow analysis |
 | `zirk-ir` | typed, portable intermediate representation |
 | `zirk-codegen-llvm` | IR → LLVM → object file |
+| `zirk-runtime-core` | pure, platform-neutral runtime value semantics |
+| `zirk-interpreter` | verified IR execution with explicit bounded host effects |
+| `zirk-browser` | in-memory frontend and optional WASM browser contract |
 | `zirk-diagnostics` | error and warning formatting |
 | `zirk-cli` | the `zirk` executable |
 | `zirk-runtime` | runtime linked into produced binaries |
 
 Dependencies flow in a single direction along the pipeline. `zirk-diagnostics` is the only cross-cutting one.
+The browser branch uses the interpreter and `zirk-runtime-core`; it does not
+depend on LLVM, the native ABI runtime, or browser ambient authority. It is an
+optional execution engine for compatible source, not a native-target replacement.
 
 ## Getting started
 
@@ -84,6 +102,7 @@ cargo test --workspace
 - [ZIRK_ROADMAP.md](docs/init/ZIRK_ROADMAP.md) — the 13 phases, from here to self-hosting
 - [docs/decisions/](docs/decisions/) — ADRs: decisions that cascade to the rest of the project
 - [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md) — toolchain installation
+- [browser-package-handoff.md](docs/browser-package-handoff.md) — verified browser package handoff
 
 ## Language
 

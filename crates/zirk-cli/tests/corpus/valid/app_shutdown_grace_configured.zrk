@@ -1,0 +1,16 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut negative = -1ms;
+    try {
+        App.set_shutdown_grace(negative);
+    } catch InvalidArgumentError(_) {
+        stdout.println("negative rejected");
+    }
+    App.set_shutdown_grace(0ns);
+    Concurrent.detach((): Void => {
+        Timer.sleep(100ms);
+        stdout.println("background completed");
+    });
+    stdout.println("root completed");
+}

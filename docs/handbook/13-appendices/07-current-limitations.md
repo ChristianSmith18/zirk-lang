@@ -9,7 +9,27 @@ the `String` mutation/search surface, `Char` classification/normalization, and
 `record`). Their existence in documentation does not imply every pipeline
 stage implements them.
 
+The delivered `Map`/`Set` runtime remains intentionally narrower than the
+generic API contract: entries use a one-word representation, supported managed
+references are traced, mutable text keys/elements are normalized snapshots, and
+aggregate layouts that cannot be represented safely are rejected by semantic
+analysis. The native Regex cache is bounded to 128 entries, 16 KiB per source
+pattern, 256 KiB total retained pattern text, and 256 KiB compiled size per
+pattern; when full, new patterns are rejected instead of evicting handles that
+may still be live. Numeric casts and temporal arithmetic use checked bounds;
+native/interpreter parity coverage includes the documented overflow edges.
+
 Current high-impact delivery limits include:
+
+- Package roots, local/vendored dependency traversal, `share mod`, logical
+  package imports and lock metadata validation are delivered. Registry/Git
+  acquisition, cryptographic archive verification, package publishing and
+  complete collision resolution across opened module members are still
+  pending.
+
+- `zirk format` is canonical for the delivered source grammar, but it does not
+  format `.zkinit` manifests, accept style configuration, or support
+  range-formatting. Use `fmt off` / `fmt on` for deliberate exceptions.
 
 - `Fn(P...) => R` is parseable, type-checked, and lowered in every position
   (Phase 4d). A named function, capture-less lambda, or captured closure works
@@ -80,7 +100,7 @@ Current high-impact delivery limits include:
   (today: `String`, `NativeSlice<T>`/`NativeSliceMut<T>`) so the
   `Array<T>`/`List<T>` of `array-list-tuple-duration-regex` register their
   own support without another grammar change. Volatile access, untagged native-union access (no union type
-  exists), weak atomic ordering (`Atomic<T>` is Phase 5), a
+  exists), language-level atomics and their source-level ordering contract,
   native-library-linking manifest, and general provenance tracking for a
   view's known extent beyond the one recognized syntactic shape also
   remain.
@@ -183,11 +203,43 @@ Current high-impact delivery limits include:
   28-digit budget the rational operations use. `Decimal.format(spec)` and an
   explicit `RoundingMode` for `div` / `round` are specified but not implemented;
   both round half-to-even by default.
-- Standard-library, structured-concurrency, packaging, developer-tooling,
-  decorator, and public documentation surfaces are specified ahead of full
-  compiler/runtime delivery.
+- Concurrency is partially delivered. `concurrent {}`, `spawn`/`Job<T>`,
+  `Timer`, `parallel`, typed channels, completion combinators, bounded
+  `Concurrent.detach`, and `Mutex<T>.with` have compiler/runtime support, but
+  the broader Phase 5 completion work is still in progress. Cancellation is
+  cooperative at runtime safe points and interruptible waits; it does not
+  preempt arbitrary loops or blocking native calls. The runtime's `Transfer`
+  / `Share` and effect checks do not yet establish general end-to-end race
+  freedom. `RwLock`, `Semaphore`, `Barrier`, and `Once` are not available as
+  source APIs. Native `Thread.run(fn)` is available on supported 64-bit targets
+  with a 64-worker/1,024-queued-callback bound;
+  blocking FFI calls without a proven collector transition remain rejected.
+  Source `Atomic<T>` supports Boolean
+  and signed/unsigned integers through 64 bits only when the target provides
+  the matching atomic width. Its scalar payload is inline in the GC-managed
+  object; pointer atomics are unsupported. Operations default to `SeqCst`,
+  weaker orders require `unsafe`, and dynamically invalid orders raise
+  `InvalidArgumentError`. Native-host E2E coverage passes. The runtime library
+  also builds for nine configured LLVM triples plus `wasm32-unknown-unknown`,
+  but those are compile-only checks, not non-host execution evidence.
+  Cross-compilation does not establish complete concurrency support on every
+  target. Internal
+  background-service supervision and managed blocking-pool foundations also
+  do not constitute the corresponding public Zirk APIs. Shutdown drains and
+  reports unfinished work according to the owning runtime component; it does
+  not forcibly terminate arbitrary running native work.
+- Other standard-library, packaging, developer-tooling, decorator, and public
+  documentation surfaces are specified ahead of full compiler/runtime
+  delivery.
 
-Zirk 1.x explicitly excludes browser/WebAssembly, public runtime directives or
+Zirk 1.x explicitly excludes a Zirk WebAssembly target and browser/DOM
+integration from the source language. The optional browser-hosted verified-IR
+interpreter is developer tooling with a bounded package contract; it does not
+add browser APIs, platform directives, or a new deployment target. Its current
+execution subset and rejected effects are recorded in the browser interpreter
+support matrix, and are intentionally narrower than the native compiler.
+
+Zirk 1.x explicitly excludes public runtime directives or
 event loop, standalone `worker`, `async fn`, textual inline assembly, general
 `comptime`/`defer`, multiple class inheritance, traditional overloads, Result
 `?`, and public ownership/reference-counting semantics.

@@ -1,5 +1,11 @@
 # `std.sync`
 
+> **Implementation status — partially delivered.** The compiler exposes the
+> scalar `Atomic<T>` source API described in the [Atomics chapter](../02-handbook/18-concurrency/13-atomics.md).
+> `Mutex`, `RwLock`, `Semaphore`, `Barrier`, `Once`, and `ConditionVariable`
+> remain unavailable as Zirk source APIs. See the
+> [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md).
+
 `std.sync` provides scoped synchronization for shared state: `Mutex<T>`,
 `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `ConditionVariable` and supported
 atomics. It does not make standard collections implicitly thread-safe.
@@ -21,7 +27,8 @@ inmut count = users.with((items) => items.length);
 Returned values must be independent of protected storage. Exceptions release
 the lock and preserve completed mutations; there is no automatic rollback or
 Rust-style poisoning. Waiting for a mutex is cancelable, but the callback itself
-cannot suspend. Extract state, await, then reacquire to apply the result.
+cannot suspend. Extract state, perform the suspending operation, then reacquire
+to apply the result.
 
 `RwLock` permits concurrent readers and favors queued writers to avoid
 starvation. Semaphore permits are managed resources released on every scope
@@ -32,12 +39,14 @@ should prefer channels.
 
 ## Atomics and diagnostics
 
-Atomics cover supported Boolean/integer/native-safe families. Sequential
-consistency is the safe default; weaker memory ordering requires `unsafe` and
-does not make multi-step invariants atomic. Debug profiles detect known lock
-cycles, inconsistent acquisition order and excessive waits where possible,
-without claiming perfect deadlock detection.
+Atomics support `Boolean` and signed/unsigned integer widths through 64 bits
+where the target provides atomic operations. Their scalar payload is inline in
+the GC-managed object. Sequential consistency is the default; weaker memory
+ordering requires `unsafe`, and a dynamically invalid ordering raises
+`InvalidArgumentError`. Pointer atomics are unsupported. Atomics protect
+individual operations, not multi-step invariants. The remaining lock diagnostics
+apply only when those synchronization primitives are implemented.
 
 ---
 
-**Previous:** [← std.thread](09-std-thread.md) · **Next:** [ std.parallel](10a-std-parallel.md)
+**Previous:** [← std.thread](09-std-thread.md) · **Next:** [Parallel CPU operations →](10a-std-parallel.md)

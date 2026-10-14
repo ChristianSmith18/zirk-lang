@@ -1,0 +1,11 @@
+{
+  "name": "list-add",
+  "source": "import { stdout } from std.io;\nfn main(): Void {\n    mut l: List<Int32> = List();\n    l.add(1);\n    l.add(2);\n    l.insert(1, 9);\n    stdout.println(l.length);\n    stdout.println(l[1]);\n}\n",
+  "virtualName": "fixtures/list-add.zrk",
+  "expectedOutput": [
+    "3\n",
+    "9\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

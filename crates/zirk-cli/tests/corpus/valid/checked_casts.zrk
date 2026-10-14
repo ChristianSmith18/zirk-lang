@@ -1,22 +1,22 @@
+import { stdout } from std.io;
+
 // A checked cast (`as`, and its prefix form `<Type>`) verifies the runtime
 // type against a descriptor's ancestor list and terminates on a mismatch
 // (roadmap task 11.6). Also exercises the widening this task's fix found:
 // an ordinary upcast via an explicit annotation was silently mistyping the
 // IR before this — `mut a: Animal = Dog();` is exactly that shape.
-class Animal { construct() { }  speak(): String { return "..."; } }
+class Animal { construct() { } speak(): String { return "..."; } }
 class Dog extends Animal {
     construct() { super(); }
-    #override
-      speak(): String { return "woof"; }
+    #override speak(): String { return "woof"; }
 }
 class Cat extends Animal {
     construct() { super(); }
-    #override
-      speak(): String { return "meow"; }
+    #override speak(): String { return "meow"; }
 }
 
-interface Shape {  area(): Int32; }
-class Circle implements Shape { construct() { }  area(): Int32 { return 1; } }
+interface Shape { area(): Int32; }
+class Circle implements Shape { construct() { } area(): Int32 { return 1; } }
 
 fn main(): Void {
     mut a: Animal = Dog();

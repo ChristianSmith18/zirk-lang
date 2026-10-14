@@ -336,38 +336,69 @@ controlled traps; release correctness may not rely on those diagnostics.
 Safe references crossing concurrent boundaries follow the derived `Transfer`
 and `Share` rules in
 [STRUCTURED_CONCURRENCY_SEMANTICS.md](./STRUCTURED_CONCURRENCY_SEMANTICS.md).
-Unsafe does not waive them. Tentative transaction state cannot cross a boundary,
-and weak atomic ordering requires both an unsafe proof and the atomic contract.
+Unsafe does not waive them. Tentative transaction state cannot cross a boundary.
+Weak atomic ordering requires both an unsafe proof and the atomic contract
+where a language-level atomic operation is available.
 
-### `parallel` regions and the stop-the-world safepoint
+### Implemented concurrency guarantees and limits
 
-The collector stays non-moving mark-sweep with the same 3-word header
-regardless of whether a `parallel` region is running. An allocation that
-crosses the collection threshold while the worker pool has active workers
-raises a "collection requested" flag instead of collecting inline; each
-worker polls this at loop back-edges inside a region and after each chunk,
-parking when it is set, and the executor parks at its next scheduling turn.
-Once every active thread is parked, one thread walks every root — the
-executor's own task chains, every parked worker's shadow-stack chain, and
-deep-clone's in-progress roots — marks, sweeps the run's published heap,
-clears the flag, and releases every parked thread.
+The current collector is non-moving mark-sweep. Generated functions publish
+their managed roots in shadow-stack frames; executor task frames remain roots
+while tasks are suspended, task results remain rooted until consumed, and
+queued channel payloads are traced using their generated element layout.
+Registered pool mutators publish stable shadow-root chains and participate in
+the collector's stop-the-world protocol. The executor waits for registered
+mutators to park or enter the quiescent native-call state before scanning.
+This guarantee applies only to registered participants and compiler/runtime
+roots. Arbitrary Rust locals, foreign stacks, and unregistered native threads
+are not scanned. The private managed-blocking pool accepts Rust-owned closures
+and is not registered with the Zirk heap; it cannot safely access managed
+objects.
 
-Every managed reference a running function holds — a local, a parameter, a
-captured value — is rooted the same way regardless of its shape: the
-generic per-function prologue zero-initializes every reference-typed slot
-and pushes their addresses as one shadow-stack frame, and this collection
-walk reads that same frame set. A type that is a *single* managed pointer
-(`Object`/`Contract`/`Weak`/`Dependent`/`Pin`/`String`/`Char`/`Array<T>`/
-`List<T>`/`Range`/`Map<K,V>`/`Set<T>`) needs no further decomposition here —
-its own descriptor is what lets the mark pass trace through it. A type
-missing from that root-address table would still be zero-initialized (safe
-on its own) but never actually walked — invisible to every collection, so a
-threshold crossing anywhere in the program could reclaim it, or whatever it
-alone referenced, while still in use. This exact gap (`Array`/`List`/`Range`/
-`Map`/`Set` were missing from it) was found and fixed while implementing
-`parallel-cpu-regions`; `crates/zirk-cli/tests/end_to_end.rs`'s
-`a_list_survives_repeated_buffer_growth_under_a_small_threshold` guards
-against it regressing.
+The compiler inserts GC safepoint polls on generated CFG back-edges, including
+conditional edges and `continue`; this is a collector protocol, not a general
+cancellation poll. Cancellation is cooperative and delivered at runtime and
+compiler checkpoints. It does not preempt arbitrary instructions, tight loops,
+or synchronous native calls that do not reach a checked boundary. `Job.cancel`
+requests cancellation but does not wait for completion. `Concurrent.protect`
+defers cancellation while its checked synchronous cleanup lambda runs, then
+delivers cancellation at the next safe point. The checker does not prove
+termination or a time bound, so cleanup must terminate. No source-level timeout
+combinator is available.
+
+The effect checker propagates selected `may_suspend`, `may_block`, and
+`may_spawn` summaries through checked direct calls. Unresolved callable and
+`extern` effects are incomplete and conservatively treated as possibly
+suspending, blocking, and spawning. These summaries guard `parallel`,
+`Concurrent.protect`, and managed `Thread.run`; they do not classify all I/O/native calls or prove
+general nonblocking behavior. `Transfer`/`Share` derivation covers represented
+concrete type graphs and is enforced at implemented boundaries such as
+`spawn`, channels, `parallel`, and `Parallel.each`. Unknown/open and opaque
+native types, task handles, pointers, weak references, and views without an
+audited contract fail conservatively. This is not a blanket data-race or
+ownership guarantee. Managed `Thread.run` is available on supported native
+64-bit targets with Transfer/Share, effect, rooting, and join checks; blocking
+FFI without a verified native transition remains rejected. Mutex, rwlock,
+semaphore, barrier, and once remain runtime-private and unavailable to Zirk.
+
+The language exposes a managed `Atomic<T>` for `Boolean` and signed/unsigned
+integers through 64 bits where the target advertises the matching atomic width.
+Its scalar payload is inline in the GC-managed object; pointer, float, and
+aggregate atomics are unsupported. Operations default to sequential
+consistency; weaker orders require `unsafe`. Invalid dynamic order combinations
+raise `InvalidArgumentError` before access. No lock-free promise is made.
+Atomic operations protect only the individual scalar access and do not prove
+general data-race freedom. Mutex, rwlock, semaphore, barrier, and once remain
+unavailable language features.
+
+When the root executor task completes, it closes background-job admission,
+requests cancellation for tracked detached jobs, and waits for a fixed
+five-second grace. Expiry reports unfinished IDs but cannot forcibly stop a
+non-cooperative task. Before the managed heap is unpublished or released, the
+executor still joins active `parallel` regions, so this grace is not a hard
+process-shutdown bound. The service supervisor currently tracks lifecycle
+state only; it is not wired to launch Zirk services, host signals, or root
+shutdown.
 
 ## 15. Implementation checklist
 

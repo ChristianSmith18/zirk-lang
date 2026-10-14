@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `Throwable.stack_trace()` is built lazily on the first call and cached so
 // the same `String` is returned on subsequent calls.
 fn main(): Void {

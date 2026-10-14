@@ -1,6 +1,6 @@
 # Functions
 
-Functions give behavior a typed name and boundary. Zirk functions declare parameters and a return type; local inference can reduce repetition inside the body without weakening that contract.
+Functions give behavior a typed name and boundary. Zirk functions declare parameters and may declare a return type — or let the body infer it. Inference can reduce repetition without weakening the contract.
 
 This unit covers declarations, parameter forms, callable values, capture, mutability, overload alternatives, and functions that never return.
 

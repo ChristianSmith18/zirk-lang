@@ -1,25 +1,35 @@
 # Formatter
 
-The formatter is canonical and idempotent. It writes semicolons and normalizes whitespace, braces, line breaks, and semantically neutral ordering without a fragmented style configuration surface.
+The formatter is canonical and idempotent. It normalizes source layout without
+changing tokens, declaration order, or program meaning, and has no fragmented
+style-configuration surface.
 
-`zirk format` rewrites files; a check mode reports differences and exits
-nonzero without writing. Formatting the same bytes twice must produce identical
-bytes. Comments, documentation, literals, invalid/recovered source regions, and
-generated-source provenance are preserved through a lossless syntax layer.
+`zirk format <target>...` accepts files and directories (directories are
+searched recursively for `.zrk` files); a bare file name may omit `.zrk`.
+`--check` reports differences and exits nonzero without writing, while `--diff`
+prints proposed changes without writing. Invalid input reports diagnostics and
+is never partially rewritten. Formatting the same bytes twice produces
+identical bytes.
 
-The formatter may choose line breaks, indentation, spaces, trailing separators,
-and brace layout. It cannot reorder effects, change imports with different
-visibility, rewrite explicit types, or turn a braced `if` into the
-single-statement form. Configuration is deliberately narrow so libraries do not
-fragment into incompatible house styles.
+Canonical output uses four-space indentation and a 100-column width. A
+comma-separated group that exceeds that width breaks every element onto its own
+indented line; a fitting group remains inline. It removes trailing whitespace,
+normalizes tabs, and preserves `'''` literal layout. Leading comments follow
+the next construct, trailing comments stay on their line after one space, and
+comments in a broken list remain on their own list-indented line.
+
+Use `// zirk-compiler: fmt off` and `// zirk-compiler: fmt on` to retain a
+region byte-for-byte. Directives do not nest; an unclosed `fmt off` continues
+to EOF. The formatter cannot reorder effects, change imports, rewrite explicit
+types, or expand source sugar such as promoted constructor parameters.
 
 ```bash
-zirk format
-zirk format --check
+zirk format src/ examples/main
+zirk format --check src/
+zirk format --diff examples/main.zrk
 ```
 
-> **Implementation status:** canonical formatting is specified; a complete
-> lossless syntax layer and production formatter remain tooling work.
+The same engine is used by the CLI, language server, and browser package.
 
 ---
 

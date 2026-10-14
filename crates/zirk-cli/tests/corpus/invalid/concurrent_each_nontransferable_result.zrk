@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut value: Int32 = 1;
+    Concurrent.each([1], (item: Int32): Pointer<Int32> => unsafe { Pointer.from(value) });
+}

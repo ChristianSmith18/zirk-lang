@@ -47,6 +47,10 @@ Parsing text that can fail returns a typed result rather than relying on a cast:
 mut parsed: Result<Int32, ParseError> = Int32.parse(text);
 ```
 
+`to_string()` is the universal non-lossy rendering operation: every
+value-producing type answers it, and `print`/`println`/interpolation call the
+same contract. `Void` and `Never` are the only excluded types.
+
 ## Checked and nullable casts
 
 `as` performs a checked cast between related types (a prefix `<Type>`

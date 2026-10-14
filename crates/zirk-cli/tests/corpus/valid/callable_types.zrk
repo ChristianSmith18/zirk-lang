@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Fn(...) => R / Function(...) => R as a real, writable type (roadmap Phase
 // 4d): a named function assigned to a typed local, a closure that captures a
 // value and escapes its creating function, a recursive lambda with an
@@ -23,7 +25,7 @@ fn main(): Void {
     stdout.println(add_five(10));
     stdout.println(add_five(20));
 
-    mut fact: Fn(Int32) => Int32 = (n: Int32): Int32 => n <= 1 ? 1 : n * fact(n - 1);
+    mut fact: Fn(Int32) => Int32 =(n: Int32): Int32 => n <= 1 ? 1 : n * fact(n - 1);
     stdout.println(fact(5));
 
     mut a: Fn(Int32) => Int32 = double;

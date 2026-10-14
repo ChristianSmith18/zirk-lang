@@ -1,0 +1,9 @@
+interface ExternalValue {
+    value(): Int32;
+}
+
+fn read_external(value: ExternalValue): Int32 {
+    return value.value();
+}
+
+fn main(): Void { }

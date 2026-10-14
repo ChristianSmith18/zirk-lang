@@ -1,0 +1,18 @@
+import { stdout } from std.io;
+
+// A compiler-level smoke test for a bounded typed channel: construction,
+// indirect send/receive and idempotent close all have dedicated lowering.
+fn main(): Void {
+    mut channel: Channel<Int32> = Channel(1);
+    channel.send(7);
+    mut send_status = channel.try_send(8);
+    mut receive_status = channel.try_receive();
+    channel.send(9);
+    mut received: Int32? = channel.receive();
+    mut queued = channel.length;
+    mut limit = channel.capacity;
+    mut closed = channel.is_closed;
+    channel.close();
+    mut drained = channel.drain();
+    stdout.println("channel-ok");
+}

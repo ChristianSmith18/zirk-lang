@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Rich civil temporal API (`temporal-rich-api`): calendrical properties,
 // comparison queries, `with_*` mutation-by-copy, unit boundaries, strict
 // ISO parsing, pattern formatting and `Duration` interop — all on the

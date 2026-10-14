@@ -1,0 +1,6 @@
+enum Outcome { Success(value: String), Failure }
+
+fn main(): Void {
+    mut wide: Set<UInt128> = Set();
+    mut outcomes: Map<Outcome, Int32> = Map();
+}

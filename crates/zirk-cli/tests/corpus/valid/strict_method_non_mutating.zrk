@@ -1,7 +1,9 @@
+import { stdout } from std.io;
+
 class Counter {
     mut value: Int32;
     construct(value: Int32) { this.value = value; }
-     current(): Int32 { return this.value; }
+    current(): Int32 { return this.value; }
 }
 
 fn main(): Void {

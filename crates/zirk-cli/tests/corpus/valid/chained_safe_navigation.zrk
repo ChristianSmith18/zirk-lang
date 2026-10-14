@@ -1,10 +1,12 @@
+import { stdout } from std.io;
+
 // `?.` chains through more than one level (roadmap task 13.6, probing `?.`
 // against itself): a field read through `?.` feeding another `?.` method
 // call, short-circuiting at whichever link is absent.
 class Engine {
     horsepower: Int32;
     construct(horsepower: Int32) { this.horsepower = horsepower; }
-     power(): Int32 { return this.horsepower; }
+    power(): Int32 { return this.horsepower; }
 }
 
 class Car {
@@ -17,7 +19,7 @@ fn main(): Void {
     mut withoutEngine: Car? = Car(null);
     mut noCar: Car? = null;
 
-    stdout.println(withEngine?.engine?.power() ?? -1);
-    stdout.println(withoutEngine?.engine?.power() ?? -1);
-    stdout.println(noCar?.engine?.power() ?? -1);
+    stdout.println(withEngine?.engine?.power() ?? - 1);
+    stdout.println(withoutEngine?.engine?.power() ?? - 1);
+    stdout.println(noCar?.engine?.power() ?? - 1);
 }

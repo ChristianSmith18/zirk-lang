@@ -147,10 +147,13 @@ encoding, and platform lookup failures are typed errors. Case sensitivity is
 platform-defined and exposed consistently by the operation; portable programs
 must not declare two required names that differ only by case.
 
-Environment reads are non-blocking in the Zirk task model and allocate the
-returned safe value. Implementations may cache immutable decoded metadata, but
-must not cache a permission decision beyond its effective signed policy or
-silently return a stale secret after authority changes.
+Environment reads are synchronous process-environment lookups; they do not
+perform asynchronous I/O or suspend a cooperative branch. This contract does
+not imply that arbitrary filesystem, process, or network operations are
+non-blocking. Reads allocate the returned safe value. Implementations may cache
+immutable decoded metadata, but must not cache a permission decision beyond its
+effective signed policy or silently return a stale secret after authority
+changes.
 
 ---
 

@@ -94,6 +94,17 @@ pub struct SourceFile {
     text: String,
     /// Byte offset where each line starts. Always begins with 0.
     line_starts: Vec<u32>,
+    identity: Option<SourceIdentity>,
+}
+
+/// Loader-assigned ownership metadata for a source file. The diagnostics crate
+/// intentionally stores strings only, so the AST and source map stay acyclic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceIdentity {
+    pub package: String,
+    pub canonical_module_path: String,
+    pub written_path: String,
+    pub package_root: String,
 }
 
 impl SourceFile {
@@ -112,6 +123,7 @@ impl SourceFile {
             name: name.into(),
             text,
             line_starts,
+            identity: None,
         }
     }
 
@@ -130,6 +142,14 @@ impl SourceFile {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn set_identity(&mut self, identity: SourceIdentity) {
+        self.identity = Some(identity);
+    }
+
+    pub fn identity(&self) -> Option<&SourceIdentity> {
+        self.identity.as_ref()
     }
 
     /// The text covered by a span.
@@ -161,6 +181,46 @@ impl SourceFile {
         let up_to = (offset as usize).min(self.text.len());
         let column = self.text[start..up_to].chars().count() as u32 + 1;
         (line as u32 + 1, column)
+    }
+
+    /// Converts an offset into a zero-based line and a zero-based column
+    /// counted in UTF-16 code units — the coordinate system the Language
+    /// Server Protocol speaks.
+    ///
+    /// Unlike [`line_column`](Self::line_column), which counts whole Unicode
+    /// characters, a character outside the Basic Multilingual Plane advances
+    /// the column by two here, matching what editors send and expect.
+    pub fn line_column_utf16(&self, offset: u32) -> (u32, u32) {
+        let line = self.line_index(offset);
+        let start = self.line_starts[line] as usize;
+        let up_to = (offset as usize).min(self.text.len());
+        let column: usize = self.text[start..up_to].chars().map(char::len_utf16).sum();
+        (line as u32, column as u32)
+    }
+
+    /// The byte offset of a zero-based line and a zero-based UTF-16 column —
+    /// the inverse of [`line_column_utf16`](Self::line_column_utf16).
+    ///
+    /// Out-of-range input clamps: a missing line lands at the end of the
+    /// text, and a column past the line's end lands before its newline.
+    pub fn offset_at_utf16(&self, line: u32, utf16_column: u32) -> u32 {
+        let Some(&start) = self.line_starts.get(line as usize) else {
+            return self.text.len() as u32;
+        };
+        let end = self
+            .line_starts
+            .get(line as usize + 1)
+            .map(|&s| s as usize)
+            .unwrap_or(self.text.len());
+
+        let mut units = 0usize;
+        for (byte, ch) in self.text[start as usize..end].char_indices() {
+            if matches!(ch, '\n' | '\r') || units >= utf16_column as usize {
+                return start + byte as u32;
+            }
+            units += ch.len_utf16();
+        }
+        end as u32
     }
 
     /// Text of a one-based line, without its trailing newline.
@@ -270,6 +330,41 @@ mod tests {
     #[test]
     fn two_spans_combine_covering_both() {
         assert_eq!(Span::new(2, 5).to(Span::new(8, 10)), Span::new(2, 10));
+    }
+
+    #[test]
+    fn utf16_positions_are_zero_based() {
+        let f = file();
+        assert_eq!(f.line_column_utf16(0), (0, 0));
+        // The first byte of the second line.
+        assert_eq!(f.line_column_utf16(18), (1, 0));
+    }
+
+    #[test]
+    fn utf16_columns_count_astral_characters_as_two() {
+        // Each '😀' is one char but two UTF-16 code units: the '=' sits at
+        // UTF-16 column 4 while `line_column` reports char column 3.
+        let f = SourceFile::new("t.zrk", "😀😀=x");
+        let offset = f.text().find('=').unwrap() as u32;
+        assert_eq!(f.line_column_utf16(offset), (0, 4));
+        assert_eq!(f.line_column(offset), (1, 3));
+    }
+
+    #[test]
+    fn utf16_offsets_round_trip() {
+        let f = SourceFile::new("t.zrk", "mut a😀b = 1;\nfn f() {}\n");
+        let offset = f.text().find('=').unwrap() as u32;
+        let (line, column) = f.line_column_utf16(offset);
+        assert_eq!(f.offset_at_utf16(line, column), offset);
+    }
+
+    #[test]
+    fn utf16_offset_clamps_out_of_range_input() {
+        let f = SourceFile::new("t.zrk", "ab\ncd");
+        // Line 99 does not exist: lands at the end.
+        assert_eq!(f.offset_at_utf16(99, 0), 5);
+        // Column 99 past the end of line 0 lands before the newline.
+        assert_eq!(f.offset_at_utf16(0, 99), 2);
     }
 }
 

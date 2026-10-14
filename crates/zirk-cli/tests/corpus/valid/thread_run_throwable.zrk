@@ -1,0 +1,12 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        Thread.run((): Void => {
+            throw BackgroundCapacityError("thread callback failed");
+        });
+    } catch RuntimeError(error) {
+        stdout.println(error.code());
+        stdout.println(error.message());
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "oop-identity-aliasing",
+  "source": "import { stdout } from std.io;\nclass N { v: Int32; construct(v: Int32) { this.v = v; } }\nfn main(): Void {\n    mut a = N(1);\n    mut b = a;\n    mut c = N(1);\n    b.v = 9;\n    stdout.println(a.v);\n    stdout.println(a is b);\n    stdout.println(a is c);\n}\n",
+  "virtualName": "fixtures/oop-identity-aliasing.zrk",
+  "expectedOutput": [
+    "9\n",
+    "true\n",
+    "false\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

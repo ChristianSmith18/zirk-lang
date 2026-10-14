@@ -75,7 +75,7 @@ unsafe {
 }
 ```
 
-Invalid: `await`, task/thread creation, socket/file/process effects, or an
+Invalid: suspension or concurrent work, socket/file/process effects, or an
 unbounded raw write inside that reversible region. Irreversible effects require
 an explicit boundary after validation:
 
@@ -91,21 +91,21 @@ unsafe {
 }
 ```
 
-Valid structured aggregation and selection:
+Valid structured concurrency:
 
 ```zirk
-mut outcomes = await Task.settled(tasks);
+fn calculate(): Int32 { return 42; }
 
-select {
-    message = await messages.receive() => process(message),
-    after 5s => report_timeout(),
+concurrent {
+    inmut job = spawn calculate();
+    inmut result = job.wait();
 }
 ```
 
-Invalid: assuming `Task.settled` cancels siblings, assuming `select` cancels
-losing operations, detaching a task without an application supervisor, holding
-an ordinary mutex across `await`, or sharing a writable `List<T>` between tasks
-without transfer or synchronization.
+Invalid: using the removed `task`, `await`, or `select` constructs; assuming
+`parallel.settled` is a language API; detaching a branch without an application
+supervisor; or sharing a writable `List<T>` between concurrent branches without
+transfer or synchronization.
 
 ---
 

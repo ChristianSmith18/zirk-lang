@@ -1,0 +1,18 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut mutex: Mutex<Int32> = Mutex(1);
+    inmut failure: InvalidArgumentError = InvalidArgumentError("callback failure");
+    try {
+        mutex.with((value: Int32): Int32 => {
+            value = 9;
+            throw failure;
+            return value;
+        });
+    } catch InvalidArgumentError(error) {
+        stdout.println(error.code());
+    }
+
+    inmut result: Int32 = mutex.with((value: Int32): Int32 => value);
+    stdout.println(result);
+}

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // An out-of-range index on a constructed view fails with a controlled
 // bounds error (`IndexOutOfBoundsError`), not a crash or silent
 // out-of-bounds access (roadmap Phase 4e, `fase-4e-native-slice`, design D3,
@@ -5,7 +7,7 @@
 fn main(): Void {
     mut x: Int32 = 41;
     mut view: NativeSlice<Int32> = unsafe {
-        mut p: Pointer<Int32> = Pointer.from(x);
+        mut p: Pointer<Int32> = Pointer.from (x);
         p.as_slice(1).unwrap()
     };
 

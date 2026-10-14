@@ -1,0 +1,7 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    Concurrent.detach((): Void => { stdout.println("detached ran"); });
+    Timer.sleep(1ms);
+    stdout.println("root done");
+}

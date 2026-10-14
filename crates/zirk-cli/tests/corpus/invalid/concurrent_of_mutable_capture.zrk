@@ -1,0 +1,9 @@
+class Counter {
+    mut value: Int32;
+    construct() { this.value = 0; }
+    read(): Int32 { return this.value; }
+}
+fn main(): Void {
+    mut counter = Counter();
+    _ = Concurrent.of((): Int32 => counter.read(), (): Int32 => 2).settled();
+}

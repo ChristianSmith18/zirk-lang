@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `fase-3-generic-substitution-recursion`, `Checker::infer_type_params`
 // (design D2): with no expected-type annotation to seed `T` from, `w`'s own
 // declaration must infer `OnlyBox<T>`'s `T` purely from `Wrap`'s constructor

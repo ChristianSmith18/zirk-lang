@@ -17,6 +17,12 @@ Regex literals use `re'pattern'`. The lexer recognizes `**`, `**=`, `..=`,
 `do`, `gen`, and `yield`. An unterminated regex is diagnosed at its opening
 delimiter.
 
+Strings use either `"…"` or multiline `'''…'''` delimiters. The latter keeps
+physical content, escapes and interpolation, but removes the exact leading
+character prefix of the opening delimiter from every non-empty content line.
+The closing delimiter is alone on a line at or right of that edge; violations
+and unclosed literals are diagnostics.
+
 Conventions:
 
 - variables, functions, methods, parameters and files: `snake_case`;
@@ -88,13 +94,17 @@ block of `.zkinit`:
 ```text
 globals {
     inmut APP_NAME: String = "App";
+    // Scalar Atomic<T> is available where the target supports the width.
     mut REQUEST_COUNT: Atomic<UInt64> = Atomic(0);
 }
 ```
 
-Each consumer uses `use APP_NAME;`. A mutable global accessed from `parallel` or
-`thread` must be protected with `sync` or `Atomic<T>`; otherwise it is a compile
-error.
+Each consumer uses `use APP_NAME;`. A mutable global accessed from an
+implemented `parallel` boundary must satisfy that boundary's capture and
+ownership checks. Managed `Thread.run` and `Mutex<T>.with` are available on
+their supported native targets. `RwLock`, `Semaphore`, `Barrier`, and `Once`
+remain unavailable as source APIs. Scalar `Atomic<T>` supports Boolean and
+signed/unsigned integers through 64 bits when the target provides that width.
 
 ## 3. Type system
 
@@ -156,6 +166,13 @@ complete expression under its ordinary rules and converts only the final
 result. It never propagates `T` into nested operands: `Int32(3 / 4)` converts
 the completed `Decimal` quotient, while `String("value=" + 42)` remains invalid
 because the mixed concatenation itself is invalid.
+
+Every value-producing type automatically satisfies the standard
+`Stringifiable` trait and answers `to_string(): String`; `print`, `println`
+and string interpolation invoke it. The trait supplies a default body, so a
+class replacement uses `#override`. `Void` and `Never` have no text form.
+Absent nullable values render `<Null>`, collections render recursively, ranges
+mirror their literals, and opaque handles render `<TypeName>`.
 
 ## 4. Nullability, equality and operators
 
@@ -291,6 +308,8 @@ used instead.
 Lambdas are equivalent to function values:
 
 ```text
+import { stdout } from std.io;
+
 inmut ADD = (a: Int32, b: Int32): Int32 => a + b;
 inmut SUBTRACT = fn(a: Int32, b: Int32): Int32 => a - b;
 inmut ACTION = (): Void => {
@@ -342,10 +361,28 @@ constructor execution. A constructor may finalize an `inmut` attribute before
 the instance becomes available. There is no property declaration or implicit
 accessor dispatch; APIs use ordinary `get_` and `set_` methods.
 
+A `class` constructor parameter carrying one or more member modifiers declares
+and initializes a field with the same name. For example,
+`construct(public name: String, private inmut id: UInt64)` is equivalent to
+explicit field declarations followed by assignments from the parameters. The
+parameter remains available in the constructor body. Promotion is restricted
+to a single `class construct`; it cannot be variadic or duplicate a declared
+field. A promoted field used from another method produces a legibility warning
+suggesting an explicit declaration.
+
+A class with no written `construct` has an implicit zero-argument constructor.
+It is not materialized in source or tooling. For a subclass it invokes an
+accessible zero-argument base constructor; construction is rejected at the
+call site when the base needs arguments. Declaring any `construct` removes the
+implicit constructor.
+
 A class may declare multiple `construct` members when their effective
-parameter signatures differ. Resolution uses arity, type and argument labels,
-including reordered named arguments, and rejects duplicate or ambiguous sets.
-This exception does not enable ordinary function or method overloading.
+positional parameter signatures differ. Parameter labels do not distinguish
+constructors that accept the same positional arity and types: declaring both
+`construct(x: Int32)` and `construct(y: Int32)` is an error. Resolution uses
+arity, type and argument labels, including reordered named arguments, and
+rejects genuinely ambiguous calls. This exception does not enable ordinary
+function or method overloading.
 
 Named calls use `name: value`. When a simple visible identifier has exactly the
 parameter name, `name:` abbreviates `name: name`, so
@@ -551,23 +588,40 @@ behaviour.
 ## 10. Modules, project and packages
 
 ```text
-share class User {}
-import { User, Role -> DomainRole } from "./domain/user";
+package acme.cli;
+share mod terminal from "./terminal";
+import { terminal } from acme.cli;
 import { stdin, stdout, stderr } from std.io;
 ```
 
-Local paths use quotes and omit `.zrk`. Standard modules use unquoted names.
-`share` publishes code; `import` brings code in; `use` only enables globals.
+`package` gives a package root its logical identity. `mod` is a namespace
+inside that package; `share mod name from "./path"` is the root's barrel
+export and its path is relative and omits `.zrk`. Local paths use quotes;
+logical package paths, including standard packages, are unquoted. A package is
+the only importable/distributable unit—"library" is ordinary prose for a
+package intended for reuse.
 
-Importing a compiler-known standard-library object also exposes its declared
-convenience members directly when unambiguous. After
-`import { stdout } from std.io`, `println("hello")` resolves to
-`stdout.println("hello")`. A collision requires qualification. Local and
-package objects do not inject methods into file scope.
+`share` publishes a declaration or module; `import` brings selected published
+names into a file; `use` only enables application globals. It does not open a
+module. Published module members open by default only while their unqualified
+name is unique. Thus both `clear()` and `terminal.clear()` are valid after
+`import { terminal } from acme.cli;`; a collision requires the qualified form.
+Aliases bind the written import name (`import { terminal -> console } from
+acme.cli;`) and explicit member imports select one member
+(`import { println } from std.io::stdout;`).
 
-`.zkinit` is a declarative DSL, not executable code. It contains `project`,
-`build_targets`, `globals`, `permissions`, `requires` and dependencies according
-to project type. Libraries request authority with `requires`; applications grant
+After `import { stdout } from std.io`, `println("hello")` resolves to
+`stdout.println("hello")`. The same opening rule applies to every published
+module, not just `std`; an unimported module, including `stdout`, is never
+made available merely by writing its name.
+
+`.zkinit` is a declarative DSL, not executable code. Its project identity,
+kind (`application` or `package`), entry, source roots and dependencies are
+resolved before source bodies. `zirk.lock`, when dependencies are declared,
+pins their source, version, hash and package-root entry. Registry, Git, local
+and vendored acquisition are transport details; source code always imports the
+logical package name. It also contains `build_targets`, `globals`,
+`permissions`, `requires` and dependencies according to project type. Libraries request authority with `requires`; applications grant
 it with `permissions`. Each operation uses `during: build`, `runtime` or `both`;
 there is no separate `compile_permissions` block. It contains no global imports and no
 arbitrary compiler/runtime configuration.
@@ -682,9 +736,13 @@ are in `MEMORY_AND_UNSAFE_SEMANTICS.md`.
 constructs. The parser reports a targeted removal diagnostic that names the
 replacement; `scope` and `shield` are ordinary identifiers.
 
-The Phase 5 surface is defined by the pending `concurrent` / `spawn`,
-`parallel`, typed-channel, and concurrency-completion changes. `parallel`,
-`thread`, `Channel<T>`, `sync`, and `Atomic<T>` remain owned by their respective
-changes. There is no `async fn`, general detach, or independent `worker`.
+The delivered Phase 5 source surface includes `concurrent` / `spawn`,
+`parallel`, typed channels, scalar `Atomic<T>`, and managed `Thread.run` on
+supported native 64-bit targets. `Mutex<T>` exposes scoped access only through
+`mutex.with`; its borrowed payload view cannot escape, and the callback cannot
+suspend, block, or spawn. Completion combinators and bounded
+`Concurrent.detach` are also available. `RwLock<T>`, `Semaphore`, `Barrier`,
+and `Once<T>` remain unavailable as source APIs. There is no `async fn` or
+independent `worker`.
 Internal `Transfer`/`Share` properties are compiler-derived and never ordinary
 user-implemented contracts.

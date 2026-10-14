@@ -2,7 +2,17 @@
 
 ## Purpose
 TBD - created by archiving change array-list-tuple-duration-regex. Update Purpose after archive.
+
 ## Requirements
+
+### Requirement: `Regex` text form
+
+Regex SHALL expose `to_string(): String` backed by `zirk_regex_to_string` and wrapped as `re'pattern'`.
+
+#### Scenario: Regex prints directly
+- **WHEN** a Regex value is passed to `println`
+- **THEN** it renders `re'…'`
+
 ### Requirement: Regex literal syntax
 
 The compiler SHALL support the `re'pattern'` literal form for plain regex patterns. The pattern SHALL be parsed at compile time and a diagnostic SHALL be emitted for invalid patterns.
@@ -78,3 +88,14 @@ A `match` expression SHALL support a `re'pattern'` pattern that binds a `Regex.M
 - **WHEN** `match s { re'(?<name>\w+)' => { m } }` is evaluated with `s = "devin"`
 - **THEN** the branch is taken and `m` is a `Regex.Match` with `group("name") = "devin"`
 
+### Requirement: Native compiled-pattern retention is bounded
+
+The native runtime SHALL impose a deterministic bound on compiled Regex cache entries or retained bytes. Cache eviction or limit failure SHALL not invalidate a Regex value still reachable by a program. User-controlled patterns SHALL not cause unbounded process-lifetime retention.
+
+#### Scenario: Many distinct patterns are parsed
+- **WHEN** a program repeatedly parses distinct user-controlled patterns beyond the configured cache bound
+- **THEN** retained compiled-pattern memory stays within the bound and parsing follows a deterministic eviction or controlled limit policy
+
+#### Scenario: Cached pattern is reused
+- **WHEN** a pattern is compiled and remains in the cache for a repeated parse
+- **THEN** the compiled matcher is reused without compiling the same pattern twice for one parse operation

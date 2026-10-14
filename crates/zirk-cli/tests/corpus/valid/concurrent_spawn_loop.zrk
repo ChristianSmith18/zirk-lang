@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Dynamic branches: every `spawn` inside the block is awaited before it closes.
 
 fn announce(n: Int32): Void {
@@ -6,7 +8,7 @@ fn announce(n: Int32): Void {
 
 fn main(): Void {
     concurrent {
-        for n in 1..=3 {
+        for n in 1 ..= 3 {
             spawn announce(n);
         }
     }

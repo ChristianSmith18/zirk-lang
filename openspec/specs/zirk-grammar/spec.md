@@ -8,7 +8,7 @@ The parser decides whether a program is well *formed*, not whether it makes *sen
 ## Requirements
 ### Requirement: Function declaration
 
-The parser SHALL recognize function declarations with the form from `ZIRK_LANGUAGE_SPEC.md` section 6: `fn`, name, list of typed parameters, return type after `:`, and a body between braces.
+The parser SHALL recognize function declarations with the form from `ZIRK_LANGUAGE_SPEC.md` section 6: `fn`, name, list of typed parameters, an optional return type after `:`, and a body between braces. The `: ReturnType` annotation is optional when a body is present; its absence marks the signature for return-type inference by the checker rather than producing a diagnostic.
 
 #### Scenario: Function without parameters
 
@@ -20,11 +20,17 @@ The parser SHALL recognize function declarations with the form from `ZIRK_LANGUA
 - **WHEN** `fn add(a: Int32, b: Int32): Int32 { return a + b; }` is parsed
 - **THEN** a function with two typed parameters and return type `Int32` is produced
 
+#### Scenario: Omitted return type with a body
+
+- **WHEN** `fn main() { }` is parsed
+- **THEN** a function declaration with no declared return type is produced
+- **AND** no missing-return-type diagnostic is emitted
+
 #### Scenario: Missing return type
 
-- **WHEN** a function is declared without a return type
+- **WHEN** a signature without a body omits the return type, as in an `interface` member, an `abstract` method, or an `extern "C" fn`
 - **THEN** a diagnostic pointing to where the type was expected is emitted
-- **AND** the help indicates that the return type is mandatory at this phase
+- **AND** the help indicates that a signature without a body must declare its return type
 
 ### Requirement: Variable declaration
 
@@ -611,7 +617,8 @@ The call grammar SHALL accept `name: expression` as an explicit named argument
 and `name:` as shorthand for `name: name`. The shorthand SHALL accept only a
 simple identifier, SHALL remain reorderable with other named arguments, and
 SHALL NOT reinterpret a reordered bare positional identifier by matching its
-spelling to a parameter.
+spelling to a parameter. After the first explicit or shorthand named argument,
+the call SHALL NOT accept a positional argument.
 
 #### Scenario: Reordered shorthand arguments
 
@@ -1054,3 +1061,100 @@ expression, bindable (`inmut h = spawn f()`) or used as a statement (`spawn f()`
 #### Scenario: Spawn with a handle
 - **WHEN** source contains `inmut h = spawn compute();`
 - **THEN** the parser produces a binding whose initializer is a spawn node over `compute()`
+
+### Requirement: Constructor parameter promotion syntax
+
+The parser SHALL accept member modifiers — `public`, `private`,
+`protected`, `mut`, `inmut`, and `inmut::strict`, in any valid member
+combination — on parameters of a `construct` declaration inside a `class`
+body, and SHALL mark each modified parameter as promoted. A `construct`
+parameter without modifiers SHALL remain an ordinary parameter. The parser
+SHALL reject member modifiers on parameters of methods, free functions,
+lambdas, and `extern` declarations with a targeted diagnostic, and SHALL
+reject a promoted variadic parameter.
+
+#### Scenario: Promoted parameters parse
+
+- **WHEN** source contains `construct(public name: String, private inmut id: UInt64)`
+- **THEN** both parameters are recorded with their modifiers and marked as
+  promoted
+
+#### Scenario: Ordinary parameter stays ordinary
+
+- **WHEN** a `construct` parameter carries no modifier
+- **THEN** it binds only inside the constructor body and declares no field
+
+#### Scenario: Optional and default promoted parameters
+
+- **WHEN** source contains `construct(public name?: String)` or
+  `construct(public name: String = "unknown")`
+- **THEN** the promoted parameter keeps its optional or default contract
+
+#### Scenario: Modifier on a method parameter
+
+- **WHEN** a method parameter carries `public`, `private`, `protected`,
+  `mut`, `inmut`, or `inmut::strict`
+- **THEN** a targeted diagnostic explains that member modifiers apply only
+  to `construct` parameters
+
+#### Scenario: Promoted variadic parameter
+
+- **WHEN** a `construct` parameter is both variadic and promoted
+- **THEN** a diagnostic rejects the promotion
+
+### Requirement: Promotion is restricted to class constructors
+
+Promoted parameters SHALL be accepted only on `construct` members of a
+`class` declaration. Writing a promoted parameter on a `record`, `enum`,
+`interface`, `trait`, or `abstract class` member — or on any other
+declaration — SHALL produce a targeted diagnostic naming where promotion
+is allowed.
+
+#### Scenario: Promotion on a record member
+
+- **WHEN** source attempts promotion inside a `record` declaration
+- **THEN** a diagnostic indicates promotion applies only to `class`
+  constructors
+
+### Requirement: Package and module declarations have explicit grammar
+
+The grammar SHALL recognize `package qualified.name;`, `mod name { ... }`, and
+`share mod name from "relative-path";` at their permitted source scopes. The
+parser SHALL retain declaration and path spans for diagnostics and tooling.
+
+#### Scenario: Package index declaration
+- **WHEN** source contains `package std.io; share mod stdout from "./stdout";`
+- **THEN** the syntax tree records the package identity and one module re-export
+
+#### Scenario: Inline module declaration
+- **WHEN** source contains `mod stdout { share fn println(): Void { } }`
+- **THEN** the syntax tree records a named module with its published function
+
+### Requirement: Package paths and relative paths are lexically distinct
+
+An import source beginning with `./` or `../` and enclosed in quotes SHALL be
+parsed as a relative source path. An unquoted dotted identifier path SHALL be
+parsed as a logical package/module path. The parser SHALL reject ambiguous or
+mixed spellings with a targeted diagnostic.
+
+#### Scenario: Relative import
+- **WHEN** source contains `import { User } from "./models/user";`
+- **THEN** the source is recorded as a relative path without `.zrk`
+
+#### Scenario: Logical package import
+- **WHEN** source contains `import { stdout } from std.io;`
+- **THEN** the source is recorded as an unquoted logical path
+
+### Requirement: Package import and module member paths are parsed
+
+The grammar SHALL recognize `::` only in an unquoted package import path, such
+as `std.io::stdout`. Member access in values, calls, and type positions SHALL
+use `module.member`.
+
+#### Scenario: Qualified call
+- **WHEN** source contains `stdout.println("hello");`
+- **THEN** the parser records a two-segment qualified member access
+
+#### Scenario: Qualified import
+- **WHEN** source contains `import { println } from std.io::stdout;`
+- **THEN** the parser records the package path `std.io` and module segment `stdout`

@@ -1,0 +1,28 @@
+share fn print(...args: Stringifiable): Void {
+    mut first: Boolean = true;
+    for arg in args {
+        if !first {
+            write(" ");
+        }
+        write(arg.to_string());
+        first = false;
+    }
+}
+
+share fn println(...args: Stringifiable): Void {
+    mut first: Boolean = true;
+    for arg in args {
+        if !first {
+            write(" ");
+        }
+        write(arg.to_string());
+        first = false;
+    }
+    write_line();
+}
+
+fn write(text: String): Void { }
+
+fn write_line(): Void { }
+
+share fn flush(): Result<Void, IoError> { return Error(IoError.Io); }

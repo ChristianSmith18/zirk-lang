@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 class Counter {
     mut value: Int32;
     construct(v: Int32) { this.value = v; }
@@ -5,7 +7,7 @@ class Counter {
 
 fn main(): Void {
     mut c: Counter = Counter(5);
-    mut pinned: Pin<Counter> = Pin(c);
+    mut pinned: Pin<Counter> = Pin (c);
     // Pin<T> dereferences automatically for field access.
     stdout.println(pinned.value);
 }

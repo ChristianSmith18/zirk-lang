@@ -1,179 +1,113 @@
 # `std.io`
 
-`std.io` provides typed text and byte streams, console-oriented printing and
-the three process-standard objects: `stdin`, `stdout` and `stderr`.
-
-> **Implementation status:** target Zirk 1.x contract; some terminal and
-> task-aware operations may not yet be implemented by the current runtime.
+`std.io` is the synchronous standard-stream package. It publishes the `stdin`,
+`stdout`, and `stderr` modules as ordinary Zirk source modules.
 
 ```zirk
-import { stdin, stdout, stderr, ReadResult } from std.io;
+import { stdin, stdout, stderr } from std.io;
+
+fn main(): Void {
+    println("ready"); // opened from stdout
+    stdout.println("explicit");
+    stderr.println("warning");
+}
 ```
 
-Importing a standard object makes its unique convenience members available
-unqualified:
+Importing a module opens its unique shared members. Explicit calls always use
+`module.member`; `::` is only used to select a module in an import, for example
+`import { println } from std.io::stdout;`.
+
+## Output
+
+Both `stdout` and `stderr` provide:
 
 ```zirk
-println("ready");          // stdout.println("ready")
-stderr.println("warning");
+trait Stringifiable {
+    to_string(): String { return "<Value>"; }
+}
+fn print(...args: Stringifiable): Void;
+fn println(...args: Stringifiable): Void;
+fn flush(): Result<Void, IoError>;
 ```
 
-A local collision requires qualification. No import or convenience call grants
-additional permissions.
+`print` emits no line ending and `println` emits exactly one platform line
+ending. Arguments are rendered left-to-right, joined by one space, and preserve
+call order. `stdout` and `stderr` have separate destinations. `print()` emits
+nothing; `println()` emits only a line ending.
 
-## Printing values
+`Stringifiable` is a real standard trait: every value-producing type satisfies
+it automatically and receives a base `to_string()` implementation. A class may
+replace that implementation, but must declare `#override`, just as when it
+replaces any trait method with a body.
 
-`print` and `println` accept zero or more values. Each value is evaluated from
-left to right and converted through its `to_string()` contract. Multiple values
-are joined with exactly one space; the space is inserted only between values.
+`print` and `println` are implemented in the bundled Zirk source: each one
+calls `arg.to_string()` through the trait while it composes the stream output
+and delegates only the final single-text writes to the compiler runtime.
+`read_line()` likewise is Zirk code that maps
+`read_line_result()` into `String?`. Those runtime boundaries have no keyword
+or callable name available to application packages.
 
 ```zirk
-fn print(...args: T[]): Void;
-fn println(...args: T[]): Void;
+class Label {
+    text: String;
+
+    #override
+    to_string(): String { return this.text; }
+}
 ```
 
-`print` emits no line ending; `println` appends exactly the platform line ending.
-Neither accepts an `end` argument because that distinction belongs to their
-names.
-
 ```zirk
-println("User:", user, "Age:", user.age);
-print("a", "b", "c");       // a b c
-println();
-print();                       // no output
-```
-
-The convenience operations propagate a catchable `IoError` if the destination
-is closed, a downstream pipe disappears or the operating system rejects the
-write. Code that treats output failure as an expected branch uses the explicit
-result form:
-
-```zirk
-match stdout.try_println(report) {
+stdout.print("count", 2);  // count 2
+stdout.println();
+match stderr.flush() {
     Ok(_) => {},
-    Error(error) => backup_log(error),
+    Error(error) => stdout.println(error),
 }
 ```
 
-## Style, formatting and live output
-
-`format` constructs text; `style` controls presentation. Keeping them separate
-prevents ANSI or terminal concerns from contaminating stored strings.
+## Input and outcomes
 
 ```zirk
-inmut message = format(
-    "{completed}/{total} tasks completed",
-    completed:,
-    total:,
-);
+enum IoError { Io, Decoding, Limit, EndOfStream }
+enum ReadResult<T> { Value(value: T), End, Error(error: IoError) }
 
-println(message, style: Style.success);
+stdin.read_line(): String?;
+stdin.read_line_result(): ReadResult<String>;
+stdin.read_char(): ReadResult<Char>;
+stdin.read_bytes(max: UInt64): ReadResult<Array<Byte>>;
+stdin.read_exact(count: UInt64): Result<Array<Byte>, IoError>;
 ```
 
-`Style` supports semantic presets and explicit foreground/background color,
-bold, dim, italic and underline where available. Terminal output detects its
-capabilities, respects `NO_COLOR` and falls back to plain text when redirected.
-
-Cursor movement, live regions and progress belong to `Terminal`, not to
-`println`:
+`read_line()` is the nullable convenience API: it removes `\n` or `\r\n`,
+returns an empty string for an empty terminated line, and returns `null` at EOF
+or when it cannot return text. Use `read_line_result()` when EOF, decoding, and
+host errors must remain distinguishable.
 
 ```zirk
-mut progress = Terminal.progress(total: files.length);
-
-for file in files {
-    compile(file);
-    progress.advance();
-}
-
-progress.finish("Compilation completed");
-```
-
-The terminal implementation coordinates live regions with ordinary log writes
-so that concurrent task output does not permanently corrupt the display.
-
-## `print` versus `write`
-
-Printing is a presentation API: it converts values, inserts separators and may
-apply terminal style. `write` is the exact stream primitive: it adds nothing,
-performs no arbitrary object conversion and accepts text or bytes supported by
-the destination.
-
-```zirk
-stdout.write("progress: ");
-stdout.write(percent.to_string());
-stdout.write("\r");
-
-file.write(bytes);
-socket.write(packet);
-```
-
-Each individual call is atomic with respect to other calls on the same standard
-stream. A sequence of calls is not a transaction. Use `stream.lock` when a
-multi-call console record must remain contiguous.
-
-## Reading and EOF
-
-EOF is data, not an exception. Text and scalar reads return an exhaustive
-algebraic result without using `?`:
-
-```zirk
-enum ReadResult<T> {
-    Value(T);
-    End;
-    Error(IoError);
+match stdin.read_line_result() {
+    ReadResult.Value(line) => stdout.println(line),
+    ReadResult.End => stdout.println("input completed"),
+    ReadResult.Error(error) => stderr.println(error),
 }
 ```
 
-```zirk
-match stdin.read_line() {
-    Value(line) => process(line),
-    End => println("input completed"),
-    Error(error) => report(error),
-}
-```
+Text reads use strict UTF-8; invalid data reports `IoError.Decoding`.
+`read_bytes(max)` reports `IoError.Limit` when its request exceeds the stream
+bound. `read_exact(count)` returns `Error(IoError.EndOfStream)` when fewer than
+`count` bytes remain.
 
-`Value("")` means an empty line and remains distinct from `End`. `read_line`
-removes the terminating line break. The input API distinguishes storage and
-Unicode units:
+## Targets and limits
 
-```zirk
-stdin.read_byte(): ReadResult<Byte>;
-stdin.read_code_point(): ReadResult<CodePoint>;
-stdin.read_grapheme(): ReadResult<Char>;
-stdin.read_line(): ReadResult<String>;
-```
+Native programs use the process standard streams. The interpreter receives
+bounded injected input and records ordered output events labelled `stdout` or
+`stderr`. Browser execution captures those output events but rejects a
+reachable stdin operation before execution; it never prompts, touches the DOM,
+storage, or network to emulate input.
 
-An exact-count operation uses `Result` because early EOF violates its requested
-contract:
-
-```zirk
-stream.read_exact(size: 128);
-```
-
-## Buffering, tasks and cancellation
-
-Streams may be wrapped in explicit readers and writers with configurable buffer
-limits. `flush()` moves buffered data to the operating-system boundary; it does
-not promise durable storage.
-
-Blocking operations have `_async` variants when a task-aware alternative is
-needed:
-
-```zirk
-inmut pending: Task<ReadResult<String>> = stdin.read_line_async();
-inmut result = await pending;
-```
-
-Cancellation closes only resources owned by the operation and preserves the
-standard stream. Extracting `stdout.println` creates an independent safe
-callable capability and never allows replacement or mutation of the original
-standard object:
-
-```zirk
-mut log = stdout.println;
-log("bound safely");
-```
+This delivery is synchronous. Async stream APIs, terminal styling, cursor
+control, prompts, raw mode, and progress regions are deferred to later
+standard-library work.
 
 ---
 
-**Previous:** [← Common API Contracts](01-common-api-contracts.md) · **Next:** [ std.fs](03-std-fs.md)
+**Previous:** [← Common API Contracts](01-common-api-contracts.md) · **Next:** [std.fs →](03-std-fs.md)

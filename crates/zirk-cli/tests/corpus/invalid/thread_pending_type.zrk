@@ -1,0 +1,3 @@
+fn inspect(value: Thread<Int32>): Void { }
+
+fn main(): Void { }

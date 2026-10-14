@@ -3,9 +3,10 @@
 ## 1. Principles
 
 The stdlib must be small, coherent, typed, cross-platform and explicit about
-I/O, permissions and errors. Print and read operations belong to imported
-standard objects; compiler-known convenience members may be called directly
-after that object is imported when the name is unambiguous.
+I/O, permissions and errors. It is consumed as ordinary Zirk packages and
+published modules. Print and read operations belong to imported standard
+objects; published members may be called directly after that module is
+imported when the name is unambiguous.
 Standard modules are imported without quotes:
 
 ```text
@@ -32,22 +33,30 @@ std.http
 std.json
 std.crypto
 std.time
-std.task
 std.thread
 std.sync
-std.parallel
 std.collections
 std.testing
 std.reflect
 std.system
 ```
 
-Implementations may subdivide them without changing their public imports.
+Task and CPU-parallel operations are language surfaces, not importable
+`std.task` or `std.parallel` modules. They are documented here as API areas;
+their implementation status is recorded in `ZIRK_FEATURE_STATUS.md`.
 
-`std.terminal` owns `Terminal`, `Style`, `Color`, cursor control, progress and
-live regions; `std.io` re-exports the common console-facing types for ordinary
-printing. `std.encoding` owns the `Encoding` enum and codecs used explicitly by
-text I/O; strict UTF-8 is the default interchange encoding.
+Implementations may subdivide them without changing their public imports.
+The compiler may map a fully identified standard declaration to its host
+implementation internally. This is not source syntax and cannot be requested
+by an external package with a matching short name.
+
+This document defines a target library contract; its module list and examples
+do not assert current compiler availability. Check
+[`ZIRK_FEATURE_STATUS.md`](init/ZIRK_FEATURE_STATUS.md) for delivered modules
+and APIs.
+
+`std.terminal` and `std.encoding` are future packages. This delivery owns only
+the synchronous `std.io` stream surface; strict UTF-8 is its text encoding.
 
 ## 3. `std.io`
 
@@ -56,48 +65,37 @@ Exposes three streams:
 ```text
 import { stdin, stdout, stderr } from std.io;
 
-stdout.print("Hello", 42);
-stdout.println("World", user);
-stdout.println();
-println("Direct convenience call");
-stderr.println("Diagnostic");
-mut line = stdin.read_line();
+stdout.print("Hello", "world");
+stdout.println("ready");
+stderr.println("diagnostic");
+match stdin.read_line_result() { ReadResult.End => {}, _ => {} }
 ```
 
-- `print(...args: T[])` converts each value through `to_string()`, joins the
-  rendered values with one space, and writes without a line break.
-- `println(...args: T[])` performs the same conversion and adds exactly the
-  platform line break. Neither operation has a configurable separator or an
-  `end` parameter.
+- `print(...args: Stringifiable)` and `println(...args: Stringifiable)` are
+  the delivered output APIs. `Stringifiable` is the standard trait for a
+  value with `to_string(): String`, supplied automatically by every
+  value-producing type. Its default body is a concrete implementation, so a
+  class that declares `to_string()` must mark it `#override`.
+  This allows heterogeneous calls such as `stdout.println("count", 2, true)`.
+  They join rendered arguments with one space; `println` adds one platform
+  line break and `print` adds none.
 - `println()` writes just a line break.
 - `print()` writes nothing.
 - `stdout` and `stderr` share the same formatting operations but different
   destinations.
-- every printable value uses `to_string(): String` or the corresponding
-  formatting trait.
-- interpolation is favoured: `stdout.println("User: {user.name}");`.
-- an unqualified convenience call resolves through the imported standard object
-  when unique; a collision requires `stdout.println(...)`.
-- `style` controls terminal presentation while `format` constructs text;
-  cursor movement, progress and live regions belong to `Terminal`.
-- `write` is the exact text/byte stream primitive and does not insert
-  separators, line endings, styles or arbitrary object conversions.
-- convenience printing propagates catchable `IoError`; `try_print` and
-  `try_println` expose an explicit `Result` for expected output failure.
-- `mut print: Fn(String) => Void = stdout.println` creates an independent safe
-  callable capability. Compiler-known standard-library extraction performs the
-  necessary internal clone/attenuation without exposing mutable authority over
-  the original standard object or cloning its native handle.
+- an unqualified convenience call resolves through the imported module when
+  unique; a collision requires `stdout.println(...)`.
+- `flush(): Result<Void, IoError>` is explicit and target-aware.
 
-`stdin` offers byte, Unicode code-point, grapheme and line reads. EOF is not an
-exception: `ReadResult<T>` distinguishes `Value(T)`, `End` and
-`Error(IoError)`. `read_line` removes the terminator and `Value("")` remains
-distinct from `End`. Exact-count reads use `Result` because premature EOF
-violates their requested contract.
-
-Blocking operations may offer `_async` variants that return `Task<T>` and
-suspend without blocking a thread. There is no `async fn`; inherently
-task-aware APIs do not need the suffix.
+`IoError` has `Io`, `Decoding`, `Limit`, and `EndOfStream`. `ReadResult<T>` has
+`Value(value: T)`, `End`, and `Error(error: IoError)`. `stdin` provides
+`read_line(): String?`, `read_line_result(): ReadResult<String>`,
+`read_char(): ReadResult<Char>`, `read_bytes(max: UInt64): ReadResult<Array<Byte>>`,
+and `read_exact(count: UInt64): Result<Array<Byte>, IoError>`. Empty lines are
+values, text decoding is strict UTF-8, and premature exact reads return
+`IoError.EndOfStream`. Browser execution retains output capture but rejects
+reachable stdin reads before execution. Async streams and terminal APIs are
+not delivered by this package.
 
 ## 4. `std.fs`
 
@@ -131,9 +129,9 @@ and more expensive buffering/durability boundaries.
 The module includes complete file/directory manipulation, metadata, links,
 temporary files/directories, shared/exclusive advisory locks and native change
 watchers. Recursive operations do not follow symlinks by default. Watcher
-notification is consumed with `await watcher.next()` inside the current task or
-a concurrent `task` block; no `async for` construct exists. Overflow is an
-explicit event requiring a rescan.
+notification is consumed through the task-aware API described by its module
+contract; watcher delivery is not part of the current compiler surface.
+Overflow is an explicit event requiring a rescan.
 
 Modes do not use magic strings: they are expressed through options/enums. Errors
 distinguish not found, permission denied, already exists, invalid path, wrong
@@ -175,7 +173,7 @@ requires permission.
 ```text
 import { Process } from std.process;
 
-mut result = await Process.run("git", ["status"]);
+mut result = Process.run("git", ["status"]);
 ```
 
 The API separates executable from arguments; it does not invoke a shell by
@@ -247,8 +245,8 @@ errors.
 
 Collection transformations are eager; iterator adapters are lazy and require
 explicit `collect` or a typed `to_*` terminal. Iterators are single-pass and
-remain `Done` after completion. Task-aware streams stay separate so iteration
-never hides `await`. Every `Range` has a finite end.
+remain `Done` after completion. Streams stay separate so iteration never
+implicitly suspends. Every `Range` has a finite end.
 
 ## 8. `std.time`
 
@@ -258,12 +256,12 @@ Exports the sealed temporal family: `Date`, `Time`, `DateTime`, `Instant`,
 cancellable sleep. Values are immutable and transformations return new values.
 
 ```text
-await task.sleep(500ms);
-await operation timeout 5s;
+Timer.sleep(500ms);
 ```
 
 Elapsed measurements use a monotonic clock. Civil date and duration are distinct
-types; they are not implicitly mixed.
+types; they are not implicitly mixed. There is no general `await` timeout
+operator in the available language surface.
 
 Friendly current-time calls live on temporal types (`Instant.now` and
 `Date`/`Time`/`ZonedDateTime.now(zone:)`) with an optional injectable clock.
@@ -292,8 +290,8 @@ Cron/calendar scheduling is an official package.
 Minimum controlled errors include `InvalidDate`, `InvalidTime`,
 `InvalidDateTime`, `InvalidTimeZone`, `AmbiguousLocalTime`,
 `NonexistentLocalTime`, `DurationOverflow`, `TemporalParseError` and
-`TemporalFormatError`. `task.sleep` and timeout APIs require non-negative
-`Duration` even though differences can produce signed values.
+`TemporalFormatError`. `Timer.sleep` and other duration-based timer APIs require
+non-negative `Duration` even though differences can produce signed values.
 
 ### 8.1 Native scalar and text contracts
 
@@ -310,33 +308,25 @@ slicing, search, replacement, trim/case/split/line/normalization views,
 String mutation follows binding strictness and slice replacement requires equal
 grapheme counts.
 
-## 9. `std.task`, `std.thread` and `std.sync`
+## 9. Concurrency and synchronization APIs
 
-These modules expose supporting types for the language constructs:
+**Available:** structured concurrency uses `concurrent`, `spawn`, `Job<T>` and
+`Timer`; cooperative channels provide bounded, rendezvous and growable forms;
+`parallel` exposes its implemented pool and collection operations; scalar
+`Atomic<T>` is available for target-supported Boolean and signed/unsigned
+integer widths through 64 bits. Its payload is inline in the GC-managed object,
+pointer atomics are unsupported, operations default to `SeqCst`, and weaker
+orders require `unsafe`. A dynamically invalid order raises
+`InvalidArgumentError`. The former
+`Task<T>`, `task`, `await`, and `select` surface was removed. No general
+`task.blocking` bridge or timeout operator is available.
 
-- `Task<T>` handles and scopes;
-- `TaskSettlement<T>` with `Fulfilled`, `Rejected`, and `Cancelled`;
-- `Task.all`, `Task.first`, `Task.settled`, fair select support, cancellation
-  and cancellation reasons;
-- bounded channels, rendezvous, defensively limited dynamic channels, closing,
-  broadcast/watch/one-shot variants;
-- `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>`;
-- `Atomic<T>` and memory orderings;
-- ordered/unordered parallel operations and deterministic/associative reduction
-  primitives;
-- `task.blocking` for legacy blocking work.
-
-The `task`, `await`, `parallel` and `thread` syntax belongs to the language; the
-stdlib does not create an alternative model.
-
-A `Task<T>` starts immediately and its result is consumed by exactly one
-`await`; multiple observers use the corresponding channel family. Cancellation
-reason is optional with a default, and scheduling priority is automatic.
-Threads cancel cooperatively and are never killed at arbitrary instructions.
-Safe `Mutex<T>.with` prevents guard escape and `await`; callback failure releases
-the lock without rollback or poisoning. `std.parallel` uses one managed worker
-pool, preserves order for map, requires associative reduction, avoids nested
-oversubscription and mirrors task failure/settlement cleanup.
+**Planned:** managed `Thread<T>`, `std.sync`, `Mutex<T>`, `RwLock<T>`,
+`Semaphore`, `Barrier`, and `Once<T>` remain gated on their compiler, runtime,
+ownership, and collector contracts. The runtime's Rust/C `AtomicCell` ABI is
+distinct from source `Atomic<T>`.
+Runtime combinators such as `settled` likewise do not imply a source-level
+standard-library API. `parallel.settled` is not available.
 
 The low-level type family includes `Weak<T>`, `Pointer<T>`,
 `NativeSlice<T>`, and `NativeSliceMut<T>`. Weak references upgrade through
@@ -434,7 +424,7 @@ bypassed.
 
 Compact, pretty and canonical output are distinct. Cycles return
 `JSONCycleError`. `JSONReader`/`JSONWriter` support bounded streaming and expose
-task-aware underlying I/O without hiding `await`. JSON Pointer is included;
+task-aware underlying I/O without hiding suspension. JSON Pointer is included;
 JSON5, Schema, advanced JSONPath, Patch, other formats, ORM and domain validation
 remain packages.
 
@@ -513,8 +503,9 @@ fn creates_user(): Void {
 }
 ```
 
-Tests may return `Void`, `Result<Void,E>`, `Task<Void>`, or
-`Task<Result<Void,E>>`; the runner awaits task results without `async fn`.
+Tests run in a runner-owned scope. They may use the delivered
+`concurrent`/`spawn`/`Job<T>` surface; the runner joins or cancels owned work
+before completing the case.
 Optional decorator arguments provide display name, tags, `Duration` timeout,
 and compile-time-checked parameter tuples through `cases`.
 

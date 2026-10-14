@@ -1,5 +1,7 @@
+import { stdout } from std.io;
+
 trait A {
-     a(): Int32 { return 1; }
+    a(): Int32 { return 1; }
 }
 
 trait B implements A { }
@@ -7,7 +9,7 @@ trait B implements A { }
 trait C implements A { }
 
 class D implements B, C {
-    construct() {}
+    construct() { }
 }
 
 fn main(): Void {

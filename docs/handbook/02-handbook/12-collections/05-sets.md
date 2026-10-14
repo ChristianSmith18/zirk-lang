@@ -1,6 +1,11 @@
 # Sets
 
-`Set<T>` stores unique values according to the type's equality contract.
+`Set<T>` stores unique values according to the type's equality contract. The
+current compiler supports a restricted one-word runtime representation and
+rejects unsupported aggregate element shapes during semantic analysis.
+Supported managed references are traced by the collector. `String` and `Char`
+elements are stored as normalized text snapshots so later source-string
+mutation cannot invalidate their hash.
 
 ```zirk
 mut permissions: Set<Permission> = Set();
@@ -17,13 +22,16 @@ The generic constraint on `T` is part of the type's safety contract. Union, inte
 
 Unique values under `T`'s equality/hash contract; insertion-order iteration.
 
-> Entirely `specified` — `Set` is ahead of the current compiler.
+> The API below is the language contract. The current compiler implements the
+> basic constructor, length/emptiness, add, contains, and remove operations;
+> iteration and the remaining methods are still specified rather than
+> delivered.
 
 ### Properties
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `Int32` | Element count | specified |
+| `length` | `UInt64` | Element count | specified |
 | `is_empty` | `Boolean` | `length == 0` | specified |
 
 ### Methods

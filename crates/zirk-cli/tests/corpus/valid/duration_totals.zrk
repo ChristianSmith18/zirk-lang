@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     inmut d = 90m;
     stdout.println(d.total_hours().to_string());

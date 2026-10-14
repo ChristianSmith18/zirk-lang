@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     mut a: Int8 = 1;
     mut b: Int32 = 2;
@@ -19,6 +21,6 @@ fn main(): Void {
     stdout.println(s == "xxx");
 
     mut i: Int8 = 5;
-    i++;
+    i ++;
     stdout.println((i as Int32) == 6);
 }

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // `to_string()` (roadmap Phase 3b, task 8): `print`/`println` and string
 // interpolation now route through it for every native scalar this phase
 // added — the ten integer widths, `Float32`/`Float64`, `Char` — and for a
@@ -13,13 +15,13 @@ class Point {
         this.y = y;
     }
 
-     to_string(): String {
+    #override to_string(): String {
         return "({this.x}, {this.y})";
     }
 }
 
 fn main(): Void {
-    mut i8: Int8 = (-5) as Int8;
+    mut i8: Int8 =(-5) as Int8;
     mut i16: Int16 = 1000 as Int16;
     mut i64: Int64 = 2000000000 as Int64;
     mut i128: Int128 = 2000000000 as Int128;

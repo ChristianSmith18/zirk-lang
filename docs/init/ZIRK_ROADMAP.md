@@ -54,6 +54,7 @@ ADR-006.
 closeout provide the implementation evidence.
 
 **Goal:** `zirk run` over a `.zrk` containing
+`import { stdout } from std.io;` and
 `fn main(): Void { stdout.println("..."); }` really compiles through LLVM and
 runs as a native binary.
 
@@ -167,6 +168,9 @@ unchanged, non-generic call site. Generic contracts remain.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
+- Constructor sugar: member-modified constructor parameters promote fields;
+  classes without a written constructor admit zero-argument construction and
+  implicit subclass construction delegates to an accessible zero-argument base.
 - Generics with `from` (constraints).
 - Records, algebraic enums, unions.
 - Casts (`as`, `<T>`, `unsafe` casts).
@@ -347,8 +351,8 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   deliberately left open for Phase 7's `Array<T>`/`List<T>` to register
   their own support later without further grammar changes. **Not**
   covered: `.read_volatile()`/`.write_volatile()`, untagged native-union
-  access (no union type exists), weak atomic ordering (`Atomic<T>` is
-  Phase 5), and general provenance tracking for a view's known extent
+  access (no union type exists), and general provenance tracking for a view's
+  known extent
   beyond the one syntactic shape recognized so far.
 - [x] Implement transactional write journals and rollback for managed/validated
   ranges, followed by explicit irreversible `commit` effects — **delivered**
@@ -406,21 +410,37 @@ function coloring.
    `for_each`, `Parallel.each`, `sum`, and associative `reduce` run through
    the worker path; `reduce_ordered` deliberately keeps sequential grouping.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
-   (`typed-channels`).
-4. Outcomes, aggregation policy, safe-default synchronization, scoped
-   `thread`, and the remaining concurrency APIs (`concurrency-completion`).
+   (`typed-channels`, delivered; `drain` and `select` remain follow-ups).
+4. Completion APIs and safety boundaries (`concurrency-completion`; in
+   progress as of 13 October 2026). Runtime foundations include a bounded
+   managed-blocking pool and a provisional detached-background supervisor.
+   Scalar source `Atomic<T>` is implemented for target-supported Boolean and
+   signed/unsigned integer widths through 64 bits, with GC-inline storage;
+   native-host E2E coverage passes, while configured non-host triples have
+   compile-only runtime checks. Managed `Thread.run`, Mutex/RwLock/Semaphore/
+   Barrier/Once, complete `Transfer`/`Share` enforcement, and a language-level
+   background-service lifecycle remain incomplete.
 
 `task`, `await`, `Task<T>`, task scopes, `select`, and cancellation shields are
 removed constructs. Their parser diagnostic names the applicable replacement.
 
-**Output:** the structured concurrency contract of
-`STRUCTURED_CONCURRENCY_SEMANTICS.md`, including cleanup, selection, transfer,
-and data-race guarantees, working end to end.
+**Output:** the delivered structured-concurrency subset works end to end:
+`concurrent`/`spawn`/`Job<T>`/`Timer`, CPU `parallel` regions, and typed
+channels. This does not establish general data-race freedom or complete
+`Transfer`/`Share` enforcement. `select`/channel draining, managed threads,
+synchronization APIs, and source-level completion/background combinators
+remain unavailable or partial; see the feature-status catalog and the active
+`concurrency-completion` change for current evidence.
 
 ---
 
 ## Phase 6 — Project system and CLI
 
+- Delivered slice: `.zkinit` discovery for `application` and `package`,
+  logical package identity, quoted local imports, unquoted package imports,
+  `share mod` package roots, local/vendored traversal and pre-frontend lock
+  metadata validation. Registry/Git acquisition and publication remain work
+  for the package phase.
 - `.zkinit` as a declarative DSL (its own parser, not reusing the Zirk parser).
 - `project`, `build_targets`, `globals`, library `requires`, and application
   `permissions` with per-operation `during: build | runtime | both`.
@@ -436,7 +456,7 @@ and data-race guarantees, working end to end.
 
 Order suggested by real dependency, not by the order they appear in the spec:
 
-`std.io` (already partially covered) → `std.collections` → `std.fs`/`std.path` →
+`std.io` (synchronous standard streams delivered; async and terminal work remains) → `std.collections` → `std.fs`/`std.path` →
 `std.time` → `std.process` → `std.thread`/`std.sync` (wrapping
 Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
@@ -458,8 +478,11 @@ distinction changes who implements them:
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
   native reference types under the same rule. `Array<T>` (fixed-capacity) and
   `List<T>` (resizable) are implemented in `array-list-tuple-duration-regex`;
-  this phase completes `Map<K,V>` and `Set<T>` plus the wider
-  `std.collections` API.
+  `Map<K,V>` and `Set<T>` currently provide a bounded one-word runtime
+  representation, managed-reference tracing, and the documented basic
+  operations. Semantic analysis rejects collection shapes that cannot be
+  represented safely by that ABI; full generic collection representations and
+  the wider `std.collections` API remain roadmap work.
 
 `String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
 the search/trim/`substring` methods are delivered in
@@ -500,6 +523,8 @@ the real collections.
 
 ## Phase 8 — Packaging and distribution
 
+- Package API inspection scaffolding exists, but `.zpkg` publication remains
+  blocked on reproducible archives and cryptographic integrity verification.
 - `.zpkg`, `zirk.lock`, `zirk add/remove/install/update`, `zirk package`,
   `zirk publish`.
 - Reproducible builds (`COMPILER_SPEC.md` section 7).
@@ -508,7 +533,9 @@ the real collections.
 
 ## Phase 9 — Developer experience
 
-- A canonical, idempotent formatter.
+- A canonical, idempotent formatter is delivered for whole `.zrk` documents;
+  future formatter work is configuration and range-formatting, not a basic
+  document formatter.
 - A linter sharing parser/types with the compiler.
 - An LSP with incremental snapshots.
 - A debugger with symbols and mapping back to `.zrk`.

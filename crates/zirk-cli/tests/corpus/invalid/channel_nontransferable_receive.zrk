@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut channel: Channel<Fn() => Void> = Channel(1);
+    mut value = channel.receive();
+}

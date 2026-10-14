@@ -99,8 +99,37 @@ pub(crate) fn mark_clone_roots(mut mark_object: impl FnMut(*mut c_void)) {
 pub unsafe extern "C" fn zirk_rt_clone(source: *mut c_void) -> *mut c_void {
     let mut memo: HashMap<usize, *mut c_void> = HashMap::new();
     let roots_start = CLONE_ROOTS.with(|roots| roots.borrow().len());
-
-    let result = unsafe { clone_recursive(source, &mut memo) };
+    let result = if source.is_null() {
+        std::ptr::null_mut()
+    } else {
+        let result = unsafe { shallow_clone(source, &mut memo) };
+        let mut pending = vec![(source, result)];
+        while let Some((source_object, destination)) = pending.pop() {
+            let descriptor = unsafe { crate::collector::object_descriptor(source_object) };
+            let offsets =
+                unsafe { crate::collector::gc_field_offsets(descriptor as *const c_void) };
+            for &offset in offsets {
+                let destination_field = (destination as usize + offset) as *mut *mut c_void;
+                let child_source = unsafe { *destination_field };
+                if child_source.is_null() {
+                    continue;
+                }
+                if let Some(&known) = memo.get(&(child_source as usize)) {
+                    unsafe { *destination_field = known };
+                    continue;
+                }
+                let child_destination = unsafe { shallow_clone(child_source, &mut memo) };
+                unsafe { *destination_field = child_destination };
+                if child_destination != child_source {
+                    if pending.try_reserve(1).is_err() {
+                        crate::failure::zirk_rt_allocation_failed();
+                    }
+                    pending.push((child_source, child_destination));
+                }
+            }
+        }
+        result
+    };
 
     // This call (and every nested one it made — see this module's own doc
     // comment) is finished: the result is either about to be handed back to
@@ -124,20 +153,12 @@ pub unsafe extern "C" fn zirk_rt_clone(source: *mut c_void) -> *mut c_void {
 /// allocation list).
 const FIELD_REGION_START: usize = crate::collector::HEADER_BYTES;
 
-/// One node of the traversal (design D2) — see this module's own doc
-/// comment for the algorithm as a whole.
-///
-/// # Safety
-///
-/// Same obligation as [`zirk_rt_clone`]: `source` must be null, or a live
-/// object this compiler allocated whose descriptor is a real class's own.
-unsafe fn clone_recursive(
+/// Copies one node and records it before any child is queued. Graph traversal
+/// itself is iterative in [`zirk_rt_clone`].
+unsafe fn shallow_clone(
     source: *mut c_void,
     memo: &mut HashMap<usize, *mut c_void>,
 ) -> *mut c_void {
-    if source.is_null() {
-        return std::ptr::null_mut();
-    }
     if let Some(&existing) = memo.get(&(source as usize)) {
         return existing;
     }
@@ -186,15 +207,6 @@ unsafe fn clone_recursive(
     // those are themselves live, already-reachable objects).
     memo.insert(source as usize, dest);
     CLONE_ROOTS.with(|roots| roots.borrow_mut().push(dest));
-
-    let offsets = unsafe { crate::collector::gc_field_offsets(descriptor as *const c_void) };
-    for &offset in offsets {
-        let field_addr = (dest as usize + offset) as *mut *mut c_void;
-        let child_source = unsafe { *field_addr };
-        let child_dest = unsafe { clone_recursive(child_source, memo) };
-        unsafe { *field_addr = child_dest };
-    }
-
     dest
 }
 
@@ -294,6 +306,33 @@ mod tests {
                 cloned_next, node,
                 "the cloned cycle must never point back into the source graph"
             );
+        }
+    }
+
+    #[test]
+    fn cloning_a_deep_chain_uses_the_iterative_worklist() {
+        let _guard = reset_state();
+        const DEPTH: usize = 12_000;
+        let descriptor = collector::descriptor_with_fields_for_tests(&[24]);
+        unsafe {
+            let mut source = Vec::with_capacity(DEPTH);
+            for _ in 0..DEPTH {
+                source.push(synthetic_clonable_object(descriptor.as_ptr().cast(), 1));
+            }
+            for pair in source.windows(2) {
+                *((pair[0] as usize + 24) as *mut *mut c_void) = pair[1];
+            }
+            let mut root = source[0];
+            let mut roots = [&mut root as *mut *mut c_void as *mut c_void];
+            collector::zirk_rt_push_frame(roots.as_mut_ptr(), 1);
+            let mut cloned = zirk_rt_clone(root);
+            let mut count = 0;
+            while !cloned.is_null() {
+                count += 1;
+                cloned = *((cloned as usize + 24) as *mut *mut c_void);
+            }
+            collector::zirk_rt_pop_frame();
+            assert_eq!(count, DEPTH);
         }
     }
 

@@ -2,7 +2,7 @@
 
 ### Requirement: Closed unsafe operation set
 
-Raw pointer creation, dereference, arithmetic and representation casts; unsafe native calls; unchecked native construction; untagged native-union access; weak atomic ordering (`AtomicOrder.relaxed` / `.acquire` / `.release`); and manual safety-contract implementation SHALL require an explicit unsafe boundary. An `Atomic<T>` operation outside `unsafe` SHALL use sequentially consistent ordering.
+Raw pointer creation, dereference, arithmetic and representation casts; unsafe native calls; unchecked native construction; untagged native-union access; weak atomic ordering (`AtomicOrder.relaxed` / `.acquire` / `.release` / `.acq_rel`); and manual safety-contract implementation SHALL require an explicit unsafe boundary. An `Atomic<T>` operation outside `unsafe` SHALL use sequentially consistent ordering. `Atomic<T>` SHALL store only supported scalar payloads inline in its GC-managed allocation; managed pointers remain unsupported because this contract defines no atomic rooting protocol.
 
 #### Scenario: Safe code dereferences a pointer
 

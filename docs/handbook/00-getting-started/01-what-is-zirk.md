@@ -76,14 +76,15 @@ An expression-valued `match` must cover every possible case. Zirk also has excep
 
 ## Concurrency is part of the language model
 
-Zirk distinguishes different kinds of concurrent work:
+The implemented source surface includes structured `concurrent { ... }` scopes,
+`spawn` with `Job<T>`, `Timer`, CPU-oriented `parallel`, and typed
+`Channel<T>`. The former `task`, `await`, and `select` syntax was removed.
+Managed OS threads, synchronization primitives, and language-level atomics are
+specified or under development, but are not currently available as Zirk APIs.
 
-- `task` and `await` express structured asynchronous work.
-- `parallel` requests CPU work that may run across cores.
-- `thread` represents a real operating-system thread.
-- `Channel<T>`, synchronization primitives, and atomics coordinate shared work.
-
-These constructs are not aliases for a public global event loop. The runtime may use an internal reactor, but application code works with structured operations whose lifetime and cancellation rules are explicit.
+The cooperative executor and the CPU worker pool are distinct runtime
+components. Synchronous I/O can block the executor; this release does not
+provide a general asynchronous I/O reactor.
 
 The distinction helps communicate intent. Waiting for a network response, splitting a CPU-heavy transform across cores, and integrating with thread-affine native code are different problems; Zirk does not pretend they are interchangeable.
 
@@ -91,7 +92,12 @@ The distinction helps communicate intent. Waiting for a network response, splitt
 
 Memory management is automatic. The compiler and runtime may use stack placement, heap allocation, escape analysis, moves, or reference counting internally, but Zirk 1.x does not expose ownership or reference counting as its public programming model.
 
-Safe code must not permit use-after-free, null dereferences, data races, or undefined behavior. Operations that cannot preserve those guarantees—raw pointers and unsafe casts, for example—belong inside an `unsafe {}` boundary. This makes low-level code possible while keeping the risk visible during review.
+Safe code is designed to exclude use-after-free, uncontrolled null
+dereferences, and undefined behavior. Concurrency guarantees are scoped to the
+boundaries the compiler currently checks; for example, `parallel` rejects
+mutable reference captures. This is not a general data-race guarantee for
+shared globals or for unavailable thread and synchronization APIs. Raw pointers
+and unsafe casts belong inside an `unsafe {}` boundary.
 
 Native interoperability follows the same principle. Zirk can call and export native functions, but ABI assumptions, platform constraints, and resource ownership have to be declared rather than inferred from hope.
 

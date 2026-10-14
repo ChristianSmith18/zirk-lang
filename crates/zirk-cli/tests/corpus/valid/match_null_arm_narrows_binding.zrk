@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // A `match` arm other than `null` sees a scrutinee that cannot be absent —
 // the `null` arm already took that case — so its own binding is the
 // unwrapped type, not `T?`. Before this narrowing, walking a hand-rolled

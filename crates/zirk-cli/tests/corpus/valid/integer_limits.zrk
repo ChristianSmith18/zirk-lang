@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 fn main(): Void {
     // `-2147483648` is one literal: folding the sign into it is what makes the
     // minimum writable at all, since its magnitude alone does not fit.

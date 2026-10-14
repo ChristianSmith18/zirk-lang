@@ -1,5 +1,10 @@
 # Concurrent Test Safety
 
+> **Status: planned test-runner contract.** The current test runner does not
+> provide concurrent case scheduling, `--jobs`, seeded scheduling, virtual
+> clocks, or timeout leak reports. These requirements describe the intended
+> runner behavior, not capabilities currently exposed by the CLI.
+
 The runner may execute independent tests concurrently. Tests must not share unsynchronized globals, fixed ports, mutable directories, clocks, or random state.
 
 Use unique fixtures and `--seed` for reproducibility. A failure must report the seed and scheduling-relevant context.

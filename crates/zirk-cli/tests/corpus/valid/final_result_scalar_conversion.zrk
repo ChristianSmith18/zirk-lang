@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Scalar conversion is final-result-only: an invocation such as `T(expr)`
 // evaluates `expr` completely under its ordinary rules, then converts that
 // one result. No target type propagates into the expression's operands.

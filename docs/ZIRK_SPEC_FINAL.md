@@ -69,9 +69,11 @@ Distributable package: `.zpkg`
 > not grant authority. Validation is incremental and reapproval follows any
 > permission widening, requester update, project rename, or project move.
 
-> **Authorial memory and concurrency checkpoint — 17 August 2026.** Managed
-> memory remains strategy-neutral and safe references use compiler-checked
-> dependent lifetimes without public lifetime syntax. `Weak<T>` upgrades to
+> **Historical authorial checkpoint — 17 August 2026.** The following records
+> design intent as of that date; current implementation status is tracked in
+> the feature-status catalog and must not be inferred from this checkpoint.
+> Managed memory remains strategy-neutral and safe references use
+> compiler-checked dependent lifetimes without public lifetime syntax. `Weak<T>` upgrades to
 > `Option<T>`; bounded native views are preferred to raw pointers; deep cloning
 > preserves graph topology. Ordinary `unsafe` blocks transactionally journal
 > managed and validated-range writes and roll them back on controlled failure;
@@ -79,7 +81,11 @@ Distributable package: `.zpkg`
 > operations are scoped and never orphaned. Failure cancels siblings, and
 > cancellation and timeouts wait for cleanup. The planned `concurrent`,
 > `parallel`, channel, and outcome APIs preserve explicit coordination.
-> Transfer/share safety is compiler-derived, and safe code is data-race free.
+> Transfer/share safety is intended to be compiler-derived, and the completed
+> language is intended to prevent data races in safe code. Current delivery is
+> narrower: ownership checks cover selected concurrency boundaries, while
+> managed threads and language-level synchronization remain unavailable. See
+> the feature-status catalog for the implemented subset.
 
 Contributors implementing these decisions must next read the consolidated
 [`CORE_LANGUAGE_SEMANTICS.md`](CORE_LANGUAGE_SEMANTICS.md) checkpoint before
@@ -223,11 +229,13 @@ fn main(): Void {
   exceptional situations; `fatalError` terminates on unrecoverable state.
 - Memory is automatic. Stack, heap, escape analysis, moves and RC are internal
   decisions.
-- Safe code admits no use-after-free, null dereference, data races or undefined
-  behaviour.
+- The language's safety target excludes use-after-free, null dereference, data
+  races and undefined behaviour in safe code; current compiler guarantees are
+  limited to the implemented and checked feature boundaries.
 - Pointers and unsafe casts require `unsafe {}`.
-- Tasks use structured concurrency; `parallel` requests multicore CPU work;
-  `thread` represents a real operating-system thread.
+- Delivered structured concurrency and `parallel` provide scoped tasks and
+  multicore CPU work. A future `thread` API is intended to represent a real
+  operating-system thread; managed `Thread.run` is not currently available.
 - The runtime may use an event reactor internally, but Zirk exposes no global
   event loop.
 - `share` publishes declarations, `import` brings them in, and `use` enables

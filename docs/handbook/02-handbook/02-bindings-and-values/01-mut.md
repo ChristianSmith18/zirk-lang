@@ -8,7 +8,11 @@ mut attempts: Int32 = 0;
 attempts += 1;
 ```
 
-Mutability is local permission, not a request for shared unsynchronized state. A mutable application global accessed from `parallel` or `thread` must use `sync` or `Atomic<T>`; otherwise compilation fails.
+Mutability is local permission, not a request for shared unsynchronized state.
+At the implemented `parallel` boundary, mutable reference captures are rejected.
+This does not establish a general mutable-global race check. Managed `thread`
+and the `Mutex`, `RwLock`, `Semaphore`, `Barrier`, and `Once` APIs remain
+unavailable; scalar `Atomic<T>` is available for supported target widths.
 
 `mut` does not erase the type. This is invalid:
 

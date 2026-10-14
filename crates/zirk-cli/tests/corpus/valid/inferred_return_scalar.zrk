@@ -1,0 +1,14 @@
+import { stdout } from std.io;
+
+// A value-returning body infers its return type from the `return`s.
+fn double(n: Int32) {
+    return n * 2;
+}
+
+fn triple(n: Int32) {
+    return double(n) + n;
+}
+
+fn main() {
+    stdout.println(triple(14));
+}

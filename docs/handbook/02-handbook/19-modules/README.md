@@ -1,6 +1,9 @@
 # Modules
 
-Files provide private declaration boundaries; `share` publishes names, `import` brings published names into another file, and `use` enables application globals declared in `.zkinit`. These operations are deliberately distinct.
+Files provide private declaration boundaries. A `package` is the logical,
+importable unit; `mod` is a published namespace inside it. `share` publishes a
+name or module, `import` selects published names, and `use` enables application
+globals declared in `.zkinit`. These operations are deliberately distinct.
 
 ---
 

@@ -69,7 +69,7 @@ abstract class Throwable implements Error {
     abstract stack_trace(): StackTrace;
 }
 
-abstract class RuntimeError implements Throwable {}
+abstract class RuntimeError implements Throwable { }
 ```
 
 Any `E` may be used in `Result<T,E>`. Only `Throwable` values can be thrown.
@@ -130,7 +130,7 @@ free boundaries.
 
 ```zirk
 interface Resource<E from Error> {
-    close(): Result<Void,E>;
+    close(): Result<Void, E>;
     is_closed(): Boolean;
 }
 ```

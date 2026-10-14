@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // La misma palabra escrita compuesta y descompuesta: bytes distintos en el
 // archivo, mismo texto para quien lo lee. ADR-011 las hace iguales.
 

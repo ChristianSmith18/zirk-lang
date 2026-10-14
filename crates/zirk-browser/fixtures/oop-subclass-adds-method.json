@@ -1,0 +1,11 @@
+{
+  "name": "oop-subclass-adds-method",
+  "source": "import { stdout } from std.io;\n\n// A subclass that declares a method the base class does not have: the new\n// method must keep its own signature even though its declaration index\n// equals that of an inherited method (here both are index 0).\nclass Account {\n    private mut balance: Int32 = 0;\n    construct() { }\n    deposit(n: Int32): Void { this.balance = this.balance + n; }\n    get_balance(): Int32 { return this.balance; }\n}\n\nclass Savings extends Account {\n    construct() { super(); }\n    label(): String { return \"savings\"; }\n}\n\nfn main(): Void {\n    mut s = Savings();\n    s.deposit(5);\n    s.deposit(7);\n    stdout.println(s.get_balance());\n    stdout.println(s.label());\n}\n",
+  "virtualName": "fixtures/oop-subclass-adds-method.zrk",
+  "expectedOutput": [
+    "12\n",
+    "savings\n"
+  ],
+  "completion": "completed",
+  "exclusions": []
+}

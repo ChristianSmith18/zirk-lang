@@ -1,0 +1,17 @@
+import { stdout } from std.io;
+record Payload { text: String; }
+fn main(): Void {
+    mut winner: Payload = Concurrent.of(
+        (): Payload => Payload(text: "rooted value"),
+        (): Payload => {
+            try {
+                Timer.sleep(50ms);
+                return Payload(text: "late value");
+            } finally {
+                mut churn: List<Int32> = [0 .. 4096];
+            }
+            return Payload(text: "unreachable");
+        },
+    ).within(1s).first();
+    stdout.println(winner.text);
+}

@@ -1,3 +1,5 @@
+import { stdout } from std.io;
+
 // Duration literals, arithmetic, comparison and printing.
 fn main(): Void {
     // Literals in each unit print normalized to the largest unit reached.
