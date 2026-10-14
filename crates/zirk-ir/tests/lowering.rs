@@ -50,6 +50,16 @@ fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) 
 /// explicit `std.io` import; source using one is automatically prefixed with
 /// the import and checked alongside the compiler-bundled `std.io` modules.
 fn compile(source_text: &str) -> Module {
+    compile_with_options(source_text)
+}
+
+/// Compiles a source-level collection combinator through the public frontend.
+fn compile_concurrent_each(source_text: &str) -> Module {
+    assert!(source_text.contains("Concurrent.each"));
+    compile_with_options(source_text)
+}
+
+fn compile_with_options(source_text: &str) -> Module {
     let needs_streams = ["stdout.", "stderr.", "stdin."]
         .iter()
         .any(|prefix| source_text.contains(prefix));
@@ -89,8 +99,13 @@ fn compile(source_text: &str) -> Module {
     }
     let checked = check(&sources, &program, &mut sink);
 
+    let unexpected_errors: Vec<_> = sink
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == zirk_diagnostics::Severity::Error)
+        .collect();
     assert!(
-        !sink.has_errors(),
+        unexpected_errors.is_empty(),
         "the program must be valid before lowering:\n{}",
         sink.render(RenderStyle::Human)
     );
@@ -108,6 +123,37 @@ fn compile(source_text: &str) -> Module {
         );
     }
 
+    module
+}
+
+/// Compiles through the normal parser/checker/lower/verifier harness while
+/// allowing the non-fatal warnings emitted by the exception fixture.
+fn compile_protected_cleanup_ir(source_text: &str) -> Module {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("test.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert!(
+        !sink.has_errors(),
+        "protected-cleanup source must pass semantic checking: {}",
+        sink.render(RenderStyle::Human)
+    );
+
+    let module = lower(&program, &checked);
+    if let Err(errors) = verify(&module) {
+        panic!(
+            "the produced protected-cleanup IR is not well formed:\n{}",
+            errors
+                .iter()
+                .map(|e| format!("  - {e}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
     module
 }
 
@@ -133,7 +179,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 16] = [
+const NATIVE_FAILURE_CODES: [&str; 24] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -158,6 +204,14 @@ const NATIVE_FAILURE_CODES: [&str; 16] = [
     // throw.
     "E_INVALID_DATE",
     "E_INVALID_TIME",
+    "E_CANCELLED",
+    "E_TIMEOUT",
+    "E_TASK_CAPACITY",
+    "E_TIMER_CAPACITY",
+    "E_BACKGROUND_CAPACITY",
+    "E_SERVICE_CAPACITY",
+    "E_SERVICE_LIFECYCLE",
+    "E_INVALID_ARGUMENT",
 ];
 
 const NATIVE_FAILURE_CODE_COUNT: usize = NATIVE_FAILURE_CODES.len();
@@ -245,6 +299,13 @@ fn parallel_sequence_terminals_lower_to_worker_dispatch() {
             "missing worker dispatch for {prefix}; saw {targets:?}"
         );
     }
+
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ParallelForStart { .. }))
+    );
 }
 
 #[test]
@@ -290,6 +351,46 @@ fn a_string_literal_goes_into_the_module_table() {
 fn a_repeated_literal_is_interned_once() {
     let module = compile("fn main(): Void {\nmut a: String = \"x\";\nmut b: String = \"x\";\n}");
     assert_eq!(module.strings.len(), NATIVE_FAILURE_CODE_COUNT + 1);
+}
+
+#[test]
+fn cancelled_error_lowers_as_a_constructible_throwable_with_native_methods() {
+    let module = compile(
+        "fn main(): Void {
+             mut cancelled: CancelledError = CancelledError(\"stop\");
+             mut message: String = cancelled.message();
+             mut code: String = cancelled.code();
+             mut cause: Error? = cancelled.cause();
+             mut trace: String = cancelled.stack_trace();
+             mut outcome: Outcome<Int32> = Outcome.Cancelled(cancelled);
+             match outcome {
+                 Outcome.Cancelled(error) => { mut matched: String = error.message(); }
+                 _ => { }
+             }
+             try { throw cancelled; } catch CancelledError(error) {
+                 mut caught: String = error.message();
+             }
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Alloc(id) if module.objects[*id as usize].name == "CancelledError")),
+        "construction must allocate the concrete native descriptor"
+    );
+    for method in ["message", "code", "cause", "stack_trace"] {
+        assert!(
+            module
+                .function(&zirk_ir::method_symbol("CancelledError", method))
+                .is_some(),
+            "missing synthesized CancelledError.{method} body"
+        );
+    }
+    assert!(
+        module.strings.iter().any(|text| text == "E_CANCELLED"),
+        "the concrete failure descriptor's code method must be synthesized"
+    );
 }
 
 #[test]
@@ -1035,6 +1136,20 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
 }
 
 #[test]
+fn mutex_type_lowers_to_a_rooted_handle_and_interned_payload_type() {
+    let module = compile("fn inspect(value: Mutex<Int32>): Void { }\nfn main(): Void { }");
+    let inspect = module.function("inspect").expect("inspect is lowered");
+    assert_eq!(module.mutex_types, vec![IrType::Int(IntWidth::I32)]);
+    assert!(inspect.slots.iter().any(|slot| slot.ty == IrType::Mutex(0)));
+    let mutex_slot = inspect
+        .slots
+        .iter()
+        .position(|slot| slot.ty == IrType::Mutex(0))
+        .expect("typed mutex parameter slot") as u32;
+    assert!(inspect.gc_roots.contains(&SlotId(mutex_slot)));
+}
+
+#[test]
 fn a_conversion_requires_allocation() {
     let module = compile("fn main(): Void { stdout.println(42); }");
     let box_id = module
@@ -1204,6 +1319,41 @@ fn a_while_enters_through_its_header() {
         .expect("the loop has a header that branches");
 
     assert_eq!(target, header.id);
+}
+
+#[test]
+fn ordinary_loop_back_edges_receive_one_poll() {
+    for body in [
+        "mut i = 0; while i < 3 { i += 1; }",
+        "mut i = 0; loop { i += 1; if i >= 3 { break; } }",
+        "mut i = 0; do { i += 1; } while i < 3;",
+        "for (mut i = 0; i < 3; i++) { }",
+        "for i in 0..3 { }",
+    ] {
+        let function = main_body(body);
+        let polls = instructions(&function)
+            .into_iter()
+            .filter(|kind| matches!(kind, InstKind::SafepointPoll))
+            .count();
+        assert_eq!(polls, 1, "expected one loop poll for `{body}`");
+    }
+}
+
+#[test]
+fn continue_back_edges_receive_one_poll_without_duplicate_edges() {
+    for body in [
+        "mut i = 0; while i < 3 { i += 1; continue; }",
+        "mut i = 0; do { i += 1; continue; } while i < 3;",
+        "for (mut i = 0; i < 3; i++) { continue; }",
+        "for i in 0..3 { continue; }",
+    ] {
+        let function = main_body(body);
+        let polls = instructions(&function)
+            .into_iter()
+            .filter(|kind| matches!(kind, InstKind::SafepointPoll))
+            .count();
+        assert_eq!(polls, 1, "expected one poll on continue path for `{body}`");
+    }
 }
 
 #[test]
@@ -2700,6 +2850,209 @@ fn an_exception_escaping_unsafe_emits_journal_rollback() {
 }
 
 #[test]
+fn concurrent_protect_shields_callable_then_checks_after_restoration() {
+    let module = compile_protected_cleanup_ir(
+        "fn main(): Void {
+            mut count: Int32 = 7;
+            Concurrent.protect((): Void => { mut local: Int32 = count; });
+        }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    let position = |predicate: fn(&InstKind) -> bool| {
+        kinds
+            .iter()
+            .position(predicate)
+            .expect("instruction in protected cleanup call sequence")
+    };
+
+    let enter = position(|kind| matches!(kind, InstKind::CancelShieldEnter));
+    let call =
+        position(|kind| matches!(kind, InstKind::CallCallable { args, .. } if args.is_empty()));
+    let exit = position(|kind| matches!(kind, InstKind::CancelShieldExit));
+    let cancelled = kinds
+        .iter()
+        .enumerate()
+        .skip(exit + 1)
+        .find_map(|(index, kind)| matches!(kind, InstKind::IsCancelled).then_some(index))
+        .expect("post-restoration cancellation check");
+    let pending = kinds
+        .iter()
+        .enumerate()
+        .skip(cancelled + 1)
+        .find_map(|(index, kind)| matches!(kind, InstKind::HasPendingException).then_some(index))
+        .expect("exception dispatch check after cancellation check");
+    assert!(
+        enter < call && call < exit && exit < cancelled && cancelled < pending,
+        "shield, callback, restoration, and first post-shield safe point must be ordered; saw {kinds:?}"
+    );
+
+    let cleanup = module
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("lambda."))
+        .expect("cleanup lambda is lifted");
+    assert!(
+        instructions(cleanup)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Store(..))),
+        "the captured mutation belongs to the invoked cleanup callable"
+    );
+}
+
+#[test]
+fn concurrent_protect_restores_shield_before_dispatching_cleanup_exception() {
+    let source = format!(
+        "{JOURNAL_BOOM}\nfn main(): Void throws Boom {{
+            Concurrent.protect((): Void => {{ throw Boom(); }});
+        }}"
+    );
+    let module = compile_protected_cleanup_ir(&source);
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    let call = kinds
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CallCallable { .. }))
+        .expect("cleanup invocation");
+    let exit = kinds
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldExit))
+        .expect("shield restoration");
+    let dispatch = kinds
+        .iter()
+        .position(|kind| matches!(kind, InstKind::TakePendingException))
+        .expect("pending exception dispatch");
+    assert!(
+        call < exit && exit < dispatch,
+        "exception dispatch must follow shield restoration; saw {kinds:?}"
+    );
+}
+
+#[test]
+fn cancellation_wins_over_a_cleanup_exception_and_consumes_it_before_cancel() {
+    let source = format!(
+        "{JOURNAL_BOOM}\nfn main(): Void throws Boom {{
+            Concurrent.protect((): Void => {{ throw Boom(); }});
+        }}"
+    );
+    let module = compile_protected_cleanup_ir(&source);
+    let main = module.function("main").expect("main exists");
+    let blocks: std::collections::HashMap<_, _> =
+        main.blocks.iter().map(|block| (block.id, block)).collect();
+
+    let discard_precedes_terminal_cancel = main.blocks.iter().any(|block| {
+        let takes_pending = block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.kind, InstKind::TakePendingException));
+        let Some(Terminator::Jump(next)) = block.terminator else {
+            return false;
+        };
+        let Some(cancel_cleanup) = blocks.get(&next) else {
+            return false;
+        };
+        takes_pending
+            && cancel_cleanup
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction.kind, InstKind::CancelShieldEnter))
+            && matches!(cancel_cleanup.terminator, Some(Terminator::Cancel))
+    });
+
+    assert!(
+        discard_precedes_terminal_cancel,
+        "a cleanup exception must be consumed before cancellation terminates the task; blocks: {:#?}",
+        main.blocks
+    );
+}
+
+#[test]
+fn concurrent_protect_callback_return_does_not_bypass_shield_exit() {
+    let module = compile_protected_cleanup_ir(
+        "fn main(): Void {
+            Concurrent.protect((): Void => { return; });
+        }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    let call = kinds
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CallCallable { args, .. } if args.is_empty()))
+        .expect("cleanup invocation");
+    let exit = kinds
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldExit))
+        .expect("shield restoration");
+    let cleanup = module
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("lambda."))
+        .expect("cleanup lambda is lifted");
+    assert!(
+        call < exit,
+        "caller restores after the callback returns; saw {kinds:?}"
+    );
+    assert!(
+        cleanup
+            .blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Some(Terminator::Return(None)))),
+        "the callback return is contained in its lifted function"
+    );
+}
+
+#[test]
+fn concurrent_protect_nests_shields_around_nested_cleanup_callables() {
+    let module = compile_protected_cleanup_ir(
+        "fn main(): Void {
+            Concurrent.protect((): Void => {
+                Concurrent.protect((): Void => { });
+            });
+        }",
+    );
+    let main = module.function("main").expect("main exists");
+    let outer = instructions(main);
+    let outer_enter = outer
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldEnter))
+        .expect("outer shield enter");
+    let outer_exit = outer
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldExit))
+        .expect("outer shield exit");
+    let outer_call = outer
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CallCallable { .. }))
+        .expect("outer cleanup call");
+    assert!(outer_enter < outer_call && outer_call < outer_exit);
+
+    let cleanup = module
+        .functions
+        .iter()
+        .find(|function| {
+            function.name.starts_with("lambda.")
+                && instructions(function)
+                    .iter()
+                    .any(|kind| matches!(kind, InstKind::CancelShieldEnter))
+        })
+        .expect("outer cleanup lambda is lifted");
+    let inner = instructions(cleanup);
+    let inner_enter = inner
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldEnter))
+        .expect("inner shield enter");
+    let inner_call = inner
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CallCallable { .. }))
+        .expect("inner cleanup call");
+    let inner_exit = inner
+        .iter()
+        .position(|kind| matches!(kind, InstKind::CancelShieldExit))
+        .expect("inner shield exit");
+    assert!(inner_enter < inner_call && inner_call < inner_exit);
+}
+
+#[test]
 fn cancellation_exit_runs_finally_and_rolls_back_active_journals() {
     let source = "fn pause(): Void {}\nfn main(): Void {
         mut value: Int32 = 1;
@@ -3800,6 +4153,418 @@ fn concurrent_block_lowers_to_scope_enter_branches_and_scope_exit() {
         2,
         "each branch is joined by a JobWait"
     );
+}
+
+#[test]
+fn settled_pipeline_lowers_to_collect_scope_and_typed_outcome_transfer() {
+    let module = compile(
+        "fn main(): Void {\n\
+           mut outcomes: List<Outcome<Int32>> = Concurrent.of(\n\
+             (): Int32 => 1,\n\
+             (): Int32 => 2\n\
+           ).settled();\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeEnterCollectAll))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeExitCollectAll { .. }))
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| matches!(k, InstKind::JobOutcomeWaitTake { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| matches!(
+                k,
+                InstKind::JobResultLoad {
+                    result: IrType::Int(IntWidth::I32),
+                    ..
+                }
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| matches!(k, InstKind::JobOutcomeTake { .. }))
+            .count(),
+        3,
+        "each cancellation point drains only the current and later jobs, never already-consumed earlier jobs"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::BuildEnum { .. })),
+        "settlement constructs generic Outcome variants"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::FatalError(_))),
+        "runtime statuses outside the closed 0..=3 ABI fail closed"
+    );
+
+    let caller_cancel_block = module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .find(|block| {
+            matches!(block.terminator, Some(Terminator::Cancel))
+                && block.instructions.iter().any(|instruction| {
+                    matches!(instruction.kind, InstKind::ScopeExitCollectAll { .. })
+                })
+        })
+        .expect("caller-cancellation block closes its collect-all scope");
+    let position = |predicate: fn(&InstKind) -> bool| {
+        caller_cancel_block
+            .instructions
+            .iter()
+            .position(|instruction| predicate(&instruction.kind))
+            .expect("instruction in caller-cancellation block")
+    };
+    let shield_enter = position(|kind| matches!(kind, InstKind::CancelShieldEnter));
+    let scope_exit = position(|kind| matches!(kind, InstKind::ScopeExitCollectAll { .. }));
+    let outcome_drain = position(|kind| matches!(kind, InstKind::JobOutcomeTake { .. }));
+    let shield_exit = position(|kind| matches!(kind, InstKind::CancelShieldExit));
+    assert!(
+        shield_enter < scope_exit && scope_exit < outcome_drain && outcome_drain < shield_exit,
+        "cancellation shield must cover scope close, child outcome drains, and cleanup"
+    );
+}
+
+#[test]
+fn concurrent_each_lowers_to_bounded_dynamic_scope_with_rooted_staging() {
+    let module = compile_concurrent_each(
+        "fn main(): Void {\n\
+           inmut::strict values: List<Int32> = [3, 1, 4, 2];\n\
+           mut results = Concurrent.each(values, (item: Int32): Int32 => item, 2);\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ScopeEnterCollectAll))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ScopeOutcomeWaitTake { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ScopeCancel { .. }))
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(
+                kind,
+                InstKind::BranchStart {
+                    kind: BranchKind::Spawn,
+                    ..
+                }
+            ))
+            .count(),
+        1,
+        "one dynamic admission site fills the bounded window"
+    );
+    assert!(
+        module.array_types.contains(&IrType::Int(IntWidth::I32)),
+        "the result staging array has a codegen descriptor type"
+    );
+    assert!(
+        module.closures.iter().any(|layout| {
+            layout.params.is_empty()
+                && layout.captures.len() == 2
+                && layout
+                    .captures
+                    .iter()
+                    .any(|ty| matches!(ty, IrType::Callable(_)))
+                && layout.returns == IrType::Int(IntWidth::I32)
+        }),
+        "the lifted zero-argument adapter layout describes callback and element captures"
+    );
+    let main = module.function("main").expect("main lowered");
+    let wait = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| {
+            if let InstKind::ScopeOutcomeWaitTake {
+                ordinal_slot,
+                value_slot,
+                throwable_slot,
+                ..
+            } = instruction.kind
+            {
+                Some((ordinal_slot, value_slot, throwable_slot))
+            } else {
+                None
+            }
+        })
+        .expect("dynamic scope wait transfers outcomes");
+    assert!(
+        main.gc_roots.contains(&wait.1) && main.gc_roots.contains(&wait.2),
+        "both managed outcome transfer slots are in the caller root map"
+    );
+}
+
+#[test]
+fn concurrent_each_settled_stages_typed_ordered_outcomes_and_checks_all_statuses() {
+    let module = compile_concurrent_each(
+        "fn main(): Void {\n\
+           inmut::strict values: List<Int32> = [1, 2, 3];\n\
+           mut results = Concurrent.each_settled(values, (item: Int32): Int32 => item, 2);\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    let outcome_id = kinds
+        .iter()
+        .find_map(|kind| match kind {
+            InstKind::BuildEnum { enum_id, .. } => Some(*enum_id),
+            _ => None,
+        })
+        .expect("Outcome<R> construction");
+    assert!(
+        module.array_types.contains(&IrType::Enum(outcome_id)),
+        "settled staging array has the generic Outcome codegen descriptor"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ScopeOutcomeWaitTake { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .filter(
+                |kind| matches!(kind, InstKind::BuildEnum { enum_id, .. } if *enum_id == outcome_id)
+            )
+            .count()
+            >= 3,
+        "fulfilled, rejected, and cancelled paths construct typed Outcome variants"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::FatalError(_))),
+        "Drained and unknown runtime statuses fail closed rather than indexing staging memory"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ScopeCancel { .. })),
+        "caller cancellation closes and joins admitted callbacks"
+    );
+}
+
+#[test]
+fn concurrent_each_checks_runtime_size_and_explicit_limit_before_scope_admission() {
+    for limit in [0, 257] {
+        let module = compile_concurrent_each(&format!(
+            "fn main(): Void {{\n\
+               inmut::strict values: List<Int32> = [1, 2];\n\
+               mut results = Concurrent.each(values, (item: Int32): Int32 => item, {limit});\n\
+             }}"
+        ));
+        let main = module.function("main").expect("main lowered");
+        let instructions: Vec<_> = main
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .map(|instruction| &instruction.kind)
+            .collect();
+        let size_guard = instructions
+            .iter()
+            .position(|kind| {
+                matches!(
+                    kind,
+                    InstKind::Binary {
+                        op: BinaryOp::Gt,
+                        ..
+                    }
+                )
+            })
+            .expect("collection maximum check");
+        let limit_guard = instructions
+            .iter()
+            .position(|kind| {
+                matches!(
+                    kind,
+                    InstKind::Binary {
+                        op: BinaryOp::Lt | BinaryOp::Eq,
+                        ..
+                    }
+                )
+            })
+            .expect("explicit lower-limit check");
+        let scope = instructions
+            .iter()
+            .position(|kind| matches!(kind, InstKind::ScopeEnterCollectAll))
+            .expect("callback scope admission point");
+        let admission = instructions
+            .iter()
+            .position(|kind| {
+                matches!(
+                    kind,
+                    InstKind::BranchStart {
+                        kind: BranchKind::Spawn,
+                        ..
+                    }
+                )
+            })
+            .expect("callback admission instruction");
+        assert!(size_guard < scope && limit_guard < scope && scope < admission);
+        assert!(
+            instructions
+                .iter()
+                .any(|kind| matches!(kind, InstKind::ConstInt(value) if *value == limit)),
+            "the explicit invalid limit {limit} must reach runtime validation"
+        );
+    }
+}
+
+#[test]
+fn concurrent_each_default_window_is_32_and_still_caps_to_input_length() {
+    let module = compile_concurrent_each(
+        "fn main(): Void {\n\
+           inmut::strict values: List<Int32> = [];\n\
+           mut results = Concurrent.each(values, (item: Int32): Int32 => item);\n\
+         }",
+    );
+    let main = module.function("main").expect("main lowered");
+    let kinds: Vec<_> = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .map(|instruction| &instruction.kind)
+        .collect();
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ConstInt(32))),
+        "omitted concurrency limit defaults to 32"
+    );
+    assert!(
+        kinds.iter().any(|kind| matches!(
+            kind,
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                ..
+            }
+        )),
+        "effective concurrency is capped by collection length, including empty input"
+    );
+}
+
+#[test]
+fn concurrent_first_lowers_to_completion_order_race_with_closed_abi_checks() {
+    let module = compile(
+        "fn cleanup(): Void { }\n\
+         fn main(): Void {\n\
+           mut result: Int32 = Concurrent.of(\n\
+             (): Int32 => 1,\n\
+             (): Int32 => {\n\
+               try { Timer.sleep(1ms); } finally { cleanup(); }\n\
+               return 2;\n\
+             }\n\
+           ).first();\n\
+         }",
+    );
+    let kinds = all_instructions(&module);
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JobWaitAny { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeEnterCollectAll))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::ScopeExitCollectAll { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::JobCancelWithCleanupFailure { .. }))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|k| matches!(k, InstKind::CancelShieldEnter))
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k, InstKind::FatalError(_))),
+        "unknown wait-any indices and outcome statuses fail closed"
+    );
+
+    let main = module.function("main").expect("main function");
+    let cancellation_start = main
+        .blocks
+        .iter()
+        .find(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction.kind, InstKind::CancelShieldEnter))
+                && block.instructions.iter().any(|instruction| {
+                    matches!(instruction.kind, InstKind::ScopeExitCollectAll { .. })
+                })
+        })
+        .expect("caller cancellation enters a shield and closes the first scope")
+        .id;
+    let mut pending = vec![cancellation_start];
+    let mut reachable = Vec::new();
+    while let Some(id) = pending.pop() {
+        if reachable.contains(&id) {
+            continue;
+        }
+        reachable.push(id);
+        if let Some(block) = main.blocks.iter().find(|block| block.id == id)
+            && let Some(terminator) = &block.terminator
+        {
+            pending.extend(terminator.successors());
+        }
+    }
+    let cancellation_path: Vec<_> = main
+        .blocks
+        .iter()
+        .filter(|block| reachable.contains(&block.id))
+        .collect();
+    assert!(
+        cancellation_path
+            .iter()
+            .any(|block| { matches!(block.terminator, Some(Terminator::Cancel)) })
+    );
+    assert!(cancellation_path.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.kind, InstKind::JobOutcomeTake { .. }))
+    }));
+    assert!(cancellation_path.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.kind, InstKind::CancelShieldExit))
+    }));
 }
 
 #[test]

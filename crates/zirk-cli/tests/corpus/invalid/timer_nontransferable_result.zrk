@@ -1,0 +1,8 @@
+class MutableValue implements Resource {
+    mut value: Int32;
+    construct() { this.value = 0; }
+}
+fn create(): MutableValue { return MutableValue(); }
+fn main(): Void {
+    Timer.after(1s, (): MutableValue => create());
+}

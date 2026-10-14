@@ -24,6 +24,21 @@ use zirk_sema::{
 /// points to.
 const UNREACHABLE_ABSTRACT_METHOD: &str = "zk.unreachable_abstract_method";
 
+#[derive(Clone, Copy)]
+struct FirstFailureSlots {
+    outcome: SlotId,
+    primary: SlotId,
+    tail: SlotId,
+    has_primary: SlotId,
+}
+
+struct FirstCleanupContext<'a> {
+    index: usize,
+    mask: u16,
+    entries: &'a HashMap<u16, BlockId>,
+    done: BlockId,
+}
+
 /// Lowers a verified program into an IR module.
 pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // Specialization comes first (roadmap task 11.1, D5): one concrete copy
@@ -373,6 +388,15 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .channel_types
         .iter()
         .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .collect();
+
+    // Mutex payload type ids are interned in lockstep by sema and IR. The
+    // handle is already a traced pointer; this table lets codegen recover the
+    // inline payload's exact layout without exposing a view as a stored value.
+    module.mutex_types = checked
+        .mutex_types
+        .iter()
+        .map(|&payload| ir_type(payload, instance_base, enum_instance_base, checked))
         .collect();
 
     // `checked.weak_types` is pushed first, in the same order, for the same
@@ -2169,7 +2193,179 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         }
     }
 
+    insert_safepoint_polls(&mut module);
     module
+}
+
+/// Inserts one poll on every reachable CFG back-edge. Branch edges are split
+/// so a poll on one successor never runs on the other path. This operates on
+/// the finished CFG, which also covers `continue` after its cleanup blocks.
+fn insert_safepoint_polls(module: &mut Module) {
+    for function in &mut module.functions {
+        if !function
+            .blocks
+            .iter()
+            .any(|block| block.id == function.entry)
+        {
+            continue;
+        }
+        let count = function.blocks.len();
+        let indices: HashMap<BlockId, usize> = function
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.id, index))
+            .collect();
+
+        let mut reachable = HashSet::new();
+        let mut pending = vec![function.entry];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(&index) = indices.get(&id)
+                && let Some(terminator) = &function.blocks[index].terminator
+            {
+                pending.extend(terminator.successors());
+            }
+        }
+
+        let mut predecessors: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        for block in &function.blocks {
+            if !reachable.contains(&block.id) {
+                continue;
+            }
+            if let Some(terminator) = &block.terminator {
+                for successor in terminator.successors() {
+                    if reachable.contains(&successor) {
+                        predecessors.entry(successor).or_default().push(block.id);
+                    }
+                }
+            }
+        }
+
+        let mut dominators: HashMap<BlockId, HashSet<BlockId>> = reachable
+            .iter()
+            .map(|&id| {
+                (
+                    id,
+                    if id == function.entry {
+                        HashSet::from([id])
+                    } else {
+                        reachable.clone()
+                    },
+                )
+            })
+            .collect();
+        loop {
+            let mut changed = false;
+            for &id in &reachable {
+                if id == function.entry {
+                    continue;
+                }
+                let preds = predecessors.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                let mut next = preds
+                    .first()
+                    .and_then(|pred| dominators.get(pred).cloned())
+                    .unwrap_or_default();
+                for pred in preds.iter().skip(1) {
+                    if let Some(pred_dominators) = dominators.get(pred) {
+                        next.retain(|candidate| pred_dominators.contains(candidate));
+                    }
+                }
+                next.insert(id);
+                if dominators.get(&id) != Some(&next) {
+                    dominators.insert(id, next);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        let mut next_id = function
+            .blocks
+            .iter()
+            .map(|block| block.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut splits = Vec::new();
+        for source_index in 0..count {
+            let source = function.blocks[source_index].id;
+            if !reachable.contains(&source) {
+                continue;
+            }
+            let mut back_edges: Vec<BlockId> = function.blocks[source_index]
+                .terminator
+                .as_ref()
+                .into_iter()
+                .flat_map(Terminator::successors)
+                .filter(|target| {
+                    dominators
+                        .get(&source)
+                        .is_some_and(|set| set.contains(target))
+                })
+                .collect();
+            back_edges.sort_unstable();
+            back_edges.dedup();
+            if back_edges.is_empty() {
+                continue;
+            }
+
+            if matches!(
+                function.blocks[source_index].terminator,
+                Some(Terminator::Jump(_))
+            ) {
+                {
+                    if !function.blocks[source_index]
+                        .instructions
+                        .last()
+                        .is_some_and(|instruction| {
+                            matches!(instruction.kind, InstKind::SafepointPoll)
+                        })
+                    {
+                        function.blocks[source_index]
+                            .instructions
+                            .push(Instruction {
+                                result: None,
+                                kind: InstKind::SafepointPoll,
+                                ty: IrType::Void,
+                                span: function.span,
+                            });
+                    }
+                }
+            } else if let Some(Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            }) = function.blocks[source_index].terminator.as_mut()
+            {
+                for target in back_edges {
+                    let split = BlockId(next_id);
+                    next_id = next_id.saturating_add(1);
+                    if *then_block == target {
+                        *then_block = split;
+                    }
+                    if *else_block == target {
+                        *else_block = split;
+                    }
+                    splits.push(Block {
+                        id: split,
+                        instructions: vec![Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span: function.span,
+                        }],
+                        terminator: Some(Terminator::Jump(target)),
+                    });
+                }
+            }
+        }
+        function.blocks.extend(splits);
+    }
 }
 
 /// Builds the method bodies of every native failure class by hand
@@ -2222,6 +2418,14 @@ fn synthesize_native_failure_bodies<'a>(
         // constructors throw.
         (native.invalid_date, "E_INVALID_DATE"),
         (native.invalid_time, "E_INVALID_TIME"),
+        (native.cancelled_error, "E_CANCELLED"),
+        (native.timeout_error, "E_TIMEOUT"),
+        (native.task_capacity_error, "E_TASK_CAPACITY"),
+        (native.timer_capacity_error, "E_TIMER_CAPACITY"),
+        (native.background_capacity_error, "E_BACKGROUND_CAPACITY"),
+        (native.service_capacity_error, "E_SERVICE_CAPACITY"),
+        (native.service_lifecycle_error, "E_SERVICE_LIFECYCLE"),
+        (native.invalid_argument, "E_INVALID_ARGUMENT"),
     ];
 
     for (class_id, code) in classes {
@@ -2608,10 +2812,7 @@ fn substitute_generic_type(checked: &CheckedProgram, ty: Type, subst: &[(u32, Ty
         _ => return ty,
     };
 
-    Type {
-        base,
-        nullable: ty.nullable,
-    }
+    ty.with_base(base)
 }
 
 /// One generic enum's own `T` replaced by one instantiation's concrete
@@ -2911,6 +3112,21 @@ fn ir_type(
         Base::DateTime => IrType::Int(IntWidth::I128),
         Base::Regex => IrType::Regex,
         Base::Char => IrType::Char,
+        // The runtime-issued callback capability carries its stable service ID.
+        // Source execution remains gated until the complete callback ABI lands.
+        Base::ServiceContext => IrType::Int(IntWidth::U64),
+        Base::ServiceCapacityError => IrType::Object(
+            checked
+                .native_exceptions
+                .expect("native exceptions are registered before lowering")
+                .service_capacity_error,
+        ),
+        Base::ServiceLifecycleError => IrType::Object(
+            checked
+                .native_exceptions
+                .expect("native exceptions are registered before lowering")
+                .service_lifecycle_error,
+        ),
         // A traditional enum — none of its variants carry data — is exactly
         // its discriminant. One with at least one algebraic variant gets a
         // representation of its own (roadmap task 11.3).
@@ -2975,6 +3191,15 @@ fn ir_type(
         // type remains in the checker; IR operations recover it at `JobWait`.
         Base::Job(_) => IrType::Job,
         Base::Channel(id) => IrType::Channel(id),
+        Base::Atomic(id) => {
+            let scalar = checked.atomic_types[id as usize];
+            let scalar_ir = ir_type(scalar, instance_base, enum_instance_base, checked);
+            IrType::Atomic(
+                crate::AtomicKind::from_ir_type(scalar_ir)
+                    .expect("sema restricts Atomic<T> to supported scalar widths"),
+            )
+        }
+        Base::Mutex(id) => IrType::Mutex(id),
 
         // `checked.pointer_types` and `module.pointer_types` are populated in
         // the same order, once, before any function is lowered (`Self::lower`,
@@ -3326,6 +3551,12 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     fn channel_element(&self, id: u32) -> Type {
         self.0.channel_types[id as usize]
     }
+    fn atomic_element(&self, id: u32) -> Type {
+        self.0.atomic_types[id as usize]
+    }
+    fn mutex_element(&self, id: u32) -> Type {
+        self.0.mutex_types[id as usize]
+    }
     fn class_name(&self, id: u32) -> String {
         self.0.classes[id as usize].name.clone()
     }
@@ -3416,6 +3647,124 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
 }
 
 impl<'a> FunctionLowering<'a> {
+    /// Returns a direct `Concurrent.of` call and its optional timeout duration
+    /// from a checked terminal. Lowering reads the original AST so duration
+    /// evaluation remains exactly once.
+    fn concurrent_pipeline_parts(
+        terminal: &ast::CallExpr,
+        has_deadline: bool,
+    ) -> (&ast::CallExpr, Option<&ast::Expr>) {
+        let ast::Expr::Field(field) = &*terminal.callee else {
+            unreachable!("completion terminal is a field call")
+        };
+        if !has_deadline {
+            let ast::Expr::Call(of_call) = &*field.object else {
+                unreachable!("sema validates a direct Concurrent.of pipeline")
+            };
+            return (of_call, None);
+        }
+        let ast::Expr::Call(within) = &*field.object else {
+            unreachable!("sema validates the within stage")
+        };
+        let ast::Expr::Field(within_field) = &*within.callee else {
+            unreachable!("within is a field call")
+        };
+        let ast::Expr::Call(of_call) = &*within_field.object else {
+            unreachable!("sema validates a direct Concurrent.of pipeline")
+        };
+        (of_call, within.args.first().map(|arg| &arg.value))
+    }
+
+    /// Validates signed nanoseconds before any child starts. A negative
+    /// duration raises a compiler-known language error rather than reaching
+    /// TimerService's fatal ABI guard.
+    fn lower_concurrent_deadline(
+        &mut self,
+        duration: Option<&ast::Expr>,
+        span: Span,
+    ) -> Option<Operand> {
+        let duration = duration?;
+        let nanos = self.lower_expr_as(duration, IrType::Int(IntWidth::I64));
+        let slot = self.spill(nanos, IrType::Int(IntWidth::I64), duration.span());
+        let value = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
+        let negative = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: negative,
+            then_block: invalid,
+            else_block: valid,
+        });
+        self.current = invalid;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        self.throw_native_failure(native.native_error, "duration must not be negative", span);
+        self.current = valid;
+        Some(self.emit(InstKind::Load(slot), IrType::Int(IntWidth::I64), span))
+    }
+
+    /// Starts a no-op ambient timer task which participates in the same
+    /// completion-sequence ordering as the pipeline branches.
+    fn lower_deadline_timer(&mut self, delay: Operand, scope_slot: SlotId, span: Span) -> Operand {
+        let target = format!("zirk.within.deadline.{}.{}", span.file.0, span.start);
+        let closure = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: vec![],
+            params: vec![],
+            returns: IrType::Void,
+        });
+        let entry = BlockId(0);
+        let mut block = Block::new(entry);
+        block.terminator = Some(Terminator::Return(None));
+        self.lifted.push(Function {
+            name: target.clone(),
+            params: vec![],
+            return_type: IrType::Void,
+            gc_roots: vec![],
+            slots: vec![],
+            blocks: vec![block],
+            entry,
+            span,
+        });
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: target.clone(),
+                captures: vec![],
+            },
+            IrType::Callable(closure),
+            span,
+        );
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        let job = self.emit(
+            InstKind::BranchStart {
+                target,
+                body,
+                scope,
+                kind: BranchKind::TimerAfter,
+                delay: Some(delay),
+                status_slot,
+            },
+            IrType::Job,
+            span,
+        );
+        let job_slot = self.spill(job, IrType::Job, span);
+        self.lower_branch_admission_check(status_slot, BranchKind::TimerAfter, span);
+        self.emit(InstKind::Load(job_slot), IrType::Job, span)
+    }
+
     fn new(
         module: &'a mut Module,
         checked: &'a CheckedProgram,
@@ -3769,6 +4118,18 @@ impl<'a> FunctionLowering<'a> {
             return Type::of(Base::Channel(id));
         }
 
+        if reference.name == "Mutex" {
+            let payload = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+            let id = self
+                .checked
+                .mutex_types
+                .iter()
+                .position(|&ty| ty == payload)
+                .expect("the checker interned every Mutex<T> it type-checked")
+                as u32;
+            return Type::of(Base::Mutex(id));
+        }
+
         // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
         // treatment as `Pointer<T>` above.
         if reference.name == "Weak" {
@@ -4073,6 +4434,11 @@ impl<'a> FunctionLowering<'a> {
     /// the IR performs implicitly: this is where the widening becomes an
     /// instruction.
     fn lower_expr_as(&mut self, expr: &ast::Expr, expected: IrType) -> Operand {
+        if let ast::Expr::Call(call) = expr
+            && self.checked.first_plans.contains_key(&call.span)
+        {
+            return self.lower_concurrent_first(call, call.span);
+        }
         // `std.io::Stringifiable` is a compiler-provided trait, not an
         // erased `String` parameter.  Values that do not already have the
         // trait's object representation are put in a small ordinary object
@@ -4756,11 +5122,14 @@ impl<'a> FunctionLowering<'a> {
             // there is no empty grapheme to fall back to.
             IrType::Void
             | IrType::Never
+            | IrType::BorrowedView { .. }
             | IrType::Char
             | IrType::Closure(_)
             | IrType::Callable(_)
             | IrType::Job
             | IrType::Channel(_)
+            | IrType::Atomic(_)
+            | IrType::Mutex(_)
             | IrType::Object(_)
             | IrType::Contract(_)
             | IrType::Value(_)
@@ -5451,6 +5820,23 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
+        if let ast::AssignTarget::Field(field) = &stmt.target
+            && field.name.name == "on_background_error"
+            && matches!(&*field.object, ast::Expr::Path(base) if base.name == "App")
+            && !self.scopes.iter().any(|scope| scope.contains_key("App"))
+            && !self.checked.functions.contains_key("App")
+            && !self.checked.classes.iter().any(|class| class.name == "App")
+        {
+            let callable = self.lower_expr(&stmt.value);
+            let IrType::Callable(layout) = self.type_of_operand(callable) else {
+                unreachable!("sema validates the App handler as a function")
+            };
+            self.emit_effect(
+                InstKind::AppSetBackgroundError { callable, layout },
+                stmt.span,
+            );
+            return;
+        }
         match &stmt.target {
             // `_ = expr;`: the value is lowered for its side effects and
             // then dropped — there is no slot named `_` to store it in
@@ -5461,11 +5847,35 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
-                let value = self.lower_expr_as(&stmt.value, self.slot_type(slot));
-                self.journal_writes_to_slot(slot, stmt.span);
-                self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                let slot_ty = self.slot_type(slot);
+                if let IrType::BorrowedView { mutex_type, .. } = slot_ty {
+                    let payload_ty = self.module.mutex_types[mutex_type as usize];
+                    let value = self.lower_expr_as(&stmt.value, payload_ty);
+                    let view = self.emit(InstKind::Load(slot), slot_ty, stmt.span);
+                    self.emit_effect(InstKind::BorrowViewStore { view, value }, stmt.span);
+                } else {
+                    let value = self.lower_expr_as(&stmt.value, slot_ty);
+                    self.journal_writes_to_slot(slot, stmt.span);
+                    self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                }
             }
             ast::AssignTarget::Field(field) => {
+                if let Some((view_slot, mut path, object_ty)) =
+                    self.borrowed_view_field_path(&field.object)
+                {
+                    let (index, field_ty) = self
+                        .field_position_for_ir_type(object_ty, &field.name.name)
+                        .expect("sema validated a field on the borrowed payload");
+                    path.push(index);
+                    let value = self.lower_expr_as(&stmt.value, field_ty);
+                    let view_ty = self.slot_type(view_slot);
+                    let view = self.emit(InstKind::Load(view_slot), view_ty, stmt.span);
+                    self.emit_effect(
+                        InstKind::BorrowViewFieldStore { view, path, value },
+                        stmt.span,
+                    );
+                    return;
+                }
                 // The object is evaluated before the value, which is the order
                 // it is written in. The value may now introduce a guard branch
                 // (`+`, `-`, `*`, `/`, `%` with overflow or division-by-zero
@@ -7112,7 +7522,16 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Path(ident) => {
                 if let Some(slot) = self.try_lookup_slot(&ident.name) {
                     let ty = self.slot_type(slot);
-                    self.emit(InstKind::Load(slot), ty, span)
+                    if matches!(ty, IrType::BorrowedView { .. }) {
+                        let IrType::BorrowedView { mutex_type, .. } = ty else {
+                            unreachable!()
+                        };
+                        let payload = self.module.mutex_types[mutex_type as usize];
+                        let view = self.emit(InstKind::Load(slot), ty, span);
+                        self.emit(InstKind::BorrowViewLoad { view }, payload, span)
+                    } else {
+                        self.emit(InstKind::Load(slot), ty, span)
+                    }
                 } else if ident.name == "outer"
                     && let Some(class) = self.current_class
                     && let Some(parent) = self.checked.classes[class as usize].enclosing
@@ -7456,9 +7875,26 @@ impl<'a> FunctionLowering<'a> {
                 )
             }
 
+            ast::Expr::Call(e) if self.is_thread_run_call(e) => self.lower_thread_run_call(e, span),
+
+            ast::Expr::Call(e) if self.checked.service_spawns.contains_key(&e.span) => {
+                self.lower_service_start(e, span)
+            }
+
+            ast::Expr::Call(e) if self.checked.service_ready_calls.contains_key(&e.span) => {
+                self.lower_service_ready(e, span)
+            }
+
             // Calling a callable value goes through the boxed callable, not a name.
+            ast::Expr::Call(e) if self.checked.mutex_with_calls.contains_key(&e.span) => {
+                self.lower_mutex_with_call(e, span)
+            }
+
             ast::Expr::Call(e)
                 if !Self::is_parallel_each_call(e)
+                    && !self.is_atomic_call(e)
+                    && !self.checked.mutex_with_calls.contains_key(&e.span)
+                    && !self.is_concurrent_detach_call(e)
                     && !matches!(
                         &*e.callee,
                         ast::Expr::Field(field)
@@ -7488,6 +7924,21 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if self.is_mutex_constructor_call(e) {
+                    return self.lower_mutex_construction(e, span);
+                }
+                if self.is_atomic_call(e) {
+                    return self.lower_atomic_call(e, span);
+                }
+                if self.checked.concurrent_each_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_each(e, span);
+                }
+                if self.checked.first_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_first(e, span);
+                }
+                if self.checked.settled_plans.contains_key(&e.span) {
+                    return self.lower_concurrent_settled(e, span);
+                }
                 if let Some(result) = self.try_lower_stdio_host_call(e, span) {
                     let returns = self.type_of_operand(result);
                     return self.lower_throws_check(result, returns, span);
@@ -7500,6 +7951,15 @@ impl<'a> FunctionLowering<'a> {
                     return self
                         .lower_array_list_construction(e, span)
                         .expect("checked Channel.unbounded construction");
+                }
+                if self.is_concurrent_protect_call(e) {
+                    return self.lower_concurrent_protect_call(e, span);
+                }
+                if self.is_concurrent_detach_call(e) {
+                    return self.lower_concurrent_detach(e, span);
+                }
+                if self.is_app_shutdown_grace_call(e) {
+                    return self.lower_app_shutdown_grace_call(e, span);
                 }
                 if self.is_timer_call(e) {
                     return self.lower_timer_call(e, span);
@@ -8077,7 +8537,7 @@ impl<'a> FunctionLowering<'a> {
             .map(|binding| binding.statement_index)
             .collect();
 
-        let mut jobs: Vec<Option<Operand>> = vec![None; block.bindings.len()];
+        let mut jobs: Vec<Option<SlotId>> = vec![None; block.bindings.len()];
         let mut joined = vec![false; block.bindings.len()];
 
         for &i in &plan.order {
@@ -8116,7 +8576,9 @@ impl<'a> FunctionLowering<'a> {
                 None,
                 span,
             );
-            jobs[i] = Some(job);
+            let job_slot = self.declare_slot("<branch-job>", IrType::Job, binding.span);
+            self.emit_effect(InstKind::Store(job_slot, job), span);
+            jobs[i] = Some(job_slot);
         }
 
         // The block's own branch: the plain statements, in source order. The
@@ -8167,7 +8629,7 @@ impl<'a> FunctionLowering<'a> {
         &mut self,
         block: &ast::ConcurrentBlock,
         index: usize,
-        jobs: &[Option<Operand>],
+        jobs: &[Option<SlotId>],
         joined: &mut [bool],
         span: Span,
     ) {
@@ -8175,7 +8637,8 @@ impl<'a> FunctionLowering<'a> {
             return;
         }
         joined[index] = true;
-        let job = jobs[index].expect("a branch is started before it is joined");
+        let job_slot = jobs[index].expect("a branch is started before it is joined");
+        let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
         let binding = &block.bindings[index];
         let returns = {
             let info = self
@@ -8258,17 +8721,1124 @@ impl<'a> FunctionLowering<'a> {
             .last()
             .expect("the checker requires a scope around every branch");
         let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
-        self.emit(
+        let status_zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(status_zero, IrType::Int(IntWidth::U32), span);
+        let job = self.emit(
             InstKind::BranchStart {
                 target: name,
                 body: callable,
                 scope,
                 kind,
                 delay,
+                status_slot,
             },
             IrType::Job,
             span,
-        )
+        );
+        let job_slot = self.spill(job, IrType::Job, span);
+        self.lower_branch_admission_check(status_slot, kind, span);
+        self.emit(InstKind::Load(job_slot), IrType::Job, span)
+    }
+
+    fn lower_concurrent_detach(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let callback = &call.args[0].value;
+        let (target, body) = if let ast::Expr::Lambda(lambda) = callback {
+            let info = self
+                .checked
+                .lambdas
+                .get(&lambda.span)
+                .expect("sema records a validated detach lambda")
+                .clone();
+            let captures: Vec<SlotId> = info
+                .captures
+                .iter()
+                .map(|capture| self.lookup_slot(&capture.name))
+                .collect();
+            let capture_types: Vec<IrType> =
+                captures.iter().map(|slot| self.slot_type(*slot)).collect();
+            let names: Vec<String> = info
+                .captures
+                .iter()
+                .map(|capture| capture.name.clone())
+                .collect();
+            let values: Vec<Operand> = captures
+                .iter()
+                .map(|slot| self.emit(InstKind::Load(*slot), self.slot_type(*slot), span))
+                .collect();
+            let target = format!("background.{}.{}", lambda.span.file.0, lambda.span.start);
+            let body_ast = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            self.module.closures[info.fn_type as usize] = ClosureLayout {
+                captures: capture_types.clone(),
+                params: Vec::new(),
+                returns: IrType::Void,
+            };
+            let lifted = self.lift_branch_body(
+                &target,
+                &names,
+                &capture_types,
+                IrType::Void,
+                body_ast,
+                span,
+            );
+            self.lifted.push(lifted);
+            let body = self.emit(
+                InstKind::MakeCallable {
+                    target: target.clone(),
+                    captures: values,
+                },
+                IrType::Callable(info.fn_type),
+                span,
+            );
+            (target, body)
+        } else {
+            let callback = self.lower_expr(callback);
+            let IrType::Callable(callback_layout) = self.type_of_operand(callback) else {
+                unreachable!("sema validates the detached callback type")
+            };
+            let callback_ty = IrType::Callable(callback_layout);
+            let layout_id = self.module.closures.len() as u32;
+            self.module.closures.push(ClosureLayout {
+                captures: vec![callback_ty],
+                params: Vec::new(),
+                returns: IrType::Void,
+            });
+            let target = format!("background.invoke.{}.{}", span.file.0, span.start);
+            let mut inner = FunctionLowering::new(
+                self.module,
+                self.checked,
+                self.declarations,
+                self.instance_base,
+                self.enum_instance_base,
+            );
+            inner.return_type = IrType::Void;
+            let entry = inner.new_block();
+            inner.current = entry;
+            inner.scopes.push(HashMap::new());
+            let callback_slot = inner.declare_slot("$background_callback", callback_ty, span);
+            let callback_value = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+            let result = inner.emit(
+                InstKind::CallCallable {
+                    callable: callback_value,
+                    args: Vec::new(),
+                },
+                IrType::Void,
+                span,
+            );
+            inner.lower_throws_check(result, IrType::Void, span);
+            if inner.block_mut(inner.current).terminator.is_none() {
+                inner.terminate(Terminator::Return(None));
+            }
+            inner.scopes.pop();
+            let nested = std::mem::take(&mut inner.lifted);
+            self.lifted.extend(nested);
+            self.lifted.push(Function {
+                name: target.clone(),
+                params: vec![callback_slot],
+                return_type: IrType::Void,
+                gc_roots: gc_roots_of(inner.module, &inner.slots),
+                slots: inner.slots,
+                blocks: inner.blocks,
+                entry,
+                span,
+            });
+            let body = self.emit(
+                InstKind::MakeCallable {
+                    target: target.clone(),
+                    captures: vec![callback],
+                },
+                IrType::Callable(layout_id),
+                span,
+            );
+            (target, body)
+        };
+
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::BackgroundStart {
+                target,
+                body,
+                status_slot,
+            },
+            span,
+        );
+        self.lower_background_admission_check(status_slot, span);
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn lower_service_start(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let info = self.checked.service_spawns[&call.span].clone();
+        let callback = &call.args[0].value;
+        let target = match callback {
+            ast::Expr::Lambda(lambda) => {
+                format!("lambda.{}.{}", lambda.span.file.0, lambda.span.start)
+            }
+            ast::Expr::Path(path) => {
+                let (_, target) = self
+                    .named_function_value(&path.name, path.span)
+                    .expect("sema validated a named service callback");
+                target
+            }
+            _ => unreachable!("sema accepts only direct service callbacks"),
+        };
+        let body = self.lower_expr(callback);
+        assert_eq!(
+            self.type_of_operand(body),
+            IrType::Callable(info.callback_type)
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::ServiceStart {
+                target,
+                body,
+                status_slot,
+            },
+            span,
+        );
+        self.lower_service_admission_check(status_slot, span);
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn lower_service_admission_check(&mut self, status_slot: SlotId, span: Span) {
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let service_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let service_error = self.new_block();
+        let check_task = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: service_full,
+            then_block: service_error,
+            else_block: check_task,
+        });
+        self.current = service_error;
+        self.throw_native_failure(
+            native.service_capacity_error,
+            "service supervisor capacity reached",
+            span,
+        );
+
+        self.current = check_task;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let task_error = self.new_block();
+        let check_lifecycle = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: task_error,
+            else_block: check_lifecycle,
+        });
+        self.current = task_error;
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached while registering service",
+            span,
+        );
+
+        self.current = check_lifecycle;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let lifecycle_error = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: lifecycle_error,
+        });
+        self.current = lifecycle_error;
+        self.throw_native_failure(
+            native.service_lifecycle_error,
+            "service registration after application draining began",
+            span,
+        );
+        self.current = done;
+    }
+
+    fn lower_service_ready(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("sema only marks ServiceContext.ready calls")
+        };
+        let ast::Expr::Path(context_name) = &*field.object else {
+            unreachable!("sema binds readiness to a direct callback parameter")
+        };
+        let slot = self.lookup_slot(&context_name.name);
+        let context = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U64), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status_slot = self.spill(zero, IrType::Int(IntWidth::U32), span);
+        self.emit_effect(
+            InstKind::ServiceReady {
+                context,
+                status_slot,
+            },
+            span,
+        );
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero_status = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.service_lifecycle_error,
+            "service readiness reported outside its active startup callback",
+            span,
+        );
+        self.current = done;
+        self.emit(InstKind::Undefined, IrType::Void, span)
+    }
+
+    fn is_atomic_call(&self, call: &ast::CallExpr) -> bool {
+        match &*call.callee {
+            ast::Expr::Path(name) if name.name == "Atomic" => {
+                !self.checked.functions.contains_key("Atomic")
+                    && !self.scopes.iter().any(|scope| scope.contains_key("Atomic"))
+                    && self
+                        .checked
+                        .expr_types
+                        .get(&call.span)
+                        .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Atomic(_)))
+            }
+            ast::Expr::Field(field) => {
+                self.atomic_receiver_type(&field.object).is_some()
+                    && matches!(
+                        field.name.name.as_str(),
+                        "load"
+                            | "store"
+                            | "exchange"
+                            | "compare_exchange"
+                            | "fetch_add"
+                            | "fetch_sub"
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    fn is_mutex_constructor_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Path(name) if name.name == "Mutex")
+            && !self.checked.functions.contains_key("Mutex")
+            && !self.scopes.iter().any(|scope| scope.contains_key("Mutex"))
+            && self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Mutex(_)))
+    }
+
+    fn atomic_receiver_type(&self, receiver: &ast::Expr) -> Option<IrType> {
+        if let Some(ty) = self.checked.expr_types.get(&receiver.span()) {
+            let ir = self.ir_type(*ty);
+            if matches!(ir, IrType::Atomic(_)) {
+                return Some(ir);
+            }
+        }
+        let ast::Expr::Path(name) = receiver else {
+            return None;
+        };
+        let slot = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name.name))?;
+        let ty = self.slot_type(*slot);
+        matches!(ty, IrType::Atomic(_)).then_some(ty)
+    }
+
+    fn lower_mutex_construction(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ty = self.checked.expr_types[&call.span];
+        let zirk_sema::Base::Mutex(mutex_type) = ty.base else {
+            unreachable!("sema records Mutex<T> for its constructor")
+        };
+        let payload_ty = self.module.mutex_types[mutex_type as usize];
+        let payload = self.lower_expr_as(&call.args[0].value, payload_ty);
+        let payload_slot = self.spill(payload, payload_ty, call.args[0].value.span());
+        let payload = self.emit(InstKind::Load(payload_slot), payload_ty, span);
+        let object_slot = self.declare_slot("<mutex>", IrType::Mutex(mutex_type), span);
+        let status = self.emit(
+            InstKind::MutexNew {
+                payload,
+                mutex_type,
+                object_slot,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let failure = self.new_block();
+        let success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: success,
+            else_block: failure,
+        });
+        self.current = failure;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(native.invalid_argument, "mutex allocation failed", span);
+        self.current = success;
+        self.emit(InstKind::Load(object_slot), IrType::Mutex(mutex_type), span)
+    }
+
+    fn lower_mutex_with_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("sema records only direct Mutex.with calls")
+        };
+        let mutex_type = self.checked.mutex_with_calls[&call.span];
+        let handle_ty = IrType::Mutex(mutex_type);
+        let handle_value = self.lower_expr_as(&field.object, handle_ty);
+        let handle_slot = self.spill(handle_value, handle_ty, field.object.span());
+        let callback = self.lower_expr(&call.args[0].value);
+        let IrType::Callable(layout) = self.type_of_operand(callback) else {
+            unreachable!("sema validates the Mutex.with callback")
+        };
+        let callback_ty = IrType::Callable(layout);
+        let callback_slot = self.spill(callback, callback_ty, call.args[0].value.span());
+        let returns = self.module.closures[layout as usize].returns;
+        let result_slot = (returns != IrType::Void)
+            .then(|| self.declare_slot("<mutex_with_result>", returns, span));
+        let handle = self.emit(InstKind::Load(handle_slot), handle_ty, span);
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let status = self.emit(
+            InstKind::MutexWithCall {
+                mutex: handle,
+                callback,
+                layout,
+                result_slot,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+
+        let cancelled_value = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: cancelled_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let cancel_block = self.new_block();
+        let check_status_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: cancel_block,
+            else_block: check_status_block,
+        });
+        self.current = cancel_block;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("built-in error classes are registered");
+        self.throw_native_failure(native.cancelled_error, "mutex wait was cancelled", span);
+
+        self.current = check_status_block;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let internal_panic_value = self.const_int_at(4, IrType::Int(IntWidth::I32), span);
+        let internal_panic = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: internal_panic_value,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let panic_block = self.new_block();
+        let validate_status_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: internal_panic,
+            then_block: panic_block,
+            else_block: validate_status_block,
+        });
+        self.current = panic_block;
+        self.emit_first_fatal("internal panic escaped a Mutex.with callback", span);
+
+        self.current = validate_status_block;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let ok = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let failure_block = self.new_block();
+        let success_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: ok,
+            then_block: success_block,
+            else_block: failure_block,
+        });
+        self.current = failure_block;
+        self.throw_native_failure(
+            native.invalid_argument,
+            "mutex callback could not run",
+            span,
+        );
+
+        self.current = success_block;
+        // A Zirk throw is delivered through the pending-exception channel and
+        // returns normally through the callback thunk. Check it after the
+        // runtime has released the mutex, before reading a possibly
+        // uninitialized non-Void callback result slot.
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        self.lower_throws_check(unit, IrType::Void, span);
+        match result_slot {
+            Some(slot) => self.emit(InstKind::Load(slot), returns, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        }
+    }
+
+    fn lower_atomic_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        if let ast::Expr::Path(_) = &*call.callee {
+            let result_type = self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .copied()
+                .map(|ty| self.ir_type(ty))
+                .expect("sema records the Atomic constructor type");
+            let IrType::Atomic(kind) = result_type else {
+                unreachable!("sema validates the Atomic constructor payload")
+            };
+            let initial = self.lower_expr_as(&call.args[0].value, kind.ir_type());
+            // The constructor writes directly into a registered root slot;
+            // runtime allocation may collect before returning.
+            let object = self.declare_slot("<atomic>", IrType::Atomic(kind), span);
+            let status = self.emit(
+                InstKind::AtomicNew {
+                    kind,
+                    value: initial,
+                    object,
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            self.lower_atomic_constructor_status(status, span);
+            return self.emit(InstKind::Load(object), IrType::Atomic(kind), span);
+        }
+
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!()
+        };
+        let receiver = self.lower_expr(&field.object);
+        let IrType::Atomic(kind) = self.type_of_operand(receiver) else {
+            unreachable!("is_atomic_call checked the receiver")
+        };
+        let method = field.name.name.as_str();
+        let (value_count, labels) = match method {
+            "load" => (0, &["order"][..]),
+            "store" | "exchange" | "fetch_add" | "fetch_sub" => (1, &["value", "order"][..]),
+            "compare_exchange" => (2, &["expected", "desired", "success", "failure"][..]),
+            _ => unreachable!("is_atomic_call checked the method"),
+        };
+        let value_ty = kind.ir_type();
+        let expected: Vec<IrType> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i < value_count {
+                    value_ty
+                } else {
+                    IrType::Int(IntWidth::I32)
+                }
+            })
+            .collect();
+        let mut arg_slots: Vec<Option<usize>> = vec![None; expected.len()];
+        let mut next = 0usize;
+        for (index, arg) in call.args.iter().enumerate() {
+            let slot = if let Some(label) = &arg.name {
+                labels
+                    .iter()
+                    .position(|name| *name == label.name)
+                    .expect("sema checked atomic argument labels")
+            } else {
+                while next < arg_slots.len() && arg_slots[next].is_some() {
+                    next += 1;
+                }
+                let slot = next;
+                next += 1;
+                slot
+            };
+            assert!(
+                arg_slots[slot].replace(index).is_none(),
+                "sema rejected duplicate atomic argument"
+            );
+        }
+
+        // Keep the managed receiver rooted across argument evaluation. An
+        // argument may allocate even when its expression does not open CFG.
+        let receiver_slot = self.spill(receiver, IrType::Atomic(kind), field.object.span());
+        let mut held: Vec<Option<Held>> = std::iter::repeat_with(|| None)
+            .take(expected.len())
+            .collect();
+        for (index, arg) in call.args.iter().enumerate() {
+            let slot = arg_slots
+                .iter()
+                .position(|v| *v == Some(index))
+                .expect("argument mapped above");
+            let branches_later = call.args[index + 1..]
+                .iter()
+                .any(|later| self.opens_blocks(&later.value));
+            held[slot] = Some(self.lower_and_hold_as(&arg.value, expected[slot], branches_later));
+        }
+        let args: Vec<Option<Operand>> = held
+            .into_iter()
+            .map(|value| value.map(|value| self.reload(value, call.span)))
+            .collect();
+        let receiver = self.emit(InstKind::Load(receiver_slot), IrType::Atomic(kind), span);
+        let out = (matches!(method, "load" | "exchange" | "fetch_add" | "fetch_sub"))
+            .then(|| self.declare_slot("<atomic_result>", value_ty, span));
+        let status = match method {
+            "load" => self.emit(
+                InstKind::AtomicLoad {
+                    object: receiver,
+                    order: args[0],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "store" => self.emit(
+                InstKind::AtomicStore {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "exchange" => self.emit(
+                InstKind::AtomicExchange {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "fetch_add" => self.emit(
+                InstKind::AtomicFetchAdd {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "fetch_sub" => self.emit(
+                InstKind::AtomicFetchSub {
+                    object: receiver,
+                    value: args[0].unwrap(),
+                    order: args[1],
+                    out: out.unwrap(),
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            ),
+            "compare_exchange" => {
+                let observed = self.declare_slot("<atomic_observed>", value_ty, span);
+                let exchanged = self.declare_slot("<atomic_exchanged>", IrType::Boolean, span);
+                let seq_cst = self.const_int_at(4, IrType::Int(IntWidth::I32), span);
+                let status = self.emit(
+                    InstKind::AtomicCompareExchange {
+                        object: receiver,
+                        current: args[0].unwrap(),
+                        new_value: args[1].unwrap(),
+                        success_order: args[2].unwrap_or(seq_cst),
+                        failure_order: args[3].unwrap_or(seq_cst),
+                        observed,
+                        exchanged,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                self.lower_atomic_operation_status(status, span);
+                let result_ty = self.ir_type(
+                    *self
+                        .checked
+                        .expr_types
+                        .get(&call.span)
+                        .expect("sema records Result<T,T>"),
+                );
+                let enum_id = match result_ty {
+                    IrType::Enum(id) => id,
+                    _ => unreachable!("Result lowers to enum"),
+                };
+                let result_slot = self.declare_slot("<atomic_cas_result>", result_ty, span);
+                let flag = self.emit(InstKind::Load(exchanged), IrType::Boolean, span);
+                let success = self.new_block();
+                let failure = self.new_block();
+                let join = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: flag,
+                    then_block: success,
+                    else_block: failure,
+                });
+                self.current = success;
+                let value = self.emit(InstKind::Load(observed), value_ty, span);
+                let ok = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: 0,
+                        fields: vec![value],
+                    },
+                    result_ty,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, ok), span);
+                self.terminate(Terminator::Jump(join));
+                self.current = failure;
+                let value = self.emit(InstKind::Load(observed), value_ty, span);
+                let err = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id,
+                        variant: 1,
+                        fields: vec![value],
+                    },
+                    result_ty,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, err), span);
+                self.terminate(Terminator::Jump(join));
+                self.current = join;
+                return self.emit(InstKind::Load(result_slot), result_ty, span);
+            }
+            _ => unreachable!(),
+        };
+        self.lower_atomic_operation_status(status, span);
+        match out {
+            Some(slot) => self.emit(InstKind::Load(slot), value_ty, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        }
+    }
+
+    fn lower_atomic_constructor_status(&mut self, status: Operand, span: Span) {
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: failed,
+        });
+        self.current = failed;
+        let message = self.const_string("atomic allocation failed for this target", span);
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    fn lower_atomic_operation_status(&mut self, status: Operand, span: Span) {
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let three = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let invalid_order = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: three,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw = self.new_block();
+        let check_success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid_order,
+            then_block: throw,
+            else_block: check_success,
+        });
+        self.current = throw;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors registered");
+        self.throw_native_failure(
+            native.invalid_argument,
+            "invalid atomic memory ordering",
+            span,
+        );
+        self.current = check_success;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: done,
+            else_block: failed,
+        });
+        self.current = failed;
+        let message = self.const_string(
+            "atomic runtime rejected a compiler-validated operation",
+            span,
+        );
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    fn lower_background_admission_check(&mut self, status_slot: SlotId, span: Span) {
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let background_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_background = self.new_block();
+        let check_draining = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: background_full,
+            then_block: throw_background,
+            else_block: check_draining,
+        });
+
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.current = throw_background;
+        self.throw_native_failure(
+            native.background_capacity_error,
+            "background supervisor is full or draining",
+            span,
+        );
+
+        self.current = check_draining;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let draining = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_draining = self.new_block();
+        let check_task = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: draining,
+            then_block: throw_draining,
+            else_block: check_task,
+        });
+        self.current = throw_draining;
+        self.throw_native_failure(
+            native.background_capacity_error,
+            "background supervisor is draining",
+            span,
+        );
+
+        self.current = check_task;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let four = self.const_int_at(4, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: four,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let throw_task = self.new_block();
+        let check_success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: throw_task,
+            else_block: check_success,
+        });
+        self.current = throw_task;
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = check_success;
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let success = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let done = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: success,
+            then_block: done,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        let message = self.const_string("invalid background admission status", span);
+        self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = done;
+    }
+
+    /// Converts runtime admission statuses into catchable language errors.
+    /// Status 0 is success, 1 is task saturation, 2 is timer saturation, and
+    /// 3 is an invalid negative timer duration.
+    fn lower_branch_admission_check(&mut self, status_slot: SlotId, kind: BranchKind, span: Span) {
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let task_full = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let task_error = self.new_block();
+        let check_timer = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: task_full,
+            then_block: task_error,
+            else_block: check_timer,
+        });
+
+        self.current = task_error;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = check_timer;
+        if matches!(kind, BranchKind::TimerAfter | BranchKind::TimerEvery) {
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+            let timer_full = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: two,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let timer_error = self.new_block();
+            let success = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: timer_full,
+                then_block: timer_error,
+                else_block: success,
+            });
+            self.current = timer_error;
+            self.throw_native_failure(
+                native.timer_capacity_error,
+                "executor timer capacity reached",
+                span,
+            );
+            self.current = success;
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let invalid_code = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+            let invalid = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: invalid_code,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let invalid_duration = self.new_block();
+            let admitted = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: invalid,
+                then_block: invalid_duration,
+                else_block: admitted,
+            });
+            self.current = invalid_duration;
+            self.throw_native_failure(
+                native.native_error,
+                "timer duration must not be negative",
+                span,
+            );
+            self.current = admitted;
+        }
     }
 
     /// Lifts a branch body to its own zero-argument (capture-prefixed) module
@@ -8346,11 +9916,2641 @@ impl<'a> FunctionLowering<'a> {
     /// Whether `call` is `Timer.sleep` / `Timer.after` / `Timer.every` — a
     /// static call on the compiler-known `Timer` namespace, recognized the
     /// same structural way the checker does (`Timer` is not a value).
+    fn is_concurrent_protect_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "protect"
+                && matches!(&*field.object, ast::Expr::Path(base)
+                    if base.name == "Concurrent"
+                        && self.try_lookup_slot(&base.name).is_none()
+                        && !self.checked.classes.iter().any(|class| class.name == base.name)))
+    }
+
+    fn is_concurrent_detach_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "detach"
+                && matches!(&*field.object, ast::Expr::Path(base)
+                    if base.name == "Concurrent"
+                        && self.try_lookup_slot(&base.name).is_none()
+                        && !self.checked.classes.iter().any(|class| class.name == base.name)))
+    }
+
+    /// Lowers the bounded `Concurrent.each` and `each_settled` operations.
+    /// Admission is incremental: the collect-all scope never has more than
+    /// `effective_limit` live callbacks, and completion ordinals index the
+    /// rooted staging array in source order.
+    fn lower_concurrent_each(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self.checked.concurrent_each_plans[&call.span].clone();
+        let collection_expr = &call.args[0].value;
+        let collection = self.lower_expr(collection_expr);
+        let collection_ty = self.type_of_operand(collection);
+        let collection_slot = self.spill(collection, collection_ty, collection_expr.span());
+        let collection = self.emit(InstKind::Load(collection_slot), collection_ty, span);
+        let length = self.emit(
+            match collection_ty {
+                IrType::Array(_) => InstKind::ArrayLength(collection),
+                IrType::List(_) => InstKind::ListLength(collection),
+                _ => unreachable!("sema restricts each input to Array/List"),
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_slot = self.spill(length, IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let maximum = self.const_int_at(256, IrType::Int(IntWidth::U64), span);
+        let too_many = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: length,
+                right: maximum,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.lower_concurrent_each_invalid_if(
+            too_many,
+            "collection exceeds the 256 element limit",
+            span,
+        );
+
+        let requested_limit = if let Some(limit_expr) = call.args.get(2).map(|arg| &arg.value) {
+            let limit_type = self.checked.expr_types[&limit_expr.span()];
+            let limit_ty = self.ir_type(limit_type);
+            let IrType::Int(width) = limit_ty else {
+                unreachable!("sema validates the integer limit")
+            };
+            let limit = self.lower_expr(limit_expr);
+            let limit_slot = self.spill(limit, limit_ty, limit_expr.span());
+            let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+            let one = self.const_int_at(1, limit_ty, span);
+            let below = if width.signed() {
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: raw,
+                        right: one,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            } else {
+                let zero = self.const_int_at(0, limit_ty, span);
+                self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: raw,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            };
+            self.lower_concurrent_each_invalid_if(
+                below,
+                "concurrency limit must be between 1 and 256",
+                span,
+            );
+            if width.bits() > 8 {
+                let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+                let upper = self.const_int_at(256, limit_ty, span);
+                let above = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Gt,
+                        left: raw,
+                        right: upper,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                self.lower_concurrent_each_invalid_if(
+                    above,
+                    "concurrency limit must be between 1 and 256",
+                    span,
+                );
+            }
+            let raw = self.emit(InstKind::Load(limit_slot), limit_ty, span);
+            self.emit(InstKind::IntCast(raw), IrType::Int(IntWidth::U64), span)
+        } else {
+            self.const_int_at(32, IrType::Int(IntWidth::U64), span)
+        };
+        let limit_slot = self.spill(requested_limit, IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let limit = self.emit(InstKind::Load(limit_slot), IrType::Int(IntWidth::U64), span);
+        let use_length = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: length,
+                right: limit,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let effective_slot = self.declare_slot(
+            "<each effective concurrency>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let length_block = self.new_block();
+        let limit_block = self.new_block();
+        let effective_done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: use_length,
+            then_block: length_block,
+            else_block: limit_block,
+        });
+        self.current = length_block;
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(effective_slot, length), span);
+        self.terminate(Terminator::Jump(effective_done));
+        self.current = limit_block;
+        let limit = self.emit(InstKind::Load(limit_slot), IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(effective_slot, limit), span);
+        self.terminate(Terminator::Jump(effective_done));
+        self.current = effective_done;
+
+        let ast::Expr::Lambda(callback_lambda) = &call.args[1].value else {
+            unreachable!("sema requires a lambda callback")
+        };
+        let callback = self.lower_lambda(callback_lambda, callback_lambda.span);
+        let callback_ty = self.type_of_operand(callback);
+        let callback_slot = self.spill(callback, callback_ty, callback_lambda.span);
+        let element_ty = self.ir_type(plan.element);
+        let result_ty = self.ir_type(plan.result);
+        let (adapter_target, adapter_closure) =
+            self.lift_concurrent_each_adapter(callback_ty, element_ty, result_ty, span);
+
+        let result_type = self.ir_type(self.checked.expr_types[&call.span]);
+        let IrType::List(list_id) = result_type else {
+            unreachable!("each returns List")
+        };
+        let staged_element_ty = if plan.settled {
+            let instance_index = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|instance| {
+                    self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                        && instance.args.as_slice() == [plan.result]
+                })
+                .expect("Outcome<R> was interned by sema");
+            IrType::Enum(self.enum_instance_base + instance_index as u32)
+        } else {
+            result_ty
+        };
+        let staged_array_id = self
+            .module
+            .array_types
+            .iter()
+            .position(|ty| *ty == staged_element_ty)
+            .map(|id| id as u32)
+            .unwrap_or_else(|| {
+                let id = self.module.array_types.len() as u32;
+                self.module.array_types.push(staged_element_ty);
+                id
+            });
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let staged_array = self.emit(
+            InstKind::ArrayNew {
+                element_id: staged_array_id,
+                capacity: length,
+            },
+            IrType::Array(staged_array_id),
+            span,
+        );
+        let staged_slot = self.spill(staged_array, IrType::Array(staged_array_id), span);
+
+        let scope = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot =
+            self.declare_slot("<each collect scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope), span);
+        self.scope_stack.push(scope_slot);
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exception types registered");
+        let value_root =
+            self.declare_slot("<each result root>", IrType::Object(native.throwable), span);
+        let throwable_root = self.declare_slot(
+            "<each throwable root>",
+            IrType::Object(native.throwable),
+            span,
+        );
+        let ordinal_slot =
+            self.declare_slot("<each outcome ordinal>", IrType::Int(IntWidth::U64), span);
+        let next_slot = self.declare_slot("<each next input>", IrType::Int(IntWidth::U64), span);
+        let active_slot =
+            self.declare_slot("<each active callbacks>", IrType::Int(IntWidth::U64), span);
+        let completed_slot = self.declare_slot(
+            "<each completed callbacks>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        for slot in [next_slot, active_slot, completed_slot] {
+            let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+            self.emit_effect(InstKind::Store(slot, zero), span);
+        }
+        let top = self.new_block();
+        let admit = self.new_block();
+        let wait = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Jump(top));
+
+        self.current = top;
+        let next = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let input_remains = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: next,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let effective = self.emit(
+            InstKind::Load(effective_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let under_limit = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: active,
+                right: effective,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let can_admit = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: input_remains,
+                right: under_limit,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let check_active = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: can_admit,
+            then_block: admit,
+            else_block: check_active,
+        });
+        self.current = check_active;
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        let has_active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Gt,
+                left: active,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: has_active,
+            then_block: wait,
+            else_block: done,
+        });
+
+        self.current = admit;
+        let collection = self.emit(InstKind::Load(collection_slot), collection_ty, span);
+        let index = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let item = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: collection,
+                index,
+            },
+            element_ty,
+            span,
+        );
+        let callback = self.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let body = self.emit(
+            InstKind::MakeCallable {
+                target: adapter_target.clone(),
+                captures: vec![callback, item],
+            },
+            IrType::Callable(adapter_closure),
+            span,
+        );
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let zero_status = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let admission_status_slot = self.spill(zero_status, IrType::Int(IntWidth::U32), span);
+        let _job = self.emit(
+            InstKind::BranchStart {
+                target: adapter_target,
+                body,
+                scope,
+                kind: BranchKind::Spawn,
+                delay: None,
+                status_slot: admission_status_slot,
+            },
+            IrType::Job,
+            span,
+        );
+        let status = self.emit(
+            InstKind::Load(admission_status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let admitted = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let accepted = self.new_block();
+        let admission_failed = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: admitted,
+            then_block: accepted,
+            else_block: admission_failed,
+        });
+        self.current = accepted;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let next = self.emit(InstKind::Load(next_slot), IrType::Int(IntWidth::U64), span);
+        let next = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: next,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(next_slot, next), span);
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: active,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(active_slot, active), span);
+        self.terminate(Terminator::Jump(top));
+        self.current = admission_failed;
+        let one_status = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(admission_status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let capacity = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let capacity_block = self.new_block();
+        let invalid_admission = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: capacity,
+            then_block: capacity_block,
+            else_block: invalid_admission,
+        });
+        self.current = invalid_admission;
+        let message = self.const_string("invalid task admission status from runtime", span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = capacity_block;
+        self.lower_concurrent_each_cancel_scope(scope_slot, span);
+        self.throw_native_failure(
+            native.task_capacity_error,
+            "executor task capacity reached",
+            span,
+        );
+
+        self.current = wait;
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        let status = self.emit(
+            InstKind::ScopeOutcomeWaitTake {
+                scope,
+                ordinal_slot,
+                value_slot: value_root,
+                throwable_slot: throwable_root,
+            },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let outcome_blocks = [
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        ];
+        let invalid_status = self.new_block();
+        let mut test = self.current;
+        for (code, block) in outcome_blocks.iter().enumerate() {
+            self.current = test;
+            let actual = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let expected = self.const_int_at(code as i128, IrType::Int(IntWidth::U32), span);
+            let matches = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: actual,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let next_test = if code == 3 {
+                invalid_status
+            } else {
+                self.new_block()
+            };
+            self.terminate(Terminator::Branch {
+                condition: matches,
+                then_block: *block,
+                else_block: next_test,
+            });
+            test = next_test;
+        }
+        self.current = invalid_status;
+        let message = self.const_string("invalid scope outcome status from runtime", span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+
+        let outcome_info = if plan.settled {
+            let instance_index = self
+                .checked
+                .enum_instances
+                .iter()
+                .position(|instance| {
+                    self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                        && instance.args.as_slice() == [plan.result]
+                })
+                .expect("Outcome<R> was interned by sema");
+            let enum_id = self.enum_instance_base + instance_index as u32;
+            let declaration = self.checked.enum_instances[instance_index].enum_id;
+            let variants = &self.checked.enums[declaration as usize];
+            Some((
+                enum_id,
+                variants.discriminant("Fulfilled").unwrap(),
+                variants.discriminant("Rejected").unwrap(),
+                variants.discriminant("Cancelled").unwrap(),
+                declaration,
+            ))
+        } else {
+            None
+        };
+        for (code, block) in outcome_blocks.into_iter().enumerate() {
+            self.current = block;
+            match code {
+                0 => {
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let boxed = self.emit(
+                        InstKind::Load(value_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    let value = self.emit(
+                        InstKind::JobResultLoad {
+                            box_pointer: boxed,
+                            result: result_ty,
+                        },
+                        result_ty,
+                        span,
+                    );
+                    let value = if let Some((enum_id, fulfilled, _, _, _)) = outcome_info {
+                        self.emit(
+                            InstKind::BuildEnum {
+                                enum_id,
+                                variant: fulfilled,
+                                fields: vec![value],
+                            },
+                            staged_element_ty,
+                            span,
+                        )
+                    } else {
+                        value
+                    };
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                1 if !plan.settled => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    let error = self.emit(
+                        InstKind::Load(throwable_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Throw(error), span);
+                    let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                    let _ = self.lower_throws_check(unit, IrType::Void, span);
+                    self.terminate(Terminator::Unreachable);
+                }
+                1 => {
+                    let (enum_id, _, rejected, _, _) =
+                        outcome_info.expect("each_settled Outcome layout");
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let error = self.emit(
+                        InstKind::Load(throwable_root),
+                        IrType::Object(native.throwable),
+                        span,
+                    );
+                    let value = self.emit(
+                        InstKind::BuildEnum {
+                            enum_id,
+                            variant: rejected,
+                            fields: vec![error],
+                        },
+                        staged_element_ty,
+                        span,
+                    );
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                2 if !plan.settled => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    self.throw_native_failure(
+                        native.cancelled_error,
+                        "callback was cancelled",
+                        span,
+                    );
+                }
+                2 => {
+                    let (enum_id, _, _, cancelled, declaration) =
+                        outcome_info.expect("each_settled Outcome layout");
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let length = self.emit(
+                        InstKind::Load(length_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let out_of_bounds = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::GtEq,
+                            left: ordinal,
+                            right: length,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    self.lower_concurrent_each_internal_check(
+                        out_of_bounds,
+                        "scope outcome ordinal exceeds collection length",
+                        span,
+                    );
+                    let class = self.checked.enums[declaration as usize].variants
+                        [cancelled as usize]
+                        .associated
+                        .first()
+                        .and_then(|field| match field.ty.base {
+                            Base::Class(id) => Some(id),
+                            _ => None,
+                        })
+                        .expect("Outcome.Cancelled carries CancelledError");
+                    let error = self.build_native_failure(class, "cancelled", span);
+                    let value = self.emit(
+                        InstKind::BuildEnum {
+                            enum_id,
+                            variant: cancelled,
+                            fields: vec![error],
+                        },
+                        staged_element_ty,
+                        span,
+                    );
+                    let ordinal = self.emit(
+                        InstKind::Load(ordinal_slot),
+                        IrType::Int(IntWidth::U64),
+                        span,
+                    );
+                    let staged = self.emit(
+                        InstKind::Load(staged_slot),
+                        IrType::Array(staged_array_id),
+                        span,
+                    );
+                    self.emit_effect(
+                        InstKind::ArrayListStore {
+                            receiver: staged,
+                            index: ordinal,
+                            value,
+                        },
+                        span,
+                    );
+                    self.lower_concurrent_each_record_completion(
+                        active_slot,
+                        completed_slot,
+                        top,
+                        span,
+                    );
+                }
+                3 => {
+                    self.lower_concurrent_each_cancel_scope(scope_slot, span);
+                    self.cancellation_cleanup_depth += 1;
+                    self.run_exit_cleanup(0, 0, span);
+                    self.cancellation_cleanup_depth -= 1;
+                    self.terminate(Terminator::Cancel);
+                }
+                _ => unreachable!("scope wait status validation handles 0..=3"),
+            }
+        }
+
+        self.current = done;
+        self.scope_stack.pop();
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            result_type,
+            span,
+        );
+        let list_slot = self.spill(list, result_type, span);
+        let index_slot = self.declare_slot(
+            "<each ordered output index>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U64), span);
+        self.emit_effect(InstKind::Store(index_slot, zero), span);
+        let loop_head = self.new_block();
+        let loop_add = self.new_block();
+        let loop_done = self.new_block();
+        self.terminate(Terminator::Jump(loop_head));
+        self.current = loop_head;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let length = self.emit(
+            InstKind::Load(length_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let has_more = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Lt,
+                left: index,
+                right: length,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: has_more,
+            then_block: loop_add,
+            else_block: loop_done,
+        });
+        self.current = loop_add;
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let staged = self.emit(
+            InstKind::Load(staged_slot),
+            IrType::Array(staged_array_id),
+            span,
+        );
+        let value = self.emit(
+            InstKind::ArrayListLoad {
+                receiver: staged,
+                index,
+            },
+            staged_element_ty,
+            span,
+        );
+        let list = self.emit(InstKind::Load(list_slot), result_type, span);
+        self.emit_effect(
+            InstKind::ListAdd {
+                receiver: list,
+                value,
+            },
+            span,
+        );
+        let index = self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let index = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(index_slot, index), span);
+        self.terminate(Terminator::Jump(loop_head));
+        self.current = loop_done;
+        self.emit(InstKind::Load(list_slot), result_type, span)
+    }
+
+    fn lower_concurrent_each_internal_check(
+        &mut self,
+        invalid: Operand,
+        message: &str,
+        span: Span,
+    ) {
+        let fail = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: fail,
+            else_block: valid,
+        });
+        self.current = fail;
+        let message = self.const_string(message, span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = valid;
+    }
+
+    /// Creates the zero-argument branch thunk used by the bounded collection
+    /// combinators. Its captures are the already-evaluated callback and one
+    /// collection element; the source lambda itself remains an ordinary
+    /// callable, so captured managed references keep their usual root map.
+    fn lift_concurrent_each_adapter(
+        &mut self,
+        callback_ty: IrType,
+        element_ty: IrType,
+        result_ty: IrType,
+        span: Span,
+    ) -> (String, u32) {
+        let target = format!("concurrent.each.adapter.{}.{}", span.file.0, span.start);
+        let closure_id = self.module.closures.len() as u32;
+        self.module.closures.push(ClosureLayout {
+            captures: vec![callback_ty, element_ty],
+            params: Vec::new(),
+            returns: result_ty,
+        });
+        let mut inner = FunctionLowering::new(
+            self.module,
+            self.checked,
+            self.declarations,
+            self.instance_base,
+            self.enum_instance_base,
+        );
+        inner.return_type = result_ty;
+        let entry = inner.new_block();
+        inner.current = entry;
+        inner.scopes.push(HashMap::new());
+        let callback_slot = inner.declare_slot("<each callback>", callback_ty, span);
+        let element_slot = inner.declare_slot("<each element>", element_ty, span);
+        let callback = inner.emit(InstKind::Load(callback_slot), callback_ty, span);
+        let element = inner.emit(InstKind::Load(element_slot), element_ty, span);
+        let result = inner.emit(
+            InstKind::CallCallable {
+                callable: callback,
+                args: vec![element],
+            },
+            result_ty,
+            span,
+        );
+        let result = inner.lower_throws_check(result, result_ty, span);
+        inner.terminate(Terminator::Return(Some(result)));
+        inner.scopes.pop();
+        let nested = std::mem::take(&mut inner.lifted);
+        self.lifted.extend(nested);
+        self.lifted.push(Function {
+            name: target.clone(),
+            params: vec![callback_slot, element_slot],
+            return_type: result_ty,
+            gc_roots: gc_roots_of(inner.module, &inner.slots),
+            slots: inner.slots,
+            blocks: inner.blocks,
+            entry,
+            span,
+        });
+        (target, closure_id)
+    }
+
+    fn lower_concurrent_each_invalid_if(&mut self, invalid: Operand, message: &str, span: Span) {
+        let fail = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: fail,
+            else_block: valid,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions registered");
+        self.throw_native_failure(native.invalid_argument, message, span);
+        self.current = valid;
+    }
+
+    /// Cancels and joins every callback admitted to this operation. The
+    /// shield keeps cleanup running even when the caller initiated it by
+    /// cancellation; callers decide whether to propagate a primary failure
+    /// or terminate with `Cancel` after this helper returns.
+    fn lower_concurrent_each_cancel_scope(&mut self, scope_slot: SlotId, span: Span) {
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeCancel { scope }, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.emit_effect(InstKind::CancelShieldExit, span);
+    }
+
+    /// Updates the live/completed counters after one terminal callback result
+    /// has been consumed, then returns to the admission loop.
+    fn lower_concurrent_each_record_completion(
+        &mut self,
+        active_slot: SlotId,
+        completed_slot: SlotId,
+        top: BlockId,
+        span: Span,
+    ) {
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+        let active = self.emit(
+            InstKind::Load(active_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let active = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Sub,
+                left: active,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(active_slot, active), span);
+        let completed = self.emit(
+            InstKind::Load(completed_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let completed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Add,
+                left: completed,
+                right: one,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(completed_slot, completed), span);
+        self.terminate(Terminator::Jump(top));
+    }
+
+    /// Lowers `Concurrent.of(thunks...).settled()` as a collect-all scope.
+    /// Handles are waited and consumed in source order, while the runtime
+    /// continues scheduling every child independently. Output list insertion
+    /// therefore has stable input order regardless of completion order.
+    fn lower_concurrent_settled(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self
+            .checked
+            .settled_plans
+            .get(&call.span)
+            .expect("the checker records the validated settled pipeline")
+            .clone();
+        let (of_call, deadline_expr) =
+            Self::concurrent_pipeline_parts(call, plan.deadline.is_some());
+        let deadline = self.lower_concurrent_deadline(deadline_expr, span);
+        let branches: Vec<&ast::LambdaExpr> = of_call
+            .args
+            .iter()
+            .map(|arg| match &arg.value {
+                ast::Expr::Lambda(lambda) => lambda,
+                _ => unreachable!("sema validates direct lambda thunks"),
+            })
+            .collect();
+        assert_eq!(branches.len(), plan.branches.len());
+
+        let result_ty = self.ir_type(plan.result);
+        let list_ty = self.ir_type(
+            *self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .expect("checker records List<Outcome<T>> for settled"),
+        );
+        let IrType::List(list_id) = list_ty else {
+            unreachable!("settled returns a list")
+        };
+        let enum_instance = self
+            .checked
+            .enum_instances
+            .iter()
+            .position(|instance| {
+                self.checked.enums[instance.enum_id as usize].name == "Outcome"
+                    && instance.args.as_slice() == [plan.result]
+            })
+            .expect("Outcome<T> was interned by sema");
+        let outcome_id = self.enum_instance_base + enum_instance as u32;
+        let outcome_ty = IrType::Enum(outcome_id);
+        let outcome_decl = self.checked.enum_instances[enum_instance].enum_id;
+        let fulfilled = self.checked.enums[outcome_decl as usize]
+            .discriminant("Fulfilled")
+            .unwrap();
+        let rejected = self.checked.enums[outcome_decl as usize]
+            .discriminant("Rejected")
+            .unwrap();
+        let cancelled = self.checked.enums[outcome_decl as usize]
+            .discriminant("Cancelled")
+            .unwrap();
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        let opaque_root_ty = IrType::Object(native.throwable);
+        let throwable_ty = IrType::Object(native.throwable);
+
+        let scope_id = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot = self.declare_slot("<settled scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope_id), span);
+        self.scopes.push(HashMap::new());
+        self.scope_stack.push(scope_slot);
+        let deadline_slot = deadline.map(|delay| {
+            let timer = self.lower_deadline_timer(delay, scope_slot, span);
+            let slot = self.declare_slot("<settled deadline job>", IrType::Job, span);
+            self.emit_effect(InstKind::Store(slot, timer), span);
+            slot
+        });
+        let mut jobs = Vec::with_capacity(branches.len());
+        for lambda in &branches {
+            let body = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            let job = self.lower_branch_start(lambda.span, body, BranchKind::Spawn, None, span);
+            let slot = self.declare_slot("<settled job>", IrType::Job, lambda.span);
+            self.emit_effect(InstKind::Store(slot, job), span);
+            jobs.push(slot);
+        }
+        self.scope_stack.pop();
+        self.scopes.pop();
+
+        let value_slot = self.declare_slot("<settled value root>", opaque_root_ty, span);
+        let error_slot = self.declare_slot("<settled throwable root>", throwable_ty, span);
+        let list = self.emit(
+            InstKind::ListNew {
+                element_id: list_id,
+            },
+            list_ty,
+            span,
+        );
+        let list_slot = self.spill(list, list_ty, span);
+
+        for (job_index, &job_slot) in jobs.iter().enumerate() {
+            let caller_cancelled = self.new_block();
+            let timeout = deadline_slot.map(|_| self.new_block());
+            if let Some(timer_slot) = deadline_slot {
+                let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let selected = self.emit(
+                    InstKind::JobWaitAnyWithTimer {
+                        jobs: vec![job, timer],
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let selected_slot = self.declare_slot(
+                    "<settled deadline selection>",
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(selected_slot, selected), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current = self.emit(
+                    InstKind::Load(selected_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let is_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_cancelled,
+                    then_block: caller_cancelled,
+                    else_block: dispatch,
+                });
+                self.current = dispatch;
+                let timer_index = self.const_int_at(1, IrType::Int(IntWidth::U64), span);
+                let current = self.emit(
+                    InstKind::Load(selected_slot),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let is_timeout = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: timer_index,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let take_job = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_timeout,
+                    then_block: timeout.unwrap(),
+                    else_block: take_job,
+                });
+                self.current = take_job;
+            }
+            let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+            let status = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let status_slot =
+                self.declare_slot("<settled status>", IrType::Int(IntWidth::U32), span);
+            self.emit_effect(InstKind::Store(status_slot, status), span);
+            let outcome_slot = self.declare_slot("<settled outcome>", outcome_ty, span);
+            let fulfilled_block = self.new_block();
+            let check_rejected = self.new_block();
+            let rejected_block = self.new_block();
+            let check_cancelled = self.new_block();
+            let cancelled_block = self.new_block();
+            let check_caller_cancelled = self.new_block();
+            let ready = self.new_block();
+
+            let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_fulfilled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: zero,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_fulfilled,
+                then_block: fulfilled_block,
+                else_block: check_rejected,
+            });
+
+            self.current = fulfilled_block;
+            let box_pointer = self.emit(InstKind::Load(value_slot), opaque_root_ty, span);
+            let value = self.emit(
+                InstKind::JobResultLoad {
+                    box_pointer,
+                    result: result_ty,
+                },
+                result_ty,
+                span,
+            );
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: fulfilled,
+                    fields: vec![value],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_rejected;
+            let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_rejected = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: one,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_rejected,
+                then_block: rejected_block,
+                else_block: check_cancelled,
+            });
+
+            self.current = rejected_block;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let is_explicit_cancel = self.emit(
+                InstKind::IsInstance {
+                    object: error,
+                    target_class: native.cancelled_error,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let rejected_throwable = self.new_block();
+            let cancelled_throwable = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_explicit_cancel,
+                then_block: cancelled_throwable,
+                else_block: rejected_throwable,
+            });
+
+            self.current = rejected_throwable;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: rejected,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = cancelled_throwable;
+            let error = self.emit(InstKind::Load(error_slot), throwable_ty, span);
+            let error = self.emit(
+                InstKind::Retype(error),
+                IrType::Object(native.cancelled_error),
+                span,
+            );
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: cancelled,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_cancelled;
+            let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_cancelled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: two,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let invalid_status = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: is_cancelled,
+                then_block: cancelled_block,
+                else_block: check_caller_cancelled,
+            });
+
+            self.current = cancelled_block;
+            let error = self.build_native_failure(native.cancelled_error, "cancelled", span);
+            let outcome = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: outcome_id,
+                    variant: cancelled,
+                    fields: vec![error],
+                },
+                outcome_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(outcome_slot, outcome), span);
+            self.terminate(Terminator::Jump(ready));
+
+            self.current = check_caller_cancelled;
+            let three = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+            let status = self.emit(
+                InstKind::Load(status_slot),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let is_caller_cancelled = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: three,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: is_caller_cancelled,
+                then_block: caller_cancelled,
+                else_block: invalid_status,
+            });
+
+            // `JobOutcomeWaitTake` has a closed 0..=3 ABI. Do not silently
+            // reinterpret a compiler/runtime version mismatch as caller
+            // cancellation, which would discard otherwise valid outcomes.
+            self.current = invalid_status;
+            let message = self.const_string("invalid job outcome status from runtime", span);
+            let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+            self.terminate(Terminator::Unreachable);
+
+            self.current = caller_cancelled;
+            // Shield before the collect-all close: it may cooperatively yield
+            // while joining children. The runtime still observes the raw
+            // cancellation request and cancels the scope, while generated
+            // cancellation delivery stays deferred through draining and cleanup.
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+            if let Some(timer_slot) = deadline_slot {
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                self.emit_effect(InstKind::JobCancel { job: timer }, span);
+            }
+            let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+            self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+            // Caller cancellation closes the scope first, causing collect-all
+            // to cancel and join every child. Then consume every terminal
+            // result so neither TCB roots nor handles outlive this expression.
+            for &drain_slot in &jobs[job_index..] {
+                let drain_job = self.emit(InstKind::Load(drain_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job: drain_job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+            }
+            if let Some(timer_slot) = deadline_slot {
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+            }
+            self.cancellation_cleanup_depth += 1;
+            self.run_exit_cleanup(0, 0, span);
+            self.cancellation_cleanup_depth -= 1;
+            self.emit_effect(InstKind::CancelShieldExit, span);
+            self.terminate(Terminator::Cancel);
+
+            self.current = ready;
+            let outcome = self.emit(InstKind::Load(outcome_slot), outcome_ty, span);
+            let receiver = self.emit(InstKind::Load(list_slot), list_ty, span);
+            self.emit_effect(
+                InstKind::ListAdd {
+                    receiver,
+                    value: outcome,
+                },
+                span,
+            );
+
+            if let (Some(timer_slot), Some(timeout_block)) = (deadline_slot, timeout) {
+                let next_after_outcome = self.current;
+                self.current = timeout_block;
+                self.emit_effect(InstKind::CancelShieldEnter, span);
+                for &cancel_slot in &jobs[job_index..] {
+                    let active = self.emit(InstKind::Load(cancel_slot), IrType::Job, span);
+                    self.emit_effect(InstKind::JobCancel { job: active }, span);
+                }
+                let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+                self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+                for &drain_slot in &jobs[job_index..] {
+                    let active = self.emit(InstKind::Load(drain_slot), IrType::Job, span);
+                    let _ = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job: active,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                }
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                self.emit_effect(InstKind::CancelShieldExit, span);
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native exceptions are registered");
+                let error = self.build_native_failure(
+                    native.timeout_error,
+                    "concurrent operation exceeded its deadline",
+                    span,
+                );
+                self.emit_effect(InstKind::Throw(error), span);
+                let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                let _ = self.lower_throws_check(unit, IrType::Void, span);
+                self.terminate(Terminator::Unreachable);
+                self.current = next_after_outcome;
+            }
+        }
+
+        if deadline_slot.is_some() {
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+        }
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_effect(InstKind::CancelShieldExit, span);
+        }
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.emit(InstKind::Load(list_slot), list_ty, span)
+    }
+
+    /// Lowers the homogeneous `Concurrent.of(...).first()` pipeline. Each
+    /// state is keyed by the still-unconsumed input branches; `JobWaitAny`
+    /// picks the lowest executor completion sequence and the runtime uses the
+    /// input index as its tie-break. Rejected/cancelled branches are consumed
+    /// once and removed from the next state. A successful branch cancels and
+    /// joins every remaining child before its rooted payload is loaded.
+    fn lower_concurrent_first(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let plan = self
+            .checked
+            .first_plans
+            .get(&call.span)
+            .expect("the checker records the validated first pipeline")
+            .clone();
+        let (of_call, deadline_expr) =
+            Self::concurrent_pipeline_parts(call, plan.deadline.is_some());
+        let deadline = self.lower_concurrent_deadline(deadline_expr, span);
+        let branches: Vec<&ast::LambdaExpr> = of_call
+            .args
+            .iter()
+            .map(|arg| match &arg.value {
+                ast::Expr::Lambda(lambda) => lambda,
+                _ => unreachable!("sema validates direct lambda thunks"),
+            })
+            .collect();
+        assert_eq!(branches.len(), plan.branches.len());
+        let result_ty = self.ir_type(plan.result);
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native exceptions are registered");
+        let throwable_ty = IrType::Object(native.throwable);
+        let value_slot = self.declare_slot("<first value root>", throwable_ty, span);
+        let error_slot = self.declare_slot("<first throwable root>", throwable_ty, span);
+        let winner_box_slot = self.declare_slot("<first winner box root>", throwable_ty, span);
+        let failure_slot = self.declare_slot("<first primary failure root>", throwable_ty, span);
+        let failure_tail_slot = self.declare_slot("<first failure tail root>", throwable_ty, span);
+        let has_failure_slot = self.declare_slot("<first has failure>", IrType::Boolean, span);
+        let cleanup_failure_slot =
+            self.declare_slot("<first cleanup failure root>", throwable_ty, span);
+        let cleanup_tail_slot =
+            self.declare_slot("<first cleanup failure tail root>", throwable_ty, span);
+        let has_cleanup_failure_slot =
+            self.declare_slot("<first has cleanup failure>", IrType::Boolean, span);
+        let cleanup_failure_slots = FirstFailureSlots {
+            outcome: error_slot,
+            primary: cleanup_failure_slot,
+            tail: cleanup_tail_slot,
+            has_primary: has_cleanup_failure_slot,
+        };
+        let no_failure = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(has_failure_slot, no_failure), span);
+        let no_cleanup_failure = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+        self.emit_effect(
+            InstKind::Store(has_cleanup_failure_slot, no_cleanup_failure),
+            span,
+        );
+
+        let scope = self.emit(
+            InstKind::ScopeEnterCollectAll,
+            IrType::Int(IntWidth::I64),
+            span,
+        );
+        let scope_slot = self.declare_slot("<first scope>", IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::Store(scope_slot, scope), span);
+        self.scopes.push(HashMap::new());
+        self.scope_stack.push(scope_slot);
+        let deadline_slot = deadline.map(|delay| {
+            let timer = self.lower_deadline_timer(delay, scope_slot, span);
+            let slot = self.declare_slot("<first deadline job>", IrType::Job, span);
+            self.emit_effect(InstKind::Store(slot, timer), span);
+            slot
+        });
+        let mut jobs = Vec::with_capacity(branches.len());
+        for lambda in &branches {
+            let body = match &*lambda.body {
+                ast::LambdaBody::Expr(expr) => BranchBody::Expr(expr),
+                ast::LambdaBody::Block(block) => BranchBody::Block(block),
+            };
+            let job = self.lower_branch_start(lambda.span, body, BranchKind::Spawn, None, span);
+            let slot = self.declare_slot("<first job>", IrType::Job, lambda.span);
+            self.emit_effect(InstKind::Store(slot, job), span);
+            jobs.push(slot);
+        }
+        self.scope_stack.pop();
+        self.scopes.pop();
+
+        let full = (1u16 << jobs.len()) - 1;
+        let first_entries: HashMap<u16, BlockId> =
+            (1..=full).map(|mask| (mask, self.new_block())).collect();
+        let cleanup_entries: HashMap<u16, BlockId> =
+            (1..=full).map(|mask| (mask, self.new_block())).collect();
+        let all_failed = self.new_block();
+        let cleanup_done = self.new_block();
+        let timeout_blocks: HashMap<u16, BlockId> = deadline_slot
+            .map(|_| (1..=full).map(|mask| (mask, self.new_block())).collect())
+            .unwrap_or_default();
+        self.terminate(Terminator::Jump(first_entries[&full]));
+
+        for mask in 1..=full {
+            self.current = first_entries[&mask];
+            let indices: Vec<usize> = (0..jobs.len()).filter(|i| mask & (1 << i) != 0).collect();
+            if indices.len() == 1 && deadline_slot.is_none() {
+                let index = indices[0];
+                let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                let status = self.emit(
+                    InstKind::JobOutcomeWaitTake {
+                        job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot =
+                    self.declare_slot("<first wait status>", IrType::Int(IntWidth::U32), span);
+                self.emit_effect(InstKind::Store(status_slot, status), span);
+                let three = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: three,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let proceed = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: proceed,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_before_winner(
+                    mask,
+                    &jobs,
+                    scope_slot,
+                    deadline_slot,
+                    (value_slot, error_slot),
+                    span,
+                );
+                self.current = proceed;
+                self.lower_first_status_flow(
+                    status_slot,
+                    index,
+                    mask,
+                    &jobs,
+                    &first_entries,
+                    &cleanup_entries,
+                    all_failed,
+                    cleanup_done,
+                    value_slot,
+                    winner_box_slot,
+                    error_slot,
+                    failure_slot,
+                    failure_tail_slot,
+                    has_failure_slot,
+                    scope_slot,
+                    deadline_slot,
+                    throwable_ty,
+                    span,
+                );
+            } else {
+                let mut handles: Vec<Operand> = indices
+                    .iter()
+                    .map(|&i| self.emit(InstKind::Load(jobs[i]), IrType::Job, span))
+                    .collect();
+                if let Some(timer_slot) = deadline_slot {
+                    handles.push(self.emit(InstKind::Load(timer_slot), IrType::Job, span));
+                }
+                let wait = self.emit(
+                    if deadline_slot.is_some() {
+                        InstKind::JobWaitAnyWithTimer { jobs: handles }
+                    } else {
+                        InstKind::JobWaitAny { jobs: handles }
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let index_slot =
+                    self.declare_slot("<first completion index>", IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(index_slot, wait), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current =
+                    self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: dispatch,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_before_winner(
+                    mask,
+                    &jobs,
+                    scope_slot,
+                    deadline_slot,
+                    (value_slot, error_slot),
+                    span,
+                );
+                self.current = dispatch;
+                let invalid_index = self.new_block();
+                let mut test = dispatch;
+                for (local, &index) in indices.iter().enumerate() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let expected =
+                        self.const_int_at(local as i128, IrType::Int(IntWidth::U64), span);
+                    let matches = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: expected,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let selected = self.new_block();
+                    let next = if local + 1 == indices.len() && deadline_slot.is_some() {
+                        self.new_block()
+                    } else if local + 1 == indices.len() {
+                        invalid_index
+                    } else {
+                        self.new_block()
+                    };
+                    self.terminate(Terminator::Branch {
+                        condition: matches,
+                        then_block: selected,
+                        else_block: next,
+                    });
+                    self.current = selected;
+                    let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                    let status = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    let status_slot = self.declare_slot(
+                        "<first outcome status>",
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(status_slot, status), span);
+                    self.lower_first_status_flow(
+                        status_slot,
+                        index,
+                        mask,
+                        &jobs,
+                        &first_entries,
+                        &cleanup_entries,
+                        all_failed,
+                        cleanup_done,
+                        value_slot,
+                        winner_box_slot,
+                        error_slot,
+                        failure_slot,
+                        failure_tail_slot,
+                        has_failure_slot,
+                        scope_slot,
+                        deadline_slot,
+                        throwable_ty,
+                        span,
+                    );
+                    test = next;
+                }
+                if deadline_slot.is_some() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let timeout_index =
+                        self.const_int_at(indices.len() as i128, IrType::Int(IntWidth::U64), span);
+                    let is_timeout = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: timeout_index,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let invalid = self.new_block();
+                    self.terminate(Terminator::Branch {
+                        condition: is_timeout,
+                        then_block: timeout_blocks[&mask],
+                        else_block: invalid,
+                    });
+                    self.current = invalid;
+                    self.emit_first_fatal("invalid job wait-any index from runtime", span);
+                }
+                self.current = invalid_index;
+                self.emit_first_fatal("invalid job wait-any index from runtime", span);
+            }
+        }
+
+        if let Some(timer_slot) = deadline_slot {
+            for mask in 1..=full {
+                self.current = timeout_blocks[&mask];
+                self.emit_effect(InstKind::CancelShieldEnter, span);
+                for (index, &job_slot) in jobs.iter().enumerate() {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                    self.emit_effect(InstKind::JobCancel { job }, span);
+                }
+                let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+                self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+                for (index, &job_slot) in jobs.iter().enumerate() {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    let job = self.emit(InstKind::Load(job_slot), IrType::Job, span);
+                    let _ = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                }
+                let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+                let _ = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job: timer,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                self.emit_effect(InstKind::CancelShieldExit, span);
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native exceptions are registered");
+                let error = self.build_native_failure(
+                    native.timeout_error,
+                    "concurrent operation exceeded its deadline",
+                    span,
+                );
+                self.emit_effect(InstKind::Throw(error), span);
+                let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+                let _ = self.lower_throws_check(unit, IrType::Void, span);
+                self.terminate(Terminator::Unreachable);
+            }
+        }
+
+        self.current = all_failed;
+        if let Some(timer_slot) = deadline_slot {
+            self.emit_effect(InstKind::CancelShieldEnter, span);
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_effect(InstKind::CancelShieldExit, span);
+            let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+            let _ = self.lower_throws_check(unit, IrType::Void, span);
+        }
+        let has_failure = self.emit(InstKind::Load(has_failure_slot), IrType::Boolean, span);
+        let raise = self.new_block();
+        let all_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: has_failure,
+            then_block: raise,
+            else_block: all_cancelled,
+        });
+        self.current = raise;
+        let error = self.emit(InstKind::Load(failure_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = all_cancelled;
+        let error = self.build_native_failure(native.cancelled_error, "cancelled", span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+
+        for mask in 1..=full {
+            self.current = cleanup_entries[&mask];
+            let indices: Vec<usize> = (0..jobs.len()).filter(|i| mask & (1 << i) != 0).collect();
+            if indices.len() == 1 {
+                let index = indices[0];
+                let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                let status = self.emit(
+                    InstKind::JobOutcomeTake {
+                        job,
+                        value_slot,
+                        throwable_slot: error_slot,
+                    },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot =
+                    self.declare_slot("<first cleanup status>", IrType::Int(IntWidth::U32), span);
+                self.emit_effect(InstKind::Store(status_slot, status), span);
+                self.lower_first_cleanup_status_flow(
+                    status_slot,
+                    FirstCleanupContext {
+                        index,
+                        mask,
+                        entries: &cleanup_entries,
+                        done: cleanup_done,
+                    },
+                    cleanup_failure_slots,
+                    span,
+                );
+            } else {
+                let handles = indices
+                    .iter()
+                    .map(|&i| self.emit(InstKind::Load(jobs[i]), IrType::Job, span))
+                    .collect();
+                let wait = self.emit(
+                    InstKind::JobWaitAny { jobs: handles },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let index_slot =
+                    self.declare_slot("<first cleanup index>", IrType::Int(IntWidth::U64), span);
+                self.emit_effect(InstKind::Store(index_slot, wait), span);
+                let max = self.const_int_at(u64::MAX as i128, IrType::Int(IntWidth::U64), span);
+                let current =
+                    self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                let caller_cancelled = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: current,
+                        right: max,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let cancel = self.new_block();
+                let dispatch = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: caller_cancelled,
+                    then_block: cancel,
+                    else_block: dispatch,
+                });
+                self.current = cancel;
+                self.lower_first_cancel_after_close(
+                    mask,
+                    &jobs,
+                    deadline_slot,
+                    value_slot,
+                    error_slot,
+                    span,
+                );
+                self.current = dispatch;
+                let invalid_index = self.new_block();
+                let mut test = dispatch;
+                for (local, &index) in indices.iter().enumerate() {
+                    self.current = test;
+                    let current =
+                        self.emit(InstKind::Load(index_slot), IrType::Int(IntWidth::U64), span);
+                    let expected =
+                        self.const_int_at(local as i128, IrType::Int(IntWidth::U64), span);
+                    let matches = self.emit(
+                        InstKind::Binary {
+                            op: BinaryOp::Eq,
+                            left: current,
+                            right: expected,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    let selected = self.new_block();
+                    let next = if local + 1 == indices.len() {
+                        invalid_index
+                    } else {
+                        self.new_block()
+                    };
+                    self.terminate(Terminator::Branch {
+                        condition: matches,
+                        then_block: selected,
+                        else_block: next,
+                    });
+                    self.current = selected;
+                    let job = self.emit(InstKind::Load(jobs[index]), IrType::Job, span);
+                    let status = self.emit(
+                        InstKind::JobOutcomeTake {
+                            job,
+                            value_slot,
+                            throwable_slot: error_slot,
+                        },
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    let status_slot = self.declare_slot(
+                        "<first cleanup outcome status>",
+                        IrType::Int(IntWidth::U32),
+                        span,
+                    );
+                    self.emit_effect(InstKind::Store(status_slot, status), span);
+                    self.lower_first_cleanup_status_flow(
+                        status_slot,
+                        FirstCleanupContext {
+                            index,
+                            mask,
+                            entries: &cleanup_entries,
+                            done: cleanup_done,
+                        },
+                        cleanup_failure_slots,
+                        span,
+                    );
+                    test = next;
+                }
+                self.current = invalid_index;
+                self.emit_first_fatal("invalid job wait-any index during first cleanup", span);
+            }
+        }
+
+        self.current = cleanup_done;
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+        }
+        let failed_cleanup = self.emit(
+            InstKind::Load(has_cleanup_failure_slot),
+            IrType::Boolean,
+            span,
+        );
+        let throw_cleanup = self.new_block();
+        let return_winner = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed_cleanup,
+            then_block: throw_cleanup,
+            else_block: return_winner,
+        });
+        self.current = throw_cleanup;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        let error = self.emit(InstKind::Load(cleanup_failure_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(error), span);
+        let unit = self.emit(InstKind::Undefined, IrType::Void, span);
+        let _ = self.lower_throws_check(unit, IrType::Void, span);
+        self.terminate(Terminator::Unreachable);
+        self.current = return_winner;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        let box_pointer = self.emit(InstKind::Load(winner_box_slot), throwable_ty, span);
+        let result = self.emit(
+            InstKind::JobResultLoad {
+                box_pointer,
+                result: result_ty,
+            },
+            result_ty,
+            span,
+        );
+        self.lower_throws_check(result, result_ty, span)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_first_status_flow(
+        &mut self,
+        status_slot: SlotId,
+        index: usize,
+        mask: u16,
+        jobs: &[SlotId],
+        first_entries: &HashMap<u16, BlockId>,
+        cleanup_entries: &HashMap<u16, BlockId>,
+        all_failed: BlockId,
+        cleanup_done: BlockId,
+        value_slot: SlotId,
+        winner_box_slot: SlotId,
+        error_slot: SlotId,
+        failure_slot: SlotId,
+        failure_tail_slot: SlotId,
+        has_failure_slot: SlotId,
+        scope_slot: SlotId,
+        deadline_slot: Option<SlotId>,
+        throwable_ty: IrType,
+        span: Span,
+    ) {
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let fulfilled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success = self.new_block();
+        let check_rejected = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: fulfilled,
+            then_block: success,
+            else_block: check_rejected,
+        });
+
+        self.current = success;
+        let box_pointer = self.emit(InstKind::Load(value_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Store(winner_box_slot, box_pointer), span);
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let remaining = mask & !(1 << index);
+        for (i, &slot) in jobs.iter().enumerate() {
+            if remaining & (1 << i) == 0 {
+                continue;
+            }
+            let job = self.emit(InstKind::Load(slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancelWithCleanupFailure { job }, span);
+        }
+        if let Some(timer_slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(timer_slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+        }
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            cleanup_done
+        } else {
+            cleanup_entries[&remaining]
+        }));
+
+        self.current = check_rejected;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let rejected = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let reject = self.new_block();
+        let check_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: rejected,
+            then_block: reject,
+            else_block: check_cancelled,
+        });
+        self.current = reject;
+        self.emit_first_record_failure(
+            error_slot,
+            failure_slot,
+            failure_tail_slot,
+            has_failure_slot,
+            span,
+        );
+        let remaining = mask & !(1 << index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            all_failed
+        } else {
+            first_entries[&remaining]
+        }));
+
+        self.current = check_cancelled;
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let proceed = self.new_block();
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: proceed,
+            else_block: invalid,
+        });
+        self.current = proceed;
+        let remaining = mask & !(1 << index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            all_failed
+        } else {
+            first_entries[&remaining]
+        }));
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status from runtime", span);
+    }
+
+    fn lower_first_cleanup_status_flow(
+        &mut self,
+        status_slot: SlotId,
+        context: FirstCleanupContext<'_>,
+        failure_slots: FirstFailureSlots,
+        span: Span,
+    ) {
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let fulfilled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let continue_state = self.new_block();
+        let check_rejected = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: fulfilled,
+            then_block: continue_state,
+            else_block: check_rejected,
+        });
+        self.current = check_rejected;
+        let one = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let rejected = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: one,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let record = self.new_block();
+        let check_cancelled = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: rejected,
+            then_block: record,
+            else_block: check_cancelled,
+        });
+        self.current = record;
+        self.emit_first_record_failure(
+            failure_slots.outcome,
+            failure_slots.primary,
+            failure_slots.tail,
+            failure_slots.has_primary,
+            span,
+        );
+        let remaining = context.mask & !(1 << context.index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            context.done
+        } else {
+            context.entries[&remaining]
+        }));
+        self.current = check_cancelled;
+        let two = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: two,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: continue_state,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status during first cleanup", span);
+        self.current = continue_state;
+        let remaining = context.mask & !(1 << context.index);
+        self.terminate(Terminator::Jump(if remaining == 0 {
+            context.done
+        } else {
+            context.entries[&remaining]
+        }));
+    }
+
+    fn emit_first_record_failure(
+        &mut self,
+        error_slot: SlotId,
+        primary_slot: SlotId,
+        tail_slot: SlotId,
+        has_slot: SlotId,
+        span: Span,
+    ) {
+        let has = self.emit(InstKind::Load(has_slot), IrType::Boolean, span);
+        let first = self.new_block();
+        let later = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: has,
+            then_block: later,
+            else_block: first,
+        });
+        self.current = first;
+        let error = self.emit(
+            InstKind::Load(error_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        self.emit_effect(InstKind::Store(primary_slot, error), span);
+        self.emit_effect(InstKind::Store(tail_slot, error), span);
+        let yes = self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+        self.emit_effect(InstKind::Store(has_slot, yes), span);
+        self.terminate(Terminator::Jump(done));
+        self.current = later;
+        let tail = self.emit(
+            InstKind::Load(tail_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        let error = self.emit(
+            InstKind::Load(error_slot),
+            IrType::Object(self.throwable_object_id()),
+            span,
+        );
+        self.emit_effect(
+            InstKind::SetSuppressed {
+                exception: tail,
+                suppressed: error,
+            },
+            span,
+        );
+        self.emit_effect(InstKind::Store(tail_slot, error), span);
+        self.terminate(Terminator::Jump(done));
+        self.current = done;
+    }
+
+    fn lower_first_cancel_before_winner(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        scope_slot: SlotId,
+        deadline_slot: Option<SlotId>,
+        outcome_slots: (SlotId, SlotId),
+        span: Span,
+    ) {
+        let (value_slot, error_slot) = outcome_slots;
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let scope = self.emit(InstKind::Load(scope_slot), IrType::Int(IntWidth::I64), span);
+        self.emit_effect(InstKind::ScopeExitCollectAll { scope }, span);
+        self.lower_first_drain_for_cancel(mask, jobs, value_slot, error_slot, span);
+        self.lower_first_drain_deadline(deadline_slot, value_slot, error_slot, span);
+        self.finish_first_cancellation(span);
+    }
+
+    fn lower_first_cancel_after_close(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        deadline_slot: Option<SlotId>,
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        self.lower_first_drain_for_cancel(mask, jobs, value_slot, error_slot, span);
+        self.lower_first_drain_deadline(deadline_slot, value_slot, error_slot, span);
+        self.finish_first_cancellation(span);
+    }
+
+    fn lower_first_drain_deadline(
+        &mut self,
+        deadline_slot: Option<SlotId>,
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        if let Some(slot) = deadline_slot {
+            let timer = self.emit(InstKind::Load(slot), IrType::Job, span);
+            self.emit_effect(InstKind::JobCancel { job: timer }, span);
+            let _ = self.emit(
+                InstKind::JobOutcomeWaitTake {
+                    job: timer,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+        }
+    }
+
+    fn lower_first_drain_for_cancel(
+        &mut self,
+        mask: u16,
+        jobs: &[SlotId],
+        value_slot: SlotId,
+        error_slot: SlotId,
+        span: Span,
+    ) {
+        for (i, &slot) in jobs.iter().enumerate() {
+            if mask & (1 << i) == 0 {
+                continue;
+            }
+            let job = self.emit(InstKind::Load(slot), IrType::Job, span);
+            let status = self.emit(
+                InstKind::JobOutcomeTake {
+                    job,
+                    value_slot,
+                    throwable_slot: error_slot,
+                },
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            self.emit_first_status_validation(status, span);
+        }
+    }
+
+    fn emit_first_status_validation(&mut self, status: Operand, span: Span) {
+        let slot = self.declare_slot(
+            "<first status validation>",
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        self.emit_effect(InstKind::Store(slot, status), span);
+        let valid = self.new_block();
+        let check_one = self.new_block();
+        let check_two = self.new_block();
+        let invalid = self.new_block();
+        for (value, next) in [(0, check_one), (1, check_two)] {
+            let expected = self.const_int_at(value, IrType::Int(IntWidth::U32), span);
+            let actual = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U32), span);
+            let equal = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: actual,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            self.terminate(Terminator::Branch {
+                condition: equal,
+                then_block: valid,
+                else_block: next,
+            });
+            self.current = next;
+        }
+        let expected = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+        let actual = self.emit(InstKind::Load(slot), IrType::Int(IntWidth::U32), span);
+        let equal = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: actual,
+                right: expected,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.terminate(Terminator::Branch {
+            condition: equal,
+            then_block: valid,
+            else_block: invalid,
+        });
+        self.current = invalid;
+        self.emit_first_fatal("invalid job outcome status from runtime", span);
+        self.current = valid;
+    }
+
+    fn finish_first_cancellation(&mut self, span: Span) {
+        self.cancellation_cleanup_depth += 1;
+        self.run_exit_cleanup(0, 0, span);
+        self.cancellation_cleanup_depth -= 1;
+        self.emit_effect(InstKind::CancelShieldExit, span);
+        self.terminate(Terminator::Cancel);
+    }
+
+    fn emit_first_fatal(&mut self, message: &str, span: Span) {
+        let message = self.const_string(message, span);
+        let _ = self.emit(InstKind::FatalError(message), IrType::Never, span);
+        self.terminate(Terminator::Unreachable);
+    }
+
+    /// Lowers the checker-validated `Concurrent.protect((): Void => cleanup)`.
+    /// The callback call is deliberately emitted without its ordinary
+    /// post-call exception dispatch: a pending language exception must remain
+    /// pending until the shield has been restored. `lower_throws_check` then
+    /// checks cancellation at the first unshielded checkpoint and dispatches
+    /// any pending exception using the same ordering as every other call.
+    fn lower_concurrent_protect_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let ast::Expr::Lambda(lambda) = &call.args[0].value else {
+            unreachable!("the checker validates a zero-argument cleanup lambda")
+        };
+
+        self.emit_effect(InstKind::CancelShieldEnter, span);
+        let callable = self.lower_lambda(lambda, lambda.span);
+        let result = self.emit(
+            InstKind::CallCallable {
+                callable,
+                args: Vec::new(),
+            },
+            IrType::Void,
+            span,
+        );
+        self.emit_effect(InstKind::CancelShieldExit, span);
+
+        // This is the first safe cancellation point after restoration. The
+        // shared check also dispatches a language exception only after Exit.
+        self.lower_throws_check(result, IrType::Void, span)
+    }
+
     fn is_timer_call(&self, call: &ast::CallExpr) -> bool {
         matches!(&*call.callee, ast::Expr::Field(field)
             if matches!(&*field.object, ast::Expr::Path(base)
                 if base.name == "Timer" && self.try_lookup_slot("Timer").is_none())
                 && matches!(field.name.name.as_str(), "sleep" | "after" | "every"))
+    }
+
+    fn is_app_shutdown_grace_call(&self, call: &ast::CallExpr) -> bool {
+        matches!(&*call.callee, ast::Expr::Field(field)
+            if field.name.name == "set_shutdown_grace"
+                && matches!(&*field.object, ast::Expr::Path(base) if base.name == "App")
+                && !self.checked.functions.contains_key("App")
+                && !self.scopes.iter().any(|scope| scope.contains_key("App"))
+                && !self.checked.classes.iter().any(|class| class.name == "App"))
+    }
+
+    fn lower_app_shutdown_grace_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let nanos = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+        let status = self.emit(
+            InstKind::AppSetShutdownGrace { nanos },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let invalid_code = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let invalid = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: invalid_code,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let reject = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: invalid,
+            then_block: reject,
+            else_block: cont,
+        });
+        self.current = reject;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("native errors are registered");
+        self.throw_native_failure(
+            native.invalid_argument,
+            "shutdown grace must not be negative",
+            span,
+        );
+        self.current = cont;
+        self.emit(InstKind::Undefined, IrType::Void, span)
     }
 
     /// Lowers a `Timer.*` call. `sleep` is a suspension point; `after` / `every`
@@ -8362,8 +12562,80 @@ impl<'a> FunctionLowering<'a> {
         let delay = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
         match field.name.name.as_str() {
             "sleep" => {
-                self.emit_effect(InstKind::TimerSleep { nanos: delay }, span);
-                self.emit(InstKind::Undefined, IrType::Void, span)
+                let status = self.emit(
+                    InstKind::TimerSleep { nanos: delay },
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let timer_full_code = self.const_int_at(2, IrType::Int(IntWidth::U32), span);
+                let timer_full = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: timer_full_code,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let timer_error = self.new_block();
+                let check_duration = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: timer_full,
+                    then_block: timer_error,
+                    else_block: check_duration,
+                });
+                self.current = timer_error;
+                let native = self
+                    .checked
+                    .native_exceptions
+                    .expect("native errors are registered");
+                self.throw_native_failure(
+                    native.timer_capacity_error,
+                    "executor timer capacity reached",
+                    span,
+                );
+
+                self.current = check_duration;
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let invalid_duration_code = self.const_int_at(3, IrType::Int(IntWidth::U32), span);
+                let invalid_duration = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: invalid_duration_code,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let duration_error = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: invalid_duration,
+                    then_block: duration_error,
+                    else_block: cont,
+                });
+                self.current = duration_error;
+                self.throw_native_failure(
+                    native.native_error,
+                    "duration must not be negative",
+                    span,
+                );
+                self.current = cont;
+                let result = self.emit(InstKind::Undefined, IrType::Void, span);
+                // Unlike timer registration, sleep suspends and can deliver
+                // cancellation. Route it through the ordinary post-call
+                // checkpoint so lexical finally blocks run before Cancel.
+                self.lower_throws_check(result, IrType::Void, span)
             }
             "after" | "every" => {
                 let kind = if field.name.name == "after" {
@@ -8464,7 +12736,20 @@ impl<'a> FunctionLowering<'a> {
             .map(|slot| self.slot_type(*slot))
             .collect();
         let signature = &self.checked.fn_types[info.fn_type as usize];
-        let param_types: Vec<IrType> = signature.params.iter().map(|t| self.ir_type(*t)).collect();
+        let mut param_types: Vec<IrType> =
+            signature.params.iter().map(|t| self.ir_type(*t)).collect();
+        let mutex_view = self.checked.mutex_view_lambdas.get(&expr.span).copied();
+        if let Some(mutex_type) = mutex_view {
+            assert_eq!(
+                param_types.len(),
+                1,
+                "sema validates one Mutex.with view parameter"
+            );
+            param_types[0] = IrType::BorrowedView {
+                region: 1,
+                mutex_type,
+            };
+        }
         let returns = self.ir_type(signature.returns);
 
         // The name reaches the object file as a symbol, so it may only use
@@ -8480,7 +12765,15 @@ impl<'a> FunctionLowering<'a> {
         // lambda shares its canonical id with every other value of the same
         // shape (design D12).
         let name = format!("lambda.{}.{}", expr.span.file.0, expr.span.start);
-        let id = info.fn_type;
+        let mut id = info.fn_type;
+        if mutex_view.is_some() && info.captures.is_empty() {
+            id = self.module.closures.len() as u32;
+            self.module.closures.push(ClosureLayout {
+                captures: capture_types.clone(),
+                params: param_types.clone(),
+                returns,
+            });
+        }
 
         // A capture-less lambda's id is the canonical, capture-less
         // `ClosureLayout` `Self::lower` already pre-populated for it (D12) —
@@ -8494,7 +12787,7 @@ impl<'a> FunctionLowering<'a> {
         // *purely* self-recursive lambda (no capture besides itself) still
         // reserved a placeholder id (it is not capture-less at the checker
         // level) that needs its real, non-`Void` shape filled in here too.
-        if !info.captures.is_empty() {
+        if !info.captures.is_empty() || mutex_view.is_some() {
             self.module.closures[id as usize] = ClosureLayout {
                 captures: capture_types.clone(),
                 params: param_types.clone(),
@@ -9751,6 +14044,13 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.lookup_error
                 || id == n.invalid_date
                 || id == n.invalid_time
+                || id == n.cancelled_error
+                || id == n.task_capacity_error
+                || id == n.timer_capacity_error
+                || id == n.background_capacity_error
+                || id == n.service_capacity_error
+                || id == n.service_lifecycle_error
+                || id == n.invalid_argument
         })
     }
 
@@ -10501,6 +14801,25 @@ impl<'a> FunctionLowering<'a> {
         });
 
         self.current = cancel_block;
+        // The call that reached this checkpoint may have thrown while
+        // cancellation was pending. Cancellation is terminal and takes
+        // precedence, so consume that secondary throwable before any outer
+        // cleanup runs and before the task yields to another executor task.
+        let pending = self.emit(InstKind::HasPendingException, IrType::Boolean, span);
+        let discard_block = self.new_block();
+        let cleanup_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: pending,
+            then_block: discard_block,
+            else_block: cleanup_block,
+        });
+
+        self.current = discard_block;
+        let throwable_ty = IrType::Object(self.throwable_object_id());
+        let _ = self.emit(InstKind::TakePendingException, throwable_ty, span);
+        self.terminate(Terminator::Jump(cleanup_block));
+
+        self.current = cleanup_block;
         self.emit_effect(InstKind::CancelShieldEnter, span);
         self.cancellation_cleanup_depth += 1;
         self.run_exit_cleanup(0, 0, span);
@@ -19761,6 +24080,16 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_safe_field(expr, span);
         }
 
+        if let Some((view_slot, mut path, object_ty)) = self.borrowed_view_field_path(&expr.object)
+        {
+            let (index, ty) = self
+                .field_position_for_ir_type(object_ty, &expr.name.name)
+                .expect("sema validated a field on the borrowed payload");
+            path.push(index);
+            let view_ty = self.slot_type(view_slot);
+            let view = self.emit(InstKind::Load(view_slot), view_ty, span);
+            return self.emit(InstKind::BorrowViewFieldLoad { view, path }, ty, span);
+        }
         let object = self.lower_expr(&expr.object);
         let (index, ty) = self.field_position(&expr.object, &expr.name.name);
         self.emit(InstKind::LoadField { object, index }, ty, span)
@@ -21955,6 +26284,44 @@ impl<'a> FunctionLowering<'a> {
         (index as u32, fields[index].ty)
     }
 
+    fn field_position_for_ir_type(&self, ty: IrType, name: &str) -> Option<(u32, IrType)> {
+        let (fields, index) = match ty {
+            IrType::Value(id) => {
+                let layout = self.module.values.get(id as usize)?;
+                (layout.fields.as_slice(), layout.field_index(name)?)
+            }
+            _ => return None,
+        };
+        Some((index as u32, fields[index].ty))
+    }
+
+    /// Finds a field projection rooted in a compiler-owned Mutex borrow and
+    /// returns the root view slot, the already-resolved inline field path,
+    /// and the type at the end of that path.
+    fn borrowed_view_field_path(&self, expr: &ast::Expr) -> Option<(SlotId, Vec<u32>, IrType)> {
+        match expr {
+            ast::Expr::Path(path) => {
+                let slot = self.try_lookup_slot(&path.name)?;
+                let IrType::BorrowedView { mutex_type, .. } = self.slot_type(slot) else {
+                    return None;
+                };
+                Some((
+                    slot,
+                    Vec::new(),
+                    self.module.mutex_types[mutex_type as usize],
+                ))
+            }
+            ast::Expr::Field(field) => {
+                let (slot, mut path, object_ty) = self.borrowed_view_field_path(&field.object)?;
+                let (index, field_ty) =
+                    self.field_position_for_ir_type(object_ty, &field.name.name)?;
+                path.push(index);
+                Some((slot, path, field_ty))
+            }
+            _ => None,
+        }
+    }
+
     /// Lowers `cond ? a : b`.
     ///
     /// The same shape as the `if` expression — two blocks writing one slot —
@@ -22090,6 +26457,24 @@ impl<'a> FunctionLowering<'a> {
     /// them would leave a value nobody reads.
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
+            ast::Expr::Call(e) if self.is_mutex_constructor_call(e) => {
+                let _ = self.lower_mutex_construction(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.mutex_with_calls.contains_key(&e.span) => {
+                let _ = self.lower_mutex_with_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.concurrent_each_plans.contains_key(&e.span) => {
+                let _ = self.lower_concurrent_each(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_concurrent_protect_call(e) => {
+                self.lower_concurrent_protect_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_concurrent_detach_call(e) => {
+                let _ = self.lower_concurrent_detach(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_app_shutdown_grace_call(e) => {
+                let _ = self.lower_app_shutdown_grace_call(e, expr.span());
+            }
             // `Timer.*` / `job.wait()` / `job.cancel()` / `spawn` as bare
             // statements: recognized before any arm that would resolve the
             // receiver (`Timer` is not a value; `method_of` would panic).
@@ -22152,6 +26537,15 @@ impl<'a> FunctionLowering<'a> {
             {
                 self.lower_super_call(e, expr.span());
             }
+            ast::Expr::Call(e) if self.is_thread_run_call(e) => {
+                self.lower_thread_run_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.service_spawns.contains_key(&e.span) => {
+                self.lower_service_start(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.checked.service_ready_calls.contains_key(&e.span) => {
+                self.lower_service_ready(e, expr.span());
+            }
             ast::Expr::Call(e) if self.contract_method_of(e).is_some() => {
                 let span = expr.span();
                 if let Some(result) = self.lower_contract_call(e, span) {
@@ -22191,6 +26585,11 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Call(e) if self.is_channel_method_call(e) => {
                 let _ = self.lower_channel_method_call(e, expr.span());
+            }
+            ast::Expr::Call(e) if self.is_atomic_call(e) => {
+                let result = self.lower_atomic_call(e, expr.span());
+                let ty = self.type_of_operand(result);
+                self.lower_throws_check(result, ty, expr.span());
             }
             // A closure call goes through the value and has its own arm in
             // `lower_expr`; only a direct call is special-cased here.
@@ -24207,7 +28606,114 @@ impl<'a> FunctionLowering<'a> {
         matches!(&*call.callee, ast::Expr::Path(ident) if &ident.name == source)
     }
 
+    fn is_thread_run_call(&self, call: &ast::CallExpr) -> bool {
+        self.checked.thread_run_calls.contains(&call.span)
+    }
+
+    fn lower_thread_run_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
+        let arg = call.args.first().expect("sema validates Thread.run arity");
+        let callable = self.lower_expr(&arg.value);
+        let callable_ty = self.type_of_operand(callable);
+        let IrType::Callable(layout_id) = callable_ty else {
+            return self.emit(InstKind::Undefined, IrType::Void, span);
+        };
+        let returns = self.module.closures[layout_id as usize].returns;
+        let callable_slot = self.declare_slot("<thread_callable>", callable_ty, span);
+        self.emit_effect(InstKind::Store(callable_slot, callable), span);
+        let result_slot =
+            (returns != IrType::Void).then(|| self.declare_slot("<thread_result>", returns, span));
+        let throwable_ty = IrType::Object(self.throwable_object_id());
+        let exception_slot = self.declare_slot("<thread_exception>", throwable_ty, span);
+
+        let status = self.emit(
+            InstKind::ThreadRun {
+                callable_slot,
+                result_slot,
+                exception_slot,
+            },
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let status_slot = self.spill(status, IrType::Int(IntWidth::U32), span);
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::U32), span);
+        let succeeded = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success_block = self.new_block();
+        let failure_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: succeeded,
+            then_block: success_block,
+            else_block: failure_block,
+        });
+
+        self.current = failure_block;
+        let failure_status = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::U32),
+            span,
+        );
+        let thrown_status = self.const_int_at(1, IrType::Int(IntWidth::U32), span);
+        let thrown = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: failure_status,
+                right: thrown_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let thrown_block = self.new_block();
+        let panic_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: thrown,
+            then_block: thrown_block,
+            else_block: panic_block,
+        });
+
+        self.current = thrown_block;
+        let exception = self.emit(InstKind::Load(exception_slot), throwable_ty, span);
+        self.emit_effect(InstKind::Throw(exception), span);
+        self.lower_pending_exception_dispatch(span);
+
+        self.current = panic_block;
+        let native_error = self
+            .checked
+            .native_exceptions
+            .expect("Thread.run uses the checked exception hierarchy")
+            .native_error;
+        self.throw_native_failure(
+            native_error,
+            "managed thread callback failed internally",
+            span,
+        );
+
+        self.current = success_block;
+        let result = match result_slot {
+            Some(slot) => self.emit(InstKind::Load(slot), returns, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        };
+        self.lower_throws_check(result, returns, span)
+    }
+
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
+        if self.checked.mutex_with_calls.contains_key(&call.span)
+            || self.is_mutex_constructor_call(call)
+        {
+            return false;
+        }
+        if self.checked.settled_plans.contains_key(&call.span)
+            || self.checked.concurrent_each_plans.contains_key(&call.span)
+            || self.is_atomic_call(call)
+        {
+            return false;
+        }
         if matches!(
             &*call.callee,
             ast::Expr::Field(field) if self.checked.aliases.contains_key(&field.name.span)
@@ -24217,7 +28723,11 @@ impl<'a> FunctionLowering<'a> {
         // `Timer.*` and `job.wait()`/`.cancel()` (`concurrent-blocks-and-timers`):
         // `Timer` is not a value and a `Job` handle has no method table, so the
         // `type_of` probes below would fault on the callee.
-        if self.is_timer_call(call) || self.is_job_method_call(call) {
+        if self.is_timer_call(call)
+            || self.is_job_method_call(call)
+            || self.is_concurrent_detach_call(call)
+            || self.is_app_shutdown_grace_call(call)
+        {
             return false;
         }
 
@@ -24381,6 +28891,23 @@ impl<'a> FunctionLowering<'a> {
     /// Total on a verified program. It is derivation, not checking: everything
     /// the checker would have rejected never reaches this point.
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
+        if let ast::Expr::Call(call) = expr
+            && (self.checked.service_spawns.contains_key(&call.span)
+                || self.checked.service_ready_calls.contains_key(&call.span))
+        {
+            return IrType::Void;
+        }
+        if let ast::Expr::Call(call) = expr
+            && (self.checked.mutex_with_calls.contains_key(&call.span)
+                || self.is_mutex_constructor_call(call))
+        {
+            return self
+                .checked
+                .expr_types
+                .get(&call.span)
+                .map(|ty| self.ir_type(*ty))
+                .expect("the checker records Mutex construction and with result types");
+        }
         // The checker records the contextual width for numeric literals and the
         // result type for binary operations; use it when available so lowering
         // matches the semantic type. Other expressions keep their IR-derived type
@@ -24403,7 +28930,12 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Regex(_) => IrType::Regex,
             ast::Expr::Char(_) => IrType::Char,
             ast::Expr::Path(ident) => match self.try_lookup_slot(&ident.name) {
-                Some(slot) => self.slot_type(slot),
+                Some(slot) => match self.slot_type(slot) {
+                    IrType::BorrowedView { mutex_type, .. } => {
+                        self.module.mutex_types[mutex_type as usize]
+                    }
+                    ty => ty,
+                },
                 None => {
                     // `outer` inside an `inner class` names the hidden field.
                     if ident.name == "outer"
@@ -24485,6 +29017,14 @@ impl<'a> FunctionLowering<'a> {
                 binary_op(e.op).result_type(self.type_of(&e.left, e.left.span()))
             }
             ast::Expr::Call(e) if self.is_recursive_self_call(e) => self.return_type,
+            ast::Expr::Call(e) if self.is_atomic_call(e) => self
+                .checked
+                .expr_types
+                .get(&e.span)
+                .map(|ty| self.ir_type(*ty))
+                .expect("sema records the Atomic operation result type"),
+            ast::Expr::Call(e) if self.is_concurrent_protect_call(e) => IrType::Void,
+            ast::Expr::Call(e) if self.is_concurrent_detach_call(e) => IrType::Void,
             // `concurrent-blocks-and-timers`: `Timer.*` and `job.wait/cancel`.
             ast::Expr::Call(e) if self.is_timer_call(e) => {
                 let ast::Expr::Field(field) = &*e.callee else {

@@ -1,14 +1,26 @@
 # Synchronization and Mutexes
 
-`sync` and `Mutex<T>` protect shared mutable state. Structured
-`mutex.with(value => { ... })` access prevents a guard or writable view from
-escaping. Keep critical sections small; holding an ordinary mutex across
-Suspension is a compile-time error.
+> **Estado:** `Mutex<T>` y `mutex.with` están disponibles para programas
+> nativos. `RwLock<T>`, `Semaphore`, `Barrier` y `Once<T>` siguen siendo
+> diseños de runtime sin API de fuente. Consulta
+> [Phase 5 — Concurrency and parallelism](../../../init/ZIRK_FEATURE_STATUS.md#phase-5-concurrency-and-parallelism)
+> para la matriz completa.
 
-Prefer channels or immutable values when ownership transfer expresses the design better.
+`Mutex<T>` protege un payload administrado por el GC y expone acceso escribible
+solo dentro de `mutex.with((value: T): T => { ... })`. La vista no puede escapar,
+capturarse ni sobrevivir a la llamada. El callback no puede suspender, bloquear,
+crear tareas ni cruzar puntos seguros; las lecturas de metadatos no asignantes
+de tipos nativos están permitidas. La espera del mutex usa la cola cooperativa,
+es FIFO y no reentrante; la cancelación quita al waiter de la cola. El runtime
+desbloquea antes de propagar una excepción de Zirk y también libera durante un
+unwind nativo. No existe estado de poisoning. Los otros sincronizadores de esta
+página no están disponibles como API de fuente.
 
-`RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` are standard-library types,
-not additional language syntax.
+Prefiere canales o valores inmutables cuando la transferencia de propiedad represente mejor el diseño.
+
+El diseño también contempla `RwLock<T>`, `Semaphore`, `Barrier` y `Once<T>` como
+tipos de biblioteca estándar, no como sintaxis adicional. Esos tipos tampoco
+deben considerarse APIs entregadas.
 
 ---
 

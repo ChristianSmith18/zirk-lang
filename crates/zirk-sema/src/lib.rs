@@ -23,7 +23,8 @@ pub mod stdlib;
 mod types;
 
 pub use checker::{
-    Capture, CheckedProgram, ConcurrentPlan, LambdaInfo, TypeMapEntry, TypeMapKind, check,
+    Capture, CheckedProgram, ConcurrentPlan, EffectSummary, LambdaInfo, OwnershipMarkers,
+    OwnershipProperties, ServiceSpawnInfo, SettledPlan, TypeMapEntry, TypeMapKind, check,
 };
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
@@ -280,4 +281,15 @@ pub mod codes {
     /// A return type cannot be inferred because the inference is recursive —
     /// directly or through a cycle — and no member declares it.
     pub const CIRCULAR_RETURN_INFERENCE: Code = Code::new("E0476");
+    /// A resource move inside a loop whose body may run more than once.
+    pub const TRANSFER_IN_LOOP: Code = Code::new("E0477");
+    /// A captured resource moved by a reusable closure.
+    pub const TRANSFER_IN_REUSABLE_CLOSURE: Code = Code::new("E0478");
+    /// A concurrent boundary has no proven Transfer/Share capability.
+    pub const UNSAFE_CONCURRENT_BOUNDARY: Code = Code::new("E0482");
+    /// `Concurrent.protect` contains a blocking or suspending effect.
+    pub const SUSPENDING_PROTECTED_REGION: Code = Code::new("E0483");
+    /// `Thread.run` is unavailable, and its literal lambda has effects the
+    /// future managed-thread boundary cannot currently account for.
+    pub const THREAD_RUN_UNSUPPORTED_EFFECT: Code = Code::new("E0484");
 }

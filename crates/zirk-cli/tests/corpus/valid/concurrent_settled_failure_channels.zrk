@@ -1,0 +1,67 @@
+import { stdout } from std.io;
+
+fn fail_cleanup(): Void throws InvalidArgumentError {
+    throw InvalidArgumentError("cleanup failure");
+}
+
+fn return_error_value(): Result<Int32, String> {
+    mut result: Result<Int32, String> = Error("returned error value");
+    return result;
+}
+
+fn return_ok_value(): Result<Int32, String> {
+    mut result: Result<Int32, String> = Ok(9);
+    return result;
+}
+
+fn main(): Void {
+    mut outcomes = Concurrent.of(
+        (): Int32 => {
+        try {
+            throw CancelledError("branch cancelled");
+        } finally {
+            stdout.println("cancel cleanup complete");
+        }
+        return 0;
+    },
+        (): Int32 => { throw InvalidArgumentError("branch failure"); },
+        (): Int32 => 7,
+        (): Int32 => {
+        try {
+            throw CancelledError("branch cancelled before cleanup");
+        } finally {
+            fail_cleanup();
+        }
+        return 0;
+    },
+    ).settled(
+
+    );
+
+    for outcome in outcomes {
+        match outcome {
+            Outcome.Fulfilled(value) => stdout.println("fulfilled " + value.to_string());
+            Outcome.Rejected(error) => stdout.println("rejected " + error.code() + " " + error.message());
+            Outcome.Cancelled(error) => stdout.println("cancelled " + error.message());
+        }
+    }
+
+    mut returned_errors = Concurrent.of(
+        (): Result<Int32, String> => return_error_value(),
+        (): Result<Int32, String> => return_ok_value(),
+    ).settled(
+
+    );
+    for outcome in returned_errors {
+        match outcome {
+            Outcome.Fulfilled(value) => {
+                match value {
+                    Result.Ok(number) => stdout.println("value ok " + number.to_string());
+                    Result.Error(message) => stdout.println("value error " + message);
+                }
+            }
+            Outcome.Rejected(error) => stdout.println("unexpected throw " + error.message());
+            Outcome.Cancelled(error) => stdout.println("unexpected cancel " + error.message());
+        }
+    }
+}

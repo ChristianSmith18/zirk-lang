@@ -185,19 +185,19 @@ value. No declaration-order integer is inferred. Algebraic enums default to
 configurable discriminated objects. Date/time, Duration and bytes require
 explicit ISO/base64 codecs.
 
-## Streaming and task-aware I/O
+## Streaming and cooperative I/O
 
 `JSONReader` consumes tokens or root-array elements incrementally;
 `JSONWriter` emits without constructing a complete text value. Parsing itself
 is CPU work. Reading a file/socket remains visibly task-aware:
 
 ```zirk
-inmut chunk = await body.read();
+inmut chunk = body.read();
 reader.push(chunk);
 ```
 
-No synchronous iterator hides `await`. The underlying writer applies
-backpressure, and its task-aware operation is explicit when suspension is
+No synchronous iterator hides suspension. The underlying writer applies
+backpressure, and its cooperative operation suspends the current branch when
 required. Limits, cancellation and typed errors apply throughout; cancellation
 does not publish a partial decoded value as success.
 

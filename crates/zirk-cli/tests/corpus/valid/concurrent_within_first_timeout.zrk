@@ -1,0 +1,12 @@
+import { stdout } from std.io;
+fn main(): Void {
+    try {
+        mut value: Int32 = Concurrent.of(
+            (): Int32 => { Timer.sleep(100ms); return 1; },
+            (): Int32 => { Timer.sleep(100ms); return 2; },
+        ).within(1ms).first();
+        stdout.println(value);
+    } catch TimeoutError(e) {
+        stdout.println("timeout");
+    }
+}

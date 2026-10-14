@@ -1,0 +1,23 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3];
+    try {
+        mut ignored = Concurrent.each(values,(value: Int32): Int32 => {
+            stdout.println("started " + value.to_string());
+            if value == 1 {
+                Timer.sleep(5ms);
+                throw InvalidArgumentError("primary callback failure");
+            }
+            try {
+                Timer.sleep(500ms);
+            } finally {
+                stdout.println("sibling cleanup");
+            }
+            return value;
+        }, 2);
+        stdout.println("unexpected successful result");
+    } catch InvalidArgumentError(error) {
+        stdout.println(error.message());
+    }
+}

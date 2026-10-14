@@ -1,0 +1,34 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2];
+    try {
+        mut ignored = Concurrent.each(values,(value: Int32): Int32 => {
+            stdout.println("callback started");
+            return value;
+        }, 0);
+        stdout.println("unexpected limit acceptance");
+    } catch InvalidArgumentError(_) {
+        stdout.println("zero limit rejected");
+    }
+    try {
+        mut ignored = Concurrent.each(values,(value: Int32): Int32 => {
+            stdout.println("callback started");
+            return value;
+        }, 257);
+        stdout.println("unexpected limit acceptance");
+    } catch InvalidArgumentError(_) {
+        stdout.println("large limit rejected");
+    }
+
+    inmut::strict oversized: List<Int32> = [0 ..= 256];
+    try {
+        mut ignored = Concurrent.each(oversized,(value: Int32): Int32 => {
+            stdout.println("callback started");
+            return value;
+        }, 1);
+        stdout.println("unexpected size acceptance");
+    } catch InvalidArgumentError(_) {
+        stdout.println("large input rejected");
+    }
+}

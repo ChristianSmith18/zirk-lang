@@ -20,7 +20,12 @@ inmut visible = selected ?? label;
 
 ## Replace Promise intuition
 
-Zirk 1.x deliberately has no `async fn`. `task` and `await` express structured concurrent work, `parallel` expresses multicore CPU work, and `thread` names an OS thread. Cancellation and child lifetimes belong to the scope, not to an ambient event loop.
+Zirk 1.x has no `async fn`; the former `task`, `await`, and `select` syntax was
+removed. Structured work uses `concurrent { ... }`, `spawn`, and `Job<T>`;
+`Timer` provides the delivered timer operations, while `parallel` requests CPU
+work. Typed channels are available. Managed OS threads and language-level
+synchronization primitives are not currently exposed, and synchronous I/O can
+block the cooperative executor.
 
 ## Replace exception-only failure intuition
 

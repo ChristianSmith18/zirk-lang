@@ -21,8 +21,8 @@ examples, and advice on choosing a type, begin with
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[N]` access | component defaults where explicitly constructed |
 | Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `T?` | no implicit default |
 | Native memory | `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>` | unsafe raw address or bounded dependent native view | null only for raw pointer |
-| Concurrency | `Task<T>`; `TaskSettlement<T>`, `Channel<T>`, `Thread<T>` deferred | `Task<T>` is a one-consume child-work handle; the rest are specified for later Phase 5 slices | no implicit default |
-| Synchronization | `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `Atomic<T>` | contract-controlled shared state | type-specific |
+| Concurrency | `Job<T>`, `Channel<T>`; `Thread<T>` planned | `Job<T>` is a one-consume branch handle; channels are delivered; managed threads remain gated | no implicit default |
+| Synchronization | `Atomic<T>`; `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>` planned | `Atomic<T>` supports target-provided Boolean and signed/unsigned integer atomic widths through 64 bits; other listed synchronization primitives have no Zirk source API yet | `Atomic<T>` requires an explicit supported scalar initializer |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
 `Decimal` is the exact base-ten fractional type. `Float` is an alias for `Float64`, the opt-in IEEE 754 binary family.
@@ -95,9 +95,10 @@ Complete reference variables alias when moved. Reads through an attribute,
 index, slice, destructuring, pattern, iterator, argument, return, or closure
 capture are independent projections and require `Clone` when reference-backed.
 
-The removed `Task<T>` and `TaskSettlement<T>` types are replaced by the pending
-concurrency-surface changes. Internal transfer/share properties are
-compiler-derived rather than user-declared types.
+The former `Task<T>` and `TaskSettlement<T>` types were removed. Structured
+concurrency uses `Job<T>`; source-level outcome aggregation remains unavailable.
+Internal transfer/share properties are compiler-derived rather than
+user-declared types.
 
 ## Universal and conditional members
 

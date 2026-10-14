@@ -351,8 +351,8 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   deliberately left open for Phase 7's `Array<T>`/`List<T>` to register
   their own support later without further grammar changes. **Not**
   covered: `.read_volatile()`/`.write_volatile()`, untagged native-union
-  access (no union type exists), weak atomic ordering (`Atomic<T>` is
-  Phase 5), and general provenance tracking for a view's known extent
+  access (no union type exists), and general provenance tracking for a view's
+  known extent
   beyond the one syntactic shape recognized so far.
 - [x] Implement transactional write journals and rollback for managed/validated
   ranges, followed by explicit irreversible `commit` effects — **delivered**
@@ -411,15 +411,26 @@ function coloring.
    the worker path; `reduce_ordered` deliberately keeps sequential grouping.
 3. Typed bounded/unbounded `Channel<T>` with closure and backpressure
    (`typed-channels`, delivered; `drain` and `select` remain follow-ups).
-4. Outcomes, aggregation policy, safe-default synchronization, scoped
-   `thread`, and the remaining concurrency APIs (`concurrency-completion`).
+4. Completion APIs and safety boundaries (`concurrency-completion`; in
+   progress as of 13 October 2026). Runtime foundations include a bounded
+   managed-blocking pool and a provisional detached-background supervisor.
+   Scalar source `Atomic<T>` is implemented for target-supported Boolean and
+   signed/unsigned integer widths through 64 bits, with GC-inline storage;
+   native-host E2E coverage passes, while configured non-host triples have
+   compile-only runtime checks. Managed `Thread.run`, Mutex/RwLock/Semaphore/
+   Barrier/Once, complete `Transfer`/`Share` enforcement, and a language-level
+   background-service lifecycle remain incomplete.
 
 `task`, `await`, `Task<T>`, task scopes, `select`, and cancellation shields are
 removed constructs. Their parser diagnostic names the applicable replacement.
 
-**Output:** the structured concurrency contract of
-`STRUCTURED_CONCURRENCY_SEMANTICS.md`, including cleanup, selection, transfer,
-and data-race guarantees, working end to end.
+**Output:** the delivered structured-concurrency subset works end to end:
+`concurrent`/`spawn`/`Job<T>`/`Timer`, CPU `parallel` regions, and typed
+channels. This does not establish general data-race freedom or complete
+`Transfer`/`Share` enforcement. `select`/channel draining, managed threads,
+synchronization APIs, and source-level completion/background combinators
+remain unavailable or partial; see the feature-status catalog and the active
+`concurrency-completion` change for current evidence.
 
 ---
 

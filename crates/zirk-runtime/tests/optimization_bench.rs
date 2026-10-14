@@ -6,6 +6,8 @@
 
 #[path = "../src/array.rs"]
 mod array;
+#[path = "../src/background.rs"]
+mod background;
 #[path = "../src/channel.rs"]
 mod channel;
 #[path = "../src/char.rs"]
@@ -14,6 +16,8 @@ mod char;
 mod clone;
 #[path = "../src/collector.rs"]
 mod collector;
+#[path = "../src/combinators.rs"]
+mod combinators;
 #[path = "../src/context.rs"]
 mod context;
 #[path = "../src/decimal.rs"]
@@ -26,6 +30,8 @@ mod exceptions;
 mod executor;
 #[path = "../src/failure.rs"]
 mod failure;
+#[path = "../src/host_signal.rs"]
+mod host_signal;
 #[path = "../src/io.rs"]
 mod io;
 #[path = "../src/journal.rs"]
@@ -48,10 +54,14 @@ mod regex;
 mod resource;
 #[path = "../src/scalar.rs"]
 mod scalar;
+#[path = "../src/services.rs"]
+mod services;
 #[path = "../src/set.rs"]
 mod set;
 #[path = "../src/string.rs"]
 mod string;
+#[path = "../src/sync_mutex.rs"]
+mod sync_mutex;
 #[path = "../src/task.rs"]
 mod task;
 #[path = "../src/temporal.rs"]
@@ -123,6 +133,8 @@ use std::ffi::c_void;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+mod common;
+
 const NODES: usize = 4_096;
 const GRAPH_ROUNDS: usize = 3;
 const CHURN_ITEMS: usize = 8_192;
@@ -139,6 +151,7 @@ fn report(name: &str, profile: &str, rounds: usize, work: usize, elapsed: Durati
         elapsed.as_nanos(),
         elapsed.as_nanos() as f64 / (rounds * work) as f64,
     );
+    common::report_process_peak_rss(name);
 }
 
 unsafe fn allocate_node(id: usize) -> *mut c_void {
@@ -367,4 +380,87 @@ fn benchmark_map_set_churn() {
         set_checksum,
     );
     black_box((checksum, set_checksum));
+}
+
+#[test]
+#[ignore = "opt-in release benchmark; see file header for the exact command"]
+fn benchmark_bounded_each() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ITEMS: usize = 256;
+    const LIMIT: usize = 16;
+    const SAMPLES: usize = 9;
+
+    println!(
+        "CONTEXT benchmark=bounded_each os={} os_version={} arch={} toolchain=[{}] profile=release opt_level=3 lto=true codegen_units=1 target=host-native items={} concurrency_limit={} samples={} allocator=system thread_ceiling=1 rss_metric=process_lifetime_peak",
+        std::env::consts::OS,
+        os_version(),
+        std::env::consts::ARCH,
+        toolchain(),
+        ITEMS,
+        LIMIT,
+        SAMPLES,
+    );
+
+    let outcome = executor::Executor::new().run_with_root(move || {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut elapsed = Vec::with_capacity(SAMPLES);
+        let mut checksums = Vec::with_capacity(SAMPLES);
+
+        for _ in 0..SAMPLES {
+            maximum.store(0, Ordering::Relaxed);
+            let active_for_each = Arc::clone(&active);
+            let maximum_for_each = Arc::clone(&maximum);
+            let start = Instant::now();
+            let values = combinators::each_with_limit(0..ITEMS, LIMIT, move |item| {
+                let now = active_for_each.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum_for_each.fetch_max(now, Ordering::SeqCst);
+
+                // Yield once so the active callback window is exercised under
+                // the cooperative scheduler instead of measuring only inline
+                // callback completion.
+                executor::yield_now();
+
+                let value = (item as u64 + 1).wrapping_mul(0x9E37_79B1);
+                active_for_each.fetch_sub(1, Ordering::SeqCst);
+                black_box(value)
+            })
+            .expect("bounded each should complete successfully");
+            elapsed.push(start.elapsed());
+
+            assert_eq!(values.len(), ITEMS);
+            assert!(values.iter().enumerate().all(|(index, value)| {
+                *value == (index as u64 + 1).wrapping_mul(0x9E37_79B1)
+            }));
+            assert_eq!(active.load(Ordering::SeqCst), 0, "each returned before joining callbacks");
+            let observed_max = maximum.load(Ordering::SeqCst);
+            assert!(observed_max <= LIMIT, "active callbacks exceeded configured limit");
+            assert_eq!(observed_max, LIMIT, "benchmark did not exercise the full callback window");
+            checksums.push(values.iter().fold(0_u64, |sum, value| sum.wrapping_add(*value)));
+        }
+
+        let checksum = checksums[0];
+        assert!(checksums.iter().all(|sample| *sample == checksum));
+        assert_eq!(active.load(Ordering::SeqCst), 0, "callbacks remained active after final sample");
+        let max_active = maximum.load(Ordering::SeqCst);
+        let mut nanos = elapsed.iter().map(Duration::as_nanos).collect::<Vec<_>>();
+        nanos.sort_unstable();
+        let min = nanos[0];
+        let median = nanos[nanos.len() / 2];
+        let max = nanos[nanos.len() - 1];
+        println!(
+            "BENCH name=bounded_each profile=release items={ITEMS} concurrency_limit={LIMIT} samples={SAMPLES} min_ns={min} median_ns={median} max_ns={max} checksum={checksum} max_active_concurrency={max_active} cleanup=all_callbacks_joined"
+        );
+        common::report_process_peak_rss("bounded_each");
+        black_box(checksum as usize)
+    });
+
+    match outcome {
+        task::TaskOutcome::Value(_) => {}
+        task::TaskOutcome::Panicked(payload) => {
+            panic!("bounded each benchmark executor failed: {payload:?}")
+        }
+    }
 }

@@ -1,0 +1,22 @@
+import { stdout } from std.io;
+
+record Inner {
+    count: Int32;
+}
+
+record State {
+    inner: Inner;
+    label: String;
+}
+
+fn main(): Void {
+    mut mutex: Mutex<State> = Mutex(State(inner: Inner(count: 4), label: "re" + "tained"));
+    inmut result: Int32 = mutex.with (
+        (view: State): Int32 => {
+        inmut old_length: Int32 = view.label.length;
+        view = State(inner: Inner(count: 8), label: "x");
+        return old_length;
+    },
+    );
+    stdout.println(result);
+}

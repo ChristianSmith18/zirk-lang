@@ -1,0 +1,12 @@
+class MutableBox {
+    mut value: Int32;
+
+    construct() {
+        this.value = 1;
+    }
+}
+
+fn main(): Void {
+    inmut::strict values: List<MutableBox> = [MutableBox()];
+    Concurrent.each(values, (item: MutableBox): Int32 => item.value);
+}

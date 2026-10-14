@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut value: Int32 = 1;
+    Thread.run((): Pointer<Int32> => unsafe { Pointer.from(value) });
+}

@@ -1,0 +1,22 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut outcomes = Concurrent.of(
+        (): Int32 => {
+        Timer.sleep(20ms);
+        return 11;
+    },
+        (): Int32 => 22,
+        (): Int32 => 33,
+    ).settled(
+
+    );
+
+    for outcome in outcomes {
+        match outcome {
+            Outcome.Fulfilled(value) => stdout.println(value.to_string());
+            Outcome.Rejected(_) => stdout.println("unexpected rejection");
+            Outcome.Cancelled(_) => stdout.println("unexpected cancellation");
+        }
+    }
+}

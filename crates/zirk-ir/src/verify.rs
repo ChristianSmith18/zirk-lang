@@ -9,7 +9,7 @@
 //! invariants of the *representation*.
 
 use crate::ir::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// A violation of the IR invariants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,13 +29,22 @@ pub fn verify(module: &Module) -> Result<(), Vec<IrError>> {
     let mut errors = Vec::new();
 
     verify_module_layouts(module, &mut errors);
+    verify_mutex_callback_layouts(module, &mut errors);
 
     // Function verification calls helpers such as `is_managed_reference`
     // that index validated module layout tables. Stop before those accesses
     // when the module-level representation is malformed.
     if errors.is_empty() {
+        let direct_effects = direct_call_effects(module);
+        let mutex_callback_functions = mutex_callback_functions(module);
         for function in &module.functions {
-            verify_function(module, function, &mut errors);
+            verify_function(
+                module,
+                function,
+                &direct_effects,
+                &mutex_callback_functions,
+                &mut errors,
+            );
         }
     }
 
@@ -51,6 +60,320 @@ fn module_error(errors: &mut Vec<IrError>, detail: impl Into<String>) {
         function: "<module>".into(),
         detail: detail.into(),
     });
+}
+
+/// Resolves a non-empty path through inline Value layouts. Enum traversal is
+/// deliberately unavailable until IR carries an explicit active-variant guard.
+fn resolve_borrowed_value_path(module: &Module, root: IrType, path: &[u32]) -> Option<IrType> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut ty = root;
+    for &index in path {
+        let IrType::Value(layout) = ty else {
+            return None;
+        };
+        ty = module
+            .values
+            .get(layout as usize)?
+            .fields
+            .get(index as usize)?
+            .ty;
+    }
+    Some(ty)
+}
+
+fn verify_mutex_callback_layouts(module: &Module, errors: &mut Vec<IrError>) {
+    let used: HashSet<u32> = module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|i| {
+            if let InstKind::MutexWithCall { layout, .. } = &i.kind {
+                Some(*layout)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (index, layout) in module.closures.iter().enumerate() {
+        let has_view = layout
+            .params
+            .iter()
+            .any(|ty| matches!(ty, IrType::BorrowedView { .. }))
+            || layout
+                .captures
+                .iter()
+                .any(|ty| matches!(ty, IrType::BorrowedView { .. }))
+            || matches!(layout.returns, IrType::BorrowedView { .. });
+        if has_view && !used.contains(&(index as u32)) {
+            module_error(
+                errors,
+                format!(
+                    "closure layout {index} contains BorrowedView but is not used by MutexWithCall"
+                ),
+            );
+        }
+        if used.contains(&(index as u32)) {
+            if layout.params.len() != 1
+                || !matches!(layout.params.first(), Some(IrType::BorrowedView { .. }))
+            {
+                module_error(
+                    errors,
+                    format!(
+                        "MutexWithCall closure layout {index} must have exactly one BorrowedView parameter"
+                    ),
+                );
+            }
+            if layout
+                .captures
+                .iter()
+                .any(|ty| matches!(ty, IrType::BorrowedView { .. }))
+                || matches!(layout.returns, IrType::BorrowedView { .. })
+            {
+                module_error(
+                    errors,
+                    format!(
+                        "MutexWithCall closure layout {index} cannot capture or return BorrowedView"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn mutex_callback_functions(module: &Module) -> HashSet<String> {
+    let used_layouts: HashSet<u32> = module
+        .functions
+        .iter()
+        .flat_map(|function| {
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions.iter())
+                .filter_map(|inst| {
+                    if let InstKind::MutexWithCall { layout, .. } = &inst.kind {
+                        Some(*layout)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    module
+        .functions
+        .iter()
+        .flat_map(|function| {
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| block.instructions.iter())
+                .filter_map(|inst| {
+                    let InstKind::MakeCallable { target, .. } = &inst.kind else {
+                        return None;
+                    };
+                    let IrType::Callable(layout) = inst.ty else {
+                        return None;
+                    };
+                    used_layouts.contains(&layout).then(|| target.clone())
+                })
+        })
+        .collect()
+}
+
+/// Whether an instruction may cross a scheduler, host-blocking, shared-runtime,
+/// or GC/safepoint boundary while a BorrowedView is live. Direct calls to
+/// module functions are handled by `direct_call_effects` below.
+fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
+    matches!(
+        kind,
+        InstKind::CallContract { .. }
+            | InstKind::CallVirtual { .. }
+            | InstKind::CallClosure { .. }
+            | InstKind::CallCallable { .. }
+            | InstKind::BranchStart { .. }
+            | InstKind::ParallelForStart { .. }
+            | InstKind::BackgroundStart { .. }
+            | InstKind::ServiceStart { .. }
+            | InstKind::ServiceReady { .. }
+            | InstKind::MutexAcquire { .. }
+            | InstKind::MutexWithCall { .. }
+            | InstKind::MutexNew { .. }
+            | InstKind::ThreadRun { .. }
+            | InstKind::SafepointPoll
+            | InstKind::Alloc(_)
+            | InstKind::AtomicNew { .. }
+            | InstKind::MakeClosure { .. }
+            | InstKind::MakeCallable { .. }
+            | InstKind::Concat { .. }
+            | InstKind::Repeat { .. }
+            | InstKind::ToString(_)
+            | InstKind::Println(_)
+            | InstKind::Print(_)
+            | InstKind::PrintlnStderr(_)
+            | InstKind::PrintStderr(_)
+            | InstKind::FlushStdout { .. }
+            | InstKind::FlushStderr { .. }
+            | InstKind::StdinReadLineResult { .. }
+            | InstKind::StdinReadChar { .. }
+            | InstKind::StdinReadBytes { .. }
+            | InstKind::StdinReadExact { .. }
+            | InstKind::ScopeExit { .. }
+            | InstKind::ScopeExitCollectAll { .. }
+            | InstKind::JobWait { .. }
+            | InstKind::JobWaitAny { .. }
+            | InstKind::JobWaitAnyWithTimer { .. }
+            | InstKind::JobOutcomeWaitTake { .. }
+            | InstKind::ScopeOutcomeWaitTake { .. }
+            | InstKind::TimerSleep { .. }
+            | InstKind::ChannelSend { .. }
+            | InstKind::ChannelRecv { .. }
+            | InstKind::ChannelTrySend { .. }
+            | InstKind::ChannelTryRecv { .. }
+            | InstKind::ChannelNew { .. }
+            | InstKind::ChannelClose { .. }
+            | InstKind::ChannelLength(_)
+            | InstKind::ChannelIsClosed(_)
+            | InstKind::ChannelCapacity(_)
+            | InstKind::ChannelDrain { .. }
+            | InstKind::WeakFrom(_)
+            | InstKind::WeakUpgrade(_)
+            | InstKind::Clone(_)
+            | InstKind::ArrayNew { .. }
+            | InstKind::ListNew { .. }
+            | InstKind::MapNew { .. }
+            | InstKind::SetNew { .. }
+            | InstKind::ListAdd { .. }
+            | InstKind::ListInsert { .. }
+            | InstKind::ListRemove { .. }
+            | InstKind::ListRemoveValue { .. }
+            | InstKind::ArrayClone { .. }
+            | InstKind::ListClone { .. }
+            | InstKind::MapSet { .. }
+            | InstKind::MapRemove { .. }
+            | InstKind::SetAdd { .. }
+            | InstKind::SetRemove { .. }
+            | InstKind::ArraySlice { .. }
+    )
+}
+
+/// Computes conservative whole-module effects for direct calls. Unknown calls
+/// are effectful. Repeated propagation reaches the least fixed point, even for
+/// recursive call graphs.
+fn direct_call_effects(module: &Module) -> HashMap<String, bool> {
+    let function_names: HashSet<&str> = module
+        .functions
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
+    let mut effects = HashMap::with_capacity(module.functions.len());
+    let mut callers: HashMap<String, Vec<String>> = HashMap::new();
+
+    for function in &module.functions {
+        let mut effectful = false;
+        for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+            match &instruction.kind {
+                InstKind::Call { callee, .. } if function_names.contains(callee.as_str()) => {
+                    callers
+                        .entry(callee.clone())
+                        .or_default()
+                        .push(function.name.clone());
+                }
+                InstKind::Call { callee, .. } => {
+                    effectful |= !is_non_safepoint_runtime_leaf(callee)
+                }
+                kind => effectful |= has_intrinsic_borrow_boundary(kind),
+            }
+        }
+        effects
+            .entry(function.name.clone())
+            .and_modify(|known| *known |= effectful)
+            .or_insert(effectful);
+    }
+
+    // Propagate effectfulness from callees to callers once per call edge. The
+    // queue also handles recursion without repeated whole-module rescans.
+    let mut queue: VecDeque<String> = effects
+        .iter()
+        .filter_map(|(name, effectful)| effectful.then_some(name.clone()))
+        .collect();
+    while let Some(callee) = queue.pop_front() {
+        for caller in callers.get(&callee).into_iter().flatten() {
+            if let Some(effectful) = effects.get_mut(caller)
+                && !*effectful
+            {
+                *effectful = true;
+                queue.push_back(caller.clone());
+            }
+        }
+    }
+    effects
+}
+
+fn may_suspend_or_spawn(kind: &InstKind, direct_effects: &HashMap<String, bool>) -> bool {
+    match kind {
+        InstKind::Call { callee, .. } => direct_effects
+            .get(callee)
+            .copied()
+            .unwrap_or_else(|| !is_non_safepoint_runtime_leaf(callee)),
+        kind => has_intrinsic_borrow_boundary(kind),
+    }
+}
+
+/// Runtime leaf calls proven not to allocate, suspend, block, or re-enter the
+/// executor. Keep this allowlist narrow: every entry is used while a
+/// `BorrowedView` may be live, so adding a symbol requires auditing its runtime
+/// implementation and ABI contract.
+fn is_non_safepoint_runtime_leaf(callee: &str) -> bool {
+    non_safepoint_runtime_leaf_signature(callee).is_some()
+}
+
+fn non_safepoint_runtime_leaf_signature(callee: &str) -> Option<(IrType, IrType)> {
+    use IntWidth::{I32, I64, I128};
+    let (parameter, result) = match callee {
+        "zirk_str_length" | "zirk_str_byte_length" => (IrType::String, IrType::Int(I32)),
+        "zirk_str_is_empty" => (IrType::String, IrType::Boolean),
+        "zirk_char_byte_length" | "zirk_char_codepoint_count" | "zirk_char_ascii_code" => {
+            (IrType::Char, IrType::Int(I32))
+        }
+        "zirk_char_is_ascii"
+        | "zirk_char_is_alphabetic"
+        | "zirk_char_is_numeric"
+        | "zirk_char_is_alphanumeric"
+        | "zirk_char_is_uppercase"
+        | "zirk_char_is_lowercase"
+        | "zirk_char_is_digit"
+        | "zirk_char_is_letter"
+        | "zirk_char_is_whitespace" => (IrType::Char, IrType::Boolean),
+        "zirk_duration_days" => (IrType::Int(I64), IrType::Int(I64)),
+        "zirk_duration_hours"
+        | "zirk_duration_minutes"
+        | "zirk_duration_seconds"
+        | "zirk_duration_milliseconds"
+        | "zirk_duration_microseconds"
+        | "zirk_duration_nanoseconds" => (IrType::Int(I64), IrType::Int(I32)),
+        "zirk_range_start" | "zirk_range_end" | "zirk_range_step" => {
+            (IrType::Range, IrType::Int(I64))
+        }
+        "zirk_rt_date_year"
+        | "zirk_rt_date_month"
+        | "zirk_rt_date_day"
+        | "zirk_rt_date_day_of_week"
+        | "zirk_rt_date_day_of_year"
+        | "zirk_rt_date_week_of_year"
+        | "zirk_rt_date_quarter"
+        | "zirk_rt_date_days_in_month"
+        | "zirk_rt_date_days_in_year" => (IrType::Int(I64), IrType::Int(I32)),
+        "zirk_rt_date_is_leap" => (IrType::Int(I64), IrType::Boolean),
+        "zirk_rt_time_hour" | "zirk_rt_time_minute" | "zirk_rt_time_second" => {
+            (IrType::Int(I64), IrType::Int(I32))
+        }
+        "zirk_rt_time_nanosecond" => (IrType::Int(I64), IrType::Int(I64)),
+        "zirk_rt_datetime_days" | "zirk_rt_datetime_nanos" => (IrType::Int(I128), IrType::Int(I64)),
+        _ => return None,
+    };
+    Some((parameter, result))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,8 +442,12 @@ fn has_inline_layout_cycle(
 fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
     fn check_type(module: &Module, errors: &mut Vec<IrError>, ty: IrType, context: &str) {
         let valid = match ty {
+            // Borrowed views are instruction-local capabilities, never
+            // admissible in a module-level layout table.
+            IrType::BorrowedView { .. } => false,
             IrType::Closure(id) | IrType::Callable(id) => id < module.closures.len() as u32,
             IrType::Channel(id) => id < module.channel_types.len() as u32,
+            IrType::Mutex(id) => id < module.mutex_types.len() as u32,
             IrType::Object(id) | IrType::Nullable(Nullable::Object(id)) => {
                 id < module.objects.len() as u32
             }
@@ -142,6 +469,7 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             IrType::List(id) | IrType::Nullable(Nullable::List(id)) => {
                 id < module.list_types.len() as u32
             }
+            IrType::Atomic(_) | IrType::Nullable(Nullable::Atomic(_)) => true,
             IrType::Map(id) => id < module.map_types.len() as u32,
             IrType::Set(id) => id < module.set_types.len() as u32,
             IrType::Nullable(Nullable::Contract(_)) => true,
@@ -170,12 +498,26 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             module_error(
                 errors,
                 format!(
-                    "{context} references an out-of-range layout in {}",
+                    "{context} references an out-of-range layout in {} ({ty:?})",
                     ty.as_str()
                 ),
             );
         }
     }
+    let mutex_callbacks = mutex_callback_functions(module);
+    let mutex_callback_layouts: HashSet<u32> = module
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter())
+        .flat_map(|b| b.instructions.iter())
+        .filter_map(|inst| {
+            if let InstKind::MutexWithCall { layout, .. } = &inst.kind {
+                Some(*layout)
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut layout_errors = Vec::new();
 
     for (index, layout) in module.objects.iter().enumerate() {
@@ -231,8 +573,16 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
         }
     }
     for (index, layout) in module.closures.iter().enumerate() {
-        for &ty in layout.captures.iter().chain(&layout.params) {
+        for &ty in &layout.captures {
             check_type(module, errors, ty, &format!("closure layout {index}"));
+        }
+        for (parameter_index, &ty) in layout.params.iter().enumerate() {
+            if !(mutex_callback_layouts.contains(&(index as u32))
+                && parameter_index == 0
+                && matches!(ty, IrType::BorrowedView { .. }))
+            {
+                check_type(module, errors, ty, &format!("closure layout {index}"));
+            }
         }
         check_type(
             module,
@@ -244,6 +594,7 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
 
     for (table_name, table) in [
         ("pointer", &module.pointer_types),
+        ("mutex", &module.mutex_types),
         ("weak", &module.weak_types),
         ("native slice", &module.native_slice_types),
         ("mutable native slice", &module.native_slice_mut_types),
@@ -259,6 +610,17 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
                 errors,
                 ty,
                 &format!("{table_name} type table entry {index}"),
+            );
+        }
+    }
+    for (index, &ty) in module.mutex_types.iter().enumerate() {
+        if matches!(
+            ty,
+            IrType::Void | IrType::Never | IrType::BorrowedView { .. }
+        ) {
+            module_error(
+                errors,
+                format!("mutex type table entry {index} has an unstorable payload type"),
             );
         }
     }
@@ -284,21 +646,43 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             &format!("function {index} return"),
         );
         for (slot_index, slot) in function.slots.iter().enumerate() {
-            check_type(
-                module,
-                errors,
-                slot.ty,
-                &format!("function {index} slot {slot_index}"),
-            );
+            let slot_id = SlotId(slot_index as u32);
+            let callback_parameter = mutex_callbacks.contains(&function.name)
+                && function.params.contains(&slot_id)
+                && matches!(slot.ty, IrType::BorrowedView { .. });
+            if !callback_parameter {
+                check_type(
+                    module,
+                    errors,
+                    slot.ty,
+                    &format!("function {index} slot {slot_index}"),
+                );
+            }
         }
         for (block_index, block) in function.blocks.iter().enumerate() {
             for (instruction_index, instruction) in block.instructions.iter().enumerate() {
+                if matches!(
+                    (&instruction.kind, instruction.ty),
+                    (
+                        InstKind::BorrowViewStart { region, .. },
+                        IrType::BorrowedView { region: ty_region, .. }
+                    ) if *region == ty_region
+                ) || matches!(
+                    (&instruction.kind, instruction.ty),
+                    (InstKind::Load(slot), IrType::BorrowedView { .. })
+                        if mutex_callbacks.contains(&function.name)
+                            && function.params.contains(slot)
+                            && function.slot(*slot).is_some_and(|s| s.ty == instruction.ty)
+                ) {
+                    continue;
+                }
                 check_type(
                     module,
                     errors,
                     instruction.ty,
                     &format!(
-                        "function {index} block {block_index} instruction {instruction_index}"
+                        "function {index} block {block_index} instruction {instruction_index} ({:?})",
+                        instruction.kind
                     ),
                 );
             }
@@ -365,7 +749,13 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
     }
 }
 
-fn verify_function(module: &Module, function: &Function, errors: &mut Vec<IrError>) {
+fn verify_function(
+    module: &Module,
+    function: &Function,
+    direct_effects: &HashMap<String, bool>,
+    mutex_callback_functions: &HashSet<String>,
+    errors: &mut Vec<IrError>,
+) {
     let mut report = |detail: String| {
         errors.push(IrError {
             function: function.name.clone(),
@@ -394,11 +784,26 @@ fn verify_function(module: &Module, function: &Function, errors: &mut Vec<IrErro
     }
     for (index, slot) in function.slots.iter().enumerate() {
         let slot_id = SlotId(index as u32);
+        if matches!(slot.ty, IrType::BorrowedView { .. })
+            && (!mutex_callback_functions.contains(&function.name)
+                || !function.params.contains(&SlotId(index as u32)))
+        {
+            report(format!("slot {slot_id:?} cannot contain a BorrowedView"));
+        }
         if slot.ty.is_managed_reference(module) && !seen_roots.contains(&slot_id) {
             report(format!(
                 "managed slot {slot_id:?} is missing from the GC roots"
             ));
         }
+    }
+
+    let has_borrowed_param = function.params.iter().any(|slot| {
+        function
+            .slot(*slot)
+            .is_some_and(|s| matches!(s.ty, IrType::BorrowedView { .. }))
+    });
+    if has_borrowed_param && !mutex_callback_functions.contains(&function.name) {
+        report("BorrowedView function parameters are allowed only for a dedicated MutexWithCall callback".into());
     }
 
     if function.block(function.entry).is_none() {
@@ -427,14 +832,144 @@ fn verify_function(module: &Module, function: &Function, errors: &mut Vec<IrErro
     // not cross blocks: locals travel through slots, which is what allows
     // skipping SSA and phi nodes.
     let mut values: HashMap<ValueId, (BlockId, IrType)> = HashMap::new();
+    let mut borrow_regions = HashSet::new();
 
     for block in &function.blocks {
         let mut defined_here: Vec<ValueId> = Vec::new();
+        let mut open_borrows: HashMap<ValueId, u32> = HashMap::new();
 
         for (index, inst) in block.instructions.iter().enumerate() {
             let position = format!("block {:?}, instruction {index}", block.id);
 
+            match &inst.kind {
+                InstKind::BorrowViewStart { region, mutex } => {
+                    if !borrow_regions.insert(*region) {
+                        report(format!(
+                            "{position}: borrow region {region} is started more than once"
+                        ));
+                    }
+                    let expected_view = values
+                        .get(&mutex.0)
+                        .and_then(|(_, ty)| match ty {
+                            IrType::Mutex(mutex_type) => Some(*mutex_type),
+                            _ => None,
+                        })
+                        .map(|mutex_type| IrType::BorrowedView {
+                            region: *region,
+                            mutex_type,
+                        });
+                    if expected_view != Some(inst.ty) {
+                        report(format!(
+                            "{position}: BorrowViewStart must produce a BorrowedView with the same region and payload type as its Mutex handle"
+                        ));
+                    }
+                    match inst.result {
+                        Some(view) => {
+                            if open_borrows.insert(view, *region).is_some() {
+                                report(format!(
+                                    "{position}: BorrowViewStart reuses view value {view:?}"
+                                ));
+                            }
+                        }
+                        None => report(format!(
+                            "{position}: BorrowViewStart must produce a view value"
+                        )),
+                    }
+                    if !values.get(&mutex.0).is_some_and(|(_, ty)| matches!(ty, IrType::Mutex(id) if *id < module.mutex_types.len() as u32)) {
+                        report(format!(
+                            "{position}: BorrowViewStart requires a valid typed Mutex handle"
+                        ));
+                    }
+                }
+                InstKind::BorrowViewEnd { view } => {
+                    expect(
+                        inst.ty,
+                        IrType::Void,
+                        &position,
+                        "BorrowViewEnd",
+                        &mut report,
+                    );
+                    if inst.result.is_some() {
+                        report(format!("{position}: BorrowViewEnd cannot produce a result"));
+                    }
+                    match values.get(&view.0).map(|(_, ty)| *ty) {
+                        Some(IrType::BorrowedView { region, .. }) => {
+                            if open_borrows.remove(&view.0) != Some(region) {
+                                report(format!(
+                                    "{position}: BorrowViewEnd closes unknown, already closed, or mismatched view {:?}",
+                                    view.0
+                                ));
+                            }
+                        }
+                        Some(ty) => report(format!(
+                            "{position}: BorrowViewEnd operand is {}, expected BorrowedView",
+                            ty.as_str()
+                        )),
+                        None => report(format!(
+                            "{position}: BorrowViewEnd operand is undefined or not yet defined"
+                        )),
+                    }
+                }
+                InstKind::BorrowViewLoad { view }
+                | InstKind::BorrowViewStore { view, .. }
+                | InstKind::BorrowViewFieldLoad { view, .. }
+                | InstKind::BorrowViewFieldStore { view, .. } => {
+                    match values.get(&view.0).map(|(_, ty)| *ty) {
+                        Some(IrType::BorrowedView { region, mutex_type }) => {
+                            let active = open_borrows.get(&view.0) == Some(&region)
+                                || function.params.iter().any(|slot| {
+                                    function.slot(*slot).is_some_and(|s| {
+                                        s.ty == IrType::BorrowedView { region, mutex_type }
+                                    })
+                                });
+                            if !active {
+                                report(format!(
+                                    "{position}: borrowed payload access requires an active matching region"
+                                ));
+                            }
+                        }
+                        _ => report(format!(
+                            "{position}: borrowed payload access requires a BorrowedView"
+                        )),
+                    }
+                }
+                _ => {}
+            }
+
+            if matches!(inst.ty, IrType::BorrowedView { .. })
+                && !matches!(inst.kind, InstKind::BorrowViewStart { .. })
+                && !matches!(&inst.kind, InstKind::Load(slot) if has_borrowed_param && function.params.contains(slot) && function.slot(*slot).is_some_and(|s| s.ty == inst.ty))
+            {
+                report(format!(
+                    "{position}: only BorrowViewStart may produce a BorrowedView"
+                ));
+            }
+
+            if (!open_borrows.is_empty() || has_borrowed_param)
+                && may_suspend_or_spawn(&inst.kind, direct_effects)
+            {
+                report(format!(
+                    "{position}: possibly suspending, blocking, spawning, performing host I/O, or crossing a GC/runtime boundary is forbidden while a BorrowedView is live"
+                ));
+            }
+
             for operand in operands_of(&inst.kind) {
+                if !matches!(
+                    inst.kind,
+                    InstKind::BorrowViewEnd { .. }
+                        | InstKind::BorrowViewLoad { .. }
+                        | InstKind::BorrowViewStore { .. }
+                        | InstKind::BorrowViewFieldLoad { .. }
+                        | InstKind::BorrowViewFieldStore { .. }
+                ) && values
+                    .get(&operand.0)
+                    .is_some_and(|(_, ty)| matches!(ty, IrType::BorrowedView { .. }))
+                {
+                    report(format!(
+                        "{position}: BorrowedView {:?} may only be consumed by borrow load/store/end",
+                        operand.0
+                    ));
+                }
                 if defined_here.contains(&operand.0) {
                     continue;
                 }
@@ -480,6 +1015,146 @@ fn verify_function(module: &Module, function: &Function, errors: &mut Vec<IrErro
         }
 
         verify_terminator(function, block, terminator, &values, &mut report);
+
+        if !open_borrows.is_empty() {
+            let mut regions: Vec<_> = open_borrows.values().copied().collect();
+            regions.sort_unstable();
+            report(format!(
+                "block {:?} leaves borrow region(s) open: {regions:?}",
+                block.id
+            ));
+        }
+    }
+
+    if matches!(function.return_type, IrType::BorrowedView { .. }) {
+        report("function return type cannot be BorrowedView".into());
+    }
+    verify_mutex_lock_dataflow(module, function, &mut report);
+}
+
+/// Enforces consistent lock ownership over every reachable control-flow path.
+fn verify_mutex_lock_dataflow(
+    module: &Module,
+    function: &Function,
+    report: &mut impl FnMut(String),
+) {
+    let blocks: HashMap<BlockId, &Block> = function.blocks.iter().map(|b| (b.id, b)).collect();
+    let mut incoming: HashMap<BlockId, BTreeMap<MutexId, SlotId>> = HashMap::new();
+    let mut queue = VecDeque::new();
+    incoming.insert(function.entry, BTreeMap::new());
+    queue.push_back(function.entry);
+
+    while let Some(block_id) = queue.pop_front() {
+        let Some(block) = blocks.get(&block_id) else {
+            continue;
+        };
+        let mut held = incoming[&block_id].clone();
+        let mut loaded_mutex_slots = HashMap::new();
+        let mut active_views: HashMap<ValueId, (MutexId, SlotId)> = HashMap::new();
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            let position = format!("block {block_id:?}, instruction {index}");
+            match instruction.kind {
+                InstKind::Load(slot) => {
+                    if let Some(result) = instruction.result
+                        && function.slot(slot).is_some_and(|candidate| {
+                            matches!(candidate.ty, IrType::Mutex(id) if id < module.mutex_types.len() as u32)
+                        })
+                    {
+                        loaded_mutex_slots.insert(result, slot);
+                    }
+                }
+                InstKind::MutexAcquire { id, mutex } => {
+                    if held.insert(id, mutex).is_some() {
+                        report(format!(
+                            "{position}: mutex identity {id:?} is acquired while already held"
+                        ));
+                    }
+                    if instruction.result.is_some() || instruction.ty != IrType::Void {
+                        report(format!(
+                            "{position}: MutexAcquire must be a result-less Void instruction"
+                        ));
+                    }
+                }
+                InstKind::MutexRelease { id, mutex } => {
+                    if active_views
+                        .values()
+                        .any(|(_, view_slot)| *view_slot == mutex)
+                    {
+                        report(format!(
+                            "{position}: cannot release mutex {id:?} while a BorrowedView is active"
+                        ));
+                    }
+                    match held.remove(&id) {
+                        None => report(format!(
+                            "{position}: mutex identity {id:?} is released without being held"
+                        )),
+                        Some(acquired) if acquired != mutex => report(format!(
+                            "{position}: MutexRelease handle does not match the handle acquired for {id:?}"
+                        )),
+                        Some(_) => {}
+                    }
+                    if instruction.result.is_some() || instruction.ty != IrType::Void {
+                        report(format!(
+                            "{position}: MutexRelease must be a result-less Void instruction"
+                        ));
+                    }
+                }
+                InstKind::Store(slot, _) if held.values().any(|locked| *locked == slot) => {
+                    report(format!(
+                        "{position}: cannot replace mutex handle in slot {slot:?} while it is held"
+                    ));
+                }
+                InstKind::BorrowViewStart { mutex, .. } => {
+                    let loaded_slot = loaded_mutex_slots.get(&mutex.0).copied();
+                    let owner = loaded_slot.and_then(|slot| {
+                        held.iter()
+                            .find_map(|(id, locked_slot)| (*locked_slot == slot).then_some((*id, slot)))
+                    });
+                    match owner {
+                        Some((id, slot)) => {
+                            if let Some(result) = instruction.result {
+                                active_views.insert(result, (id, slot));
+                            }
+                        }
+                        None => report(format!(
+                            "{position}: BorrowViewStart requires its Mutex handle to be loaded from a slot whose lock is currently held"
+                        )),
+                    }
+                }
+                InstKind::BorrowViewEnd { view } => {
+                    active_views.remove(&view.0);
+                }
+                _ => {}
+            }
+        }
+
+        let Some(terminator) = &block.terminator else {
+            continue;
+        };
+        let successors = terminator.successors();
+        if successors.is_empty() {
+            if !held.is_empty() {
+                report(format!(
+                    "reachable exit from block {block_id:?} retains acquired mutexes {held:?}"
+                ));
+            }
+            continue;
+        }
+        for successor in successors {
+            if !blocks.contains_key(&successor) {
+                continue;
+            }
+            match incoming.get(&successor) {
+                None => {
+                    incoming.insert(successor, held.clone());
+                    queue.push_back(successor);
+                }
+                Some(previous) if previous != &held => report(format!(
+                    "control-flow join at block {successor:?} has incompatible mutex states: {previous:?} versus {held:?}"
+                )),
+                Some(_) => {}
+            }
+        }
     }
 }
 
@@ -508,6 +1183,263 @@ fn verify_instruction(
     }
 
     match &inst.kind {
+        InstKind::MutexAcquire { mutex, .. } | InstKind::MutexRelease { mutex, .. } => {
+            expect(inst.ty, IrType::Void, position, "mutex operation", report);
+            if !function.slot(*mutex).is_some_and(
+                |slot| matches!(slot.ty, IrType::Mutex(id) if id < module.mutex_types.len() as u32),
+            ) {
+                report(format!(
+                    "{position}: mutex operation requires a valid Mutex handle slot"
+                ));
+            }
+            if inst.result.is_some() {
+                report(format!(
+                    "{position}: mutex operations cannot produce a result"
+                ));
+            }
+        }
+        InstKind::BorrowViewStart { region, mutex } => {
+            let expected_view = type_of(mutex).and_then(|ty| match ty {
+                IrType::Mutex(mutex_type) if mutex_type < module.mutex_types.len() as u32 => {
+                    Some(IrType::BorrowedView {
+                        region: *region,
+                        mutex_type,
+                    })
+                }
+                _ => None,
+            });
+            if expected_view != Some(inst.ty) {
+                report(format!(
+                    "{position}: BorrowViewStart requires a valid typed Mutex handle and matching BorrowedView payload type"
+                ));
+            }
+            if inst.result.is_none() {
+                report(format!("{position}: BorrowViewStart must produce a result"));
+            }
+        }
+        InstKind::BorrowViewEnd { .. } => {
+            expect(inst.ty, IrType::Void, position, "BorrowViewEnd", report);
+            if inst.result.is_some() {
+                report(format!("{position}: BorrowViewEnd cannot produce a result"));
+            }
+        }
+        InstKind::BorrowViewLoad { view } => {
+            let expected = type_of(view).and_then(|ty| match ty {
+                IrType::BorrowedView { mutex_type, .. } => {
+                    module.mutex_types.get(mutex_type as usize).copied()
+                }
+                _ => None,
+            });
+            if expected.is_none() {
+                report(format!(
+                    "{position}: BorrowViewLoad requires a BorrowedView"
+                ));
+            }
+            if expected != Some(inst.ty) {
+                report(format!(
+                    "{position}: BorrowViewLoad result must have the exact mutex payload type"
+                ));
+            }
+            if inst.result.is_none() {
+                report(format!("{position}: BorrowViewLoad must produce a value"));
+            }
+        }
+        InstKind::BorrowViewStore { view, value } => {
+            expect(inst.ty, IrType::Void, position, "BorrowViewStore", report);
+            let expected = type_of(view).and_then(|ty| match ty {
+                IrType::BorrowedView { mutex_type, .. } => {
+                    module.mutex_types.get(mutex_type as usize).copied()
+                }
+                _ => None,
+            });
+            if expected.is_none() {
+                report(format!(
+                    "{position}: BorrowViewStore requires a BorrowedView"
+                ));
+            }
+            if type_of(value) != expected {
+                report(format!(
+                    "{position}: BorrowViewStore value must have the exact mutex payload type"
+                ));
+            }
+            if inst.result.is_some() {
+                report(format!(
+                    "{position}: BorrowViewStore cannot produce a result"
+                ));
+            }
+        }
+        InstKind::BorrowViewFieldLoad { view, path } => {
+            let actual = type_of(view).and_then(|ty| match ty {
+                IrType::BorrowedView { mutex_type, .. } => {
+                    module.mutex_types.get(mutex_type as usize).copied()
+                }
+                _ => None,
+            });
+            match actual.and_then(|ty| resolve_borrowed_value_path(module, ty, path)) {
+                Some(field_ty) if field_ty == inst.ty => {}
+                Some(field_ty) => report(format!(
+                    "{position}: BorrowViewFieldLoad result is {}, expected {}",
+                    inst.ty.as_str(),
+                    field_ty.as_str()
+                )),
+                None => report(format!(
+                    "{position}: BorrowViewFieldLoad path is invalid or crosses an Enum without a variant guard"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: BorrowViewFieldLoad must produce a value"
+                ));
+            }
+        }
+        InstKind::BorrowViewFieldStore { view, path, value } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "BorrowViewFieldStore",
+                report,
+            );
+            let actual = type_of(view).and_then(|ty| match ty {
+                IrType::BorrowedView { mutex_type, .. } => {
+                    module.mutex_types.get(mutex_type as usize).copied()
+                }
+                _ => None,
+            });
+            match actual.and_then(|ty| resolve_borrowed_value_path(module, ty, path)) {
+                Some(field_ty) if type_of(value) == Some(field_ty) => {}
+                Some(field_ty) => report(format!(
+                    "{position}: BorrowViewFieldStore value must have exact type {}",
+                    field_ty.as_str()
+                )),
+                None => report(format!(
+                    "{position}: BorrowViewFieldStore path is invalid or crosses an Enum without a variant guard"
+                )),
+            }
+            if inst.result.is_some() {
+                report(format!(
+                    "{position}: BorrowViewFieldStore cannot produce a result"
+                ));
+            }
+        }
+        InstKind::MutexWithCall {
+            mutex,
+            callback,
+            layout,
+            result_slot,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "MutexWithCall",
+                report,
+            );
+            let mutex_type = type_of(mutex).and_then(|ty| {
+                if let IrType::Mutex(id) = ty {
+                    Some(id)
+                } else {
+                    None
+                }
+            });
+            if mutex_type.is_none_or(|id| id as usize >= module.mutex_types.len()) {
+                report(format!(
+                    "{position}: MutexWithCall requires a valid Mutex handle"
+                ));
+            }
+            if type_of(callback) != Some(IrType::Callable(*layout)) {
+                report(format!(
+                    "{position}: callback must have Callable({layout}) type"
+                ));
+            }
+            if let Some(callback_layout) = module.closures.get(*layout as usize) {
+                let tied = callback_layout.params.len() == 1
+                    && match (callback_layout.params[0], mutex_type) {
+                        (IrType::BorrowedView { mutex_type, .. }, Some(id)) => mutex_type == id,
+                        _ => false,
+                    };
+                if !tied {
+                    report(format!(
+                        "{position}: callback layout must take exactly one BorrowedView tied to the mutex payload"
+                    ));
+                }
+                match (callback_layout.returns, result_slot) {
+                    (IrType::Void, None) => {}
+                    (IrType::Void, Some(_)) => report(format!(
+                        "{position}: Void callback requires result_slot=None"
+                    )),
+                    (_, None) => report(format!(
+                        "{position}: non-Void callback requires a result slot"
+                    )),
+                    (returns, Some(slot)) => match function.slot(*slot) {
+                        Some(info) if info.ty == returns => {
+                            if returns.is_managed_reference(module)
+                                && !function.gc_roots.contains(slot)
+                            {
+                                report(format!(
+                                    "{position}: managed callback result slot must be a GC root"
+                                ));
+                            }
+                        }
+                        Some(info) => report(format!(
+                            "{position}: callback result slot has {}, expected {}",
+                            info.ty.as_str(),
+                            returns.as_str()
+                        )),
+                        None => report(format!(
+                            "{position}: callback result slot {slot:?} does not exist"
+                        )),
+                    },
+                }
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: MutexWithCall must produce its runtime status"
+                ));
+            }
+        }
+        InstKind::MutexNew {
+            payload,
+            mutex_type,
+            object_slot,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "MutexNew",
+                report,
+            );
+            match module.mutex_types.get(*mutex_type as usize) {
+                Some(payload_ty) if type_of(payload) == Some(*payload_ty) => {}
+                Some(payload_ty) => report(format!(
+                    "{position}: MutexNew payload type does not exactly match {}",
+                    payload_ty.as_str()
+                )),
+                None => report(format!(
+                    "{position}: MutexNew requires a valid mutex payload type"
+                )),
+            }
+            match function.slot(*object_slot) {
+                Some(slot) if slot.ty == IrType::Mutex(*mutex_type) => {
+                    if !function.gc_roots.contains(object_slot) {
+                        report(format!(
+                            "{position}: MutexNew destination must be a GC root"
+                        ));
+                    }
+                }
+                Some(_) => report(format!(
+                    "{position}: MutexNew destination slot must be Mutex({mutex_type})"
+                )),
+                None => report(format!(
+                    "{position}: MutexNew destination slot does not exist"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!("{position}: MutexNew must produce runtime status"));
+            }
+        }
+        InstKind::SafepointPoll => expect(inst.ty, IrType::Void, position, "SafepointPoll", report),
         InstKind::ConstInt(_) => {
             if !matches!(inst.ty, IrType::Int(_) | IrType::Enum(_)) {
                 report(format!(
@@ -1256,6 +2188,42 @@ fn verify_instruction(
                             target.params.len()
                         ));
                     }
+                    if let Some((parameter, result)) = non_safepoint_runtime_leaf_signature(callee)
+                    {
+                        if target.params.as_slice() != [parameter] || target.return_type != result {
+                            report(format!(
+                                "{position}: audited runtime leaf `{callee}` must have signature ({}) -> {}",
+                                parameter.as_str(),
+                                result.as_str()
+                            ));
+                        }
+                        if let Some(argument) = args.first()
+                            && let Some(actual) = type_of(argument)
+                            && actual != parameter
+                        {
+                            report(format!(
+                                "{position}: argument to audited runtime leaf `{callee}` has type {}, expected {}",
+                                actual.as_str(),
+                                parameter.as_str()
+                            ));
+                        }
+                    }
+                    if callee.starts_with("zirk_rt_atomic_") {
+                        for (index, (argument, expected)) in
+                            args.iter().zip(&target.params).enumerate()
+                        {
+                            if let Some(actual) = type_of(argument)
+                                && actual != *expected
+                            {
+                                report(format!(
+                                    "{position}: argument {} to extern `{callee}` has type {}, expected {}",
+                                    index + 1,
+                                    actual.as_str(),
+                                    expected.as_str()
+                                ));
+                            }
+                        }
+                    }
                     expect(inst.ty, target.return_type, position, "Call", report);
                 }
             }
@@ -1466,6 +2434,13 @@ fn verify_instruction(
                 ));
                 return;
             };
+
+            if matches!(layout.params.first(), Some(IrType::BorrowedView { .. })) {
+                report(format!(
+                    "{position}: BorrowedView callbacks may only be invoked by MutexWithCall"
+                ));
+                return;
+            }
 
             expect(inst.ty, layout.returns, position, "CallClosure", report);
 
@@ -1878,6 +2853,31 @@ fn verify_instruction(
                 return;
             }
 
+            let target_function = module.function(target).expect("checked above");
+            let expected_params: Vec<IrType> = layout
+                .captures
+                .iter()
+                .chain(&layout.params)
+                .copied()
+                .collect();
+            let actual_params: Option<Vec<IrType>> = target_function
+                .params
+                .iter()
+                .map(|slot| target_function.slot(*slot).map(|slot| slot.ty))
+                .collect();
+            let is_mutex_callback = layout
+                .params
+                .first()
+                .is_some_and(|ty| matches!(ty, IrType::BorrowedView { .. }));
+            if is_mutex_callback
+                && (actual_params.as_deref() != Some(expected_params.as_slice())
+                    || target_function.return_type != layout.returns)
+            {
+                report(format!(
+                    "{position}: MakeCallable target `{target}` does not match its closure layout signature"
+                ));
+            }
+
             if captures.len() != layout.captures.len() {
                 report(format!(
                     "{position}: MakeCallable passes {} capture(s), the layout declares {}",
@@ -1919,6 +2919,13 @@ fn verify_instruction(
                 return;
             };
 
+            if matches!(layout.params.first(), Some(IrType::BorrowedView { .. })) {
+                report(format!(
+                    "{position}: BorrowedView callbacks may only be invoked by MutexWithCall"
+                ));
+                return;
+            }
+
             expect(inst.ty, layout.returns, position, "CallCallable", report);
 
             if args.len() != layout.params.len() {
@@ -1940,6 +2947,87 @@ fn verify_instruction(
                         expected.as_str()
                     ));
                 }
+            }
+        }
+        InstKind::ThreadRun {
+            callable_slot,
+            result_slot,
+            exception_slot,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "ThreadRun",
+                report,
+            );
+            let Some(IrType::Callable(layout_id)) =
+                function.slot(*callable_slot).map(|slot| slot.ty)
+            else {
+                report(format!(
+                    "{position}: ThreadRun callable slot is not a Callable"
+                ));
+                return;
+            };
+            let Some(layout) = module.closures.get(layout_id as usize) else {
+                report(format!(
+                    "{position}: ThreadRun names missing callable layout {layout_id}"
+                ));
+                return;
+            };
+            if !layout.params.is_empty() {
+                report(format!(
+                    "{position}: ThreadRun callable must take no parameters"
+                ));
+            }
+            if !function.gc_roots.contains(callable_slot) {
+                report(format!(
+                    "{position}: ThreadRun callable slot is not a GC root"
+                ));
+            }
+            match (layout.returns, result_slot) {
+                (IrType::Void, None) => {}
+                (IrType::Void, Some(_)) => report(format!(
+                    "{position}: Void ThreadRun must not have a result slot"
+                )),
+                (_, None) => report(format!(
+                    "{position}: value-returning ThreadRun requires a result slot"
+                )),
+                (expected, Some(slot)) => {
+                    if function.slot(*slot).map(|slot| slot.ty) != Some(expected) {
+                        report(format!(
+                            "{position}: ThreadRun result slot type does not match {}",
+                            expected.as_str()
+                        ));
+                    }
+                    if expected.is_managed_reference(module) && !function.gc_roots.contains(slot) {
+                        report(format!(
+                            "{position}: managed ThreadRun result slot is not a GC root"
+                        ));
+                    }
+                }
+            }
+            let throwable = module
+                .objects
+                .iter()
+                .position(|object| object.name == "Throwable");
+            if function.slot(*exception_slot).map(|slot| slot.ty)
+                != throwable.map(|id| IrType::Object(id as u32))
+            {
+                report(format!(
+                    "{position}: ThreadRun exception slot must be Throwable"
+                ));
+            }
+            if !function.gc_roots.contains(exception_slot) {
+                report(format!(
+                    "{position}: ThreadRun exception slot is not a GC root"
+                ));
+            }
+            if *callable_slot == *exception_slot
+                || result_slot == &Some(*exception_slot)
+                || result_slot == &Some(*callable_slot)
+            {
+                report(format!("{position}: ThreadRun slots must be distinct"));
             }
         }
         InstKind::ResourceTransfer { source } => {
@@ -2544,6 +3632,15 @@ fn verify_instruction(
                 report,
             );
         }
+        InstKind::ScopeEnterCollectAll => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I64),
+                position,
+                "ScopeEnterCollectAll",
+                report,
+            );
+        }
         InstKind::ScopeExit { scope } => {
             expect(inst.ty, IrType::Void, position, "ScopeExit", report);
             if let Some(ty) = type_of(scope)
@@ -2555,12 +3652,118 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::ScopeExitCollectAll { scope } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "ScopeExitCollectAll",
+                report,
+            );
+            if let Some(ty) = type_of(scope)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: ScopeExitCollectAll's scope is {}, expected the Int64 id from ScopeEnterCollectAll",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::ScopeCancel { scope } => {
+            expect(inst.ty, IrType::Void, position, "ScopeCancel", report);
+            if let Some(ty) = type_of(scope)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: ScopeCancel's scope is {}, expected Int64",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::ScopeOutcomeWaitTake {
+            scope,
+            ordinal_slot,
+            value_slot,
+            throwable_slot,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "ScopeOutcomeWaitTake",
+                report,
+            );
+            if let Some(ty) = type_of(scope)
+                && ty != IrType::Int(IntWidth::I64)
+            {
+                report(format!(
+                    "{position}: ScopeOutcomeWaitTake scope is {}, expected Int64",
+                    ty.as_str()
+                ));
+            }
+            if ordinal_slot == value_slot
+                || ordinal_slot == throwable_slot
+                || value_slot == throwable_slot
+            {
+                report(format!(
+                    "{position}: scope outcome output slots must be distinct"
+                ));
+            }
+            if let Some(slot) = function.slots.get(ordinal_slot.0 as usize) {
+                if slot.ty != IrType::Int(IntWidth::U64) {
+                    report(format!(
+                        "{position}: scope outcome ordinal slot is {}, expected UInt64",
+                        slot.ty.as_str()
+                    ));
+                }
+            } else {
+                report(format!(
+                    "{position}: scope outcome ordinal slot {ordinal_slot:?} does not exist"
+                ));
+            }
+            for (name, slot_id) in [("value", value_slot), ("throwable", throwable_slot)] {
+                let Some(slot) = function.slots.get(slot_id.0 as usize) else {
+                    report(format!(
+                        "{position}: scope outcome {name} slot {slot_id:?} does not exist"
+                    ));
+                    continue;
+                };
+                let pointer_reference = matches!(
+                    slot.ty,
+                    IrType::Object(_)
+                        | IrType::Contract(_)
+                        | IrType::String
+                        | IrType::Regex
+                        | IrType::Char
+                        | IrType::Array(_)
+                        | IrType::List(_)
+                        | IrType::Channel(_)
+                        | IrType::Weak(_)
+                        | IrType::Dependent(_)
+                        | IrType::Pin(_)
+                        | IrType::Map(_)
+                        | IrType::Set(_)
+                ) && slot.ty.is_managed_reference(module);
+                if !pointer_reference {
+                    report(format!(
+                        "{position}: scope outcome {name} slot has non-pointer managed-reference type {}",
+                        slot.ty.as_str()
+                    ));
+                }
+                if !function.gc_roots.contains(slot_id) {
+                    report(format!(
+                        "{position}: scope outcome {name} slot {slot_id:?} is missing from the function's GC roots"
+                    ));
+                }
+            }
+        }
         InstKind::BranchStart {
             target,
             body,
             scope,
             kind,
             delay,
+            status_slot,
         } => {
             if inst.ty != IrType::Job {
                 report(format!(
@@ -2575,6 +3778,14 @@ fn verify_instruction(
             }
             if !matches!(type_of(body), Some(IrType::Callable(_))) {
                 report(format!("{position}: BranchStart body is not a Callable"));
+            }
+            if function
+                .slots
+                .get(status_slot.0 as usize)
+                .map(|slot| slot.ty)
+                != Some(IrType::Int(IntWidth::U32))
+            {
+                report(format!("{position}: BranchStart status slot must be U32"));
             }
             if let Some(ty) = type_of(scope)
                 && ty != IrType::Int(IntWidth::I64)
@@ -2602,6 +3813,97 @@ fn verify_instruction(
                     }
                 }
                 (false, None) => {}
+            }
+        }
+        InstKind::BackgroundStart {
+            target,
+            body,
+            status_slot,
+        } => {
+            expect(inst.ty, IrType::Void, position, "BackgroundStart", report);
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: BackgroundStart targets `{target}`, which is not a module function"
+                ));
+            }
+            if !matches!(type_of(body), Some(IrType::Callable(_))) {
+                report(format!(
+                    "{position}: BackgroundStart body is not a Callable"
+                ));
+            }
+            if function
+                .slots
+                .get(status_slot.0 as usize)
+                .map(|slot| slot.ty)
+                != Some(IrType::Int(IntWidth::U32))
+            {
+                report(format!(
+                    "{position}: BackgroundStart status slot must be U32"
+                ));
+            }
+            if module
+                .function(target)
+                .is_some_and(|target| target.return_type != IrType::Void)
+            {
+                report(format!(
+                    "{position}: BackgroundStart target must return Void"
+                ));
+            }
+        }
+        InstKind::ServiceStart {
+            target,
+            body,
+            status_slot,
+        } => {
+            expect(inst.ty, IrType::Void, position, "ServiceStart", report);
+            if module.function(target).is_none() {
+                report(format!(
+                    "{position}: ServiceStart target `{target}` is not a module function"
+                ));
+            }
+            let layout = match type_of(body) {
+                Some(IrType::Callable(id)) => module.closures.get(id as usize),
+                _ => None,
+            };
+            let Some(layout) = layout else {
+                report(format!(
+                    "{position}: ServiceStart body is not a valid Callable"
+                ));
+                return;
+            };
+            if function.slot(*status_slot).map(|slot| slot.ty) != Some(IrType::Int(IntWidth::U32)) {
+                report(format!("{position}: ServiceStart status slot must be U32"));
+            }
+            if layout.params != [IrType::Int(IntWidth::U64)] || layout.returns != IrType::Void {
+                report(format!(
+                    "{position}: ServiceStart callback must have signature (ServiceContext): Void"
+                ));
+            }
+            if let Some(target_function) = module.function(target) {
+                let mut expected = layout.captures.clone();
+                expected.extend(layout.params.iter().copied());
+                let actual: Vec<_> = target_function
+                    .params
+                    .iter()
+                    .filter_map(|slot| target_function.slot(*slot).map(|slot| slot.ty))
+                    .collect();
+                if target_function.return_type != IrType::Void || actual != expected {
+                    report(format!(
+                        "{position}: ServiceStart target signature does not match its callback layout"
+                    ));
+                }
+            }
+        }
+        InstKind::ServiceReady {
+            context,
+            status_slot,
+        } => {
+            expect(inst.ty, IrType::Void, position, "ServiceReady", report);
+            if type_of(context) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!("{position}: ServiceReady context must be U64"));
+            }
+            if function.slot(*status_slot).map(|slot| slot.ty) != Some(IrType::Int(IntWidth::U32)) {
+                report(format!("{position}: ServiceReady status slot must be U32"));
             }
         }
         InstKind::ParallelForStart {
@@ -2659,6 +3961,150 @@ fn verify_instruction(
                 report(format!("{position}: JobWait operand is not a Job"));
             }
         }
+        InstKind::JobWaitAny { jobs } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "JobWaitAny",
+                report,
+            );
+            if !(2..=8).contains(&jobs.len()) {
+                report(format!(
+                    "{position}: JobWaitAny has {} operands, expected 2..=8",
+                    jobs.len()
+                ));
+            }
+            for (index, job) in jobs.iter().enumerate() {
+                if !matches!(type_of(job), Some(IrType::Job)) {
+                    report(format!(
+                        "{position}: JobWaitAny operand {} is not a Job",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        InstKind::JobWaitAnyWithTimer { jobs } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "JobWaitAnyWithTimer",
+                report,
+            );
+            if !(2..=9).contains(&jobs.len()) {
+                report(format!(
+                    "{position}: JobWaitAnyWithTimer has {} operands, expected 2..=9",
+                    jobs.len()
+                ));
+            }
+            for (index, job) in jobs.iter().enumerate() {
+                if !matches!(type_of(job), Some(IrType::Job)) {
+                    report(format!(
+                        "{position}: JobWaitAnyWithTimer operand {} is not a Job",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        InstKind::JobOutcomeWaitTake {
+            job,
+            value_slot,
+            throwable_slot,
+        }
+        | InstKind::JobOutcomeTake {
+            job,
+            value_slot,
+            throwable_slot,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "JobOutcomeTake",
+                report,
+            );
+            if !matches!(type_of(job), Some(IrType::Job)) {
+                report(format!("{position}: outcome take operand is not a Job"));
+            }
+            if value_slot == throwable_slot {
+                report(format!(
+                    "{position}: outcome take output slots must be distinct"
+                ));
+            }
+            for (name, slot_id) in [("value", value_slot), ("throwable", throwable_slot)] {
+                let Some(slot) = function.slots.get(slot_id.0 as usize) else {
+                    report(format!(
+                        "{position}: outcome take {name} slot {slot_id:?} does not exist"
+                    ));
+                    continue;
+                };
+                // The runtime ABI writes through `void **`. Requiring a
+                // pointer-shaped managed reference avoids treating an inline
+                // aggregate that merely contains references as an out-slot.
+                let pointer_reference = matches!(
+                    slot.ty,
+                    IrType::Object(_)
+                        | IrType::Contract(_)
+                        | IrType::String
+                        | IrType::Regex
+                        | IrType::Char
+                        | IrType::Array(_)
+                        | IrType::List(_)
+                        | IrType::Channel(_)
+                        | IrType::Weak(_)
+                        | IrType::Dependent(_)
+                        | IrType::Pin(_)
+                        | IrType::Map(_)
+                        | IrType::Set(_)
+                ) && slot.ty.is_managed_reference(module);
+                if !pointer_reference {
+                    report(format!(
+                        "{position}: outcome take {name} slot has non-pointer managed-reference type {}",
+                        slot.ty.as_str()
+                    ));
+                }
+                if !function.gc_roots.contains(slot_id) {
+                    report(format!(
+                        "{position}: outcome take {name} slot {slot_id:?} is missing from the function's GC roots"
+                    ));
+                }
+            }
+        }
+        InstKind::JobResultLoad {
+            box_pointer,
+            result,
+        } => {
+            expect(inst.ty, *result, position, "JobResultLoad", report);
+            if matches!(result, IrType::Void | IrType::Never | IrType::Job) {
+                report(format!(
+                    "{position}: JobResultLoad result type {} cannot be boxed as a task payload",
+                    result.as_str()
+                ));
+            }
+            if !matches!(
+                type_of(box_pointer),
+                Some(
+                    IrType::Object(_)
+                        | IrType::Contract(_)
+                        | IrType::String
+                        | IrType::Array(_)
+                        | IrType::List(_)
+                        | IrType::Channel(_)
+                        | IrType::Map(_)
+                        | IrType::Set(_)
+                        | IrType::Weak(_)
+                        | IrType::Dependent(_)
+                        | IrType::Pin(_)
+                        | IrType::Regex
+                        | IrType::Char
+                )
+            ) {
+                report(format!(
+                    "{position}: JobResultLoad box pointer is not a pointer-shaped managed reference"
+                ));
+            }
+        }
         InstKind::JobDone { job } => {
             expect(inst.ty, IrType::Boolean, position, "JobDone", report);
             if !matches!(type_of(job), Some(IrType::Job)) {
@@ -2671,8 +4117,28 @@ fn verify_instruction(
                 report(format!("{position}: JobCancel operand is not a Job"));
             }
         }
+        InstKind::JobCancelWithCleanupFailure { job } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "JobCancelWithCleanupFailure",
+                report,
+            );
+            if !matches!(type_of(job), Some(IrType::Job)) {
+                report(format!(
+                    "{position}: cleanup-failure cancellation operand is not a Job"
+                ));
+            }
+        }
         InstKind::TimerSleep { nanos } => {
-            expect(inst.ty, IrType::Void, position, "TimerSleep", report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "TimerSleep",
+                report,
+            );
             if let Some(ty) = type_of(nanos)
                 && !matches!(ty, IrType::Int(_))
             {
@@ -2681,6 +4147,179 @@ fn verify_instruction(
                     ty.as_str()
                 ));
             }
+        }
+        InstKind::AppSetShutdownGrace { nanos } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "AppSetShutdownGrace",
+                report,
+            );
+            if let Some(ty) = type_of(nanos)
+                && !matches!(ty, IrType::Int(IntWidth::I64))
+            {
+                report(format!(
+                    "{position}: AppSetShutdownGrace duration is {}, expected i64 nanoseconds",
+                    ty.as_str()
+                ));
+            }
+        }
+        InstKind::AppSetBackgroundError {
+            callable, layout, ..
+        } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "AppSetBackgroundError",
+                report,
+            );
+            if !matches!(type_of(callable), Some(IrType::Callable(id)) if id == *layout) {
+                report(format!(
+                    "{position}: AppSetBackgroundError callable/layout mismatch"
+                ));
+            }
+        }
+        InstKind::AtomicNew {
+            kind,
+            value,
+            object,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "AtomicNew",
+                report,
+            );
+            if type_of(value) != Some((*kind).ir_type()) {
+                report(format!(
+                    "{position}: AtomicNew value does not match {:?}",
+                    kind
+                ));
+            }
+            match function.slot(*object) {
+                Some(slot) if slot.ty == IrType::Atomic(*kind) => {
+                    if !function.gc_roots.contains(object) {
+                        report(format!(
+                            "{position}: AtomicNew destination is not a GC root"
+                        ));
+                    }
+                }
+                Some(_) => report(format!(
+                    "{position}: AtomicNew destination slot has the wrong Atomic kind"
+                )),
+                None => report(format!(
+                    "{position}: AtomicNew destination slot does not exist"
+                )),
+            }
+        }
+        InstKind::AtomicLoad { object, order, out } => {
+            verify_atomic_receiver(function, type_of(object), position, report);
+            verify_atomic_order(type_of, *order, position, report);
+            verify_atomic_output(function, *out, type_of(object), position, report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "AtomicLoad",
+                report,
+            );
+        }
+        InstKind::AtomicStore {
+            object,
+            value,
+            order,
+        } => {
+            verify_atomic_receiver(function, type_of(object), position, report);
+            verify_atomic_value(type_of(object), type_of(value), position, report);
+            verify_atomic_order(type_of, *order, position, report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "AtomicStore",
+                report,
+            );
+        }
+        InstKind::AtomicExchange {
+            object,
+            value,
+            order,
+            out,
+        }
+        | InstKind::AtomicFetchAdd {
+            object,
+            value,
+            order,
+            out,
+        }
+        | InstKind::AtomicFetchSub {
+            object,
+            value,
+            order,
+            out,
+        } => {
+            verify_atomic_receiver(function, type_of(object), position, report);
+            verify_atomic_value(type_of(object), type_of(value), position, report);
+            verify_atomic_order(type_of, *order, position, report);
+            verify_atomic_output(function, *out, type_of(object), position, report);
+            if matches!(
+                inst.kind,
+                InstKind::AtomicFetchAdd { .. } | InstKind::AtomicFetchSub { .. }
+            ) && !matches!(
+                type_of(object),
+                Some(IrType::Atomic(
+                    crate::AtomicKind::I8
+                        | crate::AtomicKind::U8
+                        | crate::AtomicKind::I16
+                        | crate::AtomicKind::U16
+                        | crate::AtomicKind::I32
+                        | crate::AtomicKind::U32
+                        | crate::AtomicKind::I64
+                        | crate::AtomicKind::U64
+                ))
+            ) {
+                report(format!(
+                    "{position}: fetch add/sub requires an integer Atomic"
+                ));
+            }
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "Atomic operation",
+                report,
+            );
+        }
+        InstKind::AtomicCompareExchange {
+            object,
+            current,
+            new_value,
+            success_order,
+            failure_order,
+            observed,
+            exchanged,
+        } => {
+            verify_atomic_receiver(function, type_of(object), position, report);
+            verify_atomic_value(type_of(object), type_of(current), position, report);
+            verify_atomic_value(type_of(object), type_of(new_value), position, report);
+            verify_atomic_order(type_of, Some(*success_order), position, report);
+            verify_atomic_order(type_of, Some(*failure_order), position, report);
+            verify_atomic_output(function, *observed, type_of(object), position, report);
+            if function.slot(*exchanged).map(|slot| slot.ty) != Some(IrType::Boolean) {
+                report(format!(
+                    "{position}: compare-exchange flag slot must be Boolean"
+                ));
+            }
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "AtomicCompareExchange",
+                report,
+            );
         }
         InstKind::ChannelNew {
             capacity,
@@ -2759,6 +4398,72 @@ fn verify_instruction(
     }
 }
 
+fn verify_atomic_receiver(
+    _function: &Function,
+    ty: Option<IrType>,
+    position: &str,
+    report: &mut impl FnMut(String),
+) {
+    if !matches!(ty, Some(IrType::Atomic(_))) {
+        report(format!(
+            "{position}: Atomic receiver is not a managed Atomic"
+        ));
+    }
+}
+
+fn verify_atomic_value(
+    receiver: Option<IrType>,
+    value: Option<IrType>,
+    position: &str,
+    report: &mut impl FnMut(String),
+) {
+    let expected = match receiver {
+        Some(IrType::Atomic(kind)) => Some(kind.ir_type()),
+        _ => None,
+    };
+    if value != expected {
+        report(format!(
+            "{position}: Atomic value type does not match receiver payload"
+        ));
+    }
+}
+
+fn verify_atomic_output(
+    function: &Function,
+    slot: SlotId,
+    receiver: Option<IrType>,
+    position: &str,
+    report: &mut impl FnMut(String),
+) {
+    let expected = match receiver {
+        Some(IrType::Atomic(kind)) => Some(kind.ir_type()),
+        _ => None,
+    };
+    if function.slot(slot).map(|slot| slot.ty) != expected {
+        report(format!(
+            "{position}: Atomic output slot has the wrong scalar type"
+        ));
+    }
+}
+
+fn verify_atomic_order(
+    type_of: impl Fn(&Operand) -> Option<IrType>,
+    order: Option<Operand>,
+    position: &str,
+    report: &mut impl FnMut(String),
+) {
+    if let Some(order) = order
+        && !matches!(
+            type_of(&order),
+            Some(IrType::Int(IntWidth::I32 | IntWidth::U32))
+        )
+    {
+        report(format!(
+            "{position}: AtomicOrder must be represented by an i32/u32 discriminant"
+        ));
+    }
+}
+
 fn verify_terminator(
     function: &Function,
     block: &Block,
@@ -2777,6 +4482,9 @@ fn verify_terminator(
                 None => IrType::Void,
                 Some(operand) => match values.get(&operand.0) {
                     Some((origin, ty)) => {
+                        if matches!(ty, IrType::BorrowedView { .. }) {
+                            report(format!("{position}: cannot return a BorrowedView"));
+                        }
                         if *origin != block.id {
                             report(format!(
                                 "{position}: returns value {:?} defined in another block",
@@ -2865,10 +4573,22 @@ fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrT
 /// Operands an instruction reads.
 fn operands_of(kind: &InstKind) -> Vec<Operand> {
     match kind {
+        InstKind::BorrowViewStart { mutex, .. } => vec![*mutex],
+        InstKind::BorrowViewEnd { view } | InstKind::BorrowViewLoad { view } => vec![*view],
+        InstKind::BorrowViewFieldLoad { view, .. } => vec![*view],
+        InstKind::BorrowViewFieldStore { view, value, .. } => vec![*view, *value],
+        InstKind::BorrowViewStore { view, value } => vec![*view, *value],
+        InstKind::MutexWithCall {
+            mutex, callback, ..
+        } => vec![*mutex, *callback],
+        InstKind::MutexNew { payload, .. } => vec![*payload],
         InstKind::ConstInt(_)
         | InstKind::ConstBool(_)
         | InstKind::ConstString(_)
-        | InstKind::ConstChar(_) => Vec::new(),
+        | InstKind::ConstChar(_)
+        | InstKind::MutexAcquire { .. }
+        | InstKind::MutexRelease { .. }
+        | InstKind::SafepointPoll => Vec::new(),
         InstKind::FatalError(message) => vec![*message],
         InstKind::Throw(exception) => vec![*exception],
         InstKind::SetSuppressed {
@@ -2883,6 +4603,53 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::TakePendingException => Vec::new(),
         InstKind::Load(_) => Vec::new(),
         InstKind::Store(_, operand) => vec![*operand],
+        InstKind::AtomicNew { value, .. } => vec![*value],
+        InstKind::AtomicLoad { object, order, .. } => {
+            let mut operands = vec![*object];
+            operands.extend(order.iter().copied());
+            operands
+        }
+        InstKind::AtomicStore {
+            object,
+            value,
+            order,
+        }
+        | InstKind::AtomicExchange {
+            object,
+            value,
+            order,
+            ..
+        }
+        | InstKind::AtomicFetchAdd {
+            object,
+            value,
+            order,
+            ..
+        }
+        | InstKind::AtomicFetchSub {
+            object,
+            value,
+            order,
+            ..
+        } => {
+            let mut operands = vec![*object, *value];
+            operands.extend(order.iter().copied());
+            operands
+        }
+        InstKind::AtomicCompareExchange {
+            object,
+            current,
+            new_value,
+            success_order,
+            failure_order,
+            ..
+        } => vec![
+            *object,
+            *current,
+            *new_value,
+            *success_order,
+            *failure_order,
+        ],
         InstKind::Alloc(_) => Vec::new(),
         InstKind::BuildValue { fields, .. } => fields.clone(),
         InstKind::BuildEnum { fields, .. } => fields.clone(),
@@ -2982,6 +4749,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             operands.extend(args.iter().copied());
             operands
         }
+        InstKind::ThreadRun { .. } => Vec::new(),
         InstKind::ResourceTransfer { source } => vec![*source],
         InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
         InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],
@@ -3026,8 +4794,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             end,
             step,
         } => vec![*receiver, *start, *end, *step],
-        InstKind::ScopeEnter => Vec::new(),
-        InstKind::ScopeExit { scope } => vec![*scope],
+        InstKind::ScopeEnter | InstKind::ScopeEnterCollectAll => Vec::new(),
+        InstKind::ScopeExit { scope }
+        | InstKind::ScopeExitCollectAll { scope }
+        | InstKind::ScopeCancel { scope } => vec![*scope],
+        InstKind::ScopeOutcomeWaitTake { scope, .. } => vec![*scope],
         InstKind::BranchStart {
             body, scope, delay, ..
         } => {
@@ -3035,10 +4806,22 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             operands.extend(delay.iter().copied());
             operands
         }
-        InstKind::JobWait { job, .. } | InstKind::JobDone { job } | InstKind::JobCancel { job } => {
+        InstKind::BackgroundStart { body, .. } => vec![*body],
+        InstKind::ServiceStart { body, .. } => vec![*body],
+        InstKind::ServiceReady { context, .. } => vec![*context],
+        InstKind::JobWait { job, .. }
+        | InstKind::JobOutcomeWaitTake { job, .. }
+        | InstKind::JobOutcomeTake { job, .. }
+        | InstKind::JobDone { job }
+        | InstKind::JobCancel { job } => {
             vec![*job]
         }
+        InstKind::JobCancelWithCleanupFailure { job } => vec![*job],
+        InstKind::JobWaitAny { jobs } | InstKind::JobWaitAnyWithTimer { jobs } => jobs.clone(),
+        InstKind::JobResultLoad { box_pointer, .. } => vec![*box_pointer],
         InstKind::TimerSleep { nanos } => vec![*nanos],
+        InstKind::AppSetShutdownGrace { nanos } => vec![*nanos],
+        InstKind::AppSetBackgroundError { callable, .. } => vec![*callable],
         InstKind::ChannelNew {
             capacity, limit, ..
         } => vec![*capacity, *limit],

@@ -404,10 +404,12 @@ pub unsafe extern "C" fn zirk_rt_chan_drain(
     let mut slot = vec![0_u8; elem_size];
     loop {
         let status = unsafe { zirk_rt_chan_recv(channel, slot.as_mut_ptr()) };
-        if status == CHAN_CLOSED {
-            break;
+        match status {
+            CHAN_CLOSED => break,
+            CHAN_CANCELLED => return,
+            CHAN_RECEIVED => {}
+            other => panic!("channel drain received unexpected status {other}"),
         }
-        debug_assert_eq!(status, CHAN_RECEIVED);
         unsafe {
             crate::list::zirk_rt_list_add(list, slot.as_ptr().cast(), elem_size, elem_align, false);
         }
@@ -502,6 +504,31 @@ mod tests {
         assert_eq!(
             unsafe { zirk_rt_chan_try_recv(channel, (&raw mut received).cast()) },
             CHAN_CLOSED
+        );
+    }
+
+    #[test]
+    fn default_growable_channel_limit_rejects_the_first_excess_value() {
+        let channel = unsafe { int_channel(usize::MAX) };
+        let value = 7_i32;
+        for _ in 0..DEFAULT_UNBOUNDED_LIMIT {
+            assert_eq!(
+                unsafe { zirk_rt_chan_try_send(channel, (&raw const value).cast()) },
+                CHAN_SENT
+            );
+        }
+
+        assert_eq!(
+            unsafe { zirk_rt_chan_len(channel) },
+            DEFAULT_UNBOUNDED_LIMIT
+        );
+        assert_eq!(
+            unsafe { zirk_rt_chan_try_send(channel, (&raw const value).cast()) },
+            CHAN_FULL
+        );
+        assert_eq!(
+            unsafe { zirk_rt_chan_len(channel) },
+            DEFAULT_UNBOUNDED_LIMIT
         );
     }
 
@@ -750,6 +777,29 @@ mod tests {
             matches!(outcome, crate::task::TaskOutcome::Panicked(_)),
             "cancelled receive must unwind at its safe point"
         );
+    }
+
+    #[test]
+    fn cancellation_interrupts_a_drain_waiting_for_channel_close() {
+        let channel = unsafe { int_channel(0) } as usize;
+        let list = unsafe { crate::list::zirk_rt_list_new(4, 4, false) } as usize;
+        let outcome = executor::Executor::new().run_with_root(move || {
+            let drain = executor::spawn(move || {
+                unsafe {
+                    zirk_rt_chan_drain(channel as *mut c_void, list as *mut c_void, 4, 4);
+                }
+                0
+            });
+            executor::yield_now();
+            executor::cancel_current(drain);
+            let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                executor::await_task(drain)
+            }))
+            .expect_err("cancelled drain must return at its receive safe point");
+            assert!(error.is::<executor::Cancelled>());
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
     }
 
     #[test]

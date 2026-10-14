@@ -1,0 +1,3 @@
+fn inspect(value: Atomic<String>): Void { }
+
+fn main(): Void { }

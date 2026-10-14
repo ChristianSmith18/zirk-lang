@@ -4555,7 +4555,7 @@ impl<'a> Parser<'a> {
                     // `parallel-cpu-regions`), the adapter that runs one
                     // pipeline chain across cores.
                     let name = if let TokenKind::Keyword(
-                        Keyword::From | Keyword::Type | Keyword::Parallel,
+                        Keyword::From | Keyword::Type | Keyword::Parallel | Keyword::With,
                     ) = self.peek()
                     {
                         let span = self.peek_span();

@@ -16,7 +16,7 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 | `std.time` | `07-std-time.md` plus temporal handbook | sealed temporal family, clocks/timers/sleep, errors, exact vs calendar arithmetic | Deepened in task 1.3 |
 | `std.thread` | `09-std-thread.md` | thread creation/join/transfer and distinction from task/parallel | Deepened in task 1.3 |
 | `std.sync` | `10-std-sync.md` | locks, semaphore, barrier, once, atomics, ordering and race guarantees | Deepened in task 1.3 |
-| `std.parallel` | `10a-std-parallel.md` | ordered CPU mapping, reductions, settlement, cancellation, pool behavior | Added and deepened in task 1.3 |
+| CPU parallel language surface (not an importable module) | `10a-std-parallel.md` | ordered CPU mapping, reductions, cancellation, pool behavior | Added and deepened in task 1.3; settlement remains runtime-internal |
 | `std.net` | `11-std-net.md` | addresses, DNS, TCP/UDP, reactor, cancellation, permissions, limits | Deepened as the third task 1.4 sub-block |
 | `std.http` | `12-std-http.md` | typed requests/responses, validated headers, streaming, backpressure, TLS, limits, server tasks | Deepened as the final task 1.4 sub-block |
 | `std.json` | `13-std-json.md` | exact JSON tree, parse/stringify/typed conversion, generated codecs, streaming, path-aware errors, hostile-input limits | Deepened as the first task 1.4 sub-block |

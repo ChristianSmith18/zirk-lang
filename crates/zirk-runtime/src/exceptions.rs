@@ -16,7 +16,7 @@
 //! picture, design decision D1 of `fase-4b-excepciones`).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
 
@@ -79,6 +79,10 @@ pub(crate) fn owner_swept(owner: *mut c_void) {
 /// `exception` must be an object pointer this compiler allocated, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_throw(exception: *const c_void) {
+    // Capture the Throwable before publishing it as pending. The executor
+    // records it only for an opted-in task throwing inside cancellation
+    // cleanup (cancel requested + cancellation shield active).
+    crate::executor::capture_cancel_cleanup_throw(exception);
     PENDING.with(|cell| cell.set(exception));
 }
 
@@ -126,18 +130,62 @@ pub extern "C" fn zirk_rt_suppressed(exception: *const c_void) -> *mut c_void {
         .unwrap_or(0) as *mut c_void
 }
 
-/// Records `suppressed` as the exception suppressed by `exception`. Called
-/// before `zirk_rt_throw` when a `throw` statement occurs inside a `catch`.
+/// Appends `suppressed` to the end of the exception's suppressed chain.
+/// Called before `zirk_rt_throw` when a `throw` statement occurs inside a
+/// `catch`, and by concurrent failure aggregation. Existing suppressed
+/// exceptions are preserved; duplicate edges and cycles are ignored.
+///
+/// # Safety
+///
+/// Both pointers must be non-null Throwable objects allocated by this
+/// runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_set_suppressed(
     exception: *const c_void,
     suppressed: *const c_void,
 ) {
-    let key = exception as usize;
-    suppressed_entries()
-        .lock()
-        .unwrap()
-        .insert(key, suppressed as usize);
+    if exception.is_null() || suppressed.is_null() {
+        crate::failure::fatal("cannot link a null suppressed Throwable");
+    }
+
+    let owner = exception as usize;
+    let child = suppressed as usize;
+    if owner == child {
+        return;
+    }
+
+    let mut entries = suppressed_entries().lock().unwrap();
+    let mut owner_chain = Vec::new();
+    let mut owner_nodes = HashSet::new();
+    let mut cursor = owner;
+    loop {
+        if cursor == child || !owner_nodes.insert(cursor) {
+            // The child is already present, or the existing chain is cyclic.
+            return;
+        }
+        owner_chain.push(cursor);
+        match entries.get(&cursor).copied() {
+            Some(next) if next != 0 => cursor = next,
+            _ => break,
+        }
+    }
+
+    // Appending an existing chain is safe only if it does not point back into
+    // the owner's chain. Bound the traversal by detecting malformed cycles.
+    let mut child_nodes = HashSet::new();
+    cursor = child;
+    while cursor != 0 {
+        if owner_nodes.contains(&cursor) || !child_nodes.insert(cursor) {
+            return;
+        }
+        match entries.get(&cursor).copied() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+
+    let tail = *owner_chain.last().expect("the owner chain starts at owner");
+    entries.insert(tail, child);
 }
 
 /// Reports an exception that escaped `main` uncaught and terminates
@@ -214,6 +262,46 @@ mod tests {
                 .unwrap()
                 .contains_key(&(owner as usize))
         );
+        crate::collector::reset_state_for_tests();
+    }
+
+    #[test]
+    fn suppressed_exception_links_append_without_overwriting_or_creating_cycles() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let make_throwable = || unsafe {
+            let object = crate::memory::zirk_rt_alloc(crate::collector::HEADER_BYTES, 8);
+            *(object as *mut *mut c_void) =
+                crate::array::zirk_rt_array_descriptor.as_ptr() as *mut c_void;
+            object
+        };
+        let primary = make_throwable();
+        let existing = make_throwable();
+        let later = make_throwable();
+
+        unsafe {
+            zirk_rt_set_suppressed(primary, existing);
+            zirk_rt_set_suppressed(primary, later);
+        }
+        assert_eq!(zirk_rt_suppressed(primary), existing);
+        assert_eq!(zirk_rt_suppressed(existing), later);
+        assert!(zirk_rt_suppressed(later).is_null());
+
+        // Repeating a cause or linking back into the chain must not replace
+        // the original edge or introduce a cycle.
+        unsafe {
+            zirk_rt_set_suppressed(primary, existing);
+            zirk_rt_set_suppressed(later, primary);
+        }
+        assert_eq!(zirk_rt_suppressed(primary), existing);
+        assert_eq!(zirk_rt_suppressed(existing), later);
+        assert!(zirk_rt_suppressed(later).is_null());
+
+        let mut entries = suppressed_entries().lock().unwrap();
+        for object in [primary, existing, later] {
+            entries.remove(&(object as usize));
+        }
+        drop(entries);
         crate::collector::reset_state_for_tests();
     }
 }

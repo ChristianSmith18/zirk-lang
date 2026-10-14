@@ -27,8 +27,11 @@ use zirk_sema::check;
 /// `zirk-browser::check_source` merges them for a program with no
 /// filesystem-backed package loader.
 fn llvm_ir(source_text: &str) -> String {
-    let _llvm = common::llvm_lock();
+    let ir = checked_ir(source_text);
+    llvm_ir_for_module(&ir)
+}
 
+fn checked_ir(source_text: &str) -> zirk_ir::Module {
     let needs_streams = ["stdout.", "stderr.", "stdin."]
         .iter()
         .any(|prefix| source_text.contains(prefix));
@@ -76,9 +79,13 @@ fn llvm_ir(source_text: &str) -> String {
 
     let ir = lower(&program, &checked);
     zirk_ir::verify(&ir).expect("the IR must be well formed before emitting");
+    ir
+}
 
+fn llvm_ir_for_module(ir: &zirk_ir::Module) -> String {
+    let _llvm = common::llvm_lock();
     let context = Context::create();
-    let module = emit(&context, &ir, "test");
+    let module = emit(&context, ir, "test");
 
     if let Err(error) = module.verify() {
         panic!(
@@ -167,12 +174,15 @@ fn the_entrypoint_wraps_main_with_the_runtime_lifecycle() {
         .find(symbols::INIT)
         .expect("calls the initializer");
     let zirk = entrypoint.find("@zk_main").expect("calls Zirk main");
+    let deadline_policy = entrypoint
+        .find("zirk_rt_run_main_cli")
+        .expect("CLI entrypoint selects the bounded deadline policy");
     let shutdown = entrypoint
         .find(symbols::SHUTDOWN)
         .expect("calls the shutdown");
 
     assert!(
-        init < zirk && zirk < shutdown,
+        init < deadline_policy && deadline_policy < zirk && zirk < shutdown,
         "the order must be init, main, shutdown:\n{entrypoint}"
     );
 }
@@ -723,8 +733,89 @@ fn concurrent_block_emits_scope_calls_a_branch_thunk_and_a_spawn() {
     assert!(ir.contains(&format!("@{}", symbols::BRANCH_REGISTER)));
     assert!(ir.contains("zk.branch_thunk."));
     assert!(
+        ir.contains("zk.task.result.descriptor."),
+        "task results use a GC-described box:\n{ir}"
+    );
+    assert!(
+        ir.contains("@zirk_rt_push_frame"),
+        "the result box is rooted before calling the branch:\n{ir}"
+    );
+    assert!(
+        ir.contains("@zirk_rt_pop_frame"),
+        "the temporary result root is popped on completion:\n{ir}"
+    );
+    assert!(
         ir.contains("uwtable"),
         "generated functions carry an unwind table"
+    );
+}
+
+#[test]
+fn collect_all_scope_ir_emits_its_distinct_runtime_abi() {
+    let mut module = checked_ir(
+        "fn load(): Int32 { return 1; } fn main(): Void { concurrent { inmut a: Int32 = load(); } }",
+    );
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            for instruction in &mut block.instructions {
+                match instruction.kind {
+                    zirk_ir::InstKind::ScopeEnter => {
+                        instruction.kind = zirk_ir::InstKind::ScopeEnterCollectAll;
+                    }
+                    zirk_ir::InstKind::ScopeExit { scope } => {
+                        instruction.kind = zirk_ir::InstKind::ScopeExitCollectAll { scope };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    zirk_ir::verify(&module).expect("collect-all scope IR verifies");
+    let ir = llvm_ir_for_module(&module);
+    assert!(
+        ir.contains("declare i64 @zirk_rt_scope_enter_collect_all()"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("declare i1 @zirk_rt_scope_exit_collect_all(i64)"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("call i64 @zirk_rt_scope_enter_collect_all()"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("call i1 @zirk_rt_scope_exit_collect_all(i64 "),
+        "{ir}"
+    );
+}
+
+#[test]
+fn concurrent_task_boxes_nested_record_results_with_managed_fields() {
+    let ir = llvm_ir(
+        "record Inner { text: String; }\n\
+         record Outer { prefix: Int64; inner: Inner; }\n\
+         fn make(): Outer { return Outer(prefix: 5, inner: Inner(text: \"kept alive\")); }\n\
+         fn main(): Void {\n\
+           concurrent { inmut value: Outer = make(); }\n\
+           stdout.println(value.inner.text);\n\
+         }",
+    );
+    assert!(
+        ir.contains("zk.task.result.descriptor."),
+        "aggregate result descriptor is emitted:\n{ir}"
+    );
+    assert!(
+        ir.contains("task_result_payload"),
+        "the exact aggregate is stored in its result box:\n{ir}"
+    );
+    assert!(
+        ir.contains("job_payload"),
+        "JobWait reloads the aggregate from its result box:\n{ir}"
+    );
+    assert!(
+        ir.contains("i32 3, i32 1, i32 0"),
+        "the descriptor offset walks the box payload into the nested String field:\n{ir}"
     );
 }
 
@@ -732,6 +823,544 @@ fn concurrent_block_emits_scope_calls_a_branch_thunk_and_a_spawn() {
 fn timer_sleep_emits_a_runtime_suspend_call() {
     let ir = llvm_ir("fn main(): Void { Timer.sleep(1ms); }");
     assert!(ir.contains(&format!("@{}", symbols::SLEEP)));
+}
+
+#[test]
+fn concurrent_protect_emits_shield_calls_and_post_cleanup_cancellation_check() {
+    let ir = llvm_ir("fn main(): Void { Concurrent.protect((): Void => { }); }");
+    let enter = ir
+        .find(&format!("call void @{}", symbols::CANCEL_SHIELD_ENTER))
+        .expect("cancellation shield enter call");
+    let exit = ir
+        .find(&format!("call void @{}", symbols::CANCEL_SHIELD_EXIT))
+        .expect("cancellation shield exit call");
+    let cancelled = ir[exit..]
+        .find(&format!("call i1 @{}", symbols::IS_CANCELLED))
+        .map(|offset| exit + offset)
+        .expect("cancellation check after cleanup");
+    assert!(
+        enter < exit && exit < cancelled,
+        "generated LLVM must restore the shield before checking cancellation:\n{ir}"
+    );
+}
+
+#[test]
+fn background_start_emits_runtime_call_with_branch_thunk_capture_and_u32_status() {
+    let mut module = checked_ir("fn main(): Void {}");
+    module.closures.push(zirk_ir::ClosureLayout {
+        captures: vec![zirk_ir::IrType::Int(zirk_ir::IntWidth::I32)],
+        params: Vec::new(),
+        returns: zirk_ir::IrType::Void,
+    });
+    module.functions.push(zirk_ir::Function {
+        name: "background_branch".into(),
+        params: vec![zirk_ir::SlotId(0)],
+        return_type: zirk_ir::IrType::Void,
+        slots: vec![zirk_ir::Slot {
+            name: "capture".into(),
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::I32),
+            span: zirk_diagnostics::Span::empty(0),
+        }],
+        blocks: vec![zirk_ir::Block {
+            id: zirk_ir::BlockId(0),
+            instructions: Vec::new(),
+            terminator: Some(zirk_ir::Terminator::Return(None)),
+        }],
+        entry: zirk_ir::BlockId(0),
+        span: zirk_diagnostics::Span::empty(0),
+        gc_roots: Vec::new(),
+    });
+
+    let main = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .expect("main function");
+    let status_slot = zirk_ir::SlotId(main.slots.len() as u32);
+    main.slots.push(zirk_ir::Slot {
+        name: "background_status".into(),
+        ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::U32),
+        span: zirk_diagnostics::Span::empty(0),
+    });
+    let next = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.result)
+        .map(|value| value.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let block = main
+        .blocks
+        .iter_mut()
+        .find(|block| block.terminator.is_some())
+        .expect("terminated main block");
+    block.instructions.extend([
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next)),
+            kind: zirk_ir::InstKind::ConstInt(7),
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::I32),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next + 1)),
+            kind: zirk_ir::InstKind::MakeCallable {
+                target: "background_branch".into(),
+                captures: vec![zirk_ir::Operand(zirk_ir::ValueId(next))],
+            },
+            ty: zirk_ir::IrType::Callable(0),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+        zirk_ir::Instruction {
+            result: None,
+            kind: zirk_ir::InstKind::BackgroundStart {
+                target: "background_branch".into(),
+                body: zirk_ir::Operand(zirk_ir::ValueId(next + 1)),
+                status_slot,
+            },
+            ty: zirk_ir::IrType::Void,
+            span: zirk_diagnostics::Span::empty(0),
+        },
+    ]);
+    zirk_ir::verify(&module).expect("BackgroundStart module verifies");
+
+    let llvm = llvm_ir_for_module(&module);
+    assert!(
+        llvm.contains("declare i32 @zirk_rt_background_spawn(ptr, ptr)"),
+        "background runtime declaration uses the status-returning ABI:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("zk.background_thunk.background_branch"),
+        "the generated branch thunk is present and named for the target:\n{llvm}"
+    );
+    let call = llvm
+        .lines()
+        .find(|line| line.contains("call i32 @zirk_rt_background_spawn"))
+        .expect("background spawn call returns U32");
+    assert!(
+        call.contains("@zk.background_thunk.background_branch")
+            && call.contains("ptr %background_capture"),
+        "spawn receives the generated thunk and allocated capture block: {call}"
+    );
+    assert!(
+        llvm.contains("store i32 %background_admission_status, ptr %background_status"),
+        "U32 admission status is stored in its IR status slot:\n{llvm}"
+    );
+}
+
+#[test]
+fn job_wait_any_emits_a_bounded_id_array_and_runtime_call() {
+    let mut ir = checked_ir(
+        "fn main(): Void {
+            concurrent {
+                inmut first: Int32 = 11;
+                inmut second: Int32 = 22;
+            }
+        }",
+    );
+    let main = ir
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .expect("main function");
+    let jobs: Vec<_> = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| matches!(instruction.kind, zirk_ir::InstKind::BranchStart { .. }))
+        .filter_map(|instruction| instruction.result)
+        .map(zirk_ir::Operand)
+        .collect();
+    assert_eq!(jobs.len(), 2, "expected two generated branch handles");
+    let next_value = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.result)
+        .map(|value| value.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let job_slots: Vec<_> = jobs
+        .iter()
+        .map(|job| {
+            main.blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .find_map(|instruction| match instruction.kind {
+                    zirk_ir::InstKind::Store(slot, value) if value == *job => Some(slot),
+                    _ => None,
+                })
+                .expect("each branch handle is spilled across admission checks")
+        })
+        .collect();
+    let wait_block =
+        main.blocks
+            .iter_mut()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction.kind, zirk_ir::InstKind::ScopeExit { .. })
+                })
+            })
+            .expect("scope join block dominated by both branch handles");
+    let scope_exit_index = wait_block
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.kind, zirk_ir::InstKind::ScopeExit { .. }))
+        .expect("scope exit follows wait-any");
+    let loads: Vec<_> = job_slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next_value + index as u32)),
+            kind: zirk_ir::InstKind::Load(*slot),
+            ty: zirk_ir::IrType::Job,
+            span: zirk_diagnostics::Span::empty(0),
+        })
+        .collect();
+    let wait_jobs = (0..job_slots.len())
+        .map(|index| zirk_ir::Operand(zirk_ir::ValueId(next_value + index as u32)))
+        .collect();
+    for (index, load) in loads.into_iter().enumerate() {
+        wait_block
+            .instructions
+            .insert(scope_exit_index + index, load);
+    }
+    wait_block.instructions.insert(
+        scope_exit_index + job_slots.len(),
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next_value + job_slots.len() as u32)),
+            kind: zirk_ir::InstKind::JobWaitAny { jobs: wait_jobs },
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::U64),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+    );
+    zirk_ir::verify(&ir).expect("the bounded wait-any IR must verify");
+
+    let llvm = llvm_ir_for_module(&ir);
+    assert!(
+        llvm.contains("call i64 @zirk_rt_job_wait_any(ptr "),
+        "wait-any ABI call is emitted:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("wait_any_jobs"),
+        "the task IDs are copied to the ABI array:\n{llvm}"
+    );
+}
+
+#[test]
+fn concurrent_within_emits_the_timer_wait_any_abi() {
+    let module = checked_ir(
+        "fn main(): Void {
+            mut winner: Int32 = Concurrent.of(
+                (): Int32 => 1,
+                (): Int32 => 2,
+            ).within(5s).first();
+        }",
+    );
+    let llvm = llvm_ir_for_module(&module);
+    assert!(
+        llvm.contains("declare i64 @zirk_rt_job_wait_any_with_timer(ptr, i64)"),
+        "timer-specific wait-any ABI must be declared:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("call i64 @zirk_rt_job_wait_any_with_timer(ptr "),
+        "within lowering must call the timer-specific ABI:\n{llvm}"
+    );
+}
+
+#[test]
+fn concurrent_first_uses_cleanup_failure_cancellation_abi() {
+    let module = checked_ir(
+        "fn main(): Void {
+            mut winner: Int32 = Concurrent.of(
+                (): Int32 => 1,
+                (): Int32 => 2,
+            ).first();
+        }",
+    );
+    let llvm = llvm_ir_for_module(&module);
+    assert!(
+        llvm.contains("declare void @zirk_rt_cancel_with_cleanup_failure(i64)"),
+        "cleanup-aware cancellation ABI declaration must be explicit:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("call void @zirk_rt_cancel_with_cleanup_failure(i64 "),
+        "first() must cancel losers through the cleanup-aware ABI:\n{llvm}"
+    );
+}
+
+#[test]
+fn task_and_timer_admission_statuses_are_checked_before_handle_use() {
+    let llvm = llvm_ir(
+        "fn main(): Void {
+            concurrent {
+                inmut value: Int32 = 1;
+                Timer.after(1ms, (): Void => { });
+                Timer.every(1ms, (): Void => { });
+                Timer.sleep(1ms);
+            }
+        }",
+    );
+    assert!(
+        llvm.contains("@zirk_rt_spawn_checked"),
+        "generated task creation uses the status-bearing ABI:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("@zirk_rt_sleep_checked"),
+        "generated timer sleep receives an admission status:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("@zirk_rt_timer_after_checked")
+            && llvm.contains("@zirk_rt_timer_every_checked"),
+        "ambient timers use the task-and-timer reservation ABI:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("E_TASK_CAPACITY")
+            && llvm.contains("E_TIMER_CAPACITY")
+            && llvm.contains("E_BACKGROUND_CAPACITY"),
+        "all capacity errors are present in the generated module:\n{llvm}"
+    );
+}
+
+#[test]
+fn job_outcome_wait_take_emits_exact_runtime_abi_and_rooted_slot_addresses() {
+    let mut module = checked_ir(
+        "fn main(): Void {
+            concurrent {
+                inmut first: Int32 = 11;
+                inmut second: Int32 = 22;
+            }
+        }",
+    );
+    let main = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .expect("main function");
+    let branch_job = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match instruction.kind {
+            zirk_ir::InstKind::BranchStart { .. } => instruction.result,
+            _ => None,
+        })
+        .expect("spawned job handle");
+    let job_slot = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match instruction.kind {
+            zirk_ir::InstKind::Store(slot, value) if value == zirk_ir::Operand(branch_job) => {
+                Some(slot)
+            }
+            _ => None,
+        })
+        .expect("branch handle is spilled across admission checks");
+    let value_slot = zirk_ir::SlotId(main.slots.len() as u32);
+    main.slots.push(zirk_ir::Slot {
+        name: "outcome_value".into(),
+        ty: zirk_ir::IrType::String,
+        span: zirk_diagnostics::Span::empty(0),
+    });
+    let throwable_slot = zirk_ir::SlotId(main.slots.len() as u32);
+    main.slots.push(zirk_ir::Slot {
+        name: "outcome_throwable".into(),
+        ty: zirk_ir::IrType::String,
+        span: zirk_diagnostics::Span::empty(0),
+    });
+    main.gc_roots.extend([value_slot, throwable_slot]);
+    let next_value = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.result)
+        .map(|value| value.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let wait_block =
+        main.blocks
+            .iter_mut()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction.kind, zirk_ir::InstKind::ScopeExit { .. })
+                })
+            })
+            .expect("scope close block");
+    let scope_exit_index = wait_block
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.kind, zirk_ir::InstKind::ScopeExit { .. }))
+        .expect("scope exit instruction");
+    wait_block.instructions.insert(
+        scope_exit_index,
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next_value)),
+            kind: zirk_ir::InstKind::Load(job_slot),
+            ty: zirk_ir::IrType::Job,
+            span: zirk_diagnostics::Span::empty(0),
+        },
+    );
+    wait_block.instructions.insert(
+        scope_exit_index + 1,
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next_value + 1)),
+            kind: zirk_ir::InstKind::JobOutcomeWaitTake {
+                job: zirk_ir::Operand(zirk_ir::ValueId(next_value)),
+                value_slot,
+                throwable_slot,
+            },
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::U32),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+    );
+    zirk_ir::verify(&module).expect("outcome wait/take IR verifies");
+
+    let llvm = llvm_ir_for_module(&module);
+    assert!(
+        llvm.contains("declare i32 @zirk_rt_job_outcome_wait_take(i64, ptr, ptr)"),
+        "runtime declaration has the exact ABI signature:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("call i32 @zirk_rt_job_outcome_wait_take(i64 "),
+        "runtime call returns i32 and passes the job id:\n{llvm}"
+    );
+    let call = llvm
+        .lines()
+        .find(|line| line.contains("call i32 @zirk_rt_job_outcome_wait_take"))
+        .expect("outcome wait/take call");
+    assert!(
+        call.contains("ptr %outcome_value") && call.contains("ptr %outcome_throwable"),
+        "both rooted output-slot addresses are passed in their declared order: {call}"
+    );
+}
+
+#[test]
+fn scope_outcome_wait_take_emits_status_call_and_rooted_outputs() {
+    let mut module = checked_ir("fn main(): Void {}");
+    let main = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .expect("main function");
+    let ordinal_slot = zirk_ir::SlotId(main.slots.len() as u32);
+    let value_slot = zirk_ir::SlotId(ordinal_slot.0 + 1);
+    let throwable_slot = zirk_ir::SlotId(ordinal_slot.0 + 2);
+    for (name, ty) in [
+        (
+            "scope_ordinal",
+            zirk_ir::IrType::Int(zirk_ir::IntWidth::U64),
+        ),
+        ("scope_value", zirk_ir::IrType::String),
+        ("scope_throwable", zirk_ir::IrType::String),
+    ] {
+        main.slots.push(zirk_ir::Slot {
+            name: name.into(),
+            ty,
+            span: zirk_diagnostics::Span::empty(0),
+        });
+    }
+    main.gc_roots.extend([value_slot, throwable_slot]);
+    let next = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| instruction.result)
+        .map(|value| value.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let block = main
+        .blocks
+        .iter_mut()
+        .find(|block| block.terminator.is_some())
+        .expect("terminated main block");
+    block.instructions.extend([
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next)),
+            kind: zirk_ir::InstKind::ScopeEnterCollectAll,
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::I64),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+        zirk_ir::Instruction {
+            result: Some(zirk_ir::ValueId(next + 1)),
+            kind: zirk_ir::InstKind::ScopeOutcomeWaitTake {
+                scope: zirk_ir::Operand(zirk_ir::ValueId(next)),
+                ordinal_slot,
+                value_slot,
+                throwable_slot,
+            },
+            ty: zirk_ir::IrType::Int(zirk_ir::IntWidth::U32),
+            span: zirk_diagnostics::Span::empty(0),
+        },
+        zirk_ir::Instruction {
+            result: None,
+            kind: zirk_ir::InstKind::ScopeCancel {
+                scope: zirk_ir::Operand(zirk_ir::ValueId(next)),
+            },
+            ty: zirk_ir::IrType::Void,
+            span: zirk_diagnostics::Span::empty(0),
+        },
+    ]);
+    zirk_ir::verify(&module).expect("scope outcome IR verifies");
+
+    let llvm = llvm_ir_for_module(&module);
+    assert!(
+        llvm.contains("declare i32 @zirk_rt_scope_outcome_wait_take(i64, ptr, ptr, ptr)"),
+        "scope ABI must declare status plus three output pointers:\n{llvm}"
+    );
+    let call = llvm
+        .lines()
+        .find(|line| line.contains("call i32 @zirk_rt_scope_outcome_wait_take"))
+        .expect("scope wait/take call");
+    assert!(
+        call.contains("ptr %scope_ordinal")
+            && call.contains("ptr %scope_value")
+            && call.contains("ptr %scope_throwable"),
+        "all output destinations are passed in ABI order: {call}"
+    );
+    assert!(
+        llvm.contains("declare void @zirk_rt_scope_cancel(i64)")
+            && llvm.contains("call void @zirk_rt_scope_cancel(i64 "),
+        "scope cancellation symbol is declared and emitted:\n{llvm}"
+    );
+}
+
+#[test]
+fn settled_pipeline_emits_wait_take_result_box_load_and_cancellation_drain() {
+    let llvm = llvm_ir(
+        "fn main(): Void {\n\
+           mut outcomes: List<Outcome<Int32>> = Concurrent.of(\n\
+             (): Int32 => 1,\n\
+             (): Int32 => 2\n\
+           ).settled();\n\
+         }",
+    );
+    assert!(
+        llvm.contains("declare i32 @zirk_rt_job_outcome_wait_take(i64, ptr, ptr)"),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains("call i32 @zirk_rt_job_outcome_wait_take(i64 "),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains("declare i32 @zirk_rt_job_outcome_take(i64, ptr, ptr)"),
+        "{llvm}"
+    );
+    assert!(
+        llvm.contains("call i32 @zirk_rt_job_outcome_take(i64 "),
+        "cancellation drains joined outcomes:\n{llvm}"
+    );
+    assert!(
+        llvm.contains("job_payload"),
+        "fulfilled payload is loaded from its typed result box:\n{llvm}"
+    );
+    assert!(llvm.contains("zirk_rt_scope_enter_collect_all"), "{llvm}");
+    assert!(llvm.contains("zirk_rt_scope_exit_collect_all"), "{llvm}");
 }
 
 #[test]
@@ -856,4 +1485,563 @@ fn array_clone_and_slice_preserve_nested_aggregate_reference_offsets() {
     assert!(ir.contains(&format!("@{}", symbols::ARRAY_SLICE_WITH_LAYOUT)));
     assert!(ir.contains("zk.array.clone.offsets."));
     assert!(ir.contains("zk.array.slice.offsets."));
+}
+
+#[test]
+fn thread_run_emits_managed_callback_adapter_and_rooted_output_abi() {
+    use zirk_ir::{
+        Block, BlockId, ClosureLayout, Function, Instruction, IrType, Module, ObjectLayout, Slot,
+        SlotId, ValueId,
+    };
+    let span = zirk_diagnostics::Span::empty(0);
+    let ir = Module {
+        functions: vec![Function {
+            name: "thread_run_probe".into(),
+            params: vec![],
+            return_type: IrType::Void,
+            slots: vec![
+                Slot {
+                    name: "callable".into(),
+                    ty: IrType::Callable(0),
+                    span,
+                },
+                Slot {
+                    name: "result".into(),
+                    ty: IrType::String,
+                    span,
+                },
+                Slot {
+                    name: "exception".into(),
+                    ty: IrType::Object(0),
+                    span,
+                },
+            ],
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: zirk_ir::InstKind::Load(SlotId(0)),
+                        ty: IrType::Callable(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: zirk_ir::InstKind::ThreadRun {
+                            callable_slot: SlotId(0),
+                            result_slot: Some(SlotId(1)),
+                            exception_slot: SlotId(2),
+                        },
+                        ty: IrType::Int(zirk_ir::IntWidth::U32),
+                        span,
+                    },
+                ],
+                terminator: Some(zirk_ir::Terminator::Return(None)),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: vec![SlotId(0), SlotId(1), SlotId(2)],
+        }],
+        closures: vec![ClosureLayout {
+            captures: vec![IrType::String],
+            params: vec![],
+            returns: IrType::String,
+        }],
+        objects: vec![ObjectLayout {
+            name: "Throwable".into(),
+            fields: vec![],
+            contracts: vec![],
+            methods: vec![],
+            ancestors: vec![0],
+        }],
+        ..Module::default()
+    };
+    zirk_ir::verify(&ir)
+        .expect("ThreadRun IR has a zero-argument rooted callable and output slots");
+    let text = llvm_ir_for_module(&ir);
+    assert!(
+        text.contains("declare i32 @zirk_rt_thread_run(ptr, ptr, ptr, ptr, ptr)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("define internal i32 @zirk.thread.run.thunk(ptr"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i32 @zirk_rt_thread_run(ptr @zirk.thread.run.thunk"),
+        "{text}"
+    );
+    assert!(
+        text.contains("store ptr %thread.callback"),
+        "managed callback result is published into its rooted slot:\n{text}"
+    );
+    assert!(
+        text.contains("store ptr %callback.exception"),
+        "callback exceptions are published into the caller's rooted slot:\n{text}"
+    );
+}
+
+#[test]
+fn borrowed_view_raw_llvm_emission_fails_closed_until_payload_lowering_exists() {
+    use zirk_ir::{
+        Block, BlockId, Function, InstKind, Instruction, IrType, Module, Slot, SlotId, ValueId,
+    };
+    let span = zirk_diagnostics::Span::empty(0);
+    let ir = Module {
+        functions: vec![Function {
+            name: "borrow_view_probe".into(),
+            params: vec![],
+            return_type: IrType::Void,
+            slots: vec![Slot {
+                name: "mutex".into(),
+                ty: IrType::Mutex(0),
+                span,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::Undefined,
+                        ty: IrType::Mutex(0),
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::Store(SlotId(0), zirk_ir::Operand(ValueId(0))),
+                        ty: IrType::Void,
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::MutexAcquire {
+                            id: zirk_ir::MutexId(1),
+                            mutex: SlotId(0),
+                        },
+                        ty: IrType::Void,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::Load(SlotId(0)),
+                        ty: IrType::Mutex(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(2)),
+                        kind: InstKind::BorrowViewStart {
+                            region: 1,
+                            mutex: zirk_ir::Operand(ValueId(1)),
+                        },
+                        ty: IrType::BorrowedView {
+                            region: 1,
+                            mutex_type: 0,
+                        },
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::BorrowViewEnd {
+                            view: zirk_ir::Operand(ValueId(2)),
+                        },
+                        ty: IrType::Void,
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::MutexRelease {
+                            id: zirk_ir::MutexId(1),
+                            mutex: SlotId(0),
+                        },
+                        ty: IrType::Void,
+                        span,
+                    },
+                ],
+                terminator: Some(zirk_ir::Terminator::Return(None)),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: vec![SlotId(0)],
+        }],
+        mutex_types: vec![IrType::Int(zirk_ir::IntWidth::I32)],
+        ..Module::default()
+    };
+    zirk_ir::verify(&ir).expect("borrowed view lifetime token verifies");
+    let text = llvm_ir_for_module(&ir);
+    assert!(text.contains("define void @zk_borrow_view_probe"), "{text}");
+    assert_eq!(text.matches("call void @llvm.trap()").count(), 4, "{text}");
+}
+
+#[test]
+fn mutex_with_emits_runtime_adapter_result_and_rooted_nested_captures() {
+    use zirk_ir::{
+        Block, BlockId, ClosureLayout, Function, InstKind, Instruction, IntWidth, IrType, Module,
+        ObjectField, Slot, SlotId, ValueId, ValueLayout,
+    };
+    let span = zirk_diagnostics::Span::empty(0);
+    let payload = IrType::Value(1);
+    let view_ty = IrType::BorrowedView {
+        region: 17,
+        mutex_type: 0,
+    };
+    let ir = Module {
+        functions: vec![
+            Function {
+                name: "mutex_caller".into(),
+                params: vec![],
+                return_type: IrType::Void,
+                slots: vec![Slot {
+                    name: "result".into(),
+                    ty: payload,
+                    span,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Mutex(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Value(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::MakeCallable {
+                                target: "mutex_callback".into(),
+                                captures: vec![zirk_ir::Operand(ValueId(1))],
+                            },
+                            ty: IrType::Callable(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::MutexWithCall {
+                                mutex: zirk_ir::Operand(ValueId(0)),
+                                callback: zirk_ir::Operand(ValueId(2)),
+                                layout: 0,
+                                result_slot: Some(SlotId(0)),
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                    ],
+                    terminator: Some(zirk_ir::Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: vec![SlotId(0)],
+            },
+            Function {
+                name: "mutex_callback".into(),
+                params: vec![SlotId(0), SlotId(1)],
+                return_type: payload,
+                slots: vec![
+                    Slot {
+                        name: "capture".into(),
+                        ty: IrType::Value(0),
+                        span,
+                    },
+                    Slot {
+                        name: "view".into(),
+                        ty: view_ty,
+                        span,
+                    },
+                ],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Load(SlotId(1)),
+                            ty: view_ty,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::BorrowViewLoad {
+                                view: zirk_ir::Operand(ValueId(0)),
+                            },
+                            ty: payload,
+                            span,
+                        },
+                    ],
+                    terminator: Some(zirk_ir::Terminator::Return(Some(zirk_ir::Operand(
+                        ValueId(1),
+                    )))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: vec![SlotId(0)],
+            },
+        ],
+        closures: vec![ClosureLayout {
+            captures: vec![IrType::Value(0)],
+            params: vec![view_ty],
+            returns: payload,
+        }],
+        values: vec![
+            ValueLayout {
+                name: "NestedCapture".into(),
+                fields: vec![ObjectField {
+                    name: "text".into(),
+                    ty: IrType::String,
+                }],
+            },
+            ValueLayout {
+                name: "Payload".into(),
+                fields: vec![ObjectField {
+                    name: "text".into(),
+                    ty: IrType::String,
+                }],
+            },
+        ],
+        mutex_types: vec![payload],
+        ..Module::default()
+    };
+    zirk_ir::verify(&ir).expect("typed mutex callback IR verifies");
+    let text = llvm_ir_for_module(&ir);
+    assert!(
+        text.contains("declare i32 @zirk_rt_gc_mutex_with(ptr, ptr, ptr)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("define internal void @zirk.mutex.with.thunk.0(ptr"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call i32 @zirk_rt_gc_mutex_with(ptr "),
+        "runtime call uses the declared i32(ptr, ptr, ptr) ABI:\n{text}"
+    );
+    assert!(
+        text.contains("ptr @zirk.mutex.with.thunk.0, ptr %mutex.callback.context)"),
+        "runtime receives the callback adapter and synchronous context:\n{text}"
+    );
+    assert!(
+        text.contains("call { ptr } %mutex.callback.fn({ ptr } %mutex.capture, ptr %0)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("store { ptr } %mutex.callback"),
+        "callback result is stored only after return:\n{text}"
+    );
+    assert!(
+        text.contains("call void @zirk_rt_push_frame"),
+        "capture block is temporarily rooted across lock acquisition:\n{text}"
+    );
+    assert!(
+        text.contains("call void @zirk_rt_pop_frame"),
+        "temporary callback root is released after runtime returns:\n{text}"
+    );
+    assert!(
+        text.contains("zk.closure.type.0"),
+        "nested managed capture descriptor is emitted:\n{text}"
+    );
+}
+
+#[test]
+fn mutex_new_emits_typed_allocation_and_roots_nested_payload_references() {
+    use zirk_ir::{
+        Block, BlockId, Function, InstKind, Instruction, IntWidth, IrType, Module, ObjectField,
+        Slot, SlotId, ValueId, ValueLayout,
+    };
+    let span = zirk_diagnostics::Span::empty(0);
+    let payload = IrType::Value(0);
+    let ir = Module {
+        functions: vec![Function {
+            name: "mutex_new_probe".into(),
+            params: vec![],
+            return_type: IrType::Void,
+            slots: vec![Slot {
+                name: "mutex".into(),
+                ty: IrType::Mutex(0),
+                span,
+            }],
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::Undefined,
+                        ty: payload,
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::MutexNew {
+                            payload: zirk_ir::Operand(ValueId(0)),
+                            mutex_type: 0,
+                            object_slot: SlotId(0),
+                        },
+                        ty: IrType::Int(IntWidth::I32),
+                        span,
+                    },
+                ],
+                terminator: Some(zirk_ir::Terminator::Return(None)),
+            }],
+            entry: BlockId(0),
+            span,
+            gc_roots: vec![SlotId(0)],
+        }],
+        values: vec![ValueLayout {
+            name: "Payload".into(),
+            fields: vec![ObjectField {
+                name: "text".into(),
+                ty: IrType::String,
+            }],
+        }],
+        mutex_types: vec![payload],
+        ..Module::default()
+    };
+    zirk_ir::verify(&ir).expect("MutexNew IR is well formed");
+    let text = llvm_ir_for_module(&ir);
+    assert!(
+        text.contains("declare ptr @zirk_rt_gc_mutex_alloc(ptr, i64, i64, ptr, i64, ptr)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call void @zirk_rt_push_frame"),
+        "staging payload reference is rooted during allocation:\n{text}"
+    );
+    assert!(text.contains("call ptr @zirk_rt_gc_mutex_alloc"), "{text}");
+    assert!(
+        text.contains("call void @zirk_rt_pop_frame"),
+        "temporary payload root is released after allocation:\n{text}"
+    );
+    assert!(
+        text.contains("store ptr %mutex.new.handle"),
+        "allocated handle is stored in destination slot:\n{text}"
+    );
+}
+
+#[test]
+fn borrowed_value_field_projection_emits_typed_gep_access() {
+    use zirk_ir::{
+        Block, BlockId, ClosureLayout, Function, InstKind, Instruction, IntWidth, IrType, Module,
+        ObjectField, Slot, SlotId, ValueId, ValueLayout,
+    };
+    let span = zirk_diagnostics::Span::empty(0);
+    let payload = IrType::Value(0);
+    let view = IrType::BorrowedView {
+        region: 9,
+        mutex_type: 0,
+    };
+    let ir = Module {
+        functions: vec![
+            Function {
+                name: "caller".into(),
+                params: vec![],
+                return_type: IrType::Void,
+                slots: vec![],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Mutex(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::MakeCallable {
+                                target: "callback".into(),
+                                captures: vec![],
+                            },
+                            ty: IrType::Callable(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::MutexWithCall {
+                                mutex: zirk_ir::Operand(ValueId(0)),
+                                callback: zirk_ir::Operand(ValueId(1)),
+                                layout: 0,
+                                result_slot: None,
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                    ],
+                    terminator: Some(zirk_ir::Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: vec![],
+            },
+            Function {
+                name: "callback".into(),
+                params: vec![SlotId(0)],
+                return_type: IrType::Void,
+                slots: vec![Slot {
+                    name: "view".into(),
+                    ty: view,
+                    span,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Load(SlotId(0)),
+                            ty: view,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::BorrowViewFieldStore {
+                                view: zirk_ir::Operand(ValueId(0)),
+                                path: vec![0],
+                                value: zirk_ir::Operand(ValueId(1)),
+                            },
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstInt(4),
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                    ],
+                    terminator: Some(zirk_ir::Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: vec![],
+            },
+        ],
+        closures: vec![ClosureLayout {
+            captures: vec![],
+            params: vec![view],
+            returns: IrType::Void,
+        }],
+        values: vec![ValueLayout {
+            name: "Payload".into(),
+            fields: vec![ObjectField {
+                name: "count".into(),
+                ty: IrType::Int(IntWidth::I32),
+            }],
+        }],
+        mutex_types: vec![payload],
+        ..Module::default()
+    };
+    // The value operand is defined before use in instruction order.
+    let mut ir = ir;
+    ir.functions[1].blocks[0].instructions.swap(1, 2);
+    zirk_ir::verify(&ir).expect("borrowed field projection IR is valid");
+    let text = llvm_ir_for_module(&ir);
+    assert!(
+        text.contains("mutex.field.load") || text.contains("mutex.payload.path"),
+        "{text}"
+    );
+    assert!(
+        text.contains("store i32"),
+        "typed field store is emitted:\n{text}"
+    );
 }

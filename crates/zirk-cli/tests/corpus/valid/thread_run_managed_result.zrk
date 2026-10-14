@@ -1,0 +1,9 @@
+import { stdout } from std.io;
+
+fn compute(): Int32 {
+    return 42;
+}
+
+fn main(): Void {
+    stdout.println(Thread.run(compute));
+}

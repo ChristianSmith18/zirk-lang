@@ -136,8 +136,8 @@ implementation advantage. `Range` always has a finite end—there is no
 `Range.from(0)`—and equality compares its definition.
 
 Pure CPU iteration does not suspend or check cancellation magically. Use an
-explicit check or `std.parallel`. Task-aware streams remain separate from
-`Iterator` so iteration never hides `await`. Generator cleanup runs when
+explicit check or the delivered `.parallel` collection adapter. Task-aware
+streams remain separate from `Iterator` so iteration never hides suspension. Generator cleanup runs when
 iteration finishes early, fails or is cancelled.
 
 ## Complexity

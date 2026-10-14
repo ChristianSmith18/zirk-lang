@@ -1,0 +1,4 @@
+fn main(): Void {
+    mut value: Atomic<Int32> = Atomic(0);
+    value.load(AtomicOrder.acquire);
+}

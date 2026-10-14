@@ -14,7 +14,10 @@
 //! Enums and function types carry an index into a table owned by the checker
 //! rather than their contents, for the same reason.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use zirk_diagnostics::Phase;
+
+static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A type of the subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,6 +25,23 @@ pub struct Type {
     pub base: Base,
     /// Written `T?`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
     pub nullable: bool,
+    /// Lexical lifetime of an internal borrowed view. Source programs cannot
+    /// construct this marker; it is reserved for compiler-owned scoped APIs.
+    /// Keeping it in type identity makes compatibility invariant in scope.
+    pub(crate) borrowed_scope: Option<ScopeId>,
+}
+
+/// Identity of one lexical scope, allocated monotonically by `Scopes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ScopeId(u64);
+
+impl ScopeId {
+    pub(crate) fn fresh() -> Self {
+        let id = NEXT_SCOPE_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("scope id exhausted");
+        Self(id)
+    }
 }
 
 /// Every integer type the language has (roadmap Phase 3b): five signed
@@ -239,6 +259,12 @@ pub enum Base {
     Regex,
     /// The type of the `null` literal, assignable to any nullable type.
     Null,
+    /// Runtime-issued capability accepted only by a service callback.
+    ServiceContext,
+    /// Typed service admission failure; construction remains runtime-gated.
+    ServiceCapacityError,
+    /// Service admission/readiness attempted outside the active lifecycle.
+    ServiceLifecycleError,
     /// A declared enum, identified by its index in the checker's table.
     Enum(u32),
     /// A function value, identified by its index in the checker's table.
@@ -249,6 +275,10 @@ pub enum Base {
     /// `Channel<T>`, a shareable typed endpoint. The element type lives in
     /// the checker's intern table so `Type` remains copyable.
     Channel(u32),
+    /// `Atomic<T>`, interned by its scalar payload type.
+    Atomic(u32),
+    /// `Mutex<T>`, interned by its protected payload type.
+    Mutex(u32),
     /// A declared interface or trait, identified by its index in the checker's
     /// table.
     ///
@@ -407,6 +437,9 @@ impl Type {
     pub const DATETIME: Type = Type::of(Base::DateTime);
     pub const REGEX: Type = Type::of(Base::Regex);
     pub const NULL: Type = Type::of(Base::Null);
+    pub const SERVICE_CONTEXT: Type = Type::of(Base::ServiceContext);
+    pub const SERVICE_CAPACITY_ERROR: Type = Type::of(Base::ServiceCapacityError);
+    pub const SERVICE_LIFECYCLE_ERROR: Type = Type::of(Base::ServiceLifecycleError);
 
     pub const UNKNOWN: Type = Type::of(Base::Unknown);
 
@@ -414,6 +447,7 @@ impl Type {
         Self {
             base,
             nullable: false,
+            borrowed_scope: None,
         }
     }
 
@@ -422,6 +456,7 @@ impl Type {
         Self {
             base: self.base,
             nullable: true,
+            borrowed_scope: self.borrowed_scope,
         }
     }
 
@@ -430,7 +465,26 @@ impl Type {
         Self {
             base: self.base,
             nullable: false,
+            borrowed_scope: self.borrowed_scope,
         }
+    }
+
+    /// Rebuilds this type with a substituted base while preserving nullability
+    /// and any compiler-internal borrow provenance.
+    pub const fn with_base(self, base: Base) -> Self {
+        Self { base, ..self }
+    }
+
+    /// Creates a checker-internal view tied to `scope`.
+    pub(crate) const fn as_borrowed_in(self, scope: ScopeId) -> Self {
+        Self {
+            borrowed_scope: Some(scope),
+            ..self
+        }
+    }
+
+    pub(crate) const fn borrowed_scope(self) -> Option<ScopeId> {
+        self.borrowed_scope
     }
 
     pub const fn is_unknown(self) -> bool {
@@ -453,6 +507,9 @@ impl Type {
     ///
     /// `Unknown` is compatible with everything, to avoid cascading errors.
     pub fn accepts(self, other: Type) -> bool {
+        if self.borrowed_scope != other.borrowed_scope {
+            return false;
+        }
         if self.is_unknown() || other.is_unknown() {
             return true;
         }
@@ -554,6 +611,9 @@ impl Type {
     /// either the same base or incompatible. The only real work is deciding
     /// the nullability of the result.
     pub fn unify(self, other: Type) -> Option<Type> {
+        if self.borrowed_scope != other.borrowed_scope {
+            return None;
+        }
         if self.is_unknown() {
             return Some(other);
         }
@@ -587,6 +647,7 @@ impl Type {
         Some(Type {
             base: self.base,
             nullable: self.nullable || other.nullable,
+            borrowed_scope: self.borrowed_scope,
         })
     }
 
@@ -669,6 +730,9 @@ impl Type {
             "Time" => Type::TIME,
             "DateTime" => Type::DATETIME,
             "Regex" => Type::REGEX,
+            "ServiceContext" => Type::SERVICE_CONTEXT,
+            "ServiceCapacityError" => Type::SERVICE_CAPACITY_ERROR,
+            "ServiceLifecycleError" => Type::SERVICE_LIFECYCLE_ERROR,
             "Never" => Type::of(Base::Never),
             _ => return None,
         })
@@ -715,6 +779,9 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::DateTime => "DateTime".to_string(),
         Base::Regex => "Regex".to_string(),
         Base::Null => "Null".to_string(),
+        Base::ServiceContext => "ServiceContext".to_string(),
+        Base::ServiceCapacityError => "ServiceCapacityError".to_string(),
+        Base::ServiceLifecycleError => "ServiceLifecycleError".to_string(),
         Base::Range(id) => format!("Range<{}>", describe(names.range_element(id), names)),
         Base::Never => "Never".to_string(),
         Base::Unknown => "<unknown>".to_string(),
@@ -722,6 +789,8 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Function(id) => names.function_type(id),
         Base::Job(id) => format!("Job<{}>", describe(names.job_result(id), names)),
         Base::Channel(id) => format!("Channel<{}>", describe(names.channel_element(id), names)),
+        Base::Atomic(id) => format!("Atomic<{}>", describe(names.atomic_element(id), names)),
+        Base::Mutex(id) => format!("Mutex<{}>", describe(names.mutex_element(id), names)),
         Base::Class(id) => names.class_name(id),
         Base::Contract(id) => names.contract_name(id),
         Base::Param(id) => names.type_param_name(id),
@@ -768,6 +837,8 @@ pub trait TypeNames {
     fn function_type(&self, id: u32) -> String;
     fn job_result(&self, id: u32) -> Type;
     fn channel_element(&self, id: u32) -> Type;
+    fn atomic_element(&self, id: u32) -> Type;
+    fn mutex_element(&self, id: u32) -> Type;
     fn class_name(&self, id: u32) -> String;
     fn contract_name(&self, id: u32) -> String;
     fn type_param_name(&self, id: u32) -> String;
@@ -1104,9 +1175,9 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // resolved by name; `Resource<E>` is registered as a native contract in
     // `checker.rs` and is no longer pending here.
     const PHASE_4: &[&str] = &[];
-    // Phase 5 brings concurrency. Its public handle types are introduced by
-    // the pending concurrency-surface changes.
-    const PHASE_5: &[&str] = &["Channel", "Thread", "Atomic"];
+    // Phase 5 brings the remaining concurrency handles. `Channel<T>` is
+    // already implemented and resolved by the dedicated channel type path.
+    const PHASE_5: &[&str] = &["Thread", "RwLock", "Semaphore", "Barrier", "Once"];
     // Phase 7 brings the stdlib, and with it the collection and temporal
     // families. They are compiler-known native types, not library objects:
     // what that phase adds is their implementation, not their existence.
@@ -1136,6 +1207,32 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod borrowed_view_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_view_identity_is_scope_invariant_and_survives_nullability() {
+        let left_scope = ScopeId::fresh();
+        let right_scope = ScopeId::fresh();
+        let left = Type::INT32.as_borrowed_in(left_scope);
+        let other_region = Type::INT32.as_borrowed_in(right_scope);
+
+        assert!(left.accepts(left));
+        assert!(!Type::INT32.accepts(left));
+        assert!(!left.accepts(Type::INT32));
+        assert!(!left.accepts(other_region));
+        assert!(left.as_nullable().without_null().accepts(left));
+        assert_eq!(left.unify(other_region), None);
+        assert_eq!(left.unify(left).unwrap().borrowed_scope(), Some(left_scope));
+
+        let substituted = left.as_nullable().with_base(Base::String);
+        assert_eq!(substituted.base, Base::String);
+        assert!(substituted.nullable);
+        assert_eq!(substituted.borrowed_scope(), Some(left_scope));
+    }
 }
 
 #[cfg(test)]
@@ -1228,7 +1325,21 @@ mod tests {
             pending_type("Task").is_none(),
             "`Task<T>` was removed, so it is an unknown type name, not a pending one"
         );
-        assert_eq!(pending_type("Channel").map(|t| t.phase), Some(Phase::FIVE));
+        assert!(
+            pending_type("Channel").is_none(),
+            "`Channel<T>` is implemented"
+        );
+        assert!(
+            pending_type("Mutex").is_none(),
+            "`Mutex<T>` is recognized by the checker"
+        );
+        for name in ["Thread", "RwLock", "Semaphore", "Barrier", "Once"] {
+            assert_eq!(
+                pending_type(name).map(|t| t.phase),
+                Some(Phase::FIVE),
+                "{name}"
+            );
+        }
         assert!(pending_type("Map").is_none(), "`Map<K, V>` is implemented");
         assert!(pending_type("Set").is_none(), "`Set<T>` is implemented");
         assert!(pending_type("Array").is_none(), "`Array<T>` is implemented");

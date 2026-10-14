@@ -140,7 +140,15 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             let table_of = |symbols: &[String], name: &str| {
                 let entries: Vec<PointerValue> = symbols
                     .iter()
-                    .map(|symbol| functions[symbol].as_global_value().as_pointer_value())
+                    .map(|symbol| {
+                        functions
+                            .get(symbol)
+                            .unwrap_or_else(|| {
+                                panic!("object method `{symbol}` has no LLVM declaration")
+                            })
+                            .as_global_value()
+                            .as_pointer_value()
+                    })
                     .collect();
                 let array = ptr.const_array(&entries);
                 let global = llvm.add_global(array.get_type(), None, name);
@@ -365,6 +373,9 @@ fn llvm_type_in<'ctx>(
         // Reached through the contract, but still just the object's address:
         // the descriptor it already carries answers which body to run.
         ir::IrType::Contract(_) => context.ptr_type(AddressSpace::default()).into(),
+        // BorrowedView is a verifier-only lifetime token over the same
+        // protected managed handle. It has no runtime wrapper or allocation.
+        ir::IrType::BorrowedView { .. } => context.ptr_type(AddressSpace::default()).into(),
         // A record carries no identity, so it is the struct
         // itself, not a pointer to one — passed, returned and stored inline,
         // with no allocation (roadmap task 11.5).
@@ -405,6 +416,8 @@ fn llvm_type_in<'ctx>(
         ir::IrType::Job => context.i64_type().into(),
         // Channels are collector-tracked opaque endpoints.
         ir::IrType::Channel(_) => context.ptr_type(AddressSpace::default()).into(),
+        ir::IrType::Atomic(_) => context.ptr_type(AddressSpace::default()).into(),
+        ir::IrType::Mutex(_) => context.ptr_type(AddressSpace::default()).into(),
         // `Pointer<T>` (roadmap Phase 4e, design D8): an ordinary LLVM
         // pointer — opaque at this level, since LLVM's own `ptr` type
         // carries no pointee type; a load/store through it supplies `T`'s
@@ -628,6 +641,8 @@ fn gc_reference_paths(
         | ir::IrType::Array(_)
         | ir::IrType::List(_)
         | ir::IrType::Channel(_)
+        | ir::IrType::Atomic(_)
+        | ir::IrType::Mutex(_)
         | ir::IrType::Range
         | ir::IrType::Map(_)
         | ir::IrType::Set(_) => out.push(prefix.clone()),
@@ -749,6 +764,33 @@ fn object_struct<'ctx>(
 /// Where a field sits inside the struct, header included (design D1: three
 /// words now — descriptor, `next`, `size` — not one).
 const OBJECT_HEADER_FIELDS: u32 = 3;
+
+/// Runtime allocation shape for a non-void task result. The result payload is
+/// deliberately the exact aggregate/scalar LLVM type, preceded by the common
+/// collector header so the normal descriptor walker can trace nested roots.
+fn task_result_box_type<'ctx>(
+    context: &'ctx Context,
+    module: &ir::Module,
+    result: ir::IrType,
+) -> inkwell::types::StructType<'ctx> {
+    let ptr = context.ptr_type(AddressSpace::default());
+    context.struct_type(
+        &[
+            ptr.into(),
+            context.i64_type().into(),
+            context.i64_type().into(),
+            llvm_type_in(
+                context,
+                result,
+                &module.closures,
+                &module.values,
+                &module.enums,
+            )
+            .expect("a non-void task result has an LLVM representation"),
+        ],
+        false,
+    )
+}
 
 /// The struct a WeakCell occupies (roadmap Phase 4e, `fase-4e-weak`, design
 /// D1/D2):
@@ -990,7 +1032,7 @@ fn emit_c_entrypoint<'ctx>(
     // tasks is driven to completion before this returns.
     let zirk_main_ptr = zirk_main.as_global_value().as_pointer_value();
     builder
-        .build_call(runtime.run_main, &[zirk_main_ptr.into()], "")
+        .build_call(runtime.run_main_cli, &[zirk_main_ptr.into()], "")
         .expect("call to the executor entrypoint");
 
     // `main` itself may declare `throws` and still leave an exception
@@ -1288,6 +1330,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 | ir::IrType::Array(_)
                 | ir::IrType::List(_)
                 | ir::IrType::Channel(_)
+                | ir::IrType::Atomic(_)
+                | ir::IrType::Mutex(_)
         )
     }
 
@@ -1306,6 +1350,67 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     /// Builds an `i1` boolean constant for the runtime's `is_ref` flag.
     fn bool_const(&self, value: bool) -> inkwell::values::IntValue<'ctx> {
         self.context.bool_type().const_int(value as u64, false)
+    }
+
+    fn atomic_pack(&self, operand: ir::Operand) -> inkwell::values::IntValue<'ctx> {
+        let value = self.operand(operand).into_int_value();
+        let target = self.context.i64_type();
+        if value.get_type().get_bit_width() == 64 {
+            value
+        } else if value.get_type().get_bit_width() < 64 {
+            let signed = self.value_type(operand).is_some_and(|ty| {
+                matches!(ty,
+                ir::IrType::Int(width) if width.signed())
+            });
+            if signed {
+                self.builder
+                    .build_int_s_extend(value, target, "atomic.pack")
+                    .expect("extend atomic payload")
+            } else {
+                self.builder
+                    .build_int_z_extend(value, target, "atomic.pack")
+                    .expect("extend atomic payload")
+            }
+        } else {
+            self.builder
+                .build_int_truncate(value, target, "atomic.pack")
+                .expect("truncate atomic payload")
+        }
+    }
+
+    fn atomic_unpack_to_slot(&mut self, packed: inkwell::values::IntValue<'ctx>, slot: ir::SlotId) {
+        let ty = self.module_function_slot_type(slot);
+        let llvm_ty = self
+            .llvm_type(ty)
+            .expect("atomic scalar output has LLVM type")
+            .into_int_type();
+        let value = if llvm_ty.get_bit_width() == 1 {
+            self.builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    packed,
+                    self.context.i64_type().const_zero(),
+                    "atomic.bool",
+                )
+                .expect("convert atomic boolean")
+        } else if llvm_ty.get_bit_width() == 64 {
+            packed
+        } else {
+            self.builder
+                .build_int_truncate(packed, llvm_ty, "atomic.unpack")
+                .expect("truncate atomic result")
+        };
+        self.builder
+            .build_store(self.slots[&slot], value)
+            .expect("store atomic result");
+    }
+
+    fn value_type(&self, operand: ir::Operand) -> Option<ir::IrType> {
+        self.value_types.get(&operand.0).copied()
+    }
+
+    fn module_function_slot_type(&self, slot: ir::SlotId) -> ir::IrType {
+        self.slot_types[&slot]
     }
 
     /// Spills `value` to a stack slot of `element` type and returns its
@@ -1359,67 +1464,308 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         field_offset.const_add(header)
     }
 
-    /// Widens a branch-body result to the runtime's one-word (`i64`)
-    /// branch-result value. `Void` / `Never` become zero
-    /// (`concurrent-blocks-and-timers`, native codegen "BranchStart emits a
-    /// thunk").
-    fn widen_to_branch_word(
-        &self,
-        value: Option<BasicValueEnum<'ctx>>,
-        ty: ir::IrType,
-    ) -> inkwell::values::IntValue<'ctx> {
-        let word = self.context.i64_type();
-        match ty {
-            ir::IrType::Void | ir::IrType::Never => word.const_zero(),
-            ir::IrType::Boolean => self
-                .builder
-                .build_int_z_extend(
-                    value.expect("branch value").into_int_value(),
-                    word,
-                    "branch_word",
-                )
-                .expect("widen bool"),
-            ir::IrType::Int(width) => {
-                let raw = value.expect("branch value").into_int_value();
-                if width.bits() >= 64 {
-                    raw
-                } else {
-                    self.builder
-                        .build_int_z_extend(raw, word, "branch_word")
-                        .expect("widen int")
-                }
-            }
-            ir::IrType::Float(width) => {
-                let bits = self
-                    .builder
-                    .build_bit_cast(
-                        value.expect("branch value").into_float_value(),
-                        self.context
-                            .custom_width_int_type(
-                                std::num::NonZeroU32::new(width.bits()).expect("float width"),
-                            )
-                            .expect("float bits type"),
-                        "branch_float_bits",
-                    )
-                    .expect("float bits")
-                    .into_int_value();
-                self.builder
-                    .build_int_z_extend(bits, word, "branch_word")
-                    .expect("widen float")
-            }
-            _ => self
-                .builder
-                .build_ptr_to_int(
-                    value.expect("branch value").into_pointer_value(),
-                    word,
-                    "branch_word",
-                )
-                .expect("branch pointer bits"),
+    /// Builds the synchronous `(payload, context) -> void` adapter required by
+    /// the GC mutex ABI. The context owns only a stack copy of the callable and
+    /// result address; a temporary shadow-stack frame roots its capture block
+    /// across lock acquisition, which may wait and permit collection.
+    fn mutex_with_thunk(&self, layout_id: u32) -> FunctionValue<'ctx> {
+        let name = format!("zirk.mutex.with.thunk.{layout_id}");
+        if let Some(existing) = self.llvm.get_function(&name) {
+            return existing;
         }
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let thunk = self.llvm.add_function(
+            &name,
+            self.context
+                .void_type()
+                .fn_type(&[ptr.into(), ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(thunk, "entry");
+        builder.position_at_end(entry);
+        let callable_type = callable_struct(self.context);
+        let context_type = self
+            .context
+            .struct_type(&[callable_type.into(), ptr.into()], false);
+        let context_ptr = thunk
+            .get_nth_param(1)
+            .expect("mutex context")
+            .into_pointer_value();
+        let context_value = builder
+            .build_load(context_type, context_ptr, "mutex.context")
+            .expect("load mutex context")
+            .into_struct_value();
+        let callable = builder
+            .build_extract_value(context_value, 0, "mutex.callable")
+            .expect("extract callable")
+            .into_struct_value();
+        let result_out = builder
+            .build_extract_value(context_value, 1, "mutex.result.out")
+            .expect("extract result output")
+            .into_pointer_value();
+        let fn_ptr = builder
+            .build_extract_value(callable, CALLABLE_FUNCTION_FIELD, "mutex.callback.fn")
+            .expect("extract callable function")
+            .into_pointer_value();
+        let captures = builder
+            .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "mutex.callback.captures")
+            .expect("extract callable captures")
+            .into_pointer_value();
+        let mut arguments: Vec<BasicMetadataValueEnum> =
+            Vec::with_capacity(layout.captures.len() + 1);
+        for (index, capture_ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let address = unsafe {
+                builder.build_gep(
+                    self.context.i8_type(),
+                    captures,
+                    &[offset],
+                    "mutex.capture.addr",
+                )
+            }
+            .expect("capture address");
+            let ty = self.llvm_type(*capture_ty).expect("capture has LLVM type");
+            arguments.push(
+                builder
+                    .build_load(ty, address, "mutex.capture")
+                    .expect("load capture")
+                    .into(),
+            );
+        }
+        let payload = thunk.get_nth_param(0).expect("mutex payload");
+        arguments.push(payload.into());
+        let signature = closure_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let call = builder
+            .build_indirect_call(signature, fn_ptr, &arguments, "mutex.callback")
+            .expect("call mutex callback");
+        if layout.returns != ir::IrType::Void {
+            let returned = call
+                .try_as_basic_value()
+                .basic()
+                .expect("non-Void mutex callback result");
+            let ty = self
+                .llvm_type(layout.returns)
+                .expect("callback result type");
+            builder
+                .build_store(result_out, returned)
+                .expect("store callback result");
+            // Keep the typed store visible to LLVM's verifier for opaque ptrs.
+            let _ = ty;
+        }
+        builder
+            .build_return(None)
+            .expect("return from mutex adapter");
+        thunk
     }
 
-    /// The inverse of [`Self::widen_to_branch_word`]: recovers a `JobWait`
-    /// result from the runtime's one-word value.
+    /// Adapts a service callback to the runtime's stable `u64` thunk ABI.
+    fn build_service_thunk(
+        &self,
+        target_name: &str,
+        layout_id: u32,
+        site: &str,
+    ) -> FunctionValue<'ctx> {
+        let layout = &self.module.closures[layout_id as usize];
+        assert_eq!(layout.params, [ir::IrType::Int(ir::IntWidth::U64)]);
+        assert_eq!(layout.returns, ir::IrType::Void);
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+        let thunk = self.llvm.add_function(
+            &format!("zk.service_thunk.{site}"),
+            i64_type.fn_type(&[i64_type.into(), ptr.into()], false),
+            Some(Linkage::Private),
+        );
+        thunk.set_call_conventions(0);
+        set_uwtable(self.context, thunk);
+        let resume = self
+            .builder
+            .get_insert_block()
+            .expect("service start block");
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+        let service_id = thunk.get_nth_param(0).expect("service id").into_int_value();
+        let capture = thunk
+            .get_nth_param(1)
+            .expect("capture block")
+            .into_pointer_value();
+        let mut arguments: Vec<BasicMetadataValueEnum> =
+            Vec::with_capacity(layout.captures.len() + 1);
+        for (index, capture_ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let address = unsafe {
+                self.builder.build_gep(
+                    self.context.i8_type(),
+                    capture,
+                    &[offset],
+                    "service_capture_addr",
+                )
+            }
+            .expect("service capture address");
+            let ty = self.llvm_type(*capture_ty).expect("service capture type");
+            arguments.push(
+                self.builder
+                    .build_load(ty, address, "service_capture_value")
+                    .expect("load rooted service capture")
+                    .into(),
+            );
+        }
+        arguments.push(service_id.into());
+        let target = self
+            .functions
+            .get(target_name)
+            .copied()
+            .expect("service target is a lowered function");
+        self.builder
+            .build_call(target, &arguments, "service_callback")
+            .expect("call service callback");
+        let pending = self
+            .builder
+            .build_call(self.runtime.has_pending_exception, &[], "service_threw")
+            .expect("zirk_rt_has_pending_exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("pending exception predicate")
+            .into_int_value();
+        let failed = self.context.append_basic_block(thunk, "failed");
+        let returned = self.context.append_basic_block(thunk, "returned");
+        self.builder
+            .build_conditional_branch(pending, failed, returned)
+            .expect("branch on service callback result");
+        self.builder.position_at_end(failed);
+        self.builder
+            .build_call(
+                self.runtime.service_failed_current,
+                &[],
+                "service_failure_status",
+            )
+            .expect("zirk_rt_service_failed_current");
+        self.builder
+            .build_return(Some(&i64_type.const_int(1, false)))
+            .expect("return failed service status");
+        self.builder.position_at_end(returned);
+        self.builder
+            .build_return(Some(&i64_type.const_zero()))
+            .expect("return successful service status");
+        self.builder.position_at_end(resume);
+        thunk
+    }
+
+    /// Builds a C ABI adapter for one verified zero-argument callable. The
+    /// runtime invokes this only on a registered managed worker and joins it
+    /// before the caller's rooted output slots can leave scope.
+    fn thread_run_thunk(&self, layout_id: u32) -> FunctionValue<'ctx> {
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let thunk_type = i32_type.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false);
+        let thunk =
+            self.llvm
+                .add_function("zirk.thread.run.thunk", thunk_type, Some(Linkage::Internal));
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(thunk, "entry");
+        builder.position_at_end(entry);
+
+        let target = thunk
+            .get_nth_param(0)
+            .expect("thread target")
+            .into_pointer_value();
+        let captures = thunk
+            .get_nth_param(1)
+            .expect("thread captures")
+            .into_pointer_value();
+        let result_out = thunk
+            .get_nth_param(2)
+            .expect("thread result slot")
+            .into_pointer_value();
+        let exception_out = thunk
+            .get_nth_param(3)
+            .expect("thread exception slot")
+            .into_pointer_value();
+
+        let mut arguments = Vec::with_capacity(layout.captures.len());
+        for (index, capture_ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            // SAFETY: the callable's verified layout bounds every capture
+            // offset, and `captures` points to its GC-header-prefixed block.
+            let address = unsafe {
+                builder.build_gep(
+                    self.context.i8_type(),
+                    captures,
+                    &[offset],
+                    "capture.address",
+                )
+            }
+            .expect("capture address");
+            let llvm_ty = self.llvm_type(*capture_ty).expect("capture LLVM type");
+            let value = builder
+                .build_load(llvm_ty, address, "capture.value")
+                .expect("load capture");
+            arguments.push(value.into());
+        }
+        let signature = closure_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let callback = builder
+            .build_indirect_call(signature, target, &arguments, "thread.callback")
+            .expect("call managed callback");
+        let pending = builder
+            .build_call(self.runtime.has_pending_exception, &[], "callback.threw")
+            .expect("check callback exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("exception predicate")
+            .into_int_value();
+        let threw = self.context.append_basic_block(thunk, "threw");
+        let succeeded = self.context.append_basic_block(thunk, "succeeded");
+        builder
+            .build_conditional_branch(pending, threw, succeeded)
+            .expect("branch on callback exception");
+
+        builder.position_at_end(threw);
+        let exception = builder
+            .build_call(
+                self.runtime.take_pending_exception,
+                &[],
+                "callback.exception",
+            )
+            .expect("take callback exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("exception value");
+        builder
+            .build_store(exception_out, exception)
+            .expect("publish callback exception");
+        builder
+            .build_return(Some(&i32_type.const_int(1, false)))
+            .expect("return thrown status");
+
+        builder.position_at_end(succeeded);
+        if let Some(value) = callback.try_as_basic_value().basic() {
+            builder
+                .build_store(result_out, value)
+                .expect("publish callback result");
+        }
+        builder
+            .build_return(Some(&i32_type.const_zero()))
+            .expect("return success status");
+        thunk
+    }
+
+    /// Decodes the descriptor-backed box returned by the runtime for one
+    /// non-void task result. Inline records/enums are loaded at their exact
+    /// LLVM layout; managed references remain covered by the box descriptor.
     fn narrow_from_branch_word(
         &self,
         raw: inkwell::values::IntValue<'ctx>,
@@ -1427,78 +1773,164 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     ) -> Option<BasicValueEnum<'ctx>> {
         match ty {
             ir::IrType::Void | ir::IrType::Never => None,
-            ir::IrType::Boolean => Some(
-                self.builder
-                    .build_int_truncate(raw, self.context.bool_type(), "job_value")
-                    .expect("job bool")
-                    .into(),
-            ),
-            ir::IrType::Int(width) => {
-                if width.bits() >= 64 {
-                    Some(raw.into())
-                } else {
-                    Some(
-                        self.builder
-                            .build_int_truncate(
-                                raw,
-                                self.context
-                                    .custom_width_int_type(
-                                        std::num::NonZeroU32::new(width.bits()).expect("int width"),
-                                    )
-                                    .expect("int type"),
-                                "job_value",
-                            )
-                            .expect("job narrow")
-                            .into(),
-                    )
-                }
-            }
-            ir::IrType::Float(width) => {
-                let bits = self
+            _ => {
+                let pointer = self
                     .builder
-                    .build_int_truncate(
-                        raw,
-                        self.context
-                            .custom_width_int_type(
-                                std::num::NonZeroU32::new(width.bits()).expect("float width"),
-                            )
-                            .expect("float bits type"),
-                        "job_float_bits",
-                    )
-                    .expect("job float bits");
-                Some(
-                    self.builder
-                        .build_bit_cast(bits, self.llvm_type(ty).expect("float type"), "job_value")
-                        .expect("job float"),
-                )
-            }
-            other => Some(
-                self.builder
                     .build_int_to_ptr(
                         raw,
-                        self.llvm_type(other)
-                            .expect("pointer type")
-                            .into_pointer_type(),
-                        "job_value",
+                        self.context.ptr_type(AddressSpace::default()),
+                        "job_box",
                     )
-                    .expect("job pointer")
-                    .into(),
-            ),
+                    .expect("job result box");
+                let box_type = task_result_box_type(self.context, self.module, ty);
+                let payload = self
+                    .builder
+                    .build_struct_gep(box_type, pointer, OBJECT_HEADER_FIELDS, "job_payload")
+                    .expect("job payload field");
+                Some(
+                    self.builder
+                        .build_load(
+                            self.llvm_type(ty).expect("task result type"),
+                            payload,
+                            "job_value",
+                        )
+                        .expect("load task result"),
+                )
+            }
         }
+    }
+
+    /// Adapts a boxed managed callable to the executor's typed background
+    /// error callback ABI. The callback is invoked only from a scheduler task,
+    /// so suspension and cleanup retain a normal Zirk task context.
+    fn build_background_error_thunk(&self, layout_id: u32) -> FunctionValue<'ctx> {
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let thunk = self.llvm.add_function(
+            "zk.background_error_thunk",
+            i32_type.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(Linkage::Private),
+        );
+        thunk.set_call_conventions(0);
+        set_uwtable(self.context, thunk);
+        let resume = self.builder.get_insert_block().expect("instruction block");
+        let entry = self.context.append_basic_block(thunk, "entry");
+        self.builder.position_at_end(entry);
+
+        let target = thunk
+            .get_nth_param(0)
+            .expect("callable target")
+            .into_pointer_value();
+        let capture = thunk
+            .get_nth_param(1)
+            .expect("capture block")
+            .into_pointer_value();
+        let throwable = thunk.get_nth_param(2).expect("Throwable");
+        let mut arguments: Vec<BasicMetadataValueEnum> =
+            Vec::with_capacity(layout.captures.len() + 1);
+        for (index, capture_ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let address = unsafe {
+                self.builder.build_gep(
+                    self.context.i8_type(),
+                    capture,
+                    &[offset],
+                    "error_handler_capture",
+                )
+            }
+            .expect("capture address");
+            let ty = self.llvm_type(*capture_ty).expect("capture LLVM type");
+            arguments.push(
+                self.builder
+                    .build_load(ty, address, "capture")
+                    .expect("capture load")
+                    .into(),
+            );
+        }
+        arguments.push(throwable.into());
+        let signature = closure_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        self.builder
+            .build_indirect_call(signature, target, &arguments, "background_error_handler")
+            .expect("call managed background error handler");
+        let pending = self
+            .builder
+            .build_call(self.runtime.has_pending_exception, &[], "handler_threw")
+            .expect("zirk_rt_has_pending_exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("exception predicate")
+            .into_int_value();
+        let threw = self.context.append_basic_block(thunk, "handler_threw");
+        let returned = self.context.append_basic_block(thunk, "handler_returned");
+        self.builder
+            .build_conditional_branch(pending, threw, returned)
+            .expect("handler exception branch");
+
+        self.builder.position_at_end(threw);
+        let exception = self
+            .builder
+            .build_call(
+                self.runtime.take_pending_exception,
+                &[],
+                "handler_exception",
+            )
+            .expect("zirk_rt_take_pending_exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("exception value");
+        self.builder
+            .build_call(
+                self.runtime.background_handler_failed,
+                &[exception.into()],
+                "",
+            )
+            .expect("zirk_rt_background_handler_failed");
+        self.builder
+            .build_return(Some(&i32_type.const_int(1, false)))
+            .expect("handler failed status");
+
+        self.builder.position_at_end(returned);
+        self.builder
+            .build_return(Some(&i32_type.const_zero()))
+            .expect("handler success status");
+        self.builder.position_at_end(resume);
+        thunk
     }
 
     /// Builds the per-site `extern "C" fn(ptr) -> i64` thunk a `BranchStart`
     /// hands to `zirk_rt_spawn` / `zirk_rt_timer_*`: it reloads the captured
     /// values from the boxed capture block, calls through the callable's own
     /// function pointer, turns a pending Zirk exception into a branch failure,
-    /// and widens the normal result to the runtime's branch-result word. The
+    /// and boxes the normal result in a descriptor-backed GC allocation. The
     /// builder's insert position is saved and restored.
     ///
     fn build_branch_thunk(&self, target: &str, layout_id: u32, site: u32) -> FunctionValue<'ctx> {
+        self.build_branch_thunk_named(target, layout_id, site, &format!("zk.branch_thunk.{site}"))
+    }
+
+    fn build_branch_thunk_named(
+        &self,
+        target: &str,
+        layout_id: u32,
+        site: u32,
+        thunk_name: &str,
+    ) -> FunctionValue<'ctx> {
         let layout = &self.module.closures[layout_id as usize];
+        let returns = self
+            .module
+            .function(target)
+            .expect("branch target is a module function")
+            .return_type;
 
         let thunk = self.llvm.add_function(
-            &format!("zk.branch_thunk.{site}"),
+            thunk_name,
             self.context.i64_type().fn_type(
                 &[self.context.ptr_type(AddressSpace::default()).into()],
                 false,
@@ -1516,6 +1948,102 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .get_first_param()
             .expect("capture argument")
             .into_pointer_value();
+
+        // Reserve and root the result box before invoking user code. This
+        // avoids a GC gap after the callee has returned an aggregate whose
+        // own shadow-stack frame has already been popped.
+        let result_box = if let Some(result_type) = self.llvm_type(returns) {
+            let box_type = task_result_box_type(self.context, self.module, returns);
+            let paths = gc_reference_paths_of(self.module, returns);
+            let offsets: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    let mut full_path = vec![OBJECT_HEADER_FIELDS];
+                    full_path.extend(path);
+                    const_field_offset(self.context, box_type, &full_path)
+                })
+                .collect();
+            let word = self.context.i64_type();
+            let mut descriptor_fields: Vec<BasicValueEnum> = vec![
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into(),
+                word.const_zero().into(), // no ancestors
+                word.const_zero().into(), // no contracts
+                word.const_int(offsets.len() as u64, false).into(),
+            ];
+            descriptor_fields.extend(offsets.iter().map(|offset| BasicValueEnum::from(*offset)));
+            let descriptor = self.context.const_struct(&descriptor_fields, false);
+            let descriptor_global = self.llvm.add_global(
+                descriptor.get_type(),
+                None,
+                &format!("zk.task.result.descriptor.{site}"),
+            );
+            descriptor_global.set_initializer(&descriptor);
+            descriptor_global.set_constant(true);
+            descriptor_global.set_linkage(Linkage::Private);
+
+            let ptr = self.context.ptr_type(AddressSpace::default());
+            let root_slot = self
+                .builder
+                .build_alloca(ptr, "task_result_root")
+                .expect("result root slot");
+            self.builder
+                .build_store(root_slot, ptr.const_null())
+                .expect("zero result root");
+            let root_array_ty = ptr.array_type(1);
+            let root_array = self
+                .builder
+                .build_alloca(root_array_ty, "task_result_roots")
+                .expect("result root array");
+            let root_entry = unsafe {
+                self.builder.build_gep(
+                    root_array_ty,
+                    root_array,
+                    &[
+                        self.context.i32_type().const_zero(),
+                        self.context.i32_type().const_zero(),
+                    ],
+                    "task_result_root_entry",
+                )
+            }
+            .expect("result root entry");
+            self.builder
+                .build_store(root_entry, root_slot)
+                .expect("store result root address");
+            self.builder
+                .build_call(
+                    self.runtime.push_frame,
+                    &[root_array.into(), word.const_int(1, false).into()],
+                    "",
+                )
+                .expect("push task result root");
+
+            let size = box_type.size_of().expect("sized task result box");
+            let align = box_type.get_alignment();
+            let box_pointer = self
+                .builder
+                .build_call(
+                    self.runtime.alloc,
+                    &[size.into(), align.into()],
+                    "task_result_box",
+                )
+                .expect("allocate task result box")
+                .try_as_basic_value()
+                .basic()
+                .expect("allocator returns pointer")
+                .into_pointer_value();
+            self.builder
+                .build_store(box_pointer, descriptor_global.as_pointer_value())
+                .expect("store result descriptor");
+            self.builder
+                .build_store(root_slot, box_pointer)
+                .expect("root result box");
+            Some((result_type, box_type, root_slot, box_pointer))
+        } else {
+            None
+        };
         let mut args: Vec<BasicMetadataValueEnum> = Vec::new();
         for (index, ty) in layout.captures.iter().enumerate() {
             let offset = self.closure_capture_offset(layout, index);
@@ -1532,11 +2060,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             );
         }
 
-        let returns = self
-            .module
-            .function(target)
-            .expect("branch target is a module function")
-            .return_type;
         let call = self
             .builder
             .build_call(self.functions[target], &args, "branch_body")
@@ -1568,6 +2091,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .try_as_basic_value()
             .basic()
             .expect("take_pending_exception returns a pointer");
+        if result_box.is_some() {
+            self.builder
+                .build_call(self.runtime.pop_frame, &[], "")
+                .expect("pop result root on failure");
+        }
         self.builder
             .build_call(self.runtime.branch_fail, &[exception.into()], "branch_fail")
             .expect("branch_fail");
@@ -1576,7 +2104,28 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("branch_fail diverges");
 
         self.builder.position_at_end(ok);
-        let packed = self.widen_to_branch_word(value, returns);
+        let packed = if let Some((_, box_type, _, box_pointer)) = result_box {
+            let payload = self
+                .builder
+                .build_struct_gep(
+                    box_type,
+                    box_pointer,
+                    OBJECT_HEADER_FIELDS,
+                    "task_result_payload",
+                )
+                .expect("result payload field");
+            self.builder
+                .build_store(payload, value.expect("non-void task result"))
+                .expect("store task result payload");
+            self.builder
+                .build_call(self.runtime.pop_frame, &[], "")
+                .expect("pop result root");
+            self.builder
+                .build_ptr_to_int(box_pointer, self.context.i64_type(), "task_result_word")
+                .expect("box pointer to word")
+        } else {
+            self.context.i64_type().const_zero()
+        };
         self.builder
             .build_return(Some(&packed))
             .expect("branch thunk return");
@@ -1846,6 +2395,106 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
     }
 
+    fn borrowed_value_field_pointer(&self, view: ir::Operand, path: &[u32]) -> PointerValue<'ctx> {
+        let ir::IrType::BorrowedView { mutex_type, .. } = self.value_types[&view.0] else {
+            unreachable!("verified field projection requires BorrowedView")
+        };
+        self.payload_path_pointer(
+            self.operand(view).into_pointer_value(),
+            self.module.mutex_types[mutex_type as usize],
+            path,
+        )
+    }
+
+    /// Applies a statically verified field path to inline aggregate storage.
+    fn payload_path_pointer(
+        &self,
+        mut pointer: PointerValue<'ctx>,
+        mut ty: ir::IrType,
+        path: &[u32],
+    ) -> PointerValue<'ctx> {
+        for &index in path {
+            let (struct_ty, field_ty, llvm_index) = match ty {
+                ir::IrType::Value(id) => {
+                    let layout = &self.module.values[id as usize];
+                    (
+                        value_struct(
+                            self.context,
+                            layout,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        ),
+                        layout.fields[index as usize].ty,
+                        index,
+                    )
+                }
+                ir::IrType::Enum(id) => {
+                    let layout = &self.module.enums[id as usize];
+                    let field = index
+                        .checked_sub(ENUM_HEADER_FIELDS)
+                        .expect("verified enum GC path includes header");
+                    (
+                        enum_struct(
+                            self.context,
+                            layout,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        ),
+                        layout.fields[field as usize].ty,
+                        index,
+                    )
+                }
+                ir::IrType::Closure(id) => {
+                    let layout = &self.module.closures[id as usize];
+                    let field = index
+                        .checked_sub(CLOSURE_HEADER_FIELDS)
+                        .expect("verified closure GC path includes header");
+                    (
+                        closure_struct(
+                            self.context,
+                            layout,
+                            &self.module.closures,
+                            &self.module.values,
+                            &self.module.enums,
+                        ),
+                        layout.captures[field as usize],
+                        index,
+                    )
+                }
+                ir::IrType::Nullable(nullable) => {
+                    let inner = nullable.inner();
+                    let field_index = index
+                        .checked_sub(NULLABLE_HEADER_FIELDS)
+                        .expect("verified nullable GC path includes header");
+                    (
+                        self.llvm_type(ty)
+                            .expect("nullable payload type")
+                            .into_struct_type(),
+                        inner,
+                        field_index,
+                    )
+                }
+                ir::IrType::Callable(_) => {
+                    let field = index;
+                    (
+                        callable_struct(self.context),
+                        ir::IrType::Pointer(self.module.pointer_types.len() as u32),
+                        field,
+                    )
+                }
+                _ => unreachable!("verified GC path only descends into inline aggregate storage"),
+            };
+            pointer = self
+                .builder
+                .build_struct_gep(struct_ty, pointer, llvm_index, "mutex.payload.path")
+                .expect("verified payload path");
+            ty = field_ty;
+        }
+        pointer
+    }
+
     /// The signature of one contract method, for one concrete call.
     ///
     /// Implementations of a generic contract (`Container<T>`) share their
@@ -1929,6 +2578,553 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
     fn emit_instruction(&mut self, instruction: &ir::Instruction) {
         let value: Option<BasicValueEnum> = match &instruction.kind {
+            ir::InstKind::BorrowViewLoad { view } => {
+                let ty = self.llvm_type(instruction.ty).expect("borrow payload type");
+                Some(
+                    self.builder
+                        .build_load(
+                            ty,
+                            self.operand(*view).into_pointer_value(),
+                            "mutex.payload.load",
+                        )
+                        .expect("load borrowed mutex payload"),
+                )
+            }
+            ir::InstKind::BorrowViewStore { view, value } => {
+                self.builder
+                    .build_store(
+                        self.operand(*view).into_pointer_value(),
+                        self.operand(*value),
+                    )
+                    .expect("store borrowed mutex payload");
+                None
+            }
+            ir::InstKind::BorrowViewFieldLoad { view, path } => {
+                let pointer = self.borrowed_value_field_pointer(*view, path);
+                let ty = self.llvm_type(instruction.ty).expect("borrowed field type");
+                Some(
+                    self.builder
+                        .build_load(ty, pointer, "mutex.field.load")
+                        .expect("load borrowed field"),
+                )
+            }
+            ir::InstKind::BorrowViewFieldStore { view, path, value } => {
+                let pointer = self.borrowed_value_field_pointer(*view, path);
+                self.builder
+                    .build_store(pointer, self.operand(*value))
+                    .expect("store borrowed field");
+                None
+            }
+            ir::InstKind::MutexWithCall {
+                mutex,
+                callback,
+                layout,
+                result_slot,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let capture_ptr = self
+                    .builder
+                    .build_extract_value(
+                        callable,
+                        CALLABLE_CAPTURE_FIELD,
+                        "mutex.capture.root.value",
+                    )
+                    .expect("extract callable capture pointer")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "mutex.capture.root")
+                    .expect("allocate temporary capture root");
+                self.builder
+                    .build_store(capture_root, capture_ptr)
+                    .expect("store capture root");
+                let mutex_root = self
+                    .builder
+                    .build_alloca(ptr, "mutex.handle.root")
+                    .expect("allocate temporary mutex root");
+                self.builder
+                    .build_store(mutex_root, self.operand(*mutex))
+                    .expect("store mutex handle root");
+                let roots_ty = ptr.array_type(2);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "mutex.roots")
+                    .expect("allocate temporary root list");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "mutex.root.entry",
+                    )
+                }
+                .expect("root entry");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register capture root address");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_int(1, false),
+                        ],
+                        "mutex.handle.root.entry",
+                    )
+                }
+                .expect("mutex root entry");
+                self.builder
+                    .build_store(root_entry, mutex_root)
+                    .expect("register mutex root address");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(2, false).into(),
+                        ],
+                        "mutex.push.frame",
+                    )
+                    .expect("push mutex adapter roots");
+
+                let result_ptr = result_slot
+                    .map(|slot| self.slots[&slot])
+                    .unwrap_or_else(|| ptr.const_null());
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into(), ptr.into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "mutex.callback.context")
+                    .expect("allocate mutex callback context");
+                let mut context_value = self
+                    .builder
+                    .build_insert_value(
+                        context_ty.get_undef(),
+                        callable,
+                        0,
+                        "mutex.context.callable",
+                    )
+                    .expect("insert callback callable")
+                    .into_struct_value();
+                context_value = self
+                    .builder
+                    .build_insert_value(context_value, result_ptr, 1, "mutex.context.result")
+                    .expect("insert result slot")
+                    .into_struct_value();
+                self.builder
+                    .build_store(context, context_value)
+                    .expect("store callback context");
+                let thunk = self.mutex_with_thunk(*layout);
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.gc_mutex_with,
+                        &[
+                            self.operand(*mutex).into(),
+                            thunk.as_global_value().as_pointer_value().into(),
+                            context.into(),
+                        ],
+                        "mutex.with.status",
+                    )
+                    .expect("call runtime mutex.with ABI");
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "mutex.pop.frame")
+                    .expect("pop mutex adapter roots");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("mutex.with returns status"),
+                )
+            }
+            ir::InstKind::MutexNew {
+                payload,
+                mutex_type,
+                object_slot,
+            } => {
+                let payload_ty = self.module.mutex_types[*mutex_type as usize];
+                let llvm_ty = self.llvm_type(payload_ty).expect("Mutex payload is sized");
+                let staging = self
+                    .builder
+                    .build_alloca(llvm_ty, "mutex.payload.staging")
+                    .expect("allocate mutex payload staging");
+                self.builder
+                    .build_store(staging, self.operand(*payload))
+                    .expect("stage mutex payload");
+                let reference_paths = gc_reference_paths_of(self.module, payload_ty);
+                let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                let i64_ty = self.context.i64_type();
+                let status = self
+                    .builder
+                    .build_alloca(self.context.i32_type(), "mutex.new.status")
+                    .expect("allocate MutexNew status");
+                // The destination participates in the function's GC root frame
+                // while the allocator may collect. Never expose uninitialized
+                // stack contents as a managed pointer; failures retain null.
+                self.builder
+                    .build_store(self.slots[object_slot], ptr_ty.const_null())
+                    .expect("clear Mutex destination root");
+                self.builder
+                    .build_store(status, self.context.i32_type().const_int(4, false))
+                    .expect("initialize MutexNew failure status");
+                if reference_paths.is_empty() {
+                    let call = self
+                        .builder
+                        .build_call(
+                            self.runtime.gc_mutex_alloc,
+                            &[
+                                staging.into(),
+                                self.byte_size_of(payload_ty).into(),
+                                self.byte_align_of(payload_ty).into(),
+                                ptr_ty.const_null().into(),
+                                i64_ty.const_zero().into(),
+                                status.into(),
+                            ],
+                            "mutex.new.handle",
+                        )
+                        .expect("allocate GC mutex");
+                    let handle = call
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("Mutex allocator returns handle");
+                    self.builder
+                        .build_store(self.slots[object_slot], handle)
+                        .expect("store Mutex handle");
+                } else {
+                    let roots_ty = ptr_ty.array_type(reference_paths.len() as u32);
+                    let roots = self
+                        .builder
+                        .build_alloca(roots_ty, "mutex.payload.roots")
+                        .expect("allocate staging root array");
+                    let offsets_ty = i64_ty.array_type(reference_paths.len() as u32);
+                    let offsets = self
+                        .builder
+                        .build_alloca(offsets_ty, "mutex.reference.offsets")
+                        .expect("allocate offset array");
+                    for (index, path) in reference_paths.iter().enumerate() {
+                        let index = index as u32;
+                        let root_entry = unsafe {
+                            self.builder.build_gep(
+                                roots_ty,
+                                roots,
+                                &[
+                                    self.context.i32_type().const_zero(),
+                                    self.context.i32_type().const_int(index as u64, false),
+                                ],
+                                "mutex.payload.root.entry",
+                            )
+                        }
+                        .expect("root entry");
+                        let root_address = if path.is_empty() {
+                            staging
+                        } else {
+                            self.payload_path_pointer(staging, payload_ty, path)
+                        };
+                        self.builder
+                            .build_store(root_entry, root_address)
+                            .expect("store staged root address");
+                        let offset_entry = unsafe {
+                            self.builder.build_gep(
+                                offsets_ty,
+                                offsets,
+                                &[
+                                    self.context.i32_type().const_zero(),
+                                    self.context.i32_type().const_int(index as u64, false),
+                                ],
+                                "mutex.reference.offset.entry",
+                            )
+                        }
+                        .expect("offset entry");
+                        let offset = if path.is_empty() {
+                            i64_ty.const_zero()
+                        } else {
+                            let struct_ty = self
+                                .llvm_type(payload_ty)
+                                .expect("sized Mutex payload")
+                                .into_struct_type();
+                            const_field_offset(self.context, struct_ty, path)
+                        };
+                        self.builder
+                            .build_store(offset_entry, offset)
+                            .expect("store reference offset");
+                    }
+                    self.builder
+                        .build_call(
+                            self.runtime.push_frame,
+                            &[
+                                roots.into(),
+                                i64_ty.const_int(reference_paths.len() as u64, false).into(),
+                            ],
+                            "mutex.payload.push.frame",
+                        )
+                        .expect("root staged Mutex payload");
+                    let call = self
+                        .builder
+                        .build_call(
+                            self.runtime.gc_mutex_alloc,
+                            &[
+                                staging.into(),
+                                self.byte_size_of(payload_ty).into(),
+                                self.byte_align_of(payload_ty).into(),
+                                offsets.into(),
+                                i64_ty.const_int(reference_paths.len() as u64, false).into(),
+                                status.into(),
+                            ],
+                            "mutex.new.handle",
+                        )
+                        .expect("allocate GC mutex");
+                    let handle = call
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("Mutex allocator returns handle");
+                    self.builder
+                        .build_call(self.runtime.pop_frame, &[], "mutex.payload.pop.frame")
+                        .expect("unroot staged Mutex payload");
+                    self.builder
+                        .build_store(self.slots[object_slot], handle)
+                        .expect("store Mutex handle");
+                }
+                Some(
+                    self.builder
+                        .build_load(self.context.i32_type(), status, "mutex.new.status.value")
+                        .expect("load MutexNew status"),
+                )
+            }
+            // These verifier markers have no executable lowering yet. The
+            // object API rejects them before emission; raw LLVM users must also
+            // fail closed instead of treating lock/unlock as no-ops or a
+            // borrowed payload as an alias of its mutex handle.
+            ir::InstKind::MutexAcquire { .. }
+            | ir::InstKind::MutexRelease { .. }
+            | ir::InstKind::BorrowViewStart { .. }
+            | ir::InstKind::BorrowViewEnd { .. } => {
+                let trap = self.llvm.get_function("llvm.trap").unwrap_or_else(|| {
+                    self.llvm.add_function(
+                        "llvm.trap",
+                        self.context.void_type().fn_type(&[], false),
+                        None,
+                    )
+                });
+                self.builder
+                    .build_call(trap, &[], "mutex.marker.not.lowered")
+                    .expect("building the noreturn fail-closed marker call");
+                None
+            }
+            ir::InstKind::AtomicNew {
+                kind,
+                value,
+                object,
+            } => {
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.atomic_managed_new,
+                        &[
+                            self.context
+                                .i32_type()
+                                .const_int(*kind as u64, false)
+                                .into(),
+                            self.atomic_pack(*value).into(),
+                            self.slots[object].into(),
+                        ],
+                        "atomic.new.status",
+                    )
+                    .expect("managed Atomic constructor");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::AtomicLoad { object, order, out } => {
+                let temp = self
+                    .builder
+                    .build_alloca(self.context.i64_type(), "atomic.load.out")
+                    .expect("Atomic load output");
+                self.builder
+                    .build_store(temp, self.context.i64_type().const_zero())
+                    .expect("initialize Atomic load output");
+                let (function, args) = if let Some(order) = order {
+                    (
+                        self.runtime.atomic_managed_load_ordered,
+                        vec![
+                            self.operand(*object).into(),
+                            self.operand(*order).into(),
+                            temp.into(),
+                        ],
+                    )
+                } else {
+                    (
+                        self.runtime.atomic_managed_load,
+                        vec![self.operand(*object).into(), temp.into()],
+                    )
+                };
+                let call = self
+                    .builder
+                    .build_call(function, &args, "atomic.load.status")
+                    .expect("managed Atomic load");
+                let packed = self
+                    .builder
+                    .build_load(self.context.i64_type(), temp, "atomic.load.value")
+                    .expect("load Atomic result")
+                    .into_int_value();
+                self.atomic_unpack_to_slot(packed, *out);
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::AtomicStore {
+                object,
+                value,
+                order,
+            } => {
+                let args = if let Some(order) = order {
+                    vec![
+                        self.operand(*object).into(),
+                        self.atomic_pack(*value).into(),
+                        self.operand(*order).into(),
+                    ]
+                } else {
+                    vec![
+                        self.operand(*object).into(),
+                        self.atomic_pack(*value).into(),
+                    ]
+                };
+                let function = if order.is_some() {
+                    self.runtime.atomic_managed_store_ordered
+                } else {
+                    self.runtime.atomic_managed_store
+                };
+                self.builder
+                    .build_call(function, &args, "atomic.store.status")
+                    .expect("managed Atomic store")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::AtomicExchange {
+                object,
+                value,
+                order,
+                out,
+            }
+            | ir::InstKind::AtomicFetchAdd {
+                object,
+                value,
+                order,
+                out,
+            }
+            | ir::InstKind::AtomicFetchSub {
+                object,
+                value,
+                order,
+                out,
+            } => {
+                let temp = self
+                    .builder
+                    .build_alloca(self.context.i64_type(), "atomic.rmw.out")
+                    .expect("Atomic operation output");
+                self.builder
+                    .build_store(temp, self.context.i64_type().const_zero())
+                    .expect("initialize Atomic output");
+                let (plain, ordered) = match &instruction.kind {
+                    ir::InstKind::AtomicExchange { .. } => (
+                        self.runtime.atomic_managed_exchange,
+                        self.runtime.atomic_managed_exchange_ordered,
+                    ),
+                    ir::InstKind::AtomicFetchAdd { .. } => (
+                        self.runtime.atomic_managed_fetch_add,
+                        self.runtime.atomic_managed_fetch_add_ordered,
+                    ),
+                    _ => (
+                        self.runtime.atomic_managed_fetch_sub,
+                        self.runtime.atomic_managed_fetch_sub_ordered,
+                    ),
+                };
+                let (function, args) = if let Some(order) = order {
+                    (
+                        ordered,
+                        vec![
+                            self.operand(*object).into(),
+                            self.atomic_pack(*value).into(),
+                            self.operand(*order).into(),
+                            temp.into(),
+                        ],
+                    )
+                } else {
+                    (
+                        plain,
+                        vec![
+                            self.operand(*object).into(),
+                            self.atomic_pack(*value).into(),
+                            temp.into(),
+                        ],
+                    )
+                };
+                let call = self
+                    .builder
+                    .build_call(function, &args, "atomic.rmw.status")
+                    .expect("managed Atomic RMW");
+                let packed = self
+                    .builder
+                    .build_load(self.context.i64_type(), temp, "atomic.rmw.value")
+                    .expect("load Atomic RMW result")
+                    .into_int_value();
+                self.atomic_unpack_to_slot(packed, *out);
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::AtomicCompareExchange {
+                object,
+                current,
+                new_value,
+                success_order,
+                failure_order,
+                observed,
+                exchanged,
+            } => {
+                let temp = self
+                    .builder
+                    .build_alloca(self.context.i64_type(), "atomic.cmpxchg.out")
+                    .expect("Atomic compare-exchange output");
+                let flag = self
+                    .builder
+                    .build_alloca(self.context.bool_type(), "atomic.cmpxchg.flag")
+                    .expect("Atomic compare-exchange flag");
+                self.builder
+                    .build_store(temp, self.context.i64_type().const_zero())
+                    .expect("initialize compare-exchange output");
+                self.builder
+                    .build_store(flag, self.context.bool_type().const_zero())
+                    .expect("initialize compare-exchange flag");
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.atomic_managed_compare_exchange,
+                        &[
+                            self.operand(*object).into(),
+                            self.atomic_pack(*current).into(),
+                            self.atomic_pack(*new_value).into(),
+                            self.operand(*success_order).into(),
+                            self.operand(*failure_order).into(),
+                            temp.into(),
+                            flag.into(),
+                        ],
+                        "atomic.cmpxchg.status",
+                    )
+                    .expect("managed Atomic compare-exchange");
+                let packed = self
+                    .builder
+                    .build_load(self.context.i64_type(), temp, "atomic.cmpxchg.value")
+                    .expect("load observed Atomic value")
+                    .into_int_value();
+                self.atomic_unpack_to_slot(packed, *observed);
+                let did_exchange = self
+                    .builder
+                    .build_load(self.context.bool_type(), flag, "atomic.cmpxchg.exchanged")
+                    .expect("load compare-exchange flag");
+                self.builder
+                    .build_store(self.slots[exchanged], did_exchange)
+                    .expect("store compare-exchange flag");
+                call.try_as_basic_value().basic()
+            }
             ir::InstKind::ConstInt(value) => Some(match instruction.ty {
                 ir::IrType::Int(width) => {
                     let int_type = self
@@ -4998,6 +6194,61 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 call.try_as_basic_value().basic()
             }
 
+            ir::InstKind::ThreadRun {
+                callable_slot,
+                result_slot,
+                exception_slot,
+            } => {
+                let callable_type = self.slot_types[callable_slot];
+                let callable = self
+                    .builder
+                    .build_load(
+                        self.llvm_type(callable_type).expect("callable LLVM type"),
+                        self.slots[callable_slot],
+                        "thread.callable",
+                    )
+                    .expect("load thread callable")
+                    .into_struct_value();
+                let target = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_FUNCTION_FIELD, "thread.target")
+                    .expect("thread target pointer")
+                    .into_pointer_value();
+                let captures = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "thread.captures")
+                    .expect("thread captures pointer")
+                    .into_pointer_value();
+                let layout_id = match callable_type {
+                    ir::IrType::Callable(id) => id,
+                    _ => unreachable!("verified ThreadRun callable slot is Callable"),
+                };
+                let thunk = self.thread_run_thunk(layout_id);
+                let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                let result_ptr = result_slot.map_or_else(
+                    || self.context.ptr_type(AddressSpace::default()).const_null(),
+                    |slot| self.slots[&slot],
+                );
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.thread_run,
+                            &[
+                                thunk_ptr.into(),
+                                target.into(),
+                                captures.into(),
+                                result_ptr.into(),
+                                self.slots[exception_slot].into(),
+                            ],
+                            "thread.run.status",
+                        )
+                        .expect("zirk_rt_thread_run")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("thread status"),
+                )
+            }
+
             // --- Structured concurrency (`concurrent-blocks-and-timers`) ---
             ir::InstKind::ScopeEnter => Some(
                 self.builder
@@ -5007,6 +6258,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
                     .expect("scope id"),
             ),
+            ir::InstKind::ScopeEnterCollectAll => Some(
+                self.builder
+                    .build_call(self.runtime.scope_enter_collect_all, &[], "collect_scope")
+                    .expect("zirk_rt_scope_enter_collect_all")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("collect-all scope id"),
+            ),
             ir::InstKind::ScopeExit { scope } => {
                 let scope_id = self.operand(*scope);
                 self.builder
@@ -5014,12 +6273,56 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("zirk_rt_scope_exit");
                 None
             }
+            ir::InstKind::ScopeExitCollectAll { scope } => {
+                let scope_id = self.operand(*scope);
+                self.builder
+                    .build_call(
+                        self.runtime.scope_exit_collect_all,
+                        &[scope_id.into()],
+                        "collect_scope_close",
+                    )
+                    .expect("zirk_rt_scope_exit_collect_all");
+                None
+            }
+            ir::InstKind::ScopeCancel { scope } => {
+                self.builder
+                    .build_call(
+                        self.runtime.scope_cancel,
+                        &[self.operand(*scope).into()],
+                        "",
+                    )
+                    .expect("zirk_rt_scope_cancel");
+                None
+            }
+            ir::InstKind::ScopeOutcomeWaitTake {
+                scope,
+                ordinal_slot,
+                value_slot,
+                throwable_slot,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.scope_outcome_wait_take,
+                        &[
+                            self.operand(*scope).into(),
+                            self.slots[ordinal_slot].into(),
+                            self.slots[value_slot].into(),
+                            self.slots[throwable_slot].into(),
+                        ],
+                        "scope_outcome_status",
+                    )
+                    .expect("zirk_rt_scope_outcome_wait_take")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("scope outcome status"),
+            ),
             ir::InstKind::BranchStart {
                 target,
                 body,
                 scope,
                 kind,
                 delay,
+                status_slot,
             } => {
                 let callable = self.operand(*body).into_struct_value();
                 let capture = self
@@ -5036,19 +6339,46 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let thunk_ptr = thunk.as_global_value().as_pointer_value();
                 let scope_id = self.operand(*scope);
 
+                let status_ptr = self.slots[status_slot];
                 let handle = match kind {
                     ir::BranchKind::Spawn => {
                         let job = self
                             .builder
                             .build_call(
                                 self.runtime.spawn,
-                                &[thunk_ptr.into(), capture.into()],
+                                &[thunk_ptr.into(), capture.into(), status_ptr.into()],
                                 "branch",
                             )
                             .expect("zirk_rt_spawn")
                             .try_as_basic_value()
                             .basic()
                             .expect("job handle");
+                        let status = self
+                            .builder
+                            .build_load(self.context.i32_type(), status_ptr, "spawn_status")
+                            .expect("spawn admission status")
+                            .into_int_value();
+                        let admitted = self
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                status,
+                                self.context.i32_type().const_zero(),
+                                "spawn_admitted",
+                            )
+                            .expect("spawn status comparison");
+                        let parent = self
+                            .builder
+                            .get_insert_block()
+                            .expect("spawn instruction has an insertion block")
+                            .get_parent()
+                            .expect("spawn block has a parent function");
+                        let register = self.context.append_basic_block(parent, "spawn_register");
+                        let done = self.context.append_basic_block(parent, "spawn_done");
+                        self.builder
+                            .build_conditional_branch(admitted, register, done)
+                            .expect("branch on spawn admission");
+                        self.builder.position_at_end(register);
                         self.builder
                             .build_call(
                                 self.runtime.branch_register,
@@ -5056,6 +6386,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                                 "",
                             )
                             .expect("zirk_rt_branch_register");
+                        self.builder
+                            .build_unconditional_branch(done)
+                            .expect("join spawn status paths");
+                        self.builder.position_at_end(done);
                         job
                     }
                     ir::BranchKind::TimerAfter | ir::BranchKind::TimerEvery => {
@@ -5073,6 +6407,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                                     nanos.into(),
                                     thunk_ptr.into(),
                                     capture.into(),
+                                    status_ptr.into(),
                                 ],
                                 "timer",
                             )
@@ -5083,6 +6418,97 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     }
                 };
                 Some(handle)
+            }
+            ir::InstKind::BackgroundStart {
+                target,
+                body,
+                status_slot,
+            } => {
+                let callable = self.operand(*body).into_struct_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "background_capture")
+                    .expect("background capture pointer")
+                    .into_pointer_value();
+                let layout_id = match self.value_types.get(&body.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("BackgroundStart body is not a Callable: {other:?}"),
+                };
+                let target_name = format!("zk.background_thunk.{target}");
+                let thunk =
+                    self.build_branch_thunk_named(target.as_str(), layout_id, 0, &target_name);
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.background_spawn,
+                        &[
+                            thunk.as_global_value().as_pointer_value().into(),
+                            capture.into(),
+                        ],
+                        "background_admission_status",
+                    )
+                    .expect("zirk_rt_background_spawn")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("background admission status")
+                    .into_int_value();
+                self.builder
+                    .build_store(self.slots[status_slot], status)
+                    .expect("store background admission status");
+                None
+            }
+            ir::InstKind::ServiceStart {
+                target,
+                body,
+                status_slot,
+            } => {
+                let callable = self.operand(*body).into_struct_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "service_capture")
+                    .expect("service capture block")
+                    .into_pointer_value();
+                let layout_id = match self.value_types.get(&body.0) {
+                    Some(ir::IrType::Callable(id)) => *id,
+                    other => panic!("ServiceStart body is not a Callable: {other:?}"),
+                };
+                let site = format!("{}.{}", instruction.span.file.0, instruction.span.start);
+                let thunk = self.build_service_thunk(target, layout_id, &site);
+                let _id = self
+                    .builder
+                    .build_call(
+                        self.runtime.service_register,
+                        &[
+                            thunk.as_global_value().as_pointer_value().into(),
+                            capture.into(),
+                            capture.into(),
+                            self.context.i32_type().const_int(1, false).into(),
+                            self.slots[status_slot].into(),
+                        ],
+                        "service_id",
+                    )
+                    .expect("zirk_rt_service_register");
+                None
+            }
+            ir::InstKind::ServiceReady {
+                context,
+                status_slot,
+            } => {
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.service_ready,
+                        &[self.operand(*context).into()],
+                        "service_ready_status",
+                    )
+                    .expect("zirk_rt_service_ready")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("service readiness status");
+                self.builder
+                    .build_store(self.slots[status_slot], status)
+                    .expect("store service readiness status");
+                None
             }
             ir::InstKind::ParallelForStart {
                 target,
@@ -5132,6 +6558,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("zirk_rt_parallel_for");
                 None
             }
+            ir::InstKind::SafepointPoll => {
+                self.builder
+                    .build_call(self.runtime.safepoint_poll, &[], "")
+                    .expect("zirk_rt_safepoint_poll");
+                None
+            }
             ir::InstKind::JobWait { job, result } => {
                 let raw = self
                     .builder
@@ -5142,6 +6574,132 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("job result word")
                     .into_int_value();
                 self.narrow_from_branch_word(raw, *result)
+            }
+            ir::InstKind::JobOutcomeWaitTake {
+                job,
+                value_slot,
+                throwable_slot,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.job_outcome_wait_take,
+                        &[
+                            self.operand(*job).into(),
+                            self.slots[value_slot].into(),
+                            self.slots[throwable_slot].into(),
+                        ],
+                        "job_outcome_status",
+                    )
+                    .expect("zirk_rt_job_outcome_wait_take")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("job outcome status"),
+            ),
+            ir::InstKind::JobOutcomeTake {
+                job,
+                value_slot,
+                throwable_slot,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.job_outcome_take,
+                        &[
+                            self.operand(*job).into(),
+                            self.slots[value_slot].into(),
+                            self.slots[throwable_slot].into(),
+                        ],
+                        "job_outcome_status",
+                    )
+                    .expect("zirk_rt_job_outcome_take")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("job outcome status"),
+            ),
+            ir::InstKind::JobResultLoad {
+                box_pointer,
+                result,
+            } => {
+                let pointer = self.operand(*box_pointer).into_pointer_value();
+                let box_type = task_result_box_type(self.context, self.module, *result);
+                let payload = self
+                    .builder
+                    .build_struct_gep(box_type, pointer, OBJECT_HEADER_FIELDS, "job_payload")
+                    .expect("job payload field");
+                Some(
+                    self.builder
+                        .build_load(
+                            self.llvm_type(*result).expect("task payload type"),
+                            payload,
+                            "job_value",
+                        )
+                        .expect("load task payload"),
+                )
+            }
+            ir::InstKind::JobWaitAny { jobs } | ir::InstKind::JobWaitAnyWithTimer { jobs } => {
+                let (wait_any_fn, wait_any_symbol) = match &instruction.kind {
+                    ir::InstKind::JobWaitAny { .. } => {
+                        (self.runtime.job_wait_any, "zirk_rt_job_wait_any")
+                    }
+                    ir::InstKind::JobWaitAnyWithTimer { .. } => (
+                        self.runtime.job_wait_any_with_timer,
+                        "zirk_rt_job_wait_any_with_timer",
+                    ),
+                    _ => unreachable!("matched a wait-any instruction"),
+                };
+                let word = self.context.i64_type();
+                let array_type = word.array_type(jobs.len() as u32);
+                let array = self
+                    .builder
+                    .build_alloca(array_type, "wait_any_jobs")
+                    .expect("wait-any job IDs");
+                for (index, job) in jobs.iter().enumerate() {
+                    // SAFETY: both indices are within the fixed array type
+                    // sized from the verifier-checked bounded operand list.
+                    let slot = unsafe {
+                        self.builder.build_gep(
+                            array_type,
+                            array,
+                            &[
+                                self.context.i32_type().const_zero(),
+                                self.context.i32_type().const_int(index as u64, false),
+                            ],
+                            "wait_any_job",
+                        )
+                    }
+                    .expect("wait-any job slot");
+                    self.builder
+                        .build_store(slot, self.operand(*job))
+                        .expect("store wait-any job ID");
+                }
+                // SAFETY: the zero index points at the first of the verifier-
+                // checked fixed array's job IDs.
+                let first = unsafe {
+                    self.builder.build_gep(
+                        array_type,
+                        array,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "wait_any_ids",
+                    )
+                }
+                .expect("wait-any IDs pointer");
+                Some(
+                    self.builder
+                        .build_call(
+                            wait_any_fn,
+                            &[
+                                first.into(),
+                                word.const_int(jobs.len() as u64, false).into(),
+                            ],
+                            "wait_any_index",
+                        )
+                        .expect(wait_any_symbol)
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("wait-any returns a u64 index"),
+                )
             }
             ir::InstKind::JobDone { job } => Some(
                 self.builder
@@ -5157,10 +6715,60 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("zirk_rt_cancel");
                 None
             }
-            ir::InstKind::TimerSleep { nanos } => {
+            ir::InstKind::JobCancelWithCleanupFailure { job } => {
+                self.builder
+                    .build_call(
+                        self.runtime.cancel_with_cleanup_failure,
+                        &[self.operand(*job).into()],
+                        "",
+                    )
+                    .expect("zirk_rt_cancel_with_cleanup_failure");
+                None
+            }
+            ir::InstKind::TimerSleep { nanos } => Some(
                 self.builder
                     .build_call(self.runtime.sleep, &[self.operand(*nanos).into()], "")
-                    .expect("zirk_rt_sleep");
+                    .expect("zirk_rt_sleep")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("sleep admission status"),
+            ),
+            ir::InstKind::AppSetShutdownGrace { nanos } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.app_set_shutdown_grace,
+                        &[self.operand(*nanos).into()],
+                        "shutdown_grace_status",
+                    )
+                    .expect("zirk_rt_app_set_shutdown_grace")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("shutdown grace status"),
+            ),
+            ir::InstKind::AppSetBackgroundError { callable, layout } => {
+                let value = self.operand(*callable).into_struct_value();
+                let target = self
+                    .builder
+                    .build_extract_value(value, CALLABLE_FUNCTION_FIELD, "background_error_target")
+                    .expect("background handler function")
+                    .into_pointer_value();
+                let capture = self
+                    .builder
+                    .build_extract_value(value, CALLABLE_CAPTURE_FIELD, "background_error_capture")
+                    .expect("background handler capture")
+                    .into_pointer_value();
+                let thunk = self.build_background_error_thunk(*layout);
+                self.builder
+                    .build_call(
+                        self.runtime.app_set_background_error,
+                        &[
+                            thunk.as_global_value().as_pointer_value().into(),
+                            target.into(),
+                            capture.into(),
+                        ],
+                        "",
+                    )
+                    .expect("zirk_rt_app_set_background_error");
                 None
             }
             ir::InstKind::ChannelNew {

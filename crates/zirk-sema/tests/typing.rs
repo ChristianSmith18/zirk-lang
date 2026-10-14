@@ -3,11 +3,11 @@
 //! `ZIRK_SPEC_FINAL.md` section 8 requires one valid and one invalid case per
 //! rule. Tests are grouped by rule so that correspondence stays verifiable.
 
-use zirk_ast::{Ident, ModuleDecl};
+use zirk_ast::{Expr, Ident, ModuleDecl, Stmt};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
-use zirk_sema::{check, codes};
+use zirk_sema::{Base, Type, check, codes};
 
 /// Standard stream calls (`stdout.println`, `stderr.print`, ...) require an
 /// explicit `std.io` import (see `add-stdin-stdout-standard-library`). Source
@@ -109,6 +109,11 @@ fn rejected(source_text: &str) -> String {
     sink.render(RenderStyle::Human)
 }
 
+/// Checks the sema contract while source lowering remains explicitly gated.
+fn rejected_mutex_with(source_text: &str) -> String {
+    rejected(source_text)
+}
+
 /// Wraps a body inside a valid `main`.
 fn in_main(body: &str) -> String {
     format!("fn main(): Void {{\n{body}\n}}")
@@ -130,6 +135,391 @@ fn accepted_with_warnings(source_text: &str) -> String {
 
 fn rejected_body(body: &str) -> String {
     rejected(&in_main(body))
+}
+
+fn suspension_summary(source_text: &str, function_name: &str) -> zirk_sema::EffectSummary {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("suspension.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let function = program
+        .functions
+        .iter()
+        .find(|function| function.name.name == function_name)
+        .unwrap_or_else(|| panic!("test function `{function_name}` is missing"));
+    let span = function.name.span;
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        !sink.has_errors(),
+        "test program should check:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+    checked
+        .suspend_summaries
+        .get(&span)
+        .copied()
+        .unwrap_or_else(|| panic!("summary for `{function_name}` is missing"))
+}
+
+#[test]
+fn suspension_summary_propagates_through_forward_direct_calls() {
+    let source = "fn caller(): Void { middle(); }\n\
+                 fn middle(): Void { leaf(); }\n\
+                 fn leaf(): Void { Timer.sleep(1s); }\n\
+                 fn main(): Void { caller(); }";
+    let caller = suspension_summary(source, "caller");
+    assert!(caller.may_suspend);
+    assert!(caller.complete);
+}
+
+#[test]
+fn suspension_summary_marks_direct_channel_waits_and_concurrent_constructs() {
+    let source = "fn communicate(channel: Channel<Int32>): Void {\n\
+                   channel.send(1);\n\
+                   _ = channel.receive();\n\
+                 }\n\
+                 fn main(): Void {\n\
+                   concurrent { spawn (): Void => { Timer.sleep(1s); }; }\n\
+                 }";
+    let communicate = suspension_summary(source, "communicate");
+    assert!(communicate.may_suspend);
+    assert!(communicate.complete);
+    let main = suspension_summary(source, "main");
+    assert!(main.may_suspend);
+    assert!(main.complete);
+}
+
+#[test]
+fn suspension_summary_marks_native_calls_unknown_and_blocking() {
+    let source = "extern \"C\" fn abs(n: Int32): Int32;\n\
+                 fn main(): Void { unsafe { commit { _ = abs(-1); } } }";
+    let main = suspension_summary(source, "main");
+    assert!(main.may_suspend);
+    assert!(main.may_block);
+    assert!(!main.complete);
+}
+
+#[test]
+fn suspension_summary_tracks_timer_callback_separately_from_registration() {
+    let source_text = "extern \"C\" fn host_wait(): Void;\n\
+                      fn pause(): Void { Timer.sleep(1s); }\n\
+                      fn block(): Void { unsafe { commit { host_wait(); } } }\n\
+                      fn schedule(): Void { Timer.after(1s, (): Void => { }); }\n\
+                      fn transitively_effectful(): Void { pause(); block(); schedule(); }\n\
+                      fn main(): Void { Timer.after(1s, (): Void => transitively_effectful()); }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("suspension.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let main = program
+        .functions
+        .iter()
+        .find(|function| function.name.name == "main")
+        .unwrap();
+    let main_span = main.name.span;
+    let callback_span = main
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            Stmt::Expr(expr) => match &expr.expr {
+                Expr::Call(call) => match &call.args[1].value {
+                    Expr::Lambda(lambda) => Some(lambda.span),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("Timer.after callback lambda");
+    let checked = check(&sources, &program, &mut sink);
+    assert!(!sink.has_errors(), "{}", sink.render(RenderStyle::Human));
+    let main_effect = checked.suspend_summaries[&main_span];
+    assert!(!main_effect.may_suspend);
+    assert!(!main_effect.may_block);
+    let callback_effect = checked.suspend_summaries[&callback_span];
+    assert!(callback_effect.may_suspend);
+    assert!(callback_effect.may_block);
+    assert!(callback_effect.may_spawn);
+    assert!(!callback_effect.complete);
+}
+
+#[test]
+fn suspension_summary_does_not_treat_timer_registration_as_a_wait() {
+    let source = "fn main(): Void { Timer.after(1s, (): Void => { }); }";
+    let main = suspension_summary(source, "main");
+    assert!(!main.may_suspend);
+    assert!(!main.may_block);
+    assert!(main.complete);
+}
+
+#[test]
+fn suspension_summary_keeps_open_method_dispatch_conservative() {
+    let source = "class Worker { run(): Void { } }\n\
+                 fn main(): Void { mut w: Worker = Worker(); w.run(); }";
+    let main = suspension_summary(source, "main");
+    assert!(main.may_suspend);
+    assert!(main.may_block);
+    assert!(!main.complete);
+}
+
+#[test]
+fn suspension_summary_keeps_unknown_function_value_calls_conservative() {
+    let source = "fn invoke(action: Fn() => Void): Void { action(); }\n\
+                 fn main(): Void { }";
+    let invoke = suspension_summary(source, "invoke");
+    assert!(invoke.may_suspend);
+    assert!(invoke.may_block);
+    assert!(!invoke.complete);
+}
+
+#[test]
+fn suspension_summary_marks_pure_direct_call_chains_complete_and_non_suspending() {
+    let source = "fn leaf(): Int32 { return 1; }\n\
+                 fn caller(): Int32 { return leaf(); }\n\
+                 fn main(): Void { }";
+    let caller = suspension_summary(source, "caller");
+    assert!(!caller.may_suspend);
+    assert!(caller.complete);
+}
+
+#[test]
+fn thread_run_rejects_direct_channel_and_timer_suspension_effects() {
+    let rendered = rejected_body(
+        "Thread.run((channel: Channel<Int32>): Void => {
+             _ = channel.receive();
+             Timer.sleep(1s);
+         });",
+    );
+    assert!(
+        rendered.contains("E0484"),
+        "direct channel/timer suspension must be rejected: {rendered}"
+    );
+}
+
+#[test]
+fn thread_run_rejects_transitive_suspension_in_a_named_function() {
+    let rendered = rejected(
+        "fn waits(): Void { Timer.sleep(1s); }
+         fn main(): Void { Thread.run(waits); }",
+    );
+    assert!(
+        rendered.contains("E0484"),
+        "transitive suspension must be rejected: {rendered}"
+    );
+
+    let spawned = rejected(
+        "fn launches(): Void { concurrent { spawn (): Void => { }; } }
+         fn main(): Void { Thread.run(launches); }",
+    );
+    assert!(
+        spawned.contains("E0484"),
+        "transitive task creation must be rejected: {spawned}"
+    );
+
+    let blocked = rejected(
+        "extern \"C\" fn host_wait(): Void;\n\
+         fn waits_on_host(): Void { unsafe { host_wait(); } }\n\
+         fn main(): Void { Thread.run(waits_on_host); }",
+    );
+    assert!(
+        blocked.contains("E0484"),
+        "transitive blocking must be rejected: {blocked}"
+    );
+
+    let unknown = rejected(
+        "fn invoke(action: Fn() => Void): Void { action(); }\n\
+         fn calls_unknown(): Void { invoke((): Void => { }); }\n\
+         fn main(): Void { Thread.run(calls_unknown); }",
+    );
+    assert!(
+        unknown.contains("E0484"),
+        "a transitive unknown call must be rejected: {unknown}"
+    );
+
+    let channel_wait = rejected(
+        "fn receives(): Void {
+             inmut channel: Channel<Int32> = Channel(0);
+             _ = channel.receive();
+         }
+         fn main(): Void { Thread.run(receives); }",
+    );
+    assert!(
+        channel_wait.contains("E0484"),
+        "a named function with a transitive channel wait must be rejected: {channel_wait}"
+    );
+}
+
+#[test]
+fn thread_run_rejects_nonblocking_channel_access_transitively() {
+    let direct = rejected(
+        "fn main(): Void {
+             mut channel: Channel<Int32> = Channel();
+             Thread.run((): Void => { channel.try_send(1); });
+         }",
+    );
+    assert!(
+        direct.contains("E0484"),
+        "nonblocking channel access from a managed worker must be rejected: {direct}"
+    );
+
+    let transitive = rejected(
+        "fn touches_channel(channel: Channel<Int32>): Void { channel.close(); }
+         fn main(): Void {
+             mut channel: Channel<Int32> = Channel();
+             Thread.run((): Void => { touches_channel(channel); });
+         }",
+    );
+    assert!(
+        transitive.contains("E0484"),
+        "channel effects must propagate through direct calls: {transitive}"
+    );
+}
+
+#[test]
+fn thread_run_accepts_pure_lambda_and_returns_its_typed_result() {
+    accepted("fn main(): Void { inmut value: Int32 = Thread.run((): Int32 => 1); }");
+    accepted_body("Thread.run((): Void => { });");
+}
+
+#[test]
+fn thread_run_rejects_callable_values_without_a_known_summary() {
+    let rendered = rejected_body(
+        "mut action: Fn() => Void = (): Void => { };
+         Thread.run(action);",
+    );
+    assert!(
+        rendered.contains("E0484"),
+        "an indirect callable without a linked summary must fail closed: {rendered}"
+    );
+}
+
+#[test]
+fn thread_run_checks_capture_and_result_ownership() {
+    let captured = rejected_body(
+        "mut rows: List<Int32> = [1];
+         Thread.run((): Int32 => rows[0]);",
+    );
+    assert!(
+        captured.contains("E0430") || captured.contains("mutable alias"),
+        "a mutable list capture must fail the thread boundary: {captured}"
+    );
+
+    let returned_pointer = rejected_body(
+        "mut value: Int32 = 1;
+         Thread.run((): Pointer<Int32> => unsafe { Pointer.from(value) });",
+    );
+    assert!(
+        returned_pointer.contains("E0482"),
+        "a raw pointer result must fail the thread boundary: {returned_pointer}"
+    );
+}
+
+#[test]
+fn concurrent_detach_accepts_inline_and_named_callbacks() {
+    accepted_body("Concurrent.detach((): Void => { });");
+    accepted(
+        "fn background_work(): Void { }
+         fn main(): Void { Concurrent.detach(background_work); }",
+    );
+}
+
+#[test]
+fn app_background_error_handler_accepts_the_managed_signature() {
+    let rendered = rejected_body(
+        "fn report(error: Throwable): Void { }\n         App.on_background_error = report;",
+    );
+    assert!(
+        !rendered.contains(codes::PENDING_FEATURE.as_str()),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "the source API should have an intentional feature gate: {rendered}"
+    );
+    assert!(
+        !rendered.contains(codes::TYPE_MISMATCH.as_str()),
+        "a `(Throwable): Void` handler has the intended signature: {rendered}"
+    );
+}
+
+#[test]
+fn app_background_error_handler_rejects_wrong_signature() {
+    let rendered = rejected_body(
+        "fn report(error: Int32): Int32 { return error; }\n         App.on_background_error = report;",
+    );
+    assert!(
+        rendered.contains(codes::TYPE_MISMATCH.as_str()),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains(codes::PENDING_FEATURE.as_str()),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn concurrent_detach_rejects_invalid_arity_and_non_positional_arguments() {
+    for source in [
+        "Concurrent.detach();",
+        "Concurrent.detach((): Void => { }, (): Void => { });",
+        "Concurrent.detach(callback: (): Void => { });",
+    ] {
+        let rendered = rejected_body(source);
+        assert!(
+            rendered.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+            "expected arity/position diagnostic for {source}: {rendered}"
+        );
+        assert!(
+            !rendered.contains(codes::PENDING_FEATURE.as_str()),
+            "malformed calls should fail sema before the Phase 5 gate: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn concurrent_detach_rejects_nonzero_arity_and_non_void_callbacks() {
+    let parameter = rejected_body("Concurrent.detach((value: Int32): Void => { });");
+    assert!(
+        parameter.contains(codes::TYPE_MISMATCH.as_str()),
+        "{parameter}"
+    );
+    assert!(
+        !parameter.contains(codes::PENDING_FEATURE.as_str()),
+        "{parameter}"
+    );
+
+    let result = rejected_body("Concurrent.detach((): Int32 => 1);");
+    assert!(result.contains(codes::TYPE_MISMATCH.as_str()), "{result}");
+    assert!(result.contains("must return `Void`"), "{result}");
+    assert!(
+        !result.contains(codes::PENDING_FEATURE.as_str()),
+        "{result}"
+    );
+}
+
+#[test]
+fn concurrent_detach_rejects_mutable_lambda_captures() {
+    let rendered = rejected_body(
+        "mut rows: List<Int32> = [1];
+         Concurrent.detach((): Void => { _ = rows[0]; });",
+    );
+    assert!(
+        rendered.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "mutable captures must fail the background boundary: {rendered}"
+    );
+    assert!(
+        !rendered.contains(codes::PENDING_FEATURE.as_str()),
+        "{rendered}"
+    );
 }
 
 // --- Entrypoint -------------------------------------------------------------
@@ -168,15 +558,15 @@ fn invalid_collection_sum_requires_numeric_elements() {
 #[test]
 fn parallel_reduce_requires_an_associative_combiner_or_ordered_escape() {
     accepted_body(
-        "inmut values: List<Int32> = [1, 2, 3];\n\
+        "inmut::strict values: List<Int32> = [1, 2, 3];\n\
          inmut total: Int32 = parallel { values.reduce(0, (a: Int32, b: Int32): Int32 => a + b) };",
     );
     accepted_body(
-        "inmut values: List<Int32> = [1, 2, 3];\n\
+        "inmut::strict values: List<Int32> = [1, 2, 3];\n\
          inmut total: Int32 = values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a * b);",
     );
     accepted_body(
-        "inmut values: List<Int32> = [1, 2, 3];\n\
+        "inmut::strict values: List<Int32> = [1, 2, 3];\n\
          inmut total: Int32 = parallel { values.reduce_ordered(0, (a: Int32, b: Int32): Int32 => a - b) };",
     );
 
@@ -247,6 +637,175 @@ fn valid_job_spawn_wait_and_timer_static_members() {
            inmut answer: Int32 = later.wait();\n\
            Timer.every(1s, (): Void => { });\n\
          }",
+    );
+}
+
+#[test]
+fn concurrent_boundary_matrix_rejects_unproven_spawn_channel_and_parallel_values() {
+    let spawn_capture = rejected(
+        "fn main(): Void {
+           mut rows: List<Int32> = [1];
+           concurrent {
+             mut job: Job<Int32> = spawn (): Int32 => rows[0];
+             mut value: Int32 = job.wait();
+           }
+         }",
+    );
+    assert!(
+        spawn_capture.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "spawn must reject a captured mutable alias: {spawn_capture}"
+    );
+
+    let spawn_result = rejected(
+        "fn make_action(): Fn() => Void { return (): Void => { }; }
+         fn main(): Void {
+           concurrent {
+             mut job: Job<Fn() => Void> = spawn make_action();
+             mut value: Fn() => Void = job.wait();
+           }
+         }",
+    );
+    assert!(
+        spawn_result.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "spawn must reject an untransferable function result: {spawn_result}"
+    );
+
+    let channel_send = rejected(
+        "fn make_action(): Fn() => Void { return (): Void => { }; }
+         fn main(): Void {
+           mut channel: Channel<Fn() => Void> = Channel(1);
+           channel.send(make_action());
+         }",
+    );
+    assert!(
+        channel_send.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "channel send must reject an untransferable mutable resource: {channel_send}"
+    );
+
+    let channel_receive = rejected(
+        "fn main(): Void {
+           mut channel: Channel<Fn() => Void> = Channel(1);
+           mut value = channel.receive();
+         }",
+    );
+    assert!(
+        channel_receive.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "channel receive must reject an untransferable result type: {channel_receive}"
+    );
+
+    let parallel_result = rejected(
+        "fn make_action(): Fn() => Void { return (): Void => { }; }
+         fn main(): Void {
+           mut value: Fn() => Void = parallel { make_action() };
+         }",
+    );
+    assert!(
+        parallel_result.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "parallel must reject an untransferable result: {parallel_result}"
+    );
+}
+
+#[test]
+fn timer_callbacks_enforce_capture_and_result_ownership_boundaries() {
+    let capture = rejected(
+        "class Counter {\n\
+           mut value: Int32;\n\
+           construct() { this.value = 0; }\n\
+           read(): Int32 { return this.value; }\n\
+         }\n\
+         fn main(): Void {\n\
+           mut counter = Counter();\n\
+           Timer.after(1s, (): Int32 => counter.read());\n\
+         }",
+    );
+    assert!(
+        capture.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{capture}"
+    );
+    assert!(capture.contains("`Timer.after` callback"), "{capture}");
+
+    let result = rejected(
+        "class MutableValue implements Resource { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn create(): MutableValue { return MutableValue(); }\n\
+         fn main(): Void { Timer.after(1s, (): MutableValue => create()); }",
+    );
+    assert!(
+        result.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "{result}"
+    );
+    assert!(result.contains("`Timer.after` callback result"), "{result}");
+
+    let every_result = rejected("fn main(): Void { Timer.every(1s, (): Int32 => 1); }");
+    assert!(
+        every_result.contains(codes::TYPE_MISMATCH.as_str()),
+        "Timer.every must reject a callback with a value result: {every_result}"
+    );
+    assert!(
+        every_result.contains("`Timer.every` requires a `Void` callback"),
+        "the diagnostic must identify the Timer.every callback contract: {every_result}"
+    );
+
+    let named_callback = rejected(
+        "fn tick(): Void { }\n\
+         fn main(): Void { Timer.after(1s, tick); }",
+    );
+    assert!(
+        named_callback.contains(codes::TYPE_MISMATCH.as_str()),
+        "timer callbacks must be lifted lambdas, not named function values: {named_callback}"
+    );
+    assert!(
+        named_callback.contains("a timer callback must be written as a lambda"),
+        "the diagnostic must identify the callback representation requirement: {named_callback}"
+    );
+
+    let parameterized_callback =
+        rejected("fn main(): Void { Timer.after(1s, (value: Int32): Void => { }); }");
+    assert!(
+        parameterized_callback.contains("a timer callback must take no arguments"),
+        "timer callbacks with parameters must fail at the API boundary: {parameterized_callback}"
+    );
+}
+
+#[test]
+fn invalid_parallel_call_to_transitively_suspending_function() {
+    let output = rejected(
+        "fn pause(): Void { Timer.sleep(1s); }\n\
+         fn main(): Void { parallel { pause(); } }",
+    );
+    assert!(
+        output.contains(codes::PARALLEL_REGION_IO.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_parallel_call_to_function_that_spawns_work() {
+    let output = rejected(
+        "fn schedule(): Void { Timer.after(1s, (): Void => { }); }\n\
+         fn main(): Void { parallel { schedule(); } }",
+    );
+    assert!(
+        output.contains(codes::PARALLEL_REGION_IO.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_parallel_call_to_complete_cpu_only_function() {
+    accepted(
+        "fn compute(): Int32 { return 42; }\n\
+         fn main(): Void { parallel { _ = compute(); } }",
+    );
+}
+
+#[test]
+fn invalid_channel_operation_inside_parallel_region() {
+    let output = rejected_body(
+        "mut channel: Channel<Int32> = Channel(1); parallel { channel.try_send(1); }",
+    );
+    assert!(
+        output.contains(codes::PARALLEL_REGION_IO.as_str()),
+        "{output}"
     );
 }
 
@@ -3441,6 +4000,642 @@ fn valid_generic_enum_with_multiple_type_parameters() {
 }
 
 #[test]
+fn valid_native_outcome_generic_type_and_fulfilled_variant() {
+    accepted_body(
+        "mut outcome: Outcome<Int32> = Outcome.Fulfilled(7);\n\
+         mut text: Outcome<String> = Outcome.Fulfilled(\"ok\");",
+    );
+}
+
+#[test]
+fn native_outcome_rejected_and_cancelled_variants_have_typed_payloads() {
+    accepted(
+        "fn rejected(error: Throwable): Outcome<Int32> {\n\
+             return Outcome.Rejected(error);\n\
+         }\n\
+         fn cancelled(error: CancelledError): Outcome<Int32> {\n\
+             return Outcome.Cancelled(error);\n\
+         }\n\
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn cancelled_error_is_concrete_constructible_and_a_complete_throwable() {
+    accepted(
+        "fn main(): Void {
+             mut cancelled: CancelledError = CancelledError(\"cancelled\");
+             mut message: String = cancelled.message();
+             mut code: String = cancelled.code();
+             mut cause: Error? = cancelled.cause();
+             mut trace: String = cancelled.stack_trace();
+             mut outcome: Outcome<Int32> = Outcome.Cancelled(cancelled);
+             match outcome {
+                 Outcome.Cancelled(error) => {
+                     mut inherited: String = error.message();
+                 }
+                 _ => { }
+             }
+         }",
+    );
+}
+
+#[test]
+fn transfer_in_one_if_branch_invalidates_the_binding_after_the_join() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+             read_all(): String { return \"ok\"; }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             if true { mut moved = transfer(file); } else { }\n\
+             _ = file.read_all();\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::USE_OF_TRANSFERRED_RESOURCE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_in_one_if_expression_branch_invalidates_the_binding_after_the_join() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+             read_all(): String { return \"ok\"; }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             mut selected = if true { transfer(file) } else { file };\n\
+             _ = file.read_all();\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::USE_OF_TRANSFERRED_RESOURCE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_in_one_ternary_branch_invalidates_the_binding_after_the_join() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+             read_all(): String { return \"ok\"; }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             mut selected = true ? transfer(file) : file;\n\
+             _ = file.read_all();\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::USE_OF_TRANSFERRED_RESOURCE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_in_one_match_arm_invalidates_the_binding_after_the_join() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+             read_all(): String { return \"ok\"; }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             match true { true => transfer(file), false => file };\n\
+             _ = file.read_all();\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::USE_OF_TRANSFERRED_RESOURCE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_before_a_throw_is_visible_to_a_catch_join() {
+    let output = rejected(&format!(
+        "{BOOM_ERROR}\n\
+         class FakeFile implements TransferableResource {{\n\
+             construct() {{ }}\n\
+             read_all(): String {{ return \"ok\"; }}\n\
+         }}\n\
+         fn main(): Void {{\n\
+             mut file = FakeFile();\n\
+             try {{ mut moved = transfer(file); throw BoomError(); }}\n\
+             catch BoomError(e) {{ _ = file.read_all(); }}\n\
+         }}"
+    ));
+    assert!(
+        output.contains(codes::USE_OF_TRANSFERRED_RESOURCE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_inside_a_loop_is_rejected_until_repeated_moves_are_proven_safe() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             while true { mut moved = transfer(file); break; }\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::TRANSFER_IN_LOOP.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn transfer_in_a_for_step_is_also_rejected_as_repeated() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             for (mut i = 0; i < 1; transfer(file)) { }\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::TRANSFER_IN_LOOP.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn reusable_closure_cannot_transfer_a_captured_resource() {
+    let output = rejected(
+        "class FakeFile implements TransferableResource {\n\
+             construct() { }\n\
+         }\n\
+         fn main(): Void {\n\
+             mut file = FakeFile();\n\
+             mut action: Fn() => Void = (): Void => { mut moved = transfer(file); };\n\
+             action();\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::TRANSFER_IN_REUSABLE_CLOSURE.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn concurrent_of_stays_gated_without_a_supported_terminal() {
+    let output = rejected_body("Concurrent.of((): Int32 => 1, (): Int32 => 2);");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        !output.contains(codes::UNDECLARED_NAME.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn within_and_collection_combinators_have_typed_pipeline_plans() {
+    accepted_body(
+        "mut first: Int32 = Concurrent.of((): Int32 => 1, (): Int32 => 2).within(1s).first();",
+    );
+    accepted_body(
+        "mut outcomes: List<Outcome<Int32>> = Concurrent.of((): Int32 => 1, (): Int32 => 2).within(1s).settled();",
+    );
+
+    accepted_body(
+        "inmut::strict values: List<Int32> = [1, 2];
+         mut results: List<Int32> = Concurrent.each(values, (item: Int32): Int32 => item, 2);",
+    );
+    accepted_body(
+        "inmut::strict values: List<Int32> = [1, 2];
+         mut outcomes: List<Outcome<Int32>> = Concurrent.each_settled(values, (item: Int32): Int32 => item, 2);",
+    );
+    accepted_body(
+        "inmut::strict values: List<Int32> = [1, 2];
+         mut results: List<Int32> = Concurrent.each(values, (item: Int32): Int32 => item, 0);",
+    );
+
+    let invalid_collection = rejected_body("Concurrent.each(1, (item: Int32): Int32 => item);");
+    assert!(
+        invalid_collection.contains(codes::TYPE_MISMATCH.as_str()),
+        "{invalid_collection}"
+    );
+    assert!(!invalid_collection.contains(codes::PENDING_FEATURE.as_str()));
+
+    let nullable_collection = rejected_body(
+        "mut values: List<Int32>? = null;
+         Concurrent.each(values, (item: Int32): Int32 => item);",
+    );
+    assert!(
+        nullable_collection.contains(codes::TYPE_MISMATCH.as_str()),
+        "{nullable_collection}"
+    );
+    let nullable_array = rejected_body(
+        "mut values: Array<Int32>? = null;
+         Concurrent.each(values, (item: Int32): Int32 => item);",
+    );
+    assert!(
+        nullable_array.contains(codes::TYPE_MISMATCH.as_str()),
+        "{nullable_array}"
+    );
+
+    let aliased_collection = rejected(
+        "fn values(): List<Int32> { mut result: List<Int32> = [1]; return result; }
+         fn main(): Void { Concurrent.each(values(), (item: Int32): Int32 => item); }",
+    );
+    assert!(
+        aliased_collection.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "{aliased_collection}"
+    );
+
+    let mutable_collection = rejected_body(
+        "mut values: List<Int32> = [1, 2];
+         Concurrent.each(values, (item: Int32): Int32 => item);",
+    );
+    assert!(
+        mutable_collection.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "mutable collection must not cross the shared callback boundary: {mutable_collection}"
+    );
+    assert!(!mutable_collection.contains(codes::PENDING_FEATURE.as_str()));
+
+    accepted_body(
+        "inmut::strict values: List<Int32> = [1, 2];
+         Concurrent.each(values, (item: Int32): Int32 => item);",
+    );
+
+    let inline_collection = rejected_body("Concurrent.each([1, 2], (item: Int32): Int32 => item);");
+    assert!(
+        inline_collection.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "inline collection has no strict deep-share proof: {inline_collection}"
+    );
+
+    let mutable_element_graph = rejected(
+        "class MutableBox {\n\
+             mut value: Int32;\n\
+             construct() { this.value = 1; }\n\
+         }\n\
+         fn main(): Void {\n\
+             inmut::strict values: List<MutableBox> = [MutableBox()];\n\
+             Concurrent.each(values, (item: MutableBox): Int32 => item.value);\n\
+         }",
+    );
+    assert!(
+        mutable_element_graph.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "strict container is insufficient when its nested element graph is mutable: {mutable_element_graph}"
+    );
+
+    let invalid_limit =
+        rejected_body("Concurrent.each([1, 2], (item: Int32): Int32 => item, true);");
+    assert!(
+        invalid_limit.contains(codes::TYPE_MISMATCH.as_str()),
+        "{invalid_limit}"
+    );
+
+    let mutable_capture = rejected_body(
+        "mut rows: List<Int32> = [1];
+         Concurrent.each([1], (item: Int32): Int32 => rows[0]);",
+    );
+    assert!(mutable_capture.contains("E0430"), "{mutable_capture}");
+
+    let non_transferable_result = rejected_body(
+        "mut value: Int32 = 1;
+         Concurrent.each([1], (item: Int32): Pointer<Int32> => unsafe { Pointer.from(value) });",
+    );
+    assert!(
+        non_transferable_result.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "{non_transferable_result}"
+    );
+
+    let void_callback = rejected_body("Concurrent.each([1, 2], (item: Int32): Void => {});");
+    assert!(
+        void_callback.contains(codes::TYPE_MISMATCH.as_str()),
+        "{void_callback}"
+    );
+
+    accepted_body(
+        "inmut::strict values: List<Int32> = [1, 2];
+         Concurrent.each(values, (item: Int32): Int32 => { Timer.sleep(1s); return item; });",
+    );
+
+    accepted(&format!(
+        "{BOOM_ERROR}
+         fn main(): Void {{
+             inmut::strict values: List<Int32> = [1];
+             Concurrent.each_settled(values, (item: Int32): Int32 => {{ throw BoomError(); }});
+         }}"
+    ));
+}
+
+#[test]
+fn concurrent_settled_returns_ordered_list_of_generic_outcomes() {
+    accepted_body(
+        "mut outcomes: List<Outcome<Int32>> = Concurrent.of((): Int32 => 1, (): Int32 => 2).settled();",
+    );
+}
+
+#[test]
+fn user_classes_named_like_compiler_namespaces_keep_static_method_resolution() {
+    accepted(
+        "class Concurrent {\n\
+             static of(value: Int32): Int32 { return value; }\n\
+             static each(value: Int32): Int32 { return value; }\n\
+             static detach(value: Int32): Int32 { return value; }\n\
+             static protect(value: Int32): Int32 { return value; }\n\
+         }\n\
+         class Timer { static sleep(value: Int32): Int32 { return value; } }\n\
+         class Parallel { static each(value: Int32): Int32 { return value; } }\n\
+         fn main(): Void {\n\
+             Concurrent.of(1);\n\
+             Concurrent.each(2);\n\
+             Concurrent.detach(3);\n\
+             Concurrent.protect(4);\n\
+             Timer.sleep(5);\n\
+             Parallel.each(6);\n\
+         }",
+    );
+
+    accepted_body("mut winner: Int32 = Concurrent.of((): Int32 => 1, (): Int32 => 2).first();");
+
+    let each = rejected_body("Concurrent.each(1);");
+    assert!(
+        each.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{each}"
+    );
+    assert!(!each.contains(codes::PENDING_FEATURE.as_str()), "{each}");
+}
+
+#[test]
+fn completion_pipeline_terminals_validate_arguments() {
+    let first = rejected_body("Concurrent.of((): Int32 => 1, (): Int32 => 2).first(1);");
+    assert!(
+        first.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{first}"
+    );
+    assert!(!first.contains(codes::PENDING_FEATURE.as_str()), "{first}");
+
+    let settled = rejected_body("Concurrent.of((): Int32 => 1, (): Int32 => 2).settled(1);");
+    assert!(
+        settled.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{settled}"
+    );
+
+    let within = rejected_body("Concurrent.of((): Int32 => 1, (): Int32 => 2).within(1);");
+    assert!(within.contains(codes::TYPE_MISMATCH.as_str()), "{within}");
+    assert!(within.contains(codes::PENDING_FEATURE.as_str()), "{within}");
+}
+
+#[test]
+fn concurrent_of_rejects_mutable_reference_captures_at_branch_boundary() {
+    let output = rejected(
+        "class Counter {\n\
+           mut value: Int32;\n\
+           construct() { this.value = 0; }\n\
+           read(): Int32 { return this.value; }\n\
+         }\n\
+         fn main(): Void {\n\
+           mut counter = Counter();\n\
+           _ = Concurrent.of((): Int32 => counter.read(), (): Int32 => 2);\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+    assert!(
+        output.contains("`Concurrent.of` branch boundary"),
+        "{output}"
+    );
+}
+
+#[test]
+fn concurrent_of_requires_branch_results_to_cross_safely() {
+    let output = rejected(
+        "class MutableValue implements Resource { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn make(): MutableValue { return MutableValue(); }\n\
+         fn main(): Void {\n\
+           _ = Concurrent.of((): MutableValue => make(), (): MutableValue => make());\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::UNSAFE_CONCURRENT_BOUNDARY.as_str()),
+        "{output}"
+    );
+    assert!(output.contains("branch result"), "{output}");
+}
+
+#[test]
+fn concurrent_of_rejects_heterogeneous_thunk_results() {
+    let output = rejected_body("Concurrent.of((): Int32 => 1, (): String => \"two\");");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains("homogeneous thunk result types"),
+        "{output}"
+    );
+    assert!(!output.contains("undeclared"), "{output}");
+
+    let settled = rejected_body("Concurrent.of((): Int32 => 1, (): String => \"two\").settled();");
+    assert!(settled.contains(codes::TYPE_MISMATCH.as_str()), "{settled}");
+    assert!(
+        settled.contains("homogeneous thunk result types"),
+        "{settled}"
+    );
+}
+
+#[test]
+fn concurrent_of_rejects_void_results_for_typed_outcomes() {
+    let source = "Concurrent.of((): Void => { return; }, (): Void => { return; }).settled();";
+    let output = rejected_body(source);
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("must return a value"), "{output}");
+    assert!(output.contains("found `Void`"), "{output}");
+
+    let first =
+        rejected_body("Concurrent.of((): Void => { return; }, (): Void => { return; }).first();");
+    assert!(first.contains(codes::TYPE_MISMATCH.as_str()), "{first}");
+    assert!(first.contains("found `Void`"), "{first}");
+}
+
+#[test]
+fn concurrent_of_rejects_invalid_arity_and_parameterized_thunks() {
+    let arity = rejected_body("Concurrent.of((): Int32 => 1);");
+    assert!(
+        arity.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{arity}"
+    );
+
+    let parameterized = rejected_body("Concurrent.of((x: Int32): Int32 => x, (): Int32 => 2);");
+    assert!(
+        parameterized.contains(codes::TYPE_MISMATCH.as_str()),
+        "{parameterized}"
+    );
+    assert!(
+        parameterized.contains("must take no arguments"),
+        "{parameterized}"
+    );
+
+    let void_result = rejected_body("Concurrent.of((): Void => { }, (): Void => { }).settled();");
+    assert!(
+        void_result.contains(codes::TYPE_MISMATCH.as_str()),
+        "{void_result}"
+    );
+    assert!(void_result.contains("must return a value"), "{void_result}");
+}
+
+#[test]
+fn concurrent_of_rejects_non_lambda_named_and_spread_arguments() {
+    let non_lambda = rejected_body("Concurrent.of(compute, (): Int32 => 2);");
+    assert!(
+        non_lambda.contains(codes::TYPE_MISMATCH.as_str()),
+        "{non_lambda}"
+    );
+    assert!(
+        non_lambda.contains("must be a closure literal"),
+        "{non_lambda}"
+    );
+
+    let named = rejected_body("Concurrent.of(first: (): Int32 => 1, (): Int32 => 2);");
+    assert!(
+        named.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{named}"
+    );
+
+    let spread = rejected_body(
+        "mut thunks: Array<Fn() => Int32> = [(): Int32 => 1, (): Int32 => 2]; Concurrent.of(...thunks);",
+    );
+    assert!(
+        spread.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{spread}"
+    );
+}
+
+#[test]
+fn concurrent_protect_gates_direct_and_transitive_suspension() {
+    let direct = rejected_body("Concurrent.protect((): Void => Timer.sleep(1s));");
+    assert!(
+        direct.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "{direct}"
+    );
+
+    let transitive = rejected(
+        "fn pause(): Void { Timer.sleep(1s); }\n\
+         fn main(): Void { Concurrent.protect((): Void => pause()); }",
+    );
+    assert!(
+        transitive.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "{transitive}"
+    );
+}
+
+#[test]
+fn concurrent_protect_accepts_a_bounded_void_callback() {
+    accepted_body("Concurrent.protect((): Void => { mut n: Int32 = 0; n += 1; });");
+}
+
+#[test]
+fn concurrent_protect_rejects_a_non_void_callback() {
+    let output = rejected_body("Concurrent.protect((): Int32 => 1);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("must return `Void`"), "{output}");
+}
+
+#[test]
+fn concurrent_protect_rejects_blocking_unknown_and_spawning_cleanup_effects() {
+    let blocking = rejected(
+        "extern \"C\" fn host_wait(): Void;\n\
+         fn main(): Void { Concurrent.protect((): Void => unsafe { host_wait(); }); }",
+    );
+    assert!(
+        blocking.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "{blocking}"
+    );
+
+    let unknown = rejected(
+        "fn invoke(action: Fn() => Void): Void { action(); }\n\
+         fn main(): Void { Concurrent.protect((): Void => invoke((): Void => { })); }",
+    );
+    assert!(
+        unknown.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "{unknown}"
+    );
+
+    let spawning = rejected(
+        "fn schedule(): Void { concurrent { spawn (): Void => { }; } }\n\
+         fn main(): Void { Concurrent.protect((): Void => schedule()); }",
+    );
+    assert!(
+        spawning.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "{spawning}"
+    );
+
+    let channel = rejected(
+        "fn main(): Void {
+             mut channel: Channel<Int32> = Channel(1);
+             Concurrent.protect((): Void => { channel.send(1); });
+         }",
+    );
+    assert!(
+        channel.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "channel waits must be rejected in protected cleanup: {channel}"
+    );
+
+    let thread = rejected_body("Concurrent.protect((): Void => { Thread.run((): Int32 => 1); });");
+    assert!(
+        thread.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "joining a managed thread must be rejected inside protected cleanup: {thread}"
+    );
+
+    let transitive_thread = rejected(
+        "fn run_worker(): Void { _ = Thread.run((): Int32 => 1); }\n\
+         fn main(): Void { Concurrent.protect((): Void => run_worker()); }",
+    );
+    assert!(
+        transitive_thread.contains(codes::SUSPENDING_PROTECTED_REGION.as_str()),
+        "the managed-thread blocking effect must propagate through calls: {transitive_thread}"
+    );
+}
+
+#[test]
+fn concurrent_protect_rejects_non_lambda_parameterized_and_wrong_arity() {
+    let non_lambda = rejected_body("Concurrent.protect(cleanup);");
+    assert!(
+        non_lambda.contains(codes::TYPE_MISMATCH.as_str()),
+        "{non_lambda}"
+    );
+    assert!(
+        non_lambda.contains("requires a lambda literal"),
+        "{non_lambda}"
+    );
+
+    let parameterized =
+        rejected_body("Concurrent.protect((reason: String): Void => stdout.println(reason));");
+    assert!(
+        parameterized.contains(codes::TYPE_MISMATCH.as_str()),
+        "{parameterized}"
+    );
+    assert!(
+        parameterized.contains("cleanup lambda takes no arguments"),
+        "{parameterized}"
+    );
+
+    let arity = rejected_body("Concurrent.protect();");
+    assert!(
+        arity.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{arity}"
+    );
+    let extra = rejected_body("Concurrent.protect((): Void => { }, (): Void => { });");
+    assert!(
+        extra.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{extra}"
+    );
+}
+
+#[test]
 fn invalid_generic_enum_type_argument_violating_a_constraint_is_still_rejected() {
     // Lifting the `NOT_LOWERED` gate does not relax constraint checking: a
     // type argument that does not satisfy the parameter's `from` constraint
@@ -5232,6 +6427,74 @@ fn valid_native_failure_class_is_constructible_like_any_other_runtime_error() {
     );
 }
 
+#[test]
+fn native_capacity_errors_are_known_runtime_error_subclasses() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("capacity_errors.zrk", "fn main(): Void {}"));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert!(
+        !sink.has_errors(),
+        "no errors were expected:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+    let native = checked
+        .native_exceptions
+        .expect("native exception hierarchy is registered");
+    for (id, expected_name) in [
+        (native.task_capacity_error, "TaskCapacityError"),
+        (native.timer_capacity_error, "TimerCapacityError"),
+        (native.background_capacity_error, "BackgroundCapacityError"),
+    ] {
+        let class = &checked.classes[id as usize];
+        assert_eq!(class.name, expected_name);
+        assert_eq!(class.abstract_bases, [native.runtime_error]);
+        assert_eq!(
+            checked
+                .classes
+                .iter()
+                .filter(|c| c.name == expected_name)
+                .count(),
+            1
+        );
+    }
+
+    accepted_body(
+        "try {
+             throw TaskCapacityError(\"task quota reached\");
+         } catch TaskCapacityError(e) {
+             e.message();
+         }
+         try {
+             throw TimerCapacityError(\"timer quota reached\");
+         } catch RuntimeError(e) {
+             e.message();
+         }
+         try {
+             throw BackgroundCapacityError(\"background quota reached\");
+         } catch RuntimeError(e) {
+             e.message();
+         }",
+    );
+}
+
+#[test]
+fn native_capacity_error_names_cannot_be_redeclared_by_user_classes() {
+    for name in ["TaskCapacityError", "TimerCapacityError"] {
+        let output = rejected(&format!(
+            "class {name} {{ construct() {{ }} }} fn main(): Void {{}}"
+        ));
+        assert!(
+            output.contains(&format!("class `{name}` is already defined")),
+            "expected duplicate native class diagnostic for {name}:\n{output}"
+        );
+    }
+}
+
 // --- `Resource<E>` / `match ... with` (roadmap Phase 4c) --------------------
 
 const OPEN_ERROR: &str = "class OpenError implements Error {
@@ -6455,6 +7718,156 @@ fn task_is_not_a_type() {
 }
 
 #[test]
+fn mutex_type_is_known_while_rwlock_remains_phase_gated() {
+    accepted("fn inspect(value: Mutex<Int32>): Void { } fn main(): Void { }");
+    let output = rejected("fn inspect(value: RwLock<Int32>): Void { } fn main(): Void { }");
+    assert!(output.contains(codes::UNKNOWN_TYPE.as_str()), "{output}");
+}
+
+#[test]
+fn mutex_handles_follow_reference_alias_rules() {
+    let output = rejected_body(
+        "mut mutex: Mutex<Int32> = Mutex(0);\n\
+         inmut::strict alias: Mutex<Int32> = mutex;",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "GC-managed mutex handles have reference identity: {output}"
+    );
+}
+
+#[test]
+fn mutex_with_types_a_scoped_writable_payload_view() {
+    accepted(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mutex.with((view: Box): Void => { view.value = 1; });\n\
+         }",
+    );
+}
+
+#[test]
+fn mutex_with_marks_scalar_payload_view_mutable() {
+    accepted(
+        "fn main(): Void {\n\
+           mut mutex: Mutex<Int32> = Mutex(0);\n\
+           mutex.with((view: Int32): Void => { view = 2; });\n\
+         }",
+    );
+}
+
+#[test]
+fn mutex_with_rejects_escaping_views_and_nested_capture() {
+    let escaped = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mut saved: Box? = null;\n\
+           mutex.with((view: Box): Void => { saved = view; });\n\
+         }",
+    );
+    assert!(escaped.contains("borrowed view escapes"), "{escaped}");
+
+    let returned = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mut saved: Box = mutex.with((view: Box): Box => view);\n\
+         }",
+    );
+    assert!(
+        returned.contains(codes::TYPE_MISMATCH.as_str()),
+        "{returned}"
+    );
+
+    let nested = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mutex.with((view: Box): Void => { _ = spawn { view.value }; });\n\
+         }",
+    );
+    assert!(nested.contains("borrowed view escapes"), "{nested}");
+}
+
+#[test]
+fn mutex_with_rejects_direct_and_transitive_suspension_and_unknown_effects() {
+    let direct = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mutex.with((view: Box): Void => { Timer.sleep(1s); });\n\
+         }",
+    );
+    assert!(
+        direct.contains("Mutex.with` callback may suspend"),
+        "{direct}"
+    );
+
+    let transitive = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn pause(): Void { Timer.sleep(1s); }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mutex.with((view: Box): Void => { pause(); });\n\
+         }",
+    );
+    assert!(
+        transitive.contains("Mutex.with` callback may suspend"),
+        "{transitive}"
+    );
+
+    let unknown = rejected_mutex_with(
+        "class Box { mut value: Int32; construct() { this.value = 0; } }\n\
+         fn main(): Void {\n\
+           mut mutex: Mutex<Box> = Mutex(Box());\n\
+           mut callback: Fn() => Void = (): Void => { };\n\
+           mutex.with((view: Box): Void => { callback(); });\n\
+         }",
+    );
+    assert!(
+        unknown.contains("Mutex.with` callback may suspend"),
+        "{unknown}"
+    );
+}
+
+#[test]
+fn nested_mutex_with_is_a_suspend_and_block_effect_under_the_outer_guard() {
+    let output = rejected_mutex_with(
+        "fn main(): Void {\n\
+           mut outer: Mutex<Int32> = Mutex(0);\n\
+           mut inner: Mutex<Int32> = Mutex(0);\n\
+           outer.with((view: Int32): Void => {\n\
+             inner.with((nested: Int32): Void => { });\n\
+           });\n\
+         }",
+    );
+    assert!(
+        output.contains("Mutex.with` callback may suspend"),
+        "nested acquisition may wait while the outer guard is live: {output}"
+    );
+}
+
+#[test]
+fn transitive_mutex_with_acquisition_is_rejected_under_the_outer_guard() {
+    let output = rejected_mutex_with(
+        "fn acquire(inner: Mutex<Int32>): Void {\n\
+           inner.with((nested: Int32): Void => { });\n\
+         }\n\
+         fn main(): Void {\n\
+           mut outer: Mutex<Int32> = Mutex(0);\n\
+           mut inner: Mutex<Int32> = Mutex(0);\n\
+           outer.with((view: Int32): Void => { acquire(inner); });\n\
+         }",
+    );
+    assert!(
+        output.contains("Mutex.with` callback may suspend"),
+        "nested acquisition effects propagate through direct calls: {output}"
+    );
+}
+
+#[test]
 fn task_and_select_are_ordinary_identifiers() {
     accepted_body("mut task = 1; mut select = 2; task = select;");
 }
@@ -6610,6 +8023,14 @@ fn invalid_shared_mutable_alias_into_a_parallel_region_is_rejected() {
 }
 
 #[test]
+fn explicitly_unsafe_parallel_boundary_allows_an_unproven_mutable_alias() {
+    accepted_body(
+        "mut rows: List<Int32> = [1, 2, 3];\n\
+         unsafe { parallel { rows[0] = 4; } }",
+    );
+}
+
+#[test]
 fn valid_strict_shared_or_copied_value_into_a_parallel_region_type_checks() {
     accepted_body(
         "inmut::strict rows: List<Int32> = [1, 2, 3];\n\
@@ -6639,8 +8060,266 @@ fn invalid_parallel_adapter_on_a_non_iterable_is_rejected() {
 #[test]
 fn valid_parallel_each_types_a_list() {
     accepted_body(
-        "mut rows: List<Int32> = [1, 2, 3];\n\
+        "inmut::strict rows: List<Int32> = [1, 2, 3];\n\
          mut doubled: List<Int32> = Parallel.each(rows, (item: Int32): Int32 => item * 2);",
+    );
+}
+
+#[test]
+fn invalid_parallel_each_rejects_transitively_suspending_callback() {
+    let output = rejected(
+        "fn delay(): Void { Timer.sleep(1s); }\n\
+         fn main(): Void {\n\
+           mut rows: List<Int32> = [1];\n\
+           _ = Parallel.each(rows, (item: Int32): Int32 => { delay(); return item; });\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::PARALLEL_REGION_IO.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_parallel_each_rejects_an_unsafe_captured_reference() {
+    let output = rejected(
+        "class Counter {\n\
+           mut value: Int32;\n\
+           construct() { this.value = 0; }\n\
+           increment(): Void { this.value += 1; }\n\
+         }\n\
+         fn main(): Void {\n\
+           inmut::strict rows: List<Int32> = [1];\n\
+           mut counter = Counter();\n\
+           _ = Parallel.each(rows, (item: Int32): Int32 => { counter.increment(); return item; });\n\
+         }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+// --- Recursive Transfer/Share derivation (concurrency-completion 2.3/2.6) ---
+
+fn ownership_program(source_text: &str) -> zirk_sema::CheckedProgram {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("ownership.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        !sink.has_errors(),
+        "fixture must type-check:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+    checked
+}
+
+fn ownership_of_class(
+    checked: &zirk_sema::CheckedProgram,
+    name: &str,
+) -> zirk_sema::OwnershipProperties {
+    let id = checked
+        .classes
+        .iter()
+        .position(|class| class.name == name)
+        .expect("class exists") as u32;
+    checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Class(id)))
+}
+
+#[test]
+fn ownership_derivation_follows_aliases_nested_types_and_recursive_shapes() {
+    let checked = ownership_program(
+        "type Count = Int32;
+         class ScalarBox { inmut value: Count; construct(value: Count) { this.value = value; } }
+         class MutableBox { mut values: List<Map<Count, String>>; construct(values: List<Map<Count, String>>) { this.values = values; } }
+         class Node { mut next: Node?; construct(next: Node?) { this.next = next; } }
+         enum MaybeCount { None, Some(value: Count) }
+         class GenericBox<T> { inmut value: T; construct(value: T) { this.value = value; } }
+         class UsesGeneric { mut value: GenericBox<Count>; construct(value: GenericBox<Count>) { this.value = value; } }
+         class HasChannel { mut value: Channel<Count>; construct(value: Channel<Count>) { this.value = value; } }
+         fn main(): Void { }",
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "ScalarBox"),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: true
+        }
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "MutableBox"),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: false
+        }
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "Node"),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: false
+        }
+    );
+    let enum_id = checked
+        .enums
+        .iter()
+        .position(|en| en.name == "MaybeCount")
+        .unwrap() as u32;
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Enum(enum_id))),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: true
+        }
+    );
+    let generic_id = checked
+        .generic_instances
+        .iter()
+        .position(|instance| {
+            checked.classes[instance.class as usize].name == "GenericBox"
+                && instance.args == [zirk_sema::Type::INT32]
+        })
+        .expect("the generic class is instantiated through UsesGeneric")
+        as u32;
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Instance(generic_id,))),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: true
+        }
+    );
+    let channel = checked
+        .channel_types
+        .iter()
+        .position(|ty| *ty == zirk_sema::Type::INT32)
+        .unwrap() as u32;
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Channel(channel))),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: true
+        }
+    );
+}
+
+#[test]
+fn ownership_derivation_denies_resources_without_compiler_audited_transfer_marker() {
+    let checked = ownership_program(
+        "class OpenError implements Error {
+             inmut reason: String;
+             construct(reason: String) { this.reason = reason; }
+             message(): String { return this.reason; }
+             code(): String { return \"OPEN\"; }
+             cause(): Error? { return null; }
+         }
+         class FakeFile implements Resource<OpenError> {
+             inmut name: String;
+             mut closed: Boolean;
+             construct(name: String) { this.name = name; this.closed = false; }
+             nothing(): Void { return; }
+             close(): Result<Void, OpenError> { this.closed = true; return Ok(this.nothing()); }
+             is_closed(): Boolean { return this.closed; }
+         }
+         class Plain implements TransferableResource { mut id: Int32; construct(id: Int32) { this.id = id; } }
+         fn main(): Void { }",
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "FakeFile"),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "Plain"),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: false
+        }
+    );
+}
+
+#[test]
+fn ownership_derivation_fails_closed_for_unsupported_native_and_open_contract_shapes() {
+    let checked = ownership_program(
+        "interface Open { read(): Int32; }
+         class HoldsOpen { inmut value: Open; construct(value: Open) { this.value = value; } }
+         fn main(): Void { }",
+    );
+    assert_eq!(
+        ownership_of_class(&checked, "HoldsOpen"),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+    let checked = ownership_program(
+        "fn main(): Void { mut value: Int32 = 1; unsafe { mut p = Pointer.from(value); } }",
+    );
+    let id = checked
+        .pointer_types
+        .iter()
+        .position(|_| true)
+        .expect("pointer type interned") as u32;
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Pointer(id))),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::UNKNOWN),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+    assert_eq!(
+        checked.ownership_of(zirk_sema::Type::of(zirk_sema::Base::Regex)),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+}
+
+#[test]
+fn ownership_derivation_uses_lambda_identity_and_fails_closed_for_captures() {
+    let checked = ownership_program(
+        "fn main(): Void {
+             mut value: Int32 = 1;
+             mut captured = (): Int32 => value;
+             mut standalone = (): Int32 => 2;
+         }",
+    );
+    let (capturing_span, _) = checked
+        .lambdas
+        .iter()
+        .find(|(_, lambda)| !lambda.captures.is_empty())
+        .expect("capturing closure is recorded");
+    assert_eq!(
+        checked.ownership_of_lambda(*capturing_span),
+        zirk_sema::OwnershipProperties {
+            transfer: false,
+            share: false
+        }
+    );
+    let (empty_span, _) = checked
+        .lambdas
+        .iter()
+        .find(|(_, lambda)| lambda.captures.is_empty())
+        .expect("captureless closure is recorded");
+    assert_eq!(
+        checked.ownership_of_lambda(*empty_span),
+        zirk_sema::OwnershipProperties {
+            transfer: true,
+            share: true
+        }
     );
 }
 
@@ -6781,4 +8460,221 @@ fn implicit_subclass_constructor_reports_an_unsatisfied_base_at_instantiation() 
         output.contains(codes::UNSATISFIABLE_IMPLICIT_CONSTRUCTION.as_str()),
         "{output}"
     );
+}
+
+// --- Atomic<T> semantic surface (concurrency-completion tasks 7.3/9.1) ---
+
+#[test]
+fn atomic_supported_scalar_types_and_operations_typecheck() {
+    accepted_body(
+        "mut signed: Atomic<Int32> = Atomic(0);\n\
+         mut loaded: Int32 = signed.load();\n\
+         signed.store(value: 1);\n\
+         mut old: Int32 = signed.exchange(value: 2);\n\
+         mut result: Result<Int32, Int32> = signed.compare_exchange(expected: 2, desired: 3);\n\
+         mut added: Int32 = signed.fetch_add(value: 1);\n\
+         mut subtracted: Int32 = signed.fetch_sub(value: 1);\n\
+         mut boolean: Atomic<Boolean> = Atomic(true);\n\
+         mut seed: UInt64 = 1;\n\
+         mut unsigned: Atomic<UInt64> = Atomic(seed);\n\
+         mut i8: Atomic<Int8> = Atomic(1);\n\
+         mut i16: Atomic<Int16> = Atomic(1);\n\
+         mut i64: Atomic<Int64> = Atomic(1);\n\
+         mut u8: Atomic<UInt8> = Atomic(1);\n\
+         mut u16: Atomic<UInt16> = Atomic(1);\n\
+         mut u32: Atomic<UInt32> = Atomic(1);",
+    );
+}
+
+#[test]
+fn atomic_weaker_orders_are_accepted_inside_unsafe() {
+    accepted_body(
+        "mut value: Atomic<Int32> = Atomic(0);\n\
+         unsafe {\n\
+             mut loaded: Int32 = value.load(order: AtomicOrder.acquire);\n\
+             value.store(value: 1, order: AtomicOrder.release);\n\
+             mut exchanged: Int32 = value.exchange(2, AtomicOrder.acq_rel);\n\
+             mut prior: Int32 = value.fetch_add(1, AtomicOrder.relaxed);\n\
+             mut result: Result<Int32, Int32> = value.compare_exchange(0, 1, AtomicOrder.acq_rel, AtomicOrder.acquire);\n\
+         }",
+    );
+}
+
+#[test]
+fn atomic_rejects_unsupported_payload_types() {
+    for source in [
+        "mut value: Atomic<String> = Atomic(\"x\");",
+        "mut value: Atomic<Float> = Atomic(1.0);",
+        "mut value: Atomic<Int128> = Atomic(1i128);",
+        "mut value: Atomic<UInt128> = Atomic(1u128);",
+        "mut value: Atomic<Int32, Int32> = Atomic(1);",
+    ] {
+        let output = rejected_body(source);
+        assert!(
+            output.contains(codes::TYPE_MISMATCH.as_str())
+                || output.contains(codes::UNKNOWN_TYPE.as_str()),
+            "{source}\n{output}"
+        );
+    }
+    for source in [
+        "fn consume(value: Atomic<Pointer<Int32>>): Void { } fn main(): Void { }",
+        "fn consume(value: Atomic<Array<Int32>>): Void { } fn main(): Void { }",
+    ] {
+        let output = rejected(source);
+        assert!(
+            output.contains(codes::TYPE_MISMATCH.as_str()),
+            "{source}\n{output}"
+        );
+    }
+}
+
+#[test]
+fn atomic_fetch_arithmetic_is_integer_only_and_values_match_payload() {
+    let output = rejected_body("mut value: Atomic<Boolean> = Atomic(true); value.fetch_add(true);");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+
+    let output = rejected_body("mut value: Atomic<Int32> = Atomic(0); value.store(value: true);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+
+    let output = rejected_body("mut value: Atomic<Int32> = Atomic(true);");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn atomic_weaker_orders_require_unsafe_context() {
+    let output =
+        rejected_body("mut value: Atomic<Int32> = Atomic(0); value.load(AtomicOrder.relaxed);");
+    assert!(
+        output.contains("non-sequentially-consistent atomic ordering"),
+        "{output}"
+    );
+}
+
+#[test]
+fn atomic_load_and_store_reject_operation_incompatible_orders() {
+    for body in [
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { value.load(AtomicOrder.release); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { value.store(1, AtomicOrder.acquire); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { value.load(AtomicOrder.acq_rel); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { value.store(1, AtomicOrder.acq_rel); }",
+    ] {
+        let output = rejected_body(body);
+        assert!(
+            output.contains("ordering") && output.contains("invalid for Atomic"),
+            "{body}\n{output}"
+        );
+    }
+}
+
+#[test]
+fn atomic_compare_exchange_rejects_invalid_failure_order_pairs() {
+    for body in [
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { _ = value.compare_exchange(0, 1, AtomicOrder.release, AtomicOrder.acquire); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { _ = value.compare_exchange(0, 1, AtomicOrder.relaxed, AtomicOrder.acquire); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { _ = value.compare_exchange(0, 1, AtomicOrder.seq_cst, AtomicOrder.release); }",
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { _ = value.compare_exchange(0, 1, AtomicOrder.acq_rel, AtomicOrder.acq_rel); }",
+    ] {
+        let output = rejected_body(body);
+        assert!(
+            output.contains("invalid compare_exchange failure ordering"),
+            "{body}\n{output}"
+        );
+    }
+}
+
+#[test]
+fn atomic_compare_exchange_named_orders_resolve_by_label_and_apply_defaults() {
+    accepted_body(
+        "mut value: Atomic<Int32> = Atomic(0);\n\
+         unsafe { mut result: Result<Int32, Int32> = value.compare_exchange(desired: 1, expected: 0, failure: AtomicOrder.acquire, success: AtomicOrder.acq_rel); }",
+    );
+    let output = rejected_body(
+        "mut value: Atomic<Int32> = Atomic(0); unsafe { _ = value.compare_exchange(expected: 0, desired: 1, success: AtomicOrder.acquire); }",
+    );
+    assert!(
+        output.contains("invalid compare_exchange failure ordering"),
+        "{output}"
+    );
+}
+
+#[test]
+fn atomic_seq_cst_is_safe_without_unsafe_and_dynamic_weak_order_is_not() {
+    accepted_body(
+        "mut value: Atomic<Int32> = Atomic(0); mut observed: Int32 = value.load(AtomicOrder.seq_cst);",
+    );
+    let output = rejected_body(
+        "mut value: Atomic<Int32> = Atomic(0); mut order: AtomicOrder = AtomicOrder.relaxed; value.load(order);",
+    );
+    assert!(
+        output.contains("non-sequentially-consistent atomic ordering"),
+        "{output}"
+    );
+}
+
+#[test]
+fn atomic_rejects_bad_arity_and_unknown_operations() {
+    let output = rejected_body("mut value: Atomic<Int32> = Atomic(0); value.load(1, 2);");
+    assert!(
+        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{output}"
+    );
+    let output = rejected_body("mut value: Atomic<Int32> = Atomic(0); value.swap(2);");
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn service_callback_semantics_record_sites_for_lowering() {
+    let source_text = "fn main(): Void { application.spawn_service((context: ServiceContext): Void => { context.ready(); }); }";
+    let mut sources = SourceMap::new();
+    let file = sources.add(SourceFile::new("service.zrk", source_text));
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(sources.file(file), &mut sink);
+    let program = parse(sources.file(file), &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let output = sink.render(RenderStyle::Human);
+
+    assert!(!output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(
+        !output.contains(codes::PENDING_FEATURE.as_str()),
+        "{output}"
+    );
+    assert_eq!(checked.service_spawns.len(), 1, "{output}");
+    assert_eq!(checked.service_ready_calls.len(), 1, "{output}");
+    let spawn = checked.service_spawns.values().next().unwrap();
+    assert_eq!(
+        spawn.capacity_error,
+        Type::of(Base::Class(
+            checked.native_exceptions.unwrap().service_capacity_error
+        ))
+    );
+    assert_eq!(
+        checked.service_ready_calls.values().next(),
+        Some(&spawn.context_parameter)
+    );
+}
+
+#[test]
+fn service_context_is_bound_to_callback_parameter_and_cannot_escape() {
+    let outside = rejected(
+        "fn ordinary(context: ServiceContext): Void { context.ready(); } fn main(): Void { }",
+    );
+    assert!(outside.contains(codes::TYPE_MISMATCH.as_str()), "{outside}");
+
+    for body in [
+        "mut saved: ServiceContext = context;",
+        "return context;",
+        "throw context;",
+        "mut aggregate = (context,);",
+        "mut nested = (): Void => { context.ready(); };",
+    ] {
+        let source = format!(
+            "fn serve(context: ServiceContext): Void {{ {body} }} fn main(): Void {{ application.spawn_service(serve); }}"
+        );
+        let output = rejected(&source);
+        assert!(
+            output.contains("ServiceContext cannot escape")
+                || output.contains(codes::TYPE_MISMATCH.as_str()),
+            "{body}: {output}"
+        );
+    }
 }

@@ -19,10 +19,49 @@ use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
+const BORROWED_VIEW_ESCAPE_CODE: Code = Code::new("E0485");
+
+fn is_standard_io_source(name: &str) -> bool {
+    let name = name.replace('\\', "/");
+    name.contains("/stdlib/std/io/") || name.starts_with("std.io/")
+}
+
+fn is_standard_io_package_source(name: &str) -> bool {
+    let name = name.replace('\\', "/");
+    name.ends_with("/stdlib/std/io/package.zrk") || name.ends_with("std.io/package.zrk")
+}
+
+fn is_borrowed_scalar_value(ty: Type) -> bool {
+    !ty.is_unknown()
+        && matches!(
+            ty.base,
+            Base::Int(_)
+                | Base::Float(_)
+                | Base::Decimal
+                | Base::Boolean
+                | Base::Char
+                | Base::Duration
+                | Base::Date
+                | Base::Time
+                | Base::DateTime
+        )
+}
+
+fn without_borrowed_scope(ty: Type) -> Type {
+    Type {
+        borrowed_scope: None,
+        ..ty
+    }
+}
+
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
     pub functions: HashMap<String, Signature>,
+    /// Conservative suspension effect for each checked top-level function,
+    /// keyed by the function-name span. An incomplete summary always has
+    /// `may_suspend == true`; consumers must never treat it as non-suspending.
+    pub suspend_summaries: HashMap<Span, EffectSummary>,
     /// Compiler-bundled standard-stream implementation modules, keyed by
     /// their source file. Lowering uses this only to give their generated
     /// functions collision-free internal symbols and to select their private
@@ -44,6 +83,13 @@ pub struct CheckedProgram {
     pub job_types: Vec<Type>,
     /// Interned `Channel<T>` element types, indexed by [`Base::Channel`].
     pub channel_types: Vec<Type>,
+    pub atomic_types: Vec<Type>,
+    pub mutex_types: Vec<Type>,
+    /// The protected Mutex type and borrowed callback parameter, keyed by the
+    /// direct `Mutex.with` call and lambda spans respectively. Lowering uses
+    /// these checked facts to build a non-escaping borrowed callback ABI.
+    pub mutex_with_calls: HashMap<Span, u32>,
+    pub mutex_view_lambdas: HashMap<Span, u32>,
     /// What each lambda captures, keyed by the lambda's span.
     ///
     /// Lowering needs this to build the environment, and a span identifies a
@@ -175,6 +221,8 @@ pub struct CheckedProgram {
     /// reference works). `zirk-ir`'s `resolve_written_type` expands them at
     /// the same point the checker does.
     pub type_aliases: HashMap<String, TypeRef>,
+    /// Compiler-owned ownership marker ids used by the recursive ownership analysis.
+    pub ownership_markers: OwnershipMarkers,
 
     /// Which `Base::Instance` a generic class's construction call resolved
     /// to, keyed by the call's span — an id into `generic_instances`.
@@ -239,6 +287,452 @@ pub struct CheckedProgram {
     /// joins the branches in `order` and, before starting branch `i`, waits
     /// the branches in `deps[i]` so a dependent branch sees its inputs.
     pub concurrent_plans: HashMap<Span, ConcurrentPlan>,
+    /// Sema-validated service registrations, retained for future lowering.
+    pub service_spawns: HashMap<Span, ServiceSpawnInfo>,
+    /// Readiness call span mapped to the exact callback parameter span.
+    pub service_ready_calls: HashMap<Span, Span>,
+    /// Source branch metadata for the implemented `Concurrent.of(...).settled()` terminal.
+    pub settled_plans: HashMap<Span, SettledPlan>,
+    pub first_plans: HashMap<Span, SettledPlan>,
+    /// Typed source metadata for the bounded collection combinators. Lowering
+    /// consumes this plan only after the managed ABI is available.
+    pub concurrent_each_plans: HashMap<Span, ConcurrentEachPlan>,
+    /// Calls resolved as the compiler-provided `Thread.run` namespace API.
+    pub thread_run_calls: HashSet<Span>,
+}
+
+/// Reserved marker contracts relevant to ownership proofs. `None` means the
+/// compiler did not register that contract; user declarations cannot supply it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OwnershipMarkers {
+    pub resource: Option<u32>,
+    pub transferable_resource: Option<u32>,
+}
+
+/// Structural ownership capabilities derived from a checked reachable type graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnershipProperties {
+    /// The value can cross an ownership boundary without duplicating mutable aliases.
+    pub transfer: bool,
+    /// The complete reachable graph can be observed concurrently without a data race.
+    pub share: bool,
+}
+
+impl CheckedProgram {
+    /// Derives conservative `Transfer` and `Share` properties for a resolved type.
+    /// Unknown, open, or unaudited native shapes fail closed.
+    pub fn ownership_of(&self, ty: Type) -> OwnershipProperties {
+        OwnershipDeriver::new(self).derive(ty)
+    }
+
+    /// Derives ownership for one closure using its identity-specific capture list.
+    /// Capturing closures remain conservative until capture moves are proven by flow analysis.
+    pub fn ownership_of_lambda(&self, span: Span) -> OwnershipProperties {
+        let Some(lambda) = self.lambdas.get(&span) else {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        };
+        if !lambda.captures.is_empty() {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        }
+        OwnershipProperties {
+            transfer: true,
+            share: true,
+        }
+    }
+}
+
+struct OwnershipDeriver<'a> {
+    classes: &'a [ClassType],
+    enums: &'a [EnumType],
+    generic_instances: &'a [GenericInstance],
+    enum_instances: &'a [GenericEnumInstance],
+    tuple_types: &'a [TupleType],
+    array_types: &'a [Type],
+    list_types: &'a [Type],
+    map_types: &'a [MapType],
+    set_types: &'a [Type],
+    range_types: &'a [Type],
+    channel_types: &'a [Type],
+    unions: &'a [Vec<Base>],
+    markers: OwnershipMarkers,
+    memo: HashMap<(u8, u32, Vec<Type>), OwnershipProperties>,
+    active: HashMap<(u8, u32), Vec<Type>>,
+}
+
+impl<'a> OwnershipDeriver<'a> {
+    fn new(program: &'a CheckedProgram) -> Self {
+        Self {
+            classes: &program.classes,
+            enums: &program.enums,
+            generic_instances: &program.generic_instances,
+            enum_instances: &program.enum_instances,
+            tuple_types: &program.tuple_types,
+            array_types: &program.array_types,
+            list_types: &program.list_types,
+            map_types: &program.map_types,
+            set_types: &program.set_types,
+            range_types: &program.range_types,
+            channel_types: &program.channel_types,
+            unions: &program.unions,
+            markers: program.ownership_markers,
+            memo: HashMap::new(),
+            active: HashMap::new(),
+        }
+    }
+
+    fn from_checker(checker: &'a Checker<'_>) -> Self {
+        Self {
+            classes: &checker.classes,
+            enums: &checker.enums,
+            generic_instances: &checker.generic_instances,
+            enum_instances: &checker.enum_instances,
+            tuple_types: &checker.tuple_types,
+            array_types: &checker.array_types,
+            list_types: &checker.list_types,
+            map_types: &checker.map_types,
+            set_types: &checker.set_types,
+            range_types: &checker.range_types,
+            channel_types: &checker.channel_types,
+            unions: &checker.unions,
+            markers: OwnershipMarkers {
+                resource: checker.native_resource.map(|resource| resource.resource),
+                transferable_resource: checker.native_transferable,
+            },
+            memo: HashMap::new(),
+            active: HashMap::new(),
+        }
+    }
+
+    fn derive(mut self, ty: Type) -> OwnershipProperties {
+        self.visit(ty, &[])
+    }
+
+    fn all(
+        &mut self,
+        types: impl IntoIterator<Item = Type>,
+        subst: &[(u32, Type)],
+    ) -> OwnershipProperties {
+        types.into_iter().fold(
+            OwnershipProperties {
+                transfer: true,
+                share: true,
+            },
+            |acc, ty| {
+                let next = self.visit(ty, subst);
+                OwnershipProperties {
+                    transfer: acc.transfer && next.transfer,
+                    share: acc.share && next.share,
+                }
+            },
+        )
+    }
+
+    fn visit(&mut self, ty: Type, subst: &[(u32, Type)]) -> OwnershipProperties {
+        if ty.nullable {
+            return self.visit(ty.without_null(), subst);
+        }
+        let no = OwnershipProperties {
+            transfer: false,
+            share: false,
+        };
+        let yes = OwnershipProperties {
+            transfer: true,
+            share: true,
+        };
+        match ty.base {
+            Base::Void
+            | Base::Int(_)
+            | Base::Float(_)
+            | Base::Decimal
+            | Base::Char
+            | Base::Boolean
+            | Base::String
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::DateTime
+            | Base::Null
+            | Base::Never => yes,
+            Base::Param(id) => subst
+                .iter()
+                .find(|(param, _)| *param == id)
+                .map_or(no, |(_, actual)| self.visit(*actual, subst)),
+            Base::Class(id) => self.class(id, &[]),
+            Base::Instance(instance_id) => {
+                let Some(instance) = self.generic_instances.get(instance_id as usize) else {
+                    return no;
+                };
+                let (class_id, args) = (instance.class, instance.args.clone());
+                self.class(class_id, &args)
+            }
+            Base::Enum(id) => self.enum_type(id, &[]),
+            Base::EnumInstance(instance_id) => {
+                let Some(instance) = self.enum_instances.get(instance_id as usize) else {
+                    return no;
+                };
+                let (enum_id, args) = (instance.enum_id, instance.args.clone());
+                self.enum_type(enum_id, &args)
+            }
+            Base::Tuple(id) => self
+                .tuple_types
+                .get(id as usize)
+                .map(|t| self.all(t.elements.clone(), subst))
+                .unwrap_or(no),
+            Base::Array(id) => self
+                .array_types
+                .get(id as usize)
+                .copied()
+                .map(|t| {
+                    let p = self.visit(t, subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.share,
+                    }
+                })
+                .unwrap_or(no),
+            Base::List(id) => self
+                .list_types
+                .get(id as usize)
+                .copied()
+                .map(|t| {
+                    let p = self.visit(t, subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.share,
+                    }
+                })
+                .unwrap_or(no),
+            Base::Map(id) => self
+                .map_types
+                .get(id as usize)
+                .map(|t| {
+                    let p = self.all([t.key, t.value], subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.share,
+                    }
+                })
+                .unwrap_or(no),
+            Base::Set(id) => self
+                .set_types
+                .get(id as usize)
+                .copied()
+                .map(|t| {
+                    let p = self.visit(t, subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.share,
+                    }
+                })
+                .unwrap_or(no),
+            Base::Range(id) => self
+                .range_types
+                .get(id as usize)
+                .copied()
+                .map(|t| self.visit(t, subst))
+                .unwrap_or(no),
+            Base::Union(id) => self
+                .unions
+                .get(id as usize)
+                .map(|members| self.all(members.iter().copied().map(Type::of), subst))
+                .unwrap_or(no),
+            // Channel endpoints are runtime-synchronized. Their payload still
+            // must be safely movable through the queue before sharing is sound.
+            Base::Channel(id) => self
+                .channel_types
+                .get(id as usize)
+                .copied()
+                .map(|t| {
+                    let p = self.visit(t, subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.transfer,
+                    }
+                })
+                .unwrap_or(no),
+            Base::Atomic(_) => yes,
+            // `FnType` erases closure identity and capture provenance, so a
+            // function type alone cannot prove either capability.
+            Base::Function(_) => no,
+            // Open contracts, task handles, pointers, weak/native views and
+            // opaque native handles have no audited ownership contract yet.
+            _ => no,
+        }
+    }
+
+    fn class(&mut self, id: u32, args: &[Type]) -> OwnershipProperties {
+        let active_key = (0, id);
+        let key = (0, id, args.to_vec());
+        if let Some(cached) = self.memo.get(&key) {
+            return *cached;
+        }
+        let Some(class) = self.classes.get(id as usize) else {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        };
+        if class.type_params.len() != args.len() {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        }
+        if let Some(active_args) = self.active.get(&active_key) {
+            return if active_args == args {
+                OwnershipProperties {
+                    transfer: true,
+                    share: true,
+                }
+            } else {
+                OwnershipProperties {
+                    transfer: false,
+                    share: false,
+                }
+            };
+        }
+        let resource = self
+            .markers
+            .resource
+            .is_some_and(|marker| class.contracts.contains(&marker));
+        let transferable_resource = self
+            .markers
+            .transferable_resource
+            .is_some_and(|marker| class.contracts.contains(&marker));
+        if resource {
+            return OwnershipProperties {
+                transfer: transferable_resource,
+                share: false,
+            };
+        }
+        if !matches!(
+            class.kind,
+            zirk_ast::ClassKind::Class | zirk_ast::ClassKind::Record
+        ) {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        }
+        let subst: Vec<_> = class
+            .type_params
+            .iter()
+            .copied()
+            .zip(args.iter().copied())
+            .collect();
+        self.active.insert(active_key, args.to_vec());
+        let fields = class
+            .fields
+            .iter()
+            .filter(|f| !f.is_static)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut result = self.all(fields.iter().map(|f| f.ty), &subst);
+        result.share &= fields.iter().all(|f| {
+            f.mutability != zirk_ast::Mutability::Mutable
+                && (!self.is_reference_type(f.ty) || f.mutability == zirk_ast::Mutability::Strict)
+        });
+        self.active.remove(&active_key);
+        self.memo.insert(key, result);
+        result
+    }
+
+    fn is_reference_type(&self, ty: Type) -> bool {
+        match ty.base {
+            Base::Class(id) => self
+                .classes
+                .get(id as usize)
+                .is_some_and(|class| class.kind == zirk_ast::ClassKind::Class),
+            Base::Instance(id) => self
+                .generic_instances
+                .get(id as usize)
+                .and_then(|instance| self.classes.get(instance.class as usize))
+                .is_some_and(|class| class.kind == zirk_ast::ClassKind::Class),
+            Base::Contract(_)
+            | Base::ContractInstance(_)
+            | Base::ServiceCapacityError
+            | Base::ServiceLifecycleError
+            | Base::Array(_)
+            | Base::List(_)
+            | Base::Map(_)
+            | Base::Set(_)
+            | Base::Channel(_)
+            | Base::Tuple(_)
+            | Base::Union(_)
+            | Base::Enum(_)
+            | Base::EnumInstance(_) => true,
+            _ => false,
+        }
+    }
+
+    fn enum_type(&mut self, id: u32, args: &[Type]) -> OwnershipProperties {
+        let active_key = (1, id);
+        let key = (1, id, args.to_vec());
+        if let Some(cached) = self.memo.get(&key) {
+            return *cached;
+        }
+        let Some(en) = self.enums.get(id as usize) else {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        };
+        if en.type_params.len() != args.len() {
+            return OwnershipProperties {
+                transfer: false,
+                share: false,
+            };
+        }
+        if let Some(active_args) = self.active.get(&active_key) {
+            return if active_args == args {
+                OwnershipProperties {
+                    transfer: true,
+                    share: true,
+                }
+            } else {
+                OwnershipProperties {
+                    transfer: false,
+                    share: false,
+                }
+            };
+        }
+        let subst: Vec<_> = en
+            .type_params
+            .iter()
+            .copied()
+            .zip(args.iter().copied())
+            .collect();
+        self.active.insert(active_key, args.to_vec());
+        let result = self.all(
+            en.variants
+                .iter()
+                .flat_map(|v| v.associated.iter().map(|f| f.ty)),
+            &subst,
+        );
+        // Enums are immutable tagged values, but recurse through every variant
+        // so no inactive payload can smuggle a mutable alias across a boundary.
+        self.active.remove(&active_key);
+        self.memo.insert(key, result);
+        result
+    }
+}
+
+/// Conservative effects for a checked callable. Unknown dispatch is modeled
+/// as suspension, blocking, and task creation, and always has an incomplete
+/// summary so consumers cannot treat it as effect-free.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EffectSummary {
+    pub may_suspend: bool,
+    pub may_block: bool,
+    pub may_spawn: bool,
+    pub uses_channel: bool,
+    pub complete: bool,
 }
 
 /// See [`CheckedProgram::concurrent_plans`].
@@ -248,6 +742,26 @@ pub struct ConcurrentPlan {
     pub order: Vec<usize>,
     /// `deps[i]` is the sibling bindings binding `i`'s initializer names.
     pub deps: Vec<Vec<usize>>,
+}
+
+/// Checked input/result contract for one settled completion pipeline.
+#[derive(Debug, Clone)]
+pub struct SettledPlan {
+    pub branches: Vec<Span>,
+    pub result: Type,
+    /// Span of the duration expression for a chainable `.within(d)` stage.
+    /// The IR evaluates this expression exactly once before starting children.
+    pub deadline: Option<Span>,
+}
+
+/// Typechecked inputs for `Concurrent.each` and `each_settled`.
+#[derive(Debug, Clone)]
+pub struct ConcurrentEachPlan {
+    pub callback: Span,
+    pub element: Type,
+    pub result: Type,
+    pub limit: Option<Span>,
+    pub settled: bool,
 }
 
 /// See [`CheckedProgram::native_exceptions`].
@@ -313,6 +827,24 @@ pub struct NativeExceptions {
     /// s, ns)` receives a component outside its range — hour `24` or a
     /// negative nanosecond count is a construction error, not a wrap.
     pub invalid_time: u32,
+    /// Concrete `Throwable` stored in `Outcome.Cancelled`.
+    pub cancelled_error: u32,
+    /// Compiler-known `RuntimeError` raised by a managed pipeline deadline.
+    pub timeout_error: u32,
+    /// Compiler-known `RuntimeError` raised when an executor reaches its task quota.
+    pub task_capacity_error: u32,
+    /// Compiler-known `RuntimeError` raised when an executor reaches its timer quota.
+    pub timer_capacity_error: u32,
+    /// Compiler-known `RuntimeError` raised when the app background supervisor
+    /// reaches its independent detached-job quota.
+    pub background_capacity_error: u32,
+    /// Compiler-known `RuntimeError` raised when the service supervisor is full.
+    pub service_capacity_error: u32,
+    /// Compiler-known `RuntimeError` for service lifecycle misuse.
+    pub service_lifecycle_error: u32,
+    /// `InvalidArgumentError` raised when a bounded concurrency API receives
+    /// an out-of-range collection size or concurrency limit.
+    pub invalid_argument: u32,
 }
 
 /// What the checker learned about one lambda.
@@ -339,6 +871,18 @@ pub struct Capture {
     pub ty: Type,
 }
 
+/// Validated source service site. The context parameter span preserves the
+/// capability identity that authorizes ready(); capacity failure remains a
+/// typed contract until runtime lowering exists.
+#[derive(Debug, Clone)]
+pub struct ServiceSpawnInfo {
+    pub callback_span: Span,
+    pub context_parameter: Span,
+    pub callback_type: u32,
+    pub captures: Vec<Capture>,
+    pub capacity_error: Type,
+}
+
 /// A checked `extern "C" fn` declaration (roadmap Phase 4e, `ADR-015`).
 #[derive(Debug, Clone)]
 pub struct ExternSignature {
@@ -357,6 +901,8 @@ struct Names<'t> {
     fn_types: &'t [FnType],
     job_types: &'t [Type],
     channel_types: &'t [Type],
+    atomic_types: &'t [Type],
+    mutex_types: &'t [Type],
     classes: &'t [ClassType],
     contracts: &'t [ContractType],
     type_params: &'t [TypeParamInfo],
@@ -417,6 +963,20 @@ impl TypeNames for Names<'_> {
 
     fn channel_element(&self, id: u32) -> Type {
         self.channel_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn atomic_element(&self, id: u32) -> Type {
+        self.atomic_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn mutex_element(&self, id: u32) -> Type {
+        self.mutex_types
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
@@ -565,6 +1125,14 @@ struct Checker<'a> {
     sink: &'a mut DiagnosticSink,
     scopes: Scopes,
     functions: HashMap<String, Signature>,
+    current_function: Option<Span>,
+    direct_function_calls: HashMap<Span, HashSet<Span>>,
+    local_suspend_seeds: HashMap<Span, EffectSummary>,
+    callable_spans: HashSet<Span>,
+    parallel_calls: Vec<(Span, Option<Span>)>,
+    protected_cleanup_calls: Vec<(Span, Option<Span>)>,
+    thread_run_callables: Vec<(Span, Option<Span>)>,
+    thread_run_calls: HashSet<Span>,
     enums: Vec<EnumType>,
     classes: Vec<ClassType>,
     contracts: Vec<ContractType>,
@@ -573,6 +1141,15 @@ struct Checker<'a> {
     job_types: Vec<Type>,
     lambdas: HashMap<Span, LambdaInfo>,
     concurrent_plans: HashMap<Span, ConcurrentPlan>,
+    service_spawns: HashMap<Span, ServiceSpawnInfo>,
+    service_ready_calls: HashMap<Span, Span>,
+    service_context_params: HashSet<Span>,
+    service_callback_functions: HashSet<String>,
+    service_callback_parameter_spans: HashMap<String, Span>,
+    pending_service_callback: bool,
+    settled_plans: HashMap<Span, SettledPlan>,
+    first_plans: HashMap<Span, SettledPlan>,
+    concurrent_each_plans: HashMap<Span, ConcurrentEachPlan>,
     matches: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
     scalar_static_accesses: std::collections::HashSet<Span>,
@@ -640,6 +1217,9 @@ struct Checker<'a> {
     ///
     /// Zero means `break` and `continue` have nothing to jump out of.
     loop_depth: u32,
+    /// Nested reusable closure bodies being checked. A capture cannot be
+    /// transferred from a closure that may be invoked more than once.
+    lambda_depth: u32,
     /// Nested explicit `concurrent` blocks. `main` supplies one implicit
     /// scope through `in_main_scope` below.
     concurrent_depth: u32,
@@ -740,6 +1320,7 @@ struct Checker<'a> {
     /// See [`CheckedProgram::native_result`].
     native_result: Option<u32>,
     native_channels: Option<NativeChannels>,
+    native_atomic_order: Option<u32>,
     /// See [`CheckedProgram::native_exceptions`].
     native_exceptions: Option<NativeExceptions>,
     /// Ids of the language's own `Resource<E>` interface and its `E`
@@ -778,6 +1359,12 @@ struct Checker<'a> {
     /// carries (roadmap Phase 4e, `phase-4e-memory`).
     pin_types: Vec<Type>,
     channel_types: Vec<Type>,
+    atomic_types: Vec<Type>,
+    mutex_types: Vec<Type>,
+    mutex_with_calls: HashMap<Span, u32>,
+    mutex_view_lambdas: HashMap<Span, u32>,
+    pending_mutex_view: Option<Type>,
+    mutex_callbacks: Vec<Span>,
     /// Interned `Tuple(T...)` element types, indexed by the id their
     /// [`Base::Tuple`] carries (roadmap Phase 3b).
     tuple_types: Vec<TupleType>,
@@ -1010,6 +1597,14 @@ impl<'a> Checker<'a> {
             sink,
             scopes: Scopes::new(),
             functions: HashMap::new(),
+            current_function: None,
+            direct_function_calls: HashMap::new(),
+            local_suspend_seeds: HashMap::new(),
+            callable_spans: HashSet::new(),
+            parallel_calls: Vec::new(),
+            protected_cleanup_calls: Vec::new(),
+            thread_run_callables: Vec::new(),
+            thread_run_calls: HashSet::new(),
             enums: Vec::new(),
             classes: Vec::new(),
             contracts: Vec::new(),
@@ -1017,6 +1612,15 @@ impl<'a> Checker<'a> {
             job_types: Vec::new(),
             lambdas: HashMap::new(),
             concurrent_plans: HashMap::new(),
+            service_spawns: HashMap::new(),
+            service_ready_calls: HashMap::new(),
+            service_context_params: HashSet::new(),
+            service_callback_functions: HashSet::new(),
+            service_callback_parameter_spans: HashMap::new(),
+            pending_service_callback: false,
+            settled_plans: HashMap::new(),
+            first_plans: HashMap::new(),
+            concurrent_each_plans: HashMap::new(),
             matches: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
@@ -1037,6 +1641,7 @@ impl<'a> Checker<'a> {
             this_type: None,
             in_constructor: false,
             loop_depth: 0,
+            lambda_depth: 0,
             concurrent_depth: 0,
             in_main_scope: false,
             unsafe_depth: 0,
@@ -1060,6 +1665,7 @@ impl<'a> Checker<'a> {
             native_iteration: None,
             native_result: None,
             native_channels: None,
+            native_atomic_order: None,
             native_exceptions: None,
             native_resource: None,
             native_transferable: None,
@@ -1073,6 +1679,12 @@ impl<'a> Checker<'a> {
             dependent_types: Vec::new(),
             pin_types: Vec::new(),
             channel_types: Vec::new(),
+            atomic_types: Vec::new(),
+            mutex_types: Vec::new(),
+            mutex_with_calls: HashMap::new(),
+            mutex_view_lambdas: HashMap::new(),
+            pending_mutex_view: None,
+            mutex_callbacks: Vec::new(),
             tuple_types: Vec::new(),
             array_types: Vec::new(),
             range_types: Vec::new(),
@@ -1233,6 +1845,213 @@ impl<'a> Checker<'a> {
         self.sink.emit(d);
     }
 
+    fn mark_may_spawn(&mut self) {
+        if let Some(function) = self.current_function {
+            let summary = self
+                .local_suspend_seeds
+                .entry(function)
+                .or_insert(EffectSummary {
+                    may_suspend: false,
+                    may_block: false,
+                    may_spawn: false,
+                    uses_channel: false,
+                    complete: true,
+                });
+            summary.may_spawn = true;
+        }
+    }
+
+    fn mark_may_suspend(&mut self) {
+        if let Some(function) = self.current_function {
+            let summary = self
+                .local_suspend_seeds
+                .entry(function)
+                .or_insert(EffectSummary {
+                    may_suspend: false,
+                    may_block: false,
+                    may_spawn: false,
+                    uses_channel: false,
+                    complete: true,
+                });
+            summary.may_suspend = true;
+        }
+    }
+
+    fn mark_may_block(&mut self) {
+        if let Some(function) = self.current_function {
+            let summary = self
+                .local_suspend_seeds
+                .entry(function)
+                .or_insert(EffectSummary {
+                    may_suspend: false,
+                    may_block: false,
+                    may_spawn: false,
+                    uses_channel: false,
+                    complete: true,
+                });
+            summary.may_block = true;
+        }
+    }
+
+    fn mark_uses_channel(&mut self) {
+        if let Some(function) = self.current_function {
+            let summary = self
+                .local_suspend_seeds
+                .entry(function)
+                .or_insert(EffectSummary {
+                    may_suspend: false,
+                    may_block: false,
+                    may_spawn: false,
+                    uses_channel: false,
+                    complete: true,
+                });
+            summary.uses_channel = true;
+        }
+    }
+
+    fn mark_suspend_unknown(&mut self) {
+        if let Some(function) = self.current_function {
+            let summary = self
+                .local_suspend_seeds
+                .entry(function)
+                .or_insert(EffectSummary {
+                    may_suspend: false,
+                    may_block: false,
+                    may_spawn: false,
+                    uses_channel: false,
+                    complete: true,
+                });
+            summary.may_suspend = true;
+            summary.may_block = true;
+            summary.may_spawn = true;
+            summary.complete = false;
+        }
+    }
+
+    fn validate_parallel_call_effects(&mut self, summaries: &HashMap<Span, EffectSummary>) {
+        for (span, target) in std::mem::take(&mut self.parallel_calls) {
+            let effects = target.and_then(|target| summaries.get(&target).copied());
+            let forbidden = effects.is_none_or(|effects| {
+                !effects.complete || effects.may_suspend || effects.may_block || effects.may_spawn
+            });
+            if forbidden {
+                self.error(
+                    codes::PARALLEL_REGION_IO,
+                    span,
+                    "call may suspend, block, or create concurrent work inside a `parallel` region",
+                    "the worker pool has no scheduler safe points for these effects",
+                    Some("move the call outside `parallel`, or use only a fully checked CPU-only function".into()),
+                );
+            }
+        }
+    }
+
+    fn validate_protected_cleanup_effects(&mut self, summaries: &HashMap<Span, EffectSummary>) {
+        for (span, target) in std::mem::take(&mut self.protected_cleanup_calls) {
+            let effects = target.and_then(|target| summaries.get(&target).copied());
+            if effects.is_none_or(|effects| {
+                !effects.complete || effects.may_suspend || effects.may_block || effects.may_spawn
+            }) {
+                self.error(
+                    codes::SUSPENDING_PROTECTED_REGION,
+                    span,
+                    "`Concurrent.protect` requires a synchronous cleanup lambda with a complete effect summary",
+                    "the cleanup may suspend, block, spawn work, or has an incomplete effect summary; this analysis does not prove termination",
+                    Some("keep protected cleanup synchronous; move waits outside `Concurrent.protect`".into()),
+                );
+            }
+        }
+    }
+
+    fn validate_thread_run_effects(&mut self, summaries: &HashMap<Span, EffectSummary>) {
+        for (callable_span, summary_span) in std::mem::take(&mut self.thread_run_callables) {
+            let effects = summary_span.and_then(|span| summaries.get(&span).copied());
+            if effects.is_none_or(|effects| {
+                !effects.complete
+                    || effects.may_suspend
+                    || effects.may_spawn
+                    || effects.uses_channel
+            }) {
+                self.error(
+                    codes::THREAD_RUN_UNSUPPORTED_EFFECT,
+                    callable_span,
+                    "`Thread.run` callback has effects unsupported by managed native-thread execution",
+                    "the checked body may suspend, use a channel, create tasks, or has an incomplete effect summary; this conservative check does not establish safe blocking FFI behavior or bounded execution time",
+                    Some("keep the callback synchronous, channel-free, task-free, and fully checked; blocking FFI requires a proven collector transition".into()),
+                );
+            }
+        }
+    }
+
+    fn record_direct_function_call(&mut self, target: Span, call_span: Span) {
+        if self.parallel_depth > 0 {
+            self.parallel_calls.push((call_span, Some(target)));
+        }
+        if let Some(caller) = self.current_function {
+            self.direct_function_calls
+                .entry(caller)
+                .or_default()
+                .insert(target);
+        }
+    }
+
+    fn build_suspend_summaries(&self, program: &Program) -> HashMap<Span, EffectSummary> {
+        let callable_spans: HashSet<Span> = program
+            .functions
+            .iter()
+            .map(|function| function.name.span)
+            .chain(self.callable_spans.iter().copied())
+            .collect();
+        let mut summaries: HashMap<Span, EffectSummary> = callable_spans
+            .iter()
+            .map(|span| {
+                (
+                    *span,
+                    self.local_suspend_seeds
+                        .get(span)
+                        .copied()
+                        .unwrap_or(EffectSummary {
+                            may_suspend: false,
+                            may_block: false,
+                            may_spawn: false,
+                            uses_channel: false,
+                            complete: true,
+                        }),
+                )
+            })
+            .collect();
+
+        // This finite lattice converges even when functions are mutually
+        // recursive and makes source declaration order irrelevant.
+        loop {
+            let previous = summaries.clone();
+            for caller in &callable_spans {
+                let mut summary = previous[caller];
+                for target in self.direct_function_calls.get(caller).into_iter().flatten() {
+                    if let Some(callee) = previous.get(target) {
+                        summary.may_suspend |= callee.may_suspend;
+                        summary.may_block |= callee.may_block;
+                        summary.may_spawn |= callee.may_spawn;
+                        summary.uses_channel |= callee.uses_channel;
+                        summary.complete &= callee.complete;
+                    } else {
+                        // A signature without a checked body is never proof
+                        // that the target cannot suspend.
+                        summary.may_suspend = true;
+                        summary.may_block = true;
+                        summary.may_spawn = true;
+                        summary.complete = false;
+                    }
+                }
+                summaries.insert(*caller, summary);
+            }
+            if summaries == previous {
+                break;
+            }
+        }
+        summaries
+    }
+
     /// Renders a type for a diagnostic.
     fn name(&self, ty: Type) -> String {
         describe(
@@ -1242,6 +2061,8 @@ impl<'a> Checker<'a> {
                 fn_types: &self.fn_types,
                 job_types: &self.job_types,
                 channel_types: &self.channel_types,
+                atomic_types: &self.atomic_types,
+                mutex_types: &self.mutex_types,
                 classes: &self.classes,
                 contracts: &self.contracts,
                 type_params: &self.type_params,
@@ -1273,7 +2094,9 @@ impl<'a> Checker<'a> {
         self.register_native_functions();
         self.register_native_result_enum();
         self.register_native_channel_outcomes();
+        self.register_native_atomic_order();
         self.register_native_exception_hierarchy();
+        self.register_native_outcome_enum();
         self.register_native_resource_contract();
         self.register_native_transferable_resource_contract();
         self.register_native_resource_failure_enum();
@@ -1346,6 +2169,26 @@ impl<'a> Checker<'a> {
         self.infer_return_types(program);
         self.verify_pending_signatures();
 
+        // Record named callbacks and their exact parameter spans before any
+        // body is checked, so declaration order cannot authorize ready().
+        let service_callback_references = collect_service_callback_references(program);
+        for function in &program.functions {
+            let Some(signature) = self.functions.get(&function.name.name) else {
+                continue;
+            };
+            if signature.params.len() == 1
+                && signature.params[0].ty == Type::SERVICE_CONTEXT
+                && signature.returns == Type::VOID
+                && function.params.len() == 1
+                && service_callback_references.contains(&function.name.name)
+            {
+                self.service_callback_functions
+                    .insert(function.name.name.clone());
+                self.service_callback_parameter_spans
+                    .insert(function.name.name.clone(), function.params[0].name.span);
+            }
+        }
+
         // A `package` root is compiled as a reusable API surface. It has no
         // executable entrypoint; applications remain subject to `main`.
         if program.package.is_none() {
@@ -1369,10 +2212,17 @@ impl<'a> Checker<'a> {
         }
         self.scopes.pop();
 
+        let suspend_summaries = self.build_suspend_summaries(program);
+        self.validate_parallel_call_effects(&suspend_summaries);
+        self.validate_protected_cleanup_effects(&suspend_summaries);
+        self.validate_thread_run_effects(&suspend_summaries);
+        self.validate_mutex_callback_effects(&suspend_summaries);
+
         let tuple_base = self.classes.len() as u32;
         let type_map = self.build_type_map(program);
         CheckedProgram {
             functions: self.functions,
+            suspend_summaries,
             standard_stream_source_modules: self.standard_stream_source_modules,
             native_stringifiable: self.native_stringifiable,
             enums: self.enums,
@@ -1381,8 +2231,18 @@ impl<'a> Checker<'a> {
             fn_types: self.fn_types,
             job_types: self.job_types,
             channel_types: self.channel_types,
+            atomic_types: self.atomic_types,
+            mutex_types: self.mutex_types,
+            mutex_with_calls: self.mutex_with_calls,
+            mutex_view_lambdas: self.mutex_view_lambdas,
             lambdas: self.lambdas,
             concurrent_plans: self.concurrent_plans,
+            service_spawns: self.service_spawns,
+            service_ready_calls: self.service_ready_calls,
+            settled_plans: self.settled_plans,
+            first_plans: self.first_plans,
+            concurrent_each_plans: self.concurrent_each_plans,
+            thread_run_calls: self.thread_run_calls,
             matches: self.matches,
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
@@ -1423,6 +2283,10 @@ impl<'a> Checker<'a> {
             type_map,
             regex_match_class: self.regex_match_class,
             type_aliases: self.type_aliases,
+            ownership_markers: OwnershipMarkers {
+                resource: self.native_resource.map(|r| r.resource),
+                transferable_resource: self.native_transferable,
+            },
         }
     }
 
@@ -1594,7 +2458,7 @@ impl<'a> Checker<'a> {
         for module in &program.modules {
             let file = module.body.span.file;
             let source_name = self.sources.file(file).name();
-            if (source_name.contains("/stdlib/std/io/") || source_name.starts_with("std.io/"))
+            if is_standard_io_source(source_name)
                 && matches!(module.name.name.as_str(), "stdin" | "stdout" | "stderr")
             {
                 self.standard_stream_source_modules
@@ -2003,8 +2867,6 @@ impl<'a> Checker<'a> {
         }
         let owner_name = self.sources.file(owner.file).name();
         let used_name = self.sources.file(used.span.file).name();
-        let is_standard_io_source =
-            |name: &str| name.contains("/stdlib/std/io/") || name.starts_with("std.io/");
         if is_standard_io_source(owner_name) && is_standard_io_source(used_name) {
             return;
         }
@@ -2059,7 +2921,9 @@ impl<'a> Checker<'a> {
     /// native type, and `ZIRK_LANGUAGE_SPEC.md` section 4 forbids exactly that:
     /// a program cannot replace what `String` or `Int32` mean.
     fn is_native_type_name(name: &str) -> bool {
-        Type::from_name(name).is_some() || pending_type(name).is_some()
+        matches!(name, "Channel" | "Atomic" | "Mutex" | "AtomicOrder")
+            || Type::from_name(name).is_some()
+            || pending_type(name).is_some()
     }
 
     /// Registers `Iterable<T>`, `Iterator<T>` and `Iteration<T>` as if they
@@ -2314,6 +3178,63 @@ impl<'a> Checker<'a> {
         self.native_result = Some(result);
     }
 
+    /// Registers the outcome algebra needed by concurrent combinators.
+    /// Runtime construction and settlement are intentionally deferred.
+    fn register_native_outcome_enum(&mut self) {
+        let at = Span::empty(0);
+        let throwable = self
+            .classes
+            .iter()
+            .position(|class| class.name == "Throwable")
+            .expect("native Throwable is registered before Outcome") as u32;
+        let t = self.type_params.len() as u32;
+        self.type_params.push(TypeParamInfo {
+            name: "T".into(),
+            constraints: Vec::new(),
+            default: None,
+            span: at,
+        });
+        let cancelled_error = self
+            .native_exceptions
+            .expect("native exception hierarchy is registered before Outcome")
+            .cancelled_error;
+        self.enums.push(EnumType {
+            name: "Outcome".into(),
+            variants: vec![
+                EnumVariantInfo {
+                    name: "Fulfilled".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "value".into(),
+                        ty: Type::of(Base::Param(t)),
+                    }],
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Rejected".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "error".into(),
+                        ty: Type::of(Base::Class(throwable)),
+                    }],
+                    mapping: None,
+                    span: at,
+                },
+                EnumVariantInfo {
+                    name: "Cancelled".into(),
+                    associated: vec![AssociatedFieldInfo {
+                        name: "error".into(),
+                        ty: Type::of(Base::Class(cancelled_error)),
+                    }],
+                    mapping: None,
+                    span: at,
+                },
+            ],
+            type_params: vec![t],
+            shared: true,
+            span: at,
+        });
+    }
+
     /// Registers the closed outcome enums used by `Channel<T>` operations.
     fn register_native_channel_outcomes(&mut self) {
         let at = Span::empty(0);
@@ -2385,6 +3306,27 @@ impl<'a> Checker<'a> {
             send_outcome: send,
             receive_outcome: receive,
         });
+    }
+
+    fn register_native_atomic_order(&mut self) {
+        let at = Span::empty(0);
+        let id = self.enums.len() as u32;
+        self.enums.push(EnumType {
+            name: "AtomicOrder".into(),
+            variants: ["relaxed", "acquire", "release", "acq_rel", "seq_cst"]
+                .into_iter()
+                .map(|name| EnumVariantInfo {
+                    name: name.into(),
+                    associated: Vec::new(),
+                    mapping: None,
+                    span: at,
+                })
+                .collect(),
+            type_params: Vec::new(),
+            shared: true,
+            span: at,
+        });
+        self.native_atomic_order = Some(id);
     }
 
     /// Registers `Error`/`Throwable`/`RuntimeError`/`StackTrace` (roadmap
@@ -2721,6 +3663,22 @@ impl<'a> Checker<'a> {
         // components are already validated values).
         let invalid_date = register_native_failure(&mut self.classes, "InvalidDateError");
         let invalid_time = register_native_failure(&mut self.classes, "InvalidTimeError");
+        // A cancellation outcome must carry a real, non-null Throwable
+        // object. Reuse the native failure shape so ordinary class
+        // construction, descriptor generation and Throwable methods apply.
+        let cancelled_error = register_native_failure(&mut self.classes, "CancelledError");
+        let timeout_error = register_native_failure(&mut self.classes, "TimeoutError");
+        // Concurrency-completion 9.4: these are the typed sema identities
+        // used when task or timer admission reaches its per-executor limit.
+        let task_capacity_error = register_native_failure(&mut self.classes, "TaskCapacityError");
+        let timer_capacity_error = register_native_failure(&mut self.classes, "TimerCapacityError");
+        let background_capacity_error =
+            register_native_failure(&mut self.classes, "BackgroundCapacityError");
+        let service_capacity_error =
+            register_native_failure(&mut self.classes, "ServiceCapacityError");
+        let service_lifecycle_error =
+            register_native_failure(&mut self.classes, "ServiceLifecycleError");
+        let invalid_argument = register_native_failure(&mut self.classes, "InvalidArgumentError");
 
         self.native_exceptions = Some(NativeExceptions {
             error,
@@ -2743,6 +3701,14 @@ impl<'a> Checker<'a> {
             lookup_error,
             invalid_date,
             invalid_time,
+            cancelled_error,
+            timeout_error,
+            task_capacity_error,
+            timer_capacity_error,
+            background_capacity_error,
+            service_capacity_error,
+            service_lifecycle_error,
+            invalid_argument,
         });
     }
 
@@ -3029,11 +3995,9 @@ impl<'a> Checker<'a> {
             shared: decl.shared,
             span: decl.name.span,
         });
-        if decl.name.name == "Stringifiable" && {
-            let source_name = self.sources.file(decl.name.span.file).name();
-            source_name.ends_with("/stdlib/std/io/package.zrk")
-                || source_name.ends_with("std.io/package.zrk")
-        } {
+        if decl.name.name == "Stringifiable"
+            && is_standard_io_package_source(self.sources.file(decl.name.span.file).name())
+        {
             self.native_stringifiable = Some(id);
         }
     }
@@ -5312,13 +6276,22 @@ impl<'a> Checker<'a> {
         if ty.nullable {
             return false;
         }
-        let Base::Class(id) = ty.base else {
-            return false;
-        };
         let Some(native) = self.native_exceptions else {
             return false;
         };
+        let Some(id) = self.throwable_class_id(ty, native) else {
+            return false;
+        };
         self.implements_abstract_class(id, native.throwable)
+    }
+
+    fn throwable_class_id(&self, ty: Type, native: NativeExceptions) -> Option<u32> {
+        match ty.base {
+            Base::Class(id) => Some(id),
+            Base::ServiceCapacityError => Some(native.service_capacity_error),
+            Base::ServiceLifecycleError => Some(native.service_lifecycle_error),
+            _ => None,
+        }
     }
 
     /// Resolves a `throws Type (| Type)*` clause into its individual
@@ -5363,11 +6336,14 @@ impl<'a> Checker<'a> {
     /// (roadmap Phase 4b) — a later catch than the one that already
     /// handles it is unreachable code, not a second chance.
     fn throw_is_covered(&self, thrown: Type, catches: &[Type]) -> bool {
-        let Base::Class(thrown_id) = thrown.base else {
+        let Some(native) = self.native_exceptions else {
+            return false;
+        };
+        let Some(thrown_id) = self.throwable_class_id(thrown, native) else {
             return false;
         };
         catches.iter().any(|&caught| {
-            let Base::Class(caught_id) = caught.base else {
+            let Some(caught_id) = self.throwable_class_id(caught, native) else {
                 return false;
             };
             self.implements_abstract_class(thrown_id, caught_id)
@@ -6298,7 +7274,11 @@ impl<'a> Checker<'a> {
                 Base::Union(id)
             }
         };
-        Type { base, nullable }
+        Type {
+            base,
+            nullable,
+            borrowed_scope: None,
+        }
     }
 
     /// A stable, arbitrary order for [`Base`] values, so two unions with the
@@ -6333,6 +7313,8 @@ impl<'a> Checker<'a> {
                 Base::Function(id) => (11, id),
                 Base::Job(id) => (12, id),
                 Base::Channel(id) => (12, id),
+                Base::Atomic(id) => (26, id),
+                Base::Mutex(id) => (38, id),
                 Base::Contract(id) => (12, id),
                 Base::Class(id) => (13, id),
                 Base::Param(id) => (14, id),
@@ -6358,6 +7340,9 @@ impl<'a> Checker<'a> {
                 Base::List(id) => (29, id),
                 Base::Map(id) => (30, id),
                 Base::Set(id) => (31, id),
+                Base::ServiceContext => (35, 0),
+                Base::ServiceCapacityError => (36, 0),
+                Base::ServiceLifecycleError => (37, 0),
             }
         }
         bases.sort_by_key(key);
@@ -6461,6 +7446,229 @@ impl<'a> Checker<'a> {
         }
         self.channel_types.push(element);
         (self.channel_types.len() - 1) as u32
+    }
+
+    fn resolve_atomic_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Atomic<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Atomic<T>` with a supported scalar type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        if !element.is_unknown() && !Self::is_atomic_scalar(element) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[0].span,
+                format!("`Atomic<{}>` is unsupported", self.name(element)),
+                "Atomic supports Boolean and signed or unsigned integers from 8 through 64 bits",
+                Some("use Boolean, Int8/16/32/64, or UInt8/16/32/64".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let id = self.intern_atomic_type(element);
+        let ty = Type::of(Base::Atomic(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    fn resolve_mutex_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                "`Mutex<T>` takes exactly one type argument",
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some("write `Mutex<T>` naming the protected value type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let payload = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_mutex_type(payload);
+        let ty = Type::of(Base::Mutex(id));
+        if reference.nullable {
+            ty.as_nullable()
+        } else {
+            ty
+        }
+    }
+
+    fn intern_mutex_type(&mut self, payload: Type) -> u32 {
+        if let Some(index) = self.mutex_types.iter().position(|&ty| ty == payload) {
+            return index as u32;
+        }
+        self.mutex_types.push(payload);
+        (self.mutex_types.len() - 1) as u32
+    }
+
+    fn is_atomic_scalar(ty: Type) -> bool {
+        matches!(ty.base, Base::Boolean)
+            || matches!(ty.base, Base::Int(width) if width.bits() <= 64)
+    }
+
+    fn intern_atomic_type(&mut self, element: Type) -> u32 {
+        if let Some(index) = self.atomic_types.iter().position(|&ty| ty == element) {
+            return index as u32;
+        }
+        self.atomic_types.push(element);
+        (self.atomic_types.len() - 1) as u32
+    }
+
+    fn check_mutex_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        let Some(expected) = expected.filter(|ty| matches!(ty.base, Base::Mutex(_))) else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`Mutex(initial)` needs an expected `Mutex<T>` type",
+                "the protected payload type cannot be inferred from an untyped constructor",
+                Some("write `mut mutex: Mutex<T> = Mutex(initial)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        };
+        let Base::Mutex(id) = expected.base else {
+            unreachable!()
+        };
+        let payload = self
+            .mutex_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Mutex(initial)` takes one positional initial value",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("write `Mutex(initial)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        } else {
+            self.expected_type = Some(payload);
+            let actual = self.check_expr(&expr.args[0].value);
+            self.expect_assignable(
+                payload,
+                actual,
+                expr.args[0].value.span(),
+                "the mutex payload",
+            );
+        }
+        expected
+    }
+
+    fn check_mutex_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Mutex(id) = object.base else {
+            return None;
+        };
+        if field.name.name != "with" {
+            return None;
+        }
+        // Acquiring a contended mutex can park the current task or block a
+        // registered native worker. Record both effects at the call site so
+        // this operation cannot nest under another Mutex.with guard and its
+        // effects propagate through direct callers.
+        self.mark_may_suspend();
+        self.mark_may_block();
+        let payload = self
+            .mutex_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Mutex.with` takes one positional closure",
+                format!("received {} argument(s)", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Some(Type::UNKNOWN);
+        }
+        let Expr::Lambda(lambda) = &expr.args[0].value else {
+            self.check_expr(&expr.args[0].value);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                "`Mutex.with` requires a closure literal",
+                "the borrow region and transitive effects must be checked at the call site",
+                None,
+            );
+            return Some(Type::UNKNOWN);
+        };
+        self.mutex_with_calls.insert(expr.span, id);
+        self.mutex_view_lambdas.insert(lambda.span, id);
+        self.pending_mutex_view = Some(payload);
+        let callback = self.check_expr(&expr.args[0].value);
+        let Base::Function(function) = callback.base else {
+            return Some(Type::UNKNOWN);
+        };
+        let signature = self
+            .fn_types
+            .get(function as usize)
+            .cloned()
+            .unwrap_or(FnType {
+                params: Vec::new(),
+                returns: Type::UNKNOWN,
+            });
+        if signature.params.len() != 1 {
+            self.error(
+                codes::TYPE_MISMATCH,
+                lambda.span,
+                "`Mutex.with` closure must take exactly one view parameter",
+                format!("found {} parameter(s)", signature.params.len()),
+                None,
+            );
+        } else if signature.params[0].base != payload.base
+            || signature.params[0].nullable != payload.nullable
+        {
+            self.error(
+                codes::TYPE_MISMATCH,
+                lambda.span,
+                "`Mutex.with` view parameter must match the protected payload",
+                format!(
+                    "expected `{}`, found `{}`",
+                    self.name(payload),
+                    self.name(signature.params[0])
+                ),
+                None,
+            );
+        }
+        self.mutex_callbacks.push(lambda.span);
+        Some(signature.returns)
+    }
+
+    fn validate_mutex_callback_effects(&mut self, summaries: &HashMap<Span, EffectSummary>) {
+        for span in self.mutex_callbacks.clone() {
+            let effects = summaries.get(&span).copied().unwrap_or(EffectSummary {
+                may_suspend: true,
+                may_block: true,
+                may_spawn: true,
+                uses_channel: false,
+                complete: false,
+            });
+            if !effects.complete || effects.may_suspend || effects.may_block || effects.may_spawn {
+                self.error(codes::TYPE_MISMATCH, span, "`Mutex.with` callback may suspend, block, spawn work, or has unknown effects", "a mutex guard cannot be held across a safe point or an unproven call", Some("remove the effectful call or use `RwLock<T>`/redesign the critical section".into()));
+            }
+        }
     }
 
     /// `Pointer<T>` (roadmap Phase 4e, design D1/D2): resolves `T` and
@@ -7016,6 +8224,12 @@ impl<'a> Checker<'a> {
         if reference.name == "Channel" {
             return self.resolve_channel_type_ref(reference);
         }
+        if reference.name == "Atomic" {
+            return self.resolve_atomic_type_ref(reference);
+        }
+        if reference.name == "Mutex" {
+            return self.resolve_mutex_type_ref(reference);
+        }
         if reference.name == "Weak" {
             return self.resolve_weak_type_ref(reference);
         }
@@ -7048,6 +8262,19 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "Tuple" {
             return self.resolve_tuple_type_ref(reference);
+        }
+
+        if reference.arguments.is_empty()
+            && let Some(native) = self.native_exceptions
+        {
+            let id = match reference.name.as_str() {
+                "ServiceCapacityError" => Some(native.service_capacity_error),
+                "ServiceLifecycleError" => Some(native.service_lifecycle_error),
+                _ => None,
+            };
+            if let Some(id) = id {
+                return Type::of(Base::Class(id));
+            }
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
@@ -7543,6 +8770,7 @@ impl<'a> Checker<'a> {
         Type {
             base,
             nullable: ty.nullable,
+            borrowed_scope: ty.borrowed_scope,
         }
     }
 
@@ -7651,6 +8879,7 @@ impl<'a> Checker<'a> {
     /// returns (or diverges), which [`Self::infer_fn`] reads to tell an
     /// always-diverging `Never` body apart from an ordinary `Void` one.
     fn check_function(&mut self, f: &FnDecl) -> bool {
+        let enclosing_function = self.current_function.replace(f.name.span);
         self.enter_type_params(&f.type_params);
         let signature = self.functions.get(&f.name.name).cloned();
         self.current_return = signature
@@ -7670,7 +8899,8 @@ impl<'a> Checker<'a> {
         self.scopes.push_function();
 
         let params = signature.map(|s| s.params).unwrap_or_default();
-        for (param, info) in f.params.iter().zip(&params) {
+        let is_service_callback = self.service_callback_functions.contains(&f.name.name);
+        for (index, (param, info)) in f.params.iter().zip(&params).enumerate() {
             // The default is evaluated at the call site, but it is checked here
             // where the declared type is known.
             if let Some(default) = &param.default {
@@ -7701,6 +8931,9 @@ impl<'a> Checker<'a> {
                 moved: false,
                 pinned: false,
             });
+            if is_service_callback && index == 0 && info.ty == Type::SERVICE_CONTEXT {
+                self.service_context_params.insert(param.name.span);
+            }
         }
 
         // `unsafe fn` runs its whole body as if wrapped in `unsafe {}`
@@ -7754,6 +8987,7 @@ impl<'a> Checker<'a> {
         self.pending_throws = outer_pending;
         self.in_main_scope = outer_main_scope;
         self.leave_type_params();
+        self.current_function = enclosing_function;
         always_returns
     }
 
@@ -7866,6 +9100,8 @@ impl<'a> Checker<'a> {
     /// checked; that gives users the post-join names without leaking them into
     /// ordinary nested blocks.
     fn check_concurrent(&mut self, scope: &ConcurrentBlock) -> bool {
+        self.mark_may_suspend();
+        self.mark_may_spawn();
         self.reject_in_parallel_region(scope.span, "`concurrent {}`");
         self.concurrent_depth += 1;
         self.scopes.push();
@@ -9193,6 +10429,7 @@ impl<'a> Checker<'a> {
         let ty = self.check_block_value(&e.body);
         let captures = self.finish_capture_scope(enclosing_depth);
         self.check_parallel_boundary(e.span, &captures);
+        self.check_concurrent_result(e.span, "`parallel`", ty, false);
         self.parallel_depth -= 1;
         ty
     }
@@ -9205,31 +10442,103 @@ impl<'a> Checker<'a> {
     /// `mut`/`inmut::strict` matrix (`Self::check_strict_alias`) already
     /// polices elsewhere, so it is rejected here with the same diagnostic.
     fn check_parallel_boundary(&mut self, span: Span, captures: &[Capture]) {
+        self.check_capture_boundary(span, "`parallel`", captures);
+    }
+
+    fn check_capture_boundary(&mut self, span: Span, boundary: &str, captures: &[Capture]) {
+        if self.unsafe_depth > 0 {
+            return;
+        }
         for capture in captures {
-            if !self.is_reference_type(capture.ty) {
-                continue;
-            }
             let Some(resolved) = self.scopes.resolve(&capture.name) else {
                 continue;
             };
-            if resolved.binding.mutability == Mutability::Mutable {
+            let ownership = self.ownership_of_type(capture.ty);
+            let moved = resolved.binding.moved && ownership.transfer;
+            let synchronized = matches!(capture.ty.base, Base::Channel(_));
+            let shared = ownership.share
+                && (synchronized || resolved.binding.mutability == Mutability::Strict);
+            if self.is_reference_type(capture.ty) && !moved && !shared {
+                if resolved.binding.mutability == Mutability::Mutable && !synchronized {
+                    self.error(
+                        codes::STRICT_ALIAS_VIOLATION,
+                        span,
+                        format!(
+                            "`{}` would remain a mutable alias across the {boundary} boundary",
+                            capture.name
+                        ),
+                        "the enclosing scope can still mutate this reference while the concurrent region uses it",
+                        Some("use `inmut::strict` for a deeply immutable share, or move the value with `transfer(...)`".into()),
+                    );
+                    continue;
+                }
                 self.error(
-                    codes::STRICT_ALIAS_VIOLATION,
+                    codes::UNSAFE_CONCURRENT_BOUNDARY,
                     span,
+                    format!("`{}` has no safe ownership proof at the {boundary} boundary", capture.name),
                     format!(
-                        "`{}` would be a mutable alias shared with this `parallel` region",
-                        capture.name
-                    ),
-                    format!(
-                        "`{}` was declared `mut`, and a `parallel` region runs its work across worker threads that would alias it",
+                        "`{}` is neither moved with `transfer(...)` nor proven deeply shareable through a strict immutable binding",
                         capture.name
                     ),
                     Some(format!(
-                        "transfer `{0}` into the region, declare it `inmut::strict` to share it, clone it, or send it through a channel",
+                        "move `{0}` with `transfer(...)`, use an `inmut::strict` shareable value, clone it, or communicate through a channel",
                         capture.name
                     )),
                 );
             }
+        }
+    }
+
+    fn ownership_of_type(&self, ty: Type) -> OwnershipProperties {
+        OwnershipDeriver::from_checker(self).derive(ty)
+    }
+
+    fn boundary_expression_is_safe(&self, expr: &Expr, ty: Type) -> bool {
+        if self.unsafe_depth > 0 {
+            return true;
+        }
+        let properties = self.ownership_of_type(ty);
+        if !self.is_reference_type(ty) {
+            return properties.transfer || properties.share;
+        }
+        if matches!(expr, Expr::Transfer(_)) {
+            return properties.transfer;
+        }
+        if properties.share {
+            if let Expr::Path(path) = expr {
+                return self
+                    .scopes
+                    .resolve(&path.name)
+                    .is_some_and(|resolved| resolved.binding.mutability == Mutability::Strict);
+            }
+            return true;
+        }
+        false
+    }
+
+    fn check_concurrent_result(
+        &mut self,
+        span: Span,
+        api: &str,
+        ty: Type,
+        closure_captures_checked: bool,
+    ) {
+        if self.unsafe_depth > 0 {
+            return;
+        }
+        let ownership = self.ownership_of_type(ty);
+        if !(ty.is_unknown()
+            || ownership.transfer
+            || ownership.share
+            || closure_captures_checked && matches!(ty.base, Base::Function(_)))
+        {
+            self.error(
+                codes::UNSAFE_CONCURRENT_BOUNDARY,
+                span,
+                format!("{api} result `{}` has no safe ownership proof", self.name(ty)),
+                "the result may contain an unknown or mutable alias that cannot safely cross the concurrency boundary",
+                Some("return a transferable value or a deeply shareable immutable value".into()),
+            );
         }
     }
 
@@ -9454,6 +10763,12 @@ impl<'a> Checker<'a> {
             (None, None) => Type::UNKNOWN,
         };
 
+        if let Some(scope) = ty.borrowed_scope()
+            && !self.scopes.scope_outlives_current(scope)
+        {
+            self.borrowed_view_escape(stmt.span, "stored in a binding outside its scope");
+        }
+
         // `Void` has no representable value, so no variable can hold it.
         if ty == Type::VOID {
             let name = binding_name.unwrap_or("_");
@@ -9562,6 +10877,12 @@ impl<'a> Checker<'a> {
             }
             None => Type::UNKNOWN,
         };
+
+        if let Some(scope) = ty.borrowed_scope()
+            && !self.scopes.scope_outlives_current(scope)
+        {
+            self.borrowed_view_escape(stmt.span, "stored in a grouped binding outside its scope");
+        }
 
         if ty == Type::VOID {
             self.error(
@@ -9680,7 +11001,12 @@ impl<'a> Checker<'a> {
                 self.classes[self.generic_instances[id as usize].class as usize].kind
                     == ClassKind::Class
             }
-            Base::Contract(_) | Base::ContractInstance(_) => true,
+            Base::Contract(_)
+            | Base::ContractInstance(_)
+            | Base::Atomic(_)
+            | Base::Mutex(_)
+            | Base::ServiceCapacityError
+            | Base::ServiceLifecycleError => true,
             Base::Array(_) | Base::List(_) => true,
             Base::Channel(_) => true,
             _ => false,
@@ -9943,6 +11269,55 @@ impl<'a> Checker<'a> {
     }
 
     fn check_assign(&mut self, stmt: &AssignStmt) {
+        // `App` is a compiler-provided namespace, not a value in the lexical
+        // environment. Validate this hook directly instead of resolving it
+        // as an ordinary field assignment; the browser backend rejects the
+        // lowered operation at its capability boundary.
+        if let AssignTarget::Field(field) = &stmt.target
+            && matches!(&*field.object, Expr::Path(base) if base.name == "App")
+            && field.name.name == "on_background_error"
+            && self.is_builtin_namespace_unshadowed("App")
+        {
+            let actual = self.check_expr(&stmt.value);
+            if actual.borrowed_scope().is_some() {
+                self.borrowed_view_escape(
+                    stmt.value.span(),
+                    "stored as a global background error handler",
+                );
+                return;
+            }
+            if let Base::Function(id) = actual.base {
+                let signature = self.fn_types[id as usize].clone();
+                if signature.params.len() != 1 || !self.is_throwable_type(signature.params[0]) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        stmt.value.span(),
+                        "`App.on_background_error` requires a `(Throwable): Void` handler",
+                        format!("found `{}`", self.name(actual)),
+                        None,
+                    );
+                }
+                if signature.returns != Type::VOID {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        stmt.value.span(),
+                        "`App.on_background_error` handler must return `Void`",
+                        format!("the handler returns `{}`", self.name(signature.returns)),
+                        None,
+                    );
+                }
+            } else if !actual.is_unknown() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    stmt.value.span(),
+                    "`App.on_background_error` requires a function value",
+                    format!("found `{}`", self.name(actual)),
+                    None,
+                );
+            }
+            return;
+        }
+
         let target_hint = self.assignment_target_type(&stmt.target);
         let saved_expected = self.expected_type;
         self.expected_type = target_hint;
@@ -9991,6 +11366,20 @@ impl<'a> Checker<'a> {
     /// obeys exactly the rules a single assignment already does, applied to
     /// every destination.
     fn check_assign_target(&mut self, target: &AssignTarget, value: Type, value_span: Span) {
+        if let Some(scope) = value.borrowed_scope() {
+            let stays_in_region = match target {
+                AssignTarget::Name(name) if name.name != "_" => {
+                    self.scopes.binding_scope_outlives(&name.name, scope)
+                }
+                AssignTarget::Name(_) => true,
+                AssignTarget::Field(_) | AssignTarget::Index(_) => false,
+            };
+            if !stays_in_region {
+                self.borrowed_view_escape(value_span, "stored outside its lexical region");
+                return;
+            }
+        }
+
         let AssignTarget::Name(name) = target else {
             let target_ty = match target {
                 AssignTarget::Field(field) => {
@@ -10073,7 +11462,7 @@ impl<'a> Checker<'a> {
                 }
                 AssignTarget::Name(_) => unreachable!("handled by the outer let-else"),
             };
-            self.expect_assignable(target_ty, value, value_span, "the assigned value");
+            self.expect_assignable_mutex_view_write(target_ty, value, value_span);
             return;
         };
 
@@ -10107,9 +11496,29 @@ impl<'a> Checker<'a> {
         // the same dedicated diagnostic a second, differently-captured
         // literal gets, which is an accurate description either way: this
         // position cannot hold this closure.
-        self.expect_assignable(target_ty, value, value_span, "the assigned value");
+        self.expect_assignable_mutex_view_write(target_ty, value, value_span);
         self.scopes.mark_initialized(&name.name);
         self.scopes.mark_moved(&name.name, false);
+    }
+
+    fn expect_assignable_mutex_view_write(&mut self, target: Type, value: Type, value_span: Span) {
+        if let Some(target_scope) = target.borrowed_scope() {
+            if value
+                .borrowed_scope()
+                .is_some_and(|value_scope| value_scope != target_scope)
+            {
+                self.borrowed_view_escape(value_span, "copied from a different mutex region");
+                return;
+            }
+            self.expect_assignable(
+                without_borrowed_scope(target),
+                without_borrowed_scope(value),
+                value_span,
+                "the assigned value",
+            );
+        } else {
+            self.expect_assignable(target, value, value_span, "the assigned value");
+        }
     }
 
     /// `left, right = right, left;` (roadmap Phase 4d) — the comma-grouped
@@ -10330,14 +11739,25 @@ impl<'a> Checker<'a> {
         let condition = self.check_expr(&stmt.condition);
         self.expect_boolean(condition, stmt.condition.span(), "the condition of an `if`");
 
+        let incoming = self.scopes.move_snapshot();
         let then_returns = self.check_block(&stmt.then_branch);
+        let then_moves = self.scopes.move_snapshot();
+        self.scopes.restore_moves(&incoming);
 
         // A conditional only guarantees a return when both branches do.
-        match &stmt.else_branch {
-            Some(ElseBranch::Block(b)) => then_returns & self.check_block(b),
-            Some(ElseBranch::If(nested)) => then_returns & self.check_if(nested),
-            None => false,
-        }
+        let (returns, else_moves) = match &stmt.else_branch {
+            Some(ElseBranch::Block(b)) => {
+                let returns = then_returns & self.check_block(b);
+                (returns, self.scopes.move_snapshot())
+            }
+            Some(ElseBranch::If(nested)) => {
+                let returns = then_returns & self.check_if(nested);
+                (returns, self.scopes.move_snapshot())
+            }
+            None => (false, incoming.clone()),
+        };
+        self.scopes.join_moves(&[then_moves, else_moves]);
+        returns
     }
 
     /// `while`, `loop` and the three-clause `for`, which share a node.
@@ -10350,19 +11770,21 @@ impl<'a> Checker<'a> {
             self.check_stmt(init);
         }
 
+        // Conditions are re-evaluated on every iteration, just like the body
+        // and the step clause. They therefore share the loop transfer gate.
+        self.loop_depth += 1;
         if let Some(condition) = &stmt.condition {
             let ty = self.check_expr(condition);
             let context = format!("the condition of a `{}`", stmt.kind.as_str());
             self.expect_boolean(ty, condition.span(), &context);
         }
 
-        self.loop_depth += 1;
         let body_returns = self.check_block(&stmt.body);
-        self.loop_depth -= 1;
 
         if let Some(step) = &stmt.step {
             self.check_stmt(step);
         }
+        self.loop_depth -= 1;
 
         self.scopes.pop();
 
@@ -10530,6 +11952,14 @@ impl<'a> Checker<'a> {
             None => Type::VOID,
         };
 
+        if actual.borrowed_scope().is_some() {
+            self.borrowed_view_escape(
+                stmt.value.as_ref().map_or(stmt.span, Expr::span),
+                "returned from a function or closure",
+            );
+            return;
+        }
+
         // `return-type-inference` collect mode: a body being checked for
         // inference contributes its `return`s to the join instead of being
         // validated — the resolved type is written to the signature, and
@@ -10623,6 +12053,10 @@ impl<'a> Checker<'a> {
         let thrown = match &stmt.value {
             Some(expr) => {
                 let ty = self.check_expr(expr);
+                if ty.borrowed_scope().is_some() {
+                    self.borrowed_view_escape(expr.span(), "thrown beyond its lexical region");
+                    return;
+                }
                 if !ty.is_unknown() && !self.is_throwable_type(ty) {
                     let name = self.name(ty);
                     self.error(
@@ -10666,9 +12100,16 @@ impl<'a> Checker<'a> {
     fn check_try(&mut self, stmt: &TryStmt) -> bool {
         let mut catch_types: Vec<Type> = Vec::new();
 
+        // An exception can leave the body before or after any transfer. Keep
+        // both the entry state and the completed body state as possibilities
+        // for each catch, then join all normal and handled exits below.
+        let incoming_moves = self.scopes.move_snapshot();
+
         let outer_pending = std::mem::take(&mut self.pending_throws);
         let body_always_returns = self.check_block(&stmt.body);
+        let body_moves = self.scopes.move_snapshot();
         let body_escapees = std::mem::replace(&mut self.pending_throws, outer_pending);
+        let mut exit_moves = vec![body_moves.clone()];
 
         // Every path out of the `try` as a whole guarantees a return only
         // when the body does *and* every `catch` does too — a `catch` that
@@ -10713,16 +12154,22 @@ impl<'a> Checker<'a> {
                 moved: false,
                 pinned: false,
             });
+            self.scopes.restore_moves(&incoming_moves);
+            self.scopes
+                .join_moves(&[incoming_moves.clone(), body_moves.clone()]);
             let previous_catch = self.catch_type.replace(ty);
             let catch_always_returns = self.check_block(&catch.body);
             self.catch_type = previous_catch;
             self.scopes.pop();
+            exit_moves.push(self.scopes.move_snapshot());
             if !catch_always_returns {
                 catches_always_return = false;
             }
 
             catch_types.push(ty);
         }
+
+        self.scopes.join_moves(&exit_moves);
 
         // Whatever the body could throw that no catch here covers keeps
         // propagating, exactly like an ordinary `throws` call's own type
@@ -10918,6 +12365,65 @@ impl<'a> Checker<'a> {
             Expr::Spawn(e) => self.check_spawn(e),
             Expr::Transfer(e) => self.check_transfer(e, expected),
         };
+        // Scalar payloads are copied by value when read through a mutex view;
+        // their lexical borrow ends at that read. Reference and aggregate
+        // projections retain the region and continue through the escape
+        // checks below.
+        let ty = if ty.borrowed_scope().is_some() && is_borrowed_scalar_value(ty) {
+            without_borrowed_scope(ty)
+        } else {
+            ty
+        };
+
+        // Preserve provenance through explicitly modeled projections. Every
+        // other composite operation fails closed until its transfer/copy
+        // semantics are modeled, even when today's implementation appears
+        // to return a scalar. Closure captures have their dedicated check in
+        // `finish_capture_scope`.
+        if !matches!(expr, Expr::Path(_) | Expr::Lambda(_)) {
+            let mut paths = Vec::new();
+            collect_path_names(expr, &mut paths);
+            let borrowed: Vec<Type> = paths
+                .iter()
+                .filter_map(|(_, span)| self.expr_types.get(span).copied())
+                .filter(|ty| ty.borrowed_scope().is_some())
+                .collect();
+            let retains_one_region = borrowed.first().is_some_and(|first| {
+                let scope = first.borrowed_scope();
+                borrowed.iter().all(|ty| ty.borrowed_scope() == scope)
+                    && ty.borrowed_scope() == scope
+            });
+            let scalar_value_operation = (match expr {
+                Expr::Binary(binary) => {
+                    is_borrowed_scalar_value(ty)
+                        && self
+                            .expr_types
+                            .get(&binary.left.span())
+                            .is_some_and(|ty| is_borrowed_scalar_value(*ty))
+                        && self
+                            .expr_types
+                            .get(&binary.right.span())
+                            .is_some_and(|ty| is_borrowed_scalar_value(*ty))
+                }
+                Expr::Unary(unary) => {
+                    is_borrowed_scalar_value(ty)
+                        && self
+                            .expr_types
+                            .get(&unary.operand.span())
+                            .is_some_and(|ty| is_borrowed_scalar_value(*ty))
+                }
+                _ => false,
+            }) || (matches!(expr, Expr::Field(_))
+                && is_borrowed_scalar_value(ty));
+            if !borrowed.is_empty() && !retains_one_region && !scalar_value_operation {
+                self.borrowed_view_escape(
+                    expr.span(),
+                    "used by an operation without a checked borrowed-view rule",
+                );
+                self.expr_types.insert(expr.span(), Type::UNKNOWN);
+                return Type::UNKNOWN;
+            }
+        }
         self.expr_types.insert(expr.span(), ty);
         ty
     }
@@ -10944,6 +12450,10 @@ impl<'a> Checker<'a> {
     /// function/capture boundary used by lambdas, so it cannot inherit an
     /// enclosing loop's `break`/`continue` targets.
     fn check_spawn(&mut self, expr: &SpawnExpr) -> Type {
+        self.mark_may_suspend();
+        self.mark_may_spawn();
+        let enclosing_function = self.current_function.replace(expr.span);
+        self.callable_spans.insert(expr.span);
         self.reject_in_parallel_region(expr.span, "`spawn`");
         if self.concurrent_depth == 0 && !self.in_main_scope {
             self.error(
@@ -10979,6 +12489,13 @@ impl<'a> Checker<'a> {
         self.inferred_returns = outer_inferred;
         self.pending_throws = outer_pending;
         let captures = self.finish_capture_scope(enclosing_depth);
+        self.current_function = enclosing_function;
+        self.check_capture_boundary(expr.span, "`spawn`", &captures);
+        let closure_captures_checked = matches!(
+            &expr.body,
+            SpawnBody::Expr(body) if matches!(&**body, Expr::Lambda(_))
+        );
+        self.check_concurrent_result(expr.span, "`spawn`", result, closure_captures_checked);
 
         // The branch body is lifted like a zero-argument lambda: `zirk-ir`
         // reuses the same capture-block machinery to build its thunk. A fresh
@@ -10989,6 +12506,7 @@ impl<'a> Checker<'a> {
             returns: result,
         });
         let fn_type = (self.fn_types.len() - 1) as u32;
+        self.current_function = enclosing_function;
         self.lambdas.insert(
             expr.span,
             LambdaInfo {
@@ -11546,7 +13064,30 @@ impl<'a> Checker<'a> {
             );
             return ty;
         }
+        if self.loop_depth > 0 {
+            self.error(
+                codes::TRANSFER_IN_LOOP,
+                expr.span,
+                "`transfer(...)` inside a loop may move the same binding more than once",
+                "loop bodies can run repeatedly, but move analysis does not yet prove a single iteration",
+                Some("move the resource before the loop, or create a fresh resource for each iteration".into()),
+            );
+        }
         if let Expr::Path(ident) = &*expr.expr {
+            if self.lambda_depth > 0
+                && self
+                    .scopes
+                    .resolve(&ident.name)
+                    .is_some_and(|resolved| resolved.captured)
+            {
+                self.error(
+                    codes::TRANSFER_IN_REUSABLE_CLOSURE,
+                    expr.span,
+                    "a reusable closure cannot transfer a captured resource",
+                    "the closure may be invoked more than once, so the capture's ownership cannot be consumed exactly once",
+                    Some("transfer the value before creating the closure, or move the resource inside the closure body".into()),
+                );
+            }
             self.scopes.mark_moved(&ident.name, true);
         } else {
             self.error(
@@ -11593,6 +13134,17 @@ impl<'a> Checker<'a> {
             self.undeclared(ident);
             return Type::UNKNOWN;
         };
+
+        if resolved.binding.ty == Type::SERVICE_CONTEXT {
+            self.error(
+                codes::TYPE_MISMATCH,
+                ident.span,
+                "ServiceContext cannot escape its service callback",
+                "the runtime-issued capability may only be used directly as the receiver of ready()",
+                Some("call `context.ready()` inside the service callback".into()),
+            );
+            return Type::UNKNOWN;
+        }
 
         if resolved.binding.moved {
             if matches!(resolved.binding.ty.base, Base::Job(_)) {
@@ -11751,6 +13303,11 @@ impl<'a> Checker<'a> {
             self.expected_type = Some(hint);
         }
         let operand = self.check_expr(&expr.operand);
+        let operand = if is_borrowed_scalar_value(operand) {
+            without_borrowed_scope(operand)
+        } else {
+            operand
+        };
 
         match expr.op {
             UnaryOp::Neg => {
@@ -11853,6 +13410,16 @@ impl<'a> Checker<'a> {
             self.expected_type = Some(hint);
             left = self.check_expr(&expr.left);
         }
+        let left = if is_borrowed_scalar_value(left) {
+            without_borrowed_scope(left)
+        } else {
+            left
+        };
+        let right = if is_borrowed_scalar_value(right) {
+            without_borrowed_scope(right)
+        } else {
+            right
+        };
         self.expected_type = saved;
 
         use BinaryOp::*;
@@ -12515,6 +14082,7 @@ impl<'a> Checker<'a> {
                     Type {
                         base: Base::Instance(inst_id),
                         nullable: false,
+                        borrowed_scope: None,
                     },
                 )
             }
@@ -12667,11 +14235,20 @@ impl<'a> Checker<'a> {
         let condition = self.check_expr(&stmt.condition);
         self.expect_boolean(condition, stmt.condition.span(), "the condition of an `if`");
 
+        let incoming = self.scopes.move_snapshot();
         let then_type = self.check_block_value(&stmt.then_branch);
+        let then_moves = self.scopes.move_snapshot();
+        self.scopes.restore_moves(&incoming);
 
-        let else_type = match &stmt.else_branch {
-            Some(ElseBranch::Block(b)) => self.check_block_value(b),
-            Some(ElseBranch::If(nested)) => self.check_if_expr(nested),
+        let (else_type, else_moves) = match &stmt.else_branch {
+            Some(ElseBranch::Block(b)) => {
+                let ty = self.check_block_value(b);
+                (ty, self.scopes.move_snapshot())
+            }
+            Some(ElseBranch::If(nested)) => {
+                let ty = self.check_if_expr(nested);
+                (ty, self.scopes.move_snapshot())
+            }
             None => {
                 self.error(
                     codes::IF_WITHOUT_ELSE,
@@ -12680,9 +14257,12 @@ impl<'a> Checker<'a> {
                     "without the alternative branch there is no value when the condition is false",
                     Some("add `else { ... }`, or use the `if` as a statement".into()),
                 );
+                self.scopes.join_moves(&[then_moves, incoming]);
                 return Type::UNKNOWN;
             }
         };
+
+        self.scopes.join_moves(&[then_moves, else_moves]);
 
         match then_type.unify(else_type) {
             Some(ty) => ty,
@@ -12714,8 +14294,13 @@ impl<'a> Checker<'a> {
             "the condition of a ternary",
         );
 
+        let incoming = self.scopes.move_snapshot();
         let when_true = self.check_expr(&expr.when_true);
+        let true_moves = self.scopes.move_snapshot();
+        self.scopes.restore_moves(&incoming);
         let when_false = self.check_expr(&expr.when_false);
+        let false_moves = self.scopes.move_snapshot();
+        self.scopes.join_moves(&[true_moves, false_moves]);
 
         match when_true.unify(when_false) {
             Some(ty) => ty,
@@ -12962,6 +14547,7 @@ impl<'a> Checker<'a> {
             if let Type {
                 nullable: false,
                 base: Base::EnumInstance(inst),
+                ..
             } = scrutinee.without_null()
             {
                 let instance = &self.enum_instances[inst as usize];
@@ -13051,6 +14637,12 @@ impl<'a> Checker<'a> {
 
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
+        let incoming_moves = self.scopes.move_snapshot();
+        let mut arm_moves = Vec::with_capacity(expr.arms.len() + 1);
+        // If exhaustiveness is not proven below, the unmatched path retains
+        // the incoming state. Including it unconditionally is conservative
+        // and also handles unknown/open scrutinee types safely.
+        arm_moves.push(incoming_moves);
 
         if let Some(with_binding) = &expr.with_binding {
             self.check_resource_match_scrutinee(with_binding, scrutinee);
@@ -13109,9 +14701,12 @@ impl<'a> Checker<'a> {
                 }
             };
             self.scopes.pop();
+            arm_moves.push(self.scopes.move_snapshot());
 
             arm_types.push((ty, arm.body.span()));
         }
+
+        self.scopes.join_moves(&arm_moves);
 
         if let Some(with_binding) = &expr.with_binding
             && !resource_binding_found
@@ -13172,6 +14767,27 @@ impl<'a> Checker<'a> {
         has_wildcard: &mut bool,
         bindings: &mut Vec<Binding>,
     ) {
+        if let Some(scope) = scrutinee.borrowed_scope() {
+            match pattern {
+                Pattern::Wildcard(_) => return,
+                Pattern::Binding(_) if self.scopes.scope_outlives_current(scope) => {}
+                Pattern::Binding(binding) => {
+                    self.borrowed_view_escape(
+                        binding.span,
+                        "bound outside the borrowed view's active region",
+                    );
+                    return;
+                }
+                _ => {
+                    self.borrowed_view_escape(
+                        pattern.span(),
+                        "destructured without a checked projection rule",
+                    );
+                    return;
+                }
+            }
+        }
+
         match pattern {
             Pattern::Wildcard(_) => *has_wildcard = true,
             Pattern::Binding(ident) => {
@@ -13742,7 +15358,8 @@ impl<'a> Checker<'a> {
                 );
                 return (receiver, Type::UNKNOWN, false);
             }
-            return (receiver, tuple.elements[index as usize], false);
+            let element = self.borrowed_projection(receiver, tuple.elements[index as usize]);
+            return (receiver, element, false);
         }
 
         let Some((element, writable)) = self.indexable_element(receiver) else {
@@ -13760,7 +15377,11 @@ impl<'a> Checker<'a> {
         // `native-type-member-surface`: negative indices on `String`,
         // `Array<T>` and `List<T>` count from the end, resolved at runtime.
 
-        (receiver, element, writable)
+        (
+            receiver,
+            self.borrowed_projection(receiver, element),
+            writable,
+        )
     }
 
     /// `receiver[start:end:step]` (roadmap Phase 7, `String` slicing): every
@@ -13790,7 +15411,7 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        match receiver.base {
+        let result = match receiver.base {
             Base::String => Type::STRING,
             // `r[lo:hi:st]` (roadmap Phase 7): a `Range<T>` slices to a
             // `Range<T>` of the same element type — the bounds index the
@@ -13808,7 +15429,8 @@ impl<'a> Checker<'a> {
                 );
                 Type::UNKNOWN
             }
-        }
+        };
+        self.borrowed_projection(receiver, result)
     }
 
     /// Returns a path for `module.member` when `module` was imported as a
@@ -13949,7 +15571,29 @@ impl<'a> Checker<'a> {
             return object;
         }
 
-        self.member_type(object, &expr.name, expr.object.span(), expr.safe)
+        let result = self.member_type(object, &expr.name, expr.object.span(), expr.safe);
+        self.borrowed_projection(object, result)
+    }
+
+    /// Propagates a region through a projection unless the result is a
+    /// detached scalar value. Composite/reference results remain tied to the
+    /// same scope; operations without a modeled projection rule fail closed
+    /// in `check_expr`.
+    fn borrowed_projection(&self, receiver: Type, result: Type) -> Type {
+        let Some(scope) = receiver.borrowed_scope() else {
+            return result;
+        };
+        if result
+            .borrowed_scope()
+            .is_some_and(|result_scope| result_scope != scope)
+        {
+            return Type::UNKNOWN;
+        }
+        if matches!(result.base, Base::Void | Base::Never) {
+            result
+        } else {
+            result.as_borrowed_in(scope)
+        }
     }
 
     /// The type of `TypeName.member` for the scalar families' static
@@ -15230,6 +16874,13 @@ impl<'a> Checker<'a> {
         self.loop_depth = enclosing_depth;
 
         for capture in &captures {
+            if capture.ty.borrowed_scope().is_some() {
+                let span = self
+                    .scopes
+                    .resolve(&capture.name)
+                    .map_or(Span::new(0, 0), |resolved| resolved.binding.span);
+                self.borrowed_view_escape(span, "captured by a closure or concurrent callback");
+            }
             if let Some(resolved) = self.scopes.resolve(&capture.name)
                 && resolved.captured
             {
@@ -15240,9 +16891,27 @@ impl<'a> Checker<'a> {
         captures
     }
 
+    fn borrowed_view_escape(&mut self, span: Span, destination: &str) {
+        self.error(
+            BORROWED_VIEW_ESCAPE_CODE,
+            span,
+            "borrowed view escapes its lexical scope",
+            format!("a scoped borrowed view cannot be {destination}"),
+            Some("keep the view within the scope that created it".into()),
+        );
+    }
+
     fn check_lambda(&mut self, expr: &LambdaExpr) -> Type {
-        let params: Vec<ParamInfo> = expr.params.iter().map(|p| self.resolve_param(p)).collect();
+        let enclosing_function = self.current_function.replace(expr.span);
+        self.lambda_depth += 1;
+        self.callable_spans.insert(expr.span);
+        let mut params: Vec<ParamInfo> =
+            expr.params.iter().map(|p| self.resolve_param(p)).collect();
         let returns = self.resolve_type(&expr.return_type);
+        let is_service_callback = std::mem::take(&mut self.pending_service_callback)
+            && params.len() == 1
+            && params[0].ty == Type::SERVICE_CONTEXT
+            && returns == Type::VOID;
 
         let enclosing_return = self.current_return;
         // A lambda is its own function context: a `return` inside its block
@@ -15253,6 +16922,18 @@ impl<'a> Checker<'a> {
         // nothing to leave.
         self.current_return = returns;
         let enclosing_depth = self.begin_capture_scope();
+        let is_mutex_view = self.pending_mutex_view.take().is_some_and(|payload| {
+            if params.len() == 1 {
+                let scope = self
+                    .scopes
+                    .current_scope_id()
+                    .expect("lambda scope is active");
+                params[0].ty = payload.as_borrowed_in(scope);
+                true
+            } else {
+                false
+            }
+        });
 
         // `Option::take` so a lambda nested inside this one (if this is the
         // recursive lambda `Self::check_let` just pre-declared) never
@@ -15261,7 +16942,7 @@ impl<'a> Checker<'a> {
         // this.
         let own_recursive_binding = self.recursive_binding.take();
 
-        for (param, info) in expr.params.iter().zip(&params) {
+        for (index, (param, info)) in expr.params.iter().zip(&params).enumerate() {
             if let Some(default) = &param.default {
                 let actual = self.check_expr(default);
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
@@ -15269,12 +16950,19 @@ impl<'a> Checker<'a> {
             self.declare_local(Binding {
                 name: info.name.clone(),
                 ty: info.ty,
-                mutability: Mutability::Immutable,
+                mutability: if is_mutex_view && index == 0 {
+                    Mutability::Mutable
+                } else {
+                    Mutability::Immutable
+                },
                 span: param.name.span,
                 initialized: true,
                 moved: false,
                 pinned: false,
             });
+            if is_service_callback && index == 0 {
+                self.service_context_params.insert(param.name.span);
+            }
         }
 
         match &*expr.body {
@@ -15349,6 +17037,8 @@ impl<'a> Checker<'a> {
             }
         }
 
+        self.current_function = enclosing_function;
+        self.lambda_depth -= 1;
         self.lambdas.insert(
             expr.span,
             LambdaInfo {
@@ -15744,6 +17434,8 @@ impl<'a> Checker<'a> {
             let result = self.job_types[id as usize];
             match field.name.name.as_str() {
                 "wait" => {
+                    self.mark_may_suspend();
+                    self.reject_in_parallel_region(expr.span, "job waits");
                     if !expr.args.is_empty() {
                         self.error(
                             codes::WRONG_ARGUMENT_COUNT,
@@ -15762,6 +17454,7 @@ impl<'a> Checker<'a> {
                     return result;
                 }
                 "cancel" => {
+                    self.reject_in_parallel_region(expr.span, "job cancellation");
                     if !expr.args.is_empty() {
                         self.error(
                             codes::WRONG_ARGUMENT_COUNT,
@@ -15784,6 +17477,14 @@ impl<'a> Checker<'a> {
                 }
                 _ => {}
             }
+        }
+
+        // Receiver dispatch is not closed-world here: a class override,
+        // contract implementation or generic constraint may add a suspending
+        // target. Keep it conservative until those edges are modeled.
+        self.mark_suspend_unknown();
+        if self.parallel_depth > 0 {
+            self.parallel_calls.push((expr.span, None));
         }
 
         // `.clone()` on an enum (roadmap Phase 7, derived `Clone` on `enum`):
@@ -16456,6 +18157,7 @@ impl<'a> Checker<'a> {
     /// generic spelling is resolved before call checking, so the constructor
     /// follows the established `Array<T>`/`List<T>` contextual pattern.
     fn check_channel_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        self.mark_uses_channel();
         let Some(expected) = expected else {
             self.error(
                 codes::UNKNOWN_TYPE,
@@ -16515,6 +18217,7 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         expected: Option<Type>,
     ) -> Type {
+        self.mark_uses_channel();
         let Some(expected) = expected else {
             self.error(
                 codes::UNKNOWN_TYPE,
@@ -17133,6 +18836,11 @@ impl<'a> Checker<'a> {
 
     /// Compiler-known `Timer` static operations.
     fn check_timer_call(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        if field.name.name == "sleep" {
+            self.mark_may_suspend();
+        } else {
+            self.mark_may_spawn();
+        }
         self.reject_in_parallel_region(expr.span, &format!("`Timer.{}`", field.name.name));
 
         let expected_count = if field.name.name == "sleep" { 1 } else { 2 };
@@ -17209,6 +18917,21 @@ impl<'a> Checker<'a> {
             );
             return Type::UNKNOWN;
         }
+        if let Expr::Lambda(lambda) = &expr.args[1].value
+            && let Some(info) = self.lambdas.get(&lambda.span).cloned()
+        {
+            self.check_capture_boundary(
+                lambda.span,
+                &format!("`Timer.{}` callback", field.name.name),
+                &info.captures,
+            );
+        }
+        self.check_concurrent_result(
+            expr.args[1].value.span(),
+            &format!("`Timer.{}` callback", field.name.name),
+            shape.returns,
+            false,
+        );
         Type::of(Base::Job(self.intern_job_type(shape.returns)))
     }
 
@@ -17245,8 +18968,25 @@ impl<'a> Checker<'a> {
             self.check_expr(&expr.args[1].value);
             return Type::UNKNOWN;
         };
+        if !self.boundary_expression_is_safe(&expr.args[0].value, coll) {
+            self.error(
+                codes::UNSAFE_CONCURRENT_BOUNDARY,
+                expr.args[0].value.span(),
+                "`Parallel.each` input has no safe ownership proof",
+                format!(
+                    "`{}` is not transferable or deeply shareable",
+                    self.name(coll)
+                ),
+                Some("use a strict immutable collection or transfer an audited value".into()),
+            );
+        }
 
+        // The callback executes on the worker pool just like a `parallel`
+        // region. Check its body under the same effect boundary so direct,
+        // transitive, and unknown calls cannot bypass the worker restrictions.
+        self.parallel_depth += 1;
         let thunk = self.check_expr(&expr.args[1].value);
+        self.parallel_depth -= 1;
         if !matches!(&expr.args[1].value, Expr::Lambda(_)) {
             self.error(
                 codes::TYPE_MISMATCH,
@@ -17283,6 +19023,22 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
+        if let Expr::Lambda(lambda) = &expr.args[1].value
+            && let Some(info) = self.lambdas.get(&lambda.span).cloned()
+        {
+            self.check_capture_boundary(
+                expr.args[1].value.span(),
+                "`Parallel.each` callback",
+                &info.captures,
+            );
+        }
+        self.check_concurrent_result(
+            expr.args[1].value.span(),
+            "`Parallel.each` callback",
+            shape.returns,
+            false,
+        );
+
         // `Parallel.each` is pure CPU work: legal even nested inside a
         // `parallel` region (design D5's "Nested `parallel` regions" —
         // the inner call shares the outer's pool), unlike I/O/suspension.
@@ -17295,6 +19051,562 @@ impl<'a> Checker<'a> {
         // than left to reach `zirk-ir` and panic on an undeclared callee.
         self.intern_array_type(shape.returns);
         Type::of(Base::List(self.intern_list_type(shape.returns)))
+    }
+
+    /// Checks the public source contract for the managed collection
+    /// combinators. The API remains gated until IR lowering can preserve
+    /// managed roots for every admitted callback and result.
+    fn check_concurrent_each_call(&mut self, expr: &CallExpr, settled: bool) -> Type {
+        let api = if settled {
+            "Concurrent.each_settled"
+        } else {
+            "Concurrent.each"
+        };
+        if !(2..=3).contains(&expr.args.len())
+            || expr
+                .args
+                .iter()
+                .any(|arg| arg.name.is_some() || arg.is_spread)
+        {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{api}` takes a collection, callback, and optional concurrency limit"),
+                format!("received {} positional argument(s)", expr.args.len()),
+                Some("pass `(collection, (item: T): R => ..., limit?)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let collection = self.check_expr(&expr.args[0].value);
+        if collection.nullable {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                format!("`{api}` collection must be non-null"),
+                format!("found nullable `{}`", self.name(collection)),
+                Some("check or unwrap the collection before starting concurrent callbacks".into()),
+            );
+        }
+        let element = match collection.base {
+            Base::Array(id) => self.array_types.get(id as usize).copied(),
+            Base::List(id) => self.list_types.get(id as usize).copied(),
+            _ => None,
+        };
+        let Some(element) = element else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                format!("`{api}` requires an Array or List"),
+                format!("found `{}`", self.name(collection)),
+                None,
+            );
+            self.check_expr(&expr.args[1].value);
+            if let Some(limit) = expr.args.get(2) {
+                self.check_expr(&limit.value);
+            }
+            return Type::UNKNOWN;
+        };
+        let collection_expr = &expr.args[0].value;
+        let collection_properties = self.ownership_of_type(collection);
+        // Collection combinators share their input with every callback. The
+        // only safe collection contract is a complete deep-Share graph held
+        // through an inmut::strict binding. Moving just one local name would
+        // leave mutable aliases, captures, fields, or views live elsewhere.
+        let safe_collection = collection_properties.share
+            && matches!(collection_expr, Expr::Path(path)
+                if self.scopes.resolve(&path.name).is_some_and(|resolved|
+                    resolved.binding.mutability == Mutability::Strict));
+        if !safe_collection {
+            self.error(
+                codes::UNSAFE_CONCURRENT_BOUNDARY,
+                expr.args[0].value.span(),
+                format!("`{api}` input has no safe ownership proof"),
+                format!("`{}` is not deeply shareable through an inmut::strict binding", self.name(collection)),
+                Some(
+                    "bind the collection as `inmut::strict` and ensure its complete element graph satisfies Share"
+                        .into(),
+                ),
+            );
+        }
+
+        if let Some(limit) = expr.args.get(2) {
+            let actual = self.check_expr(&limit.value);
+            if !matches!(actual.base, Base::Int(_)) && !actual.is_unknown() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    limit.value.span(),
+                    format!("`{api}` concurrency limit must be an integer"),
+                    format!("found `{}`", self.name(actual)),
+                    None,
+                );
+            }
+        }
+
+        let surrounding_throws = settled.then(|| std::mem::take(&mut self.pending_throws));
+        let callback = self.check_expr(&expr.args[1].value);
+        if let Some(throws) = surrounding_throws {
+            self.pending_throws = throws;
+        }
+        let Expr::Lambda(lambda) = &expr.args[1].value else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[1].value.span(),
+                format!("`{api}` callback must be a lambda literal"),
+                format!("found `{}`", self.name(callback)),
+                Some("write `(item: T): R => ...` so callback effects can be checked".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let Base::Function(function) = callback.base else {
+            return Type::UNKNOWN;
+        };
+        let shape = self.fn_types[function as usize].clone();
+        if shape.params.len() != 1 || !shape.params[0].accepts(element) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                lambda.span,
+                format!("`{api}` callback must accept exactly one collection element"),
+                format!(
+                    "the collection yields `{}`, callback takes {} parameter(s)",
+                    self.name(element),
+                    shape.params.len()
+                ),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        if matches!(shape.returns.base, Base::Void | Base::Never) {
+            self.error(
+                codes::TYPE_MISMATCH,
+                lambda.span,
+                format!("`{api}` callback must return a value"),
+                format!("found `{}`", self.name(shape.returns)),
+                Some("concurrent collection results require a representable payload".into()),
+            );
+        }
+        if let Some(info) = self.lambdas.get(&lambda.span).cloned() {
+            self.check_capture_boundary(lambda.span, &format!("`{api}` callback"), &info.captures);
+        }
+        self.check_concurrent_result(
+            lambda.span,
+            &format!("`{api}` callback"),
+            shape.returns,
+            false,
+        );
+        self.intern_array_type(shape.returns);
+        let result = if settled {
+            let outcome = self.enums.iter().position(|e| e.name == "Outcome");
+            if let Some(outcome) = outcome {
+                let instance = self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: outcome as u32,
+                    args: vec![shape.returns],
+                });
+                Type::of(Base::List(
+                    self.intern_list_type(Type::of(Base::EnumInstance(instance))),
+                ))
+            } else {
+                Type::UNKNOWN
+            }
+        } else {
+            Type::of(Base::List(self.intern_list_type(shape.returns)))
+        };
+
+        self.concurrent_each_plans.insert(
+            expr.span,
+            ConcurrentEachPlan {
+                callback: lambda.span,
+                element,
+                result: shape.returns,
+                limit: expr.args.get(2).map(|arg| arg.value.span()),
+                settled,
+            },
+        );
+
+        result
+    }
+
+    /// Checks the currently supported type contract for `Concurrent.of`.
+    /// The call stays gated until IR/runtime lowering has a pipeline
+    /// representation; it must never fall through to a synthetic callee.
+    fn check_concurrent_of_call(
+        &mut self,
+        expr: &CallExpr,
+        in_settled: bool,
+    ) -> (Type, Vec<Span>, bool) {
+        let mut valid = true;
+        if !(2..=8).contains(&expr.args.len())
+            || expr
+                .args
+                .iter()
+                .any(|arg| arg.name.is_some() || arg.is_spread)
+        {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Concurrent.of` takes 2 to 8 positional thunks",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("pass between two and eight zero-argument closures".into()),
+            );
+            valid = false;
+        }
+
+        let mut result_type = None;
+        let mut branches = Vec::with_capacity(expr.args.len());
+        for arg in &expr.args {
+            // An unhandled exception from a branch is intentionally carried
+            // by its Job and becomes Outcome.Rejected at settlement. It must
+            // not escape the surrounding function as though the thunk ran
+            // synchronously during pipeline construction.
+            let actual = if matches!(arg.value, Expr::Lambda(_)) {
+                let surrounding_throws = std::mem::take(&mut self.pending_throws);
+                let actual = self.check_expr(&arg.value);
+                self.pending_throws = surrounding_throws;
+                actual
+            } else {
+                self.check_expr(&arg.value)
+            };
+            let Expr::Lambda(_) = &arg.value else {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "a `Concurrent.of` member must be a closure literal",
+                    format!("found `{}`", self.name(actual)),
+                    Some("write `(): T => expression` so its body can be checked".into()),
+                );
+                valid = false;
+                continue;
+            };
+            branches.push(arg.value.span());
+            let Base::Function(function) = actual.base else {
+                valid = false;
+                continue;
+            };
+            let shape = self.fn_types[function as usize].clone();
+            if !shape.params.is_empty() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "a `Concurrent.of` thunk must take no arguments",
+                    format!("found {} parameter(s)", shape.params.len()),
+                    Some("write a closure with the form `(): T => expression`".into()),
+                );
+                valid = false;
+            }
+            if matches!(shape.returns.base, Base::Void | Base::Never) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "a `Concurrent.of` thunk must return a value",
+                    format!("found `{}`", self.name(shape.returns)),
+                    Some("settled outcomes require a concrete `T` payload".into()),
+                );
+                valid = false;
+            }
+            // Each thunk will cross the same ownership boundary as a
+            // structured child task once the pipeline is lowered. Keep this
+            // proof in the source checker now, while the feature is gated,
+            // so enabling lowering cannot accidentally expose unchecked
+            // mutable aliases or unsafe result values.
+            if let Expr::Lambda(lambda) = &arg.value
+                && let Some(info) = self.lambdas.get(&lambda.span).cloned()
+            {
+                self.check_capture_boundary(lambda.span, "`Concurrent.of` branch", &info.captures);
+            }
+            self.check_concurrent_result(
+                arg.value.span(),
+                "`Concurrent.of` branch",
+                shape.returns,
+                false,
+            );
+            match result_type {
+                None => result_type = Some(shape.returns),
+                Some(expected) if expected != shape.returns => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        arg.value.span(),
+                        "`Concurrent.of` requires homogeneous thunk result types",
+                        format!(
+                            "expected `{}`, found `{}`",
+                            self.name(expected),
+                            self.name(shape.returns)
+                        ),
+                        Some("convert the results to one declared enum or sum type first".into()),
+                    );
+                    valid = false;
+                }
+                Some(_) => {}
+            }
+        }
+
+        let result = result_type.unwrap_or(Type::UNKNOWN);
+        if valid && !in_settled {
+            self.not_lowered(
+                expr.span,
+                "`Concurrent.of`",
+                "combinator pipeline lowering is not available yet",
+            );
+        }
+        (result, branches, valid)
+    }
+
+    fn check_concurrent_settled_call(&mut self, expr: &CallExpr, receiver: &Expr) -> Type {
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Concurrent.settled()` takes no arguments",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("call `settled()` without arguments".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+        let Some((of_call, deadline)) =
+            self.check_concurrent_terminal_receiver(receiver, expr.span, "settled")
+        else {
+            return Type::UNKNOWN;
+        };
+        let (value, branches, valid) = self.check_concurrent_of_call(of_call, true);
+        if !valid || value.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        let outcome = self
+            .enums
+            .iter()
+            .position(|e| e.name == "Outcome")
+            .expect("native Outcome is registered") as u32;
+        let outcome_instance = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: outcome,
+            args: vec![value],
+        });
+        let outcome_type = Type::of(Base::EnumInstance(outcome_instance));
+        let list = self.intern_list_type(outcome_type);
+        let result = Type::of(Base::List(list));
+        self.settled_plans.insert(
+            expr.span,
+            SettledPlan {
+                branches,
+                result: value,
+                deadline,
+            },
+        );
+        result
+    }
+
+    /// Checks a terminal's pipeline receiver and extracts the optional
+    /// chainable `.within(Duration)` stage. The duration span is retained so
+    /// lowering can evaluate it once before any child starts.
+    fn check_concurrent_terminal_receiver<'b>(
+        &mut self,
+        receiver: &'b Expr,
+        terminal_span: Span,
+        terminal: &str,
+    ) -> Option<(&'b CallExpr, Option<Span>)> {
+        let (pipeline, deadline) = match receiver {
+            Expr::Call(within) if matches!(&*within.callee, Expr::Field(field) if field.name.name == "within") =>
+            {
+                let Expr::Field(field) = &*within.callee else {
+                    unreachable!()
+                };
+                if !self.is_concurrent_pipeline_expression(&field.object) {
+                    self.check_expr(receiver);
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        terminal_span,
+                        format!("`Concurrent.{terminal}` requires a direct `Concurrent.of(...)` pipeline"),
+                        "only a checked `Concurrent.of` pipeline can be completed",
+                        None,
+                    );
+                    return None;
+                }
+                if within.args.len() != 1
+                    || within
+                        .args
+                        .iter()
+                        .any(|arg| arg.name.is_some() || arg.is_spread)
+                {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        within.span,
+                        "`Concurrent.within()` takes one positional Duration",
+                        format!("received {} argument(s)", within.args.len()),
+                        Some("pass one Duration before the completion terminal".into()),
+                    );
+                }
+                for arg in &within.args {
+                    let actual = self.check_expr(&arg.value);
+                    self.expect_assignable(
+                        Type::DURATION,
+                        actual,
+                        arg.value.span(),
+                        "`Concurrent.within` deadline",
+                    );
+                }
+                let Expr::Call(of_call) = &*field.object else {
+                    self.check_expr(receiver);
+                    return None;
+                };
+                (of_call, within.args.first().map(|arg| arg.value.span()))
+            }
+            Expr::Call(of_call) => (of_call, None),
+            _ => {
+                self.check_expr(receiver);
+                self.error(
+                    codes::PENDING_FEATURE,
+                    terminal_span,
+                    format!(
+                        "`Concurrent.{terminal}` requires a direct `Concurrent.of(...)` pipeline"
+                    ),
+                    "only a checked `Concurrent.of` pipeline can be completed",
+                    None,
+                );
+                return None;
+            }
+        };
+        let is_builtin_of = matches!(&*pipeline.callee, Expr::Field(field)
+            if field.name.name == "of"
+                && matches!(&*field.object, Expr::Path(base)
+                    if base.name == "Concurrent" && self.is_builtin_namespace_unshadowed(&base.name)));
+        if !is_builtin_of {
+            self.check_expr(receiver);
+            self.error(
+                codes::PENDING_FEATURE,
+                terminal_span,
+                format!("`Concurrent.{terminal}` requires a direct `Concurrent.of(...)` pipeline"),
+                "only a checked `Concurrent.of` pipeline can be completed",
+                None,
+            );
+            return None;
+        }
+        Some((pipeline, deadline))
+    }
+
+    fn check_concurrent_first_call(&mut self, expr: &CallExpr, receiver: &Expr) -> Type {
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Concurrent.first()` takes no arguments",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("call `first()` without arguments".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+        let Some((of_call, deadline)) =
+            self.check_concurrent_terminal_receiver(receiver, expr.span, "first")
+        else {
+            return Type::UNKNOWN;
+        };
+        let (value, branches, valid) = self.check_concurrent_of_call(of_call, true);
+        if !valid || value.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        self.first_plans.insert(
+            expr.span,
+            SettledPlan {
+                branches,
+                result: value,
+                deadline,
+            },
+        );
+        value
+    }
+
+    /// Recognizes the checked-but-not-lowered completion pipeline so terminal
+    /// calls cannot fall through to an unknown-member diagnostic or be treated
+    /// as ordinary dynamic calls.
+    fn is_concurrent_pipeline_expression(&self, expression: &Expr) -> bool {
+        let Expr::Call(call) = expression else {
+            return false;
+        };
+        let Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        match field.name.name.as_str() {
+            "of" => {
+                matches!(&*field.object, Expr::Path(base)
+                    if base.name == "Concurrent" && self.is_builtin_namespace_unshadowed(&base.name))
+            }
+            "first" | "settled" | "within" => self.is_concurrent_pipeline_expression(&field.object),
+            _ => false,
+        }
+    }
+
+    /// A compiler-provided namespace is active only when neither a value nor
+    /// a user-declared class shadows its name. Static methods on a user class
+    /// named `Concurrent` must continue through ordinary member resolution.
+    fn is_builtin_namespace_unshadowed(&self, name: &str) -> bool {
+        self.scopes.lookup(name).is_none() && self.class_id(name).is_none()
+    }
+
+    fn check_concurrent_protect_call(&mut self, expr: &CallExpr) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Concurrent.protect` takes one positional cleanup lambda",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("pass one zero-argument lambda".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let callback = &expr.args[0].value;
+        let actual = self.check_expr(callback);
+        let Expr::Lambda(lambda) = callback else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                callback.span(),
+                "`Concurrent.protect` requires a lambda literal so its effects can be verified",
+                format!("found `{}`", self.name(actual)),
+                Some("write `Concurrent.protect((): Void => cleanup())`".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let signature = match actual.base {
+            Base::Function(id) => self.fn_types.get(id as usize).cloned(),
+            _ => None,
+        };
+        let valid = match signature {
+            Some(shape) if shape.params.is_empty() && shape.returns == Type::VOID => true,
+            Some(shape) if !shape.params.is_empty() => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    callback.span(),
+                    "`Concurrent.protect` cleanup lambda takes no arguments",
+                    format!("found {} parameter(s)", shape.params.len()),
+                    None,
+                );
+                false
+            }
+            Some(shape) => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    callback.span(),
+                    "`Concurrent.protect` cleanup lambda must return `Void`",
+                    format!("found `{}`", self.name(shape.returns)),
+                    Some("perform cleanup for its effects without returning a value".into()),
+                );
+                false
+            }
+            None => false,
+        };
+        if valid {
+            self.protected_cleanup_calls
+                .push((expr.span, Some(lambda.span)));
+            return Type::VOID;
+        }
+        Type::UNKNOWN
     }
 
     /// `Weak.from(value)` (roadmap Phase 4e, `fase-4e-weak`, design D1):
@@ -18198,6 +20510,11 @@ impl<'a> Checker<'a> {
         let Base::Channel(id) = object.base else {
             return None;
         };
+        self.mark_uses_channel();
+        self.reject_in_parallel_region(expr.span, "channel operations");
+        if matches!(field.name.name.as_str(), "send" | "receive") {
+            self.mark_may_suspend();
+        }
         let element = self
             .channel_types
             .get(id as usize)
@@ -18209,6 +20526,15 @@ impl<'a> Checker<'a> {
                     self.sequence_wrong_arity(expr, "send", 1);
                 } else {
                     let value = self.check_expr(&expr.args[0].value);
+                    if !self.boundary_expression_is_safe(&expr.args[0].value, value) {
+                        self.error(
+                            codes::UNSAFE_CONCURRENT_BOUNDARY,
+                            expr.args[0].value.span(),
+                            "channel send requires a transferable value or a deeply shareable immutable value",
+                            format!("`{}` has no safe ownership proof for this channel boundary", self.name(value)),
+                            Some("move an audited resource with `transfer(...)`, or send a deeply shareable immutable value".into()),
+                        );
+                    }
                     if !value.is_unknown() && !element.accepts(value) {
                         self.expect_assignable(
                             element,
@@ -18224,6 +20550,7 @@ impl<'a> Checker<'a> {
                 if !expr.args.is_empty() {
                     self.sequence_wrong_arity(expr, "receive", 0);
                 }
+                self.check_concurrent_result(expr.span, "channel receive", element, false);
                 Some(element.as_nullable())
             }
             "try_send" => {
@@ -18231,6 +20558,15 @@ impl<'a> Checker<'a> {
                     self.sequence_wrong_arity(expr, "try_send", 1);
                 } else {
                     let value = self.check_expr(&expr.args[0].value);
+                    if !self.boundary_expression_is_safe(&expr.args[0].value, value) {
+                        self.error(
+                            codes::UNSAFE_CONCURRENT_BOUNDARY,
+                            expr.args[0].value.span(),
+                            "channel send requires a transferable value or a deeply shareable immutable value",
+                            format!("`{}` has no safe ownership proof for this channel boundary", self.name(value)),
+                            Some("move an audited resource with `transfer(...)`, or send a deeply shareable immutable value".into()),
+                        );
+                    }
                     if !value.is_unknown() && !element.accepts(value) {
                         self.expect_assignable(
                             element,
@@ -18246,6 +20582,7 @@ impl<'a> Checker<'a> {
                 if !expr.args.is_empty() {
                     self.sequence_wrong_arity(expr, "try_receive", 0);
                 }
+                self.check_concurrent_result(expr.span, "channel receive", element, false);
                 Some(self.native_receive_outcome_type(element))
             }
             "close" => {
@@ -18264,8 +20601,438 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_atomic_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`Atomic(initial)` takes one positional initial value",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("write `Atomic(initial)`".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+        let expected_element = expected.and_then(|ty| match ty.base {
+            Base::Atomic(id) => self.atomic_types.get(id as usize).copied(),
+            _ => None,
+        });
+        self.expected_type = expected_element;
+        let initial = self.check_expr(&expr.args[0].value);
+        if initial.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if let Some(expected) = expected.filter(|t| matches!(t.base, Base::Atomic(_))) {
+            let Base::Atomic(id) = expected.base else {
+                unreachable!()
+            };
+            let element = self
+                .atomic_types
+                .get(id as usize)
+                .copied()
+                .unwrap_or(Type::UNKNOWN);
+            self.expect_assignable(
+                element,
+                initial,
+                expr.args[0].value.span(),
+                "the atomic initial value",
+            );
+            expected
+        } else if Self::is_atomic_scalar(initial) {
+            Type::of(Base::Atomic(self.intern_atomic_type(initial)))
+        } else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[0].value.span(),
+                format!("`Atomic` does not support `{}`", self.name(initial)),
+                "Atomic supports Boolean and signed or unsigned integers from 8 through 64 bits",
+                Some("initialize it with a supported scalar value".into()),
+            );
+            Type::UNKNOWN
+        }
+    }
+
+    fn atomic_order_constant<'b>(&self, expr: &'b Expr) -> Option<&'b str> {
+        let Expr::Field(field) = expr else {
+            return None;
+        };
+        let Expr::Path(base) = &*field.object else {
+            return None;
+        };
+        (base.name == "AtomicOrder" && self.scopes.lookup("AtomicOrder").is_none())
+            .then_some(field.name.name.as_str())
+    }
+
+    fn check_atomic_order(&mut self, expr: &Expr, unsafe_required: bool) -> Option<String> {
+        let expected = Type::of(Base::Enum(
+            self.native_atomic_order.expect("AtomicOrder registered"),
+        ));
+        let actual = self.check_expr(expr);
+        if !actual.is_unknown() && actual != expected {
+            self.expect_assignable(expected, actual, expr.span(), "atomic memory ordering");
+        }
+        let constant = self.atomic_order_constant(expr).map(str::to_owned);
+        if unsafe_required {
+            let weak = constant.as_deref().is_none_or(|order| order != "seq_cst");
+            if weak && self.unsafe_depth == 0 {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span(),
+                    "a non-sequentially-consistent atomic ordering requires an enclosing `unsafe` boundary",
+                    "weaker memory ordering carries a programmer proof obligation",
+                    Some("wrap the operation in `unsafe { ... }` or use the default `seq_cst` ordering".into()),
+                );
+            }
+        }
+        constant
+    }
+
+    fn check_atomic_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let Base::Atomic(id) = object.base else {
+            return None;
+        };
+        let element = self
+            .atomic_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        let name = field.name.name.as_str();
+        let (value_count, order_count, returns) = match name {
+            "load" => (0, 1, element),
+            "store" => (1, 1, Type::VOID),
+            "exchange" => (1, 1, element),
+            "compare_exchange" => (2, 2, self.atomic_compare_exchange_result(element)),
+            "fetch_add" | "fetch_sub" if matches!(element.base, Base::Int(_)) => (1, 1, element),
+            "fetch_add" | "fetch_sub" => {
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    field.name.span,
+                    format!("`{}` is available only on integer atomics", name),
+                    "fetch_add and fetch_sub require an integer payload",
+                    None,
+                );
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Some(Type::UNKNOWN);
+            }
+            _ => return None,
+        };
+        let labels: &[&str] = match name {
+            "store" | "exchange" | "fetch_add" | "fetch_sub" => &["value", "order"],
+            "compare_exchange" => &["expected", "desired", "success", "failure"],
+            "load" => &["order"],
+            _ => &[],
+        };
+        let parameter_count = value_count + order_count;
+        let mut slots = vec![None; parameter_count];
+        let mut next_positional = 0;
+        for (argument_index, arg) in expr.args.iter().enumerate() {
+            let slot = if let Some(label) = &arg.name {
+                match labels.iter().position(|expected| *expected == label.name) {
+                    Some(slot) => Some(slot),
+                    None => {
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            label.span,
+                            format!("unknown argument `{}` for `Atomic.{name}`", label.name),
+                            format!("valid labels: {}", labels.join(", ")),
+                            None,
+                        );
+                        None
+                    }
+                }
+            } else {
+                while next_positional < parameter_count && slots[next_positional].is_some() {
+                    next_positional += 1;
+                }
+                let slot = (next_positional < parameter_count).then_some(next_positional);
+                next_positional += 1;
+                slot
+            };
+            if let Some(slot) = slot {
+                if slots[slot].replace(argument_index).is_some() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        arg.span,
+                        format!("argument `{}` was supplied more than once", labels[slot]),
+                        "each atomic method parameter may be supplied only once",
+                        None,
+                    );
+                }
+            } else {
+                self.check_expr(&arg.value);
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    arg.span,
+                    format!("too many arguments for `Atomic.{name}`"),
+                    format!("it takes at most {parameter_count} arguments"),
+                    None,
+                );
+            }
+        }
+        if slots[..value_count].iter().any(Option::is_none) {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`Atomic.{name}` requires {value_count} value argument(s)"),
+                "one or more required value arguments are missing",
+                None,
+            );
+        }
+        for (slot, argument_slot) in slots.iter().enumerate().take(parameter_count) {
+            let Some(argument_index) = *argument_slot else {
+                continue;
+            };
+            let argument = &expr.args[argument_index];
+            if slot < value_count {
+                self.expected_type = Some(element);
+                let actual = self.check_expr(&argument.value);
+                self.expect_assignable(element, actual, argument.value.span(), "the atomic value");
+            } else {
+                self.check_atomic_order(&argument.value, true);
+            }
+        }
+        let order_at = value_count;
+        let order = slots
+            .get(order_at)
+            .and_then(|index| *index)
+            .and_then(|index| self.atomic_order_constant(&expr.args[index].value))
+            .map(str::to_owned);
+        let invalid = match name {
+            "load" => order
+                .as_deref()
+                .is_some_and(|o| matches!(o, "release" | "acq_rel")),
+            "store" => order
+                .as_deref()
+                .is_some_and(|o| matches!(o, "acquire" | "acq_rel")),
+            _ => false,
+        };
+        if invalid {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.args[slots[order_at].expect("invalid order has a constant argument")].span,
+                format!("ordering `{}` is invalid for Atomic.{name}", order.unwrap()),
+                "load accepts relaxed/acquire/seq_cst; store accepts relaxed/release/seq_cst",
+                None,
+            );
+        }
+        if name == "compare_exchange" {
+            let success = slots
+                .get(2)
+                .and_then(|index| *index)
+                .and_then(|index| self.atomic_order_constant(&expr.args[index].value));
+            let failure = slots
+                .get(3)
+                .and_then(|index| *index)
+                .and_then(|index| self.atomic_order_constant(&expr.args[index].value));
+            let success = success.or_else(|| slots[2].is_none().then_some("seq_cst"));
+            let failure = failure.or_else(|| slots[3].is_none().then_some("seq_cst"));
+            if let (Some(success), Some(failure)) = (success, failure)
+                && !Self::valid_compare_exchange_orders(success, failure)
+            {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    slots[3].map_or(expr.span, |index| expr.args[index].span),
+                    "invalid compare_exchange failure ordering",
+                    "failure ordering cannot be release/acq_rel or stronger than success",
+                    None,
+                );
+            }
+        }
+        Some(returns)
+    }
+
+    fn valid_compare_exchange_orders(success: &str, failure: &str) -> bool {
+        match success {
+            "relaxed" => failure == "relaxed",
+            "acquire" => matches!(failure, "relaxed" | "acquire"),
+            "release" => failure == "relaxed",
+            "acq_rel" => matches!(failure, "relaxed" | "acquire"),
+            "seq_cst" => matches!(failure, "relaxed" | "acquire" | "seq_cst"),
+            _ => false,
+        }
+    }
+
+    fn atomic_compare_exchange_result(&mut self, element: Type) -> Type {
+        let id = self.native_result.expect("Result registered");
+        let instance = self.intern_enum_instance(GenericEnumInstance {
+            enum_id: id,
+            args: vec![element, element],
+        });
+        Type::of(Base::EnumInstance(instance))
+    }
+
+    fn check_application_spawn_service(&mut self, expr: &CallExpr) -> Type {
+        if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                "`application.spawn_service` takes one positional callback",
+                format!("received {} argument(s)", expr.args.len()),
+                Some("pass one `(ServiceContext): Void` function".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+        let callback_expr = &expr.args[0].value;
+        let was_pending = self.pending_service_callback;
+        self.pending_service_callback = matches!(callback_expr, Expr::Lambda(_));
+        let callback_ty = self.check_expr(callback_expr);
+        self.pending_service_callback = was_pending;
+        let Base::Function(fn_id) = callback_ty.base else {
+            if !callback_ty.is_unknown() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    callback_expr.span(),
+                    "`application.spawn_service` requires a service callback",
+                    format!("found `{}`", self.name(callback_ty)),
+                    Some("the callback signature is `(ServiceContext): Void`".into()),
+                );
+            }
+            return Type::UNKNOWN;
+        };
+        let Some(shape) = self.fn_types.get(fn_id as usize).cloned() else {
+            return Type::UNKNOWN;
+        };
+        if shape.params != [Type::SERVICE_CONTEXT] || shape.returns != Type::VOID {
+            self.error(
+                codes::TYPE_MISMATCH,
+                callback_expr.span(),
+                "invalid `application.spawn_service` callback signature",
+                format!(
+                    "expected `(ServiceContext): Void`, found `{}`",
+                    self.name(callback_ty)
+                ),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let (context_parameter, captures) = match callback_expr {
+            Expr::Lambda(lambda) => {
+                let span = lambda.params.first().map(|p| p.name.span);
+                let captures = self
+                    .lambdas
+                    .get(&lambda.span)
+                    .map(|l| l.captures.clone())
+                    .unwrap_or_default();
+                self.check_capture_boundary(expr.span, "`application.spawn_service`", &captures);
+                (span, captures)
+            }
+            Expr::Path(path) => {
+                let name = self.resolved_name(&path.name, path.span);
+                (
+                    self.service_callback_parameter_spans.get(&name).copied(),
+                    Vec::new(),
+                )
+            }
+            _ => (None, Vec::new()),
+        };
+        let Some(context_parameter) = context_parameter else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                callback_expr.span(),
+                "service callback context provenance is unavailable",
+                "only direct lambdas and named functions with the exact signature are supported",
+                None,
+            );
+            return Type::UNKNOWN;
+        };
+        self.service_spawns.insert(
+            expr.span,
+            ServiceSpawnInfo {
+                callback_span: callback_expr.span(),
+                context_parameter,
+                callback_type: fn_id,
+                captures,
+                capacity_error: Type::of(Base::Class(
+                    self.native_exceptions
+                        .expect("native exceptions are registered")
+                        .service_capacity_error,
+                )),
+            },
+        );
+        Type::VOID
+    }
+
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        if let Expr::Field(field) = &*expr.callee
+            && field.name.name == "ready"
+            && !field.safe
+            && let Expr::Path(receiver) = &*field.object
+            && let Some(resolved) = self.scopes.resolve(&receiver.name)
+            && resolved.binding.ty == Type::SERVICE_CONTEXT
+        {
+            if expr.args.is_empty()
+                && !resolved.captured
+                && self.service_context_params.contains(&resolved.binding.span)
+            {
+                self.service_ready_calls
+                    .insert(expr.span, resolved.binding.span);
+            } else if !expr.args.is_empty() {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`ServiceContext.ready()` takes no arguments",
+                    format!("received {} argument(s)", expr.args.len()),
+                    None,
+                );
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+            } else {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span,
+                    "`ready()` requires the active service callback parameter",
+                    "this ServiceContext is not the parameter of a service callback",
+                    None,
+                );
+            }
+            return Type::VOID;
+        }
+        if let Expr::Field(field) = &*expr.callee
+            && field.name.name == "spawn_service"
+            && !field.safe
+            && matches!(&*field.object, Expr::Path(base)
+                if base.name == "application" && self.is_builtin_namespace_unshadowed(&base.name))
+        {
+            return self.check_application_spawn_service(expr);
+        }
+        let thread_namespace_is_shadowed = match &*expr.callee {
+            Expr::Field(field) => match &*field.object {
+                Expr::Path(base) if base.name == "Thread" => {
+                    !self.is_builtin_namespace_unshadowed(&base.name)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+
+        if let Expr::Path(callee) = &*expr.callee
+            && self
+                .scopes
+                .lookup(&callee.name)
+                .is_some_and(|binding| matches!(binding.ty.base, Base::Function(_)))
+        {
+            // A function value may refer to any callable with this shape;
+            // its effect is not inferred from the value's type.
+            self.mark_suspend_unknown();
+            if self.parallel_depth > 0 {
+                self.parallel_calls.push((expr.span, None));
+            }
+        }
+
         // Preserve the package-qualified stream binding while the import
         // source is still known. The IR must consume this record instead of
         // treating names such as `stdin.read_line` as privileged by spelling.
@@ -18448,6 +21215,20 @@ impl<'a> Checker<'a> {
             return self.check_variant_construction(expr, &field, enum_id as u32, expected);
         }
 
+        if let Expr::Path(callee) = &*expr.callee
+            && callee.name == "Atomic"
+            && self.scopes.lookup("Atomic").is_none()
+        {
+            return self.check_atomic_construction(expr, expected);
+        }
+
+        if let Expr::Path(callee) = &*expr.callee
+            && callee.name == "Mutex"
+            && self.scopes.lookup("Mutex").is_none()
+        {
+            return self.check_mutex_construction(expr, expected);
+        }
+
         // `Pointer.from(place)` (roadmap Phase 4e, design D1/D8): a static
         // call on the compiler-built-in `Pointer` name, decided here for the
         // same reason `LoadState.Loading(...)` above is — `Pointer` names a
@@ -18479,10 +21260,157 @@ impl<'a> Checker<'a> {
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
             && base.name == "Timer"
-            && self.scopes.lookup(&base.name).is_none()
+            && self.is_builtin_namespace_unshadowed(&base.name)
             && matches!(field.name.name.as_str(), "sleep" | "after" | "every")
         {
             return self.check_timer_call(expr, field);
+        }
+
+        // Completion terminals are recognized while their pipeline is still
+        // unavailable. Checking the receiver first preserves the detailed
+        // `Concurrent.of` contract diagnostics; this explicit gate then names
+        // the terminal whose runtime/managed-result path is not implemented.
+        if let Expr::Field(field) = &*expr.callee
+            && matches!(field.name.name.as_str(), "first" | "settled" | "within")
+            && self.is_concurrent_pipeline_expression(&field.object)
+        {
+            if field.name.name == "settled" {
+                return self.check_concurrent_settled_call(expr, &field.object);
+            }
+            if field.name.name == "first" {
+                return self.check_concurrent_first_call(expr, &field.object);
+            }
+            self.check_expr(&field.object);
+            let expected_count = if field.name.name == "within" { 1 } else { 0 };
+            if expr.args.len() != expected_count
+                || expr
+                    .args
+                    .iter()
+                    .any(|arg| arg.name.is_some() || arg.is_spread)
+            {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    format!(
+                        "`Concurrent.{}()` takes {expected_count} positional argument(s)",
+                        field.name.name
+                    ),
+                    format!("received {} argument(s)", expr.args.len()),
+                    Some(if expected_count == 0 {
+                        "call the terminal without arguments".into()
+                    } else {
+                        "pass one positional Duration".into()
+                    }),
+                );
+            }
+            for arg in &expr.args {
+                let actual = self.check_expr(&arg.value);
+                if field.name.name == "within" {
+                    self.expect_assignable(
+                        Type::DURATION,
+                        actual,
+                        arg.value.span(),
+                        "`Concurrent.within` deadline",
+                    );
+                }
+            }
+            self.error(
+                codes::PENDING_FEATURE,
+                expr.span,
+                format!("`Concurrent.{}` is not available yet", field.name.name),
+                "managed completion outcomes and pipeline lowering arrive in Phase 5",
+                Some("use `Concurrent.of` only after the completion pipeline capability is implemented".into()),
+            );
+            return Type::UNKNOWN;
+        }
+
+        // Static collection combinators validate their source contract before
+        // remaining gated on managed callback/result lowering.
+        if let Expr::Field(field) = &*expr.callee
+            && matches!(field.name.name.as_str(), "each" | "each_settled")
+            && matches!(&*field.object, Expr::Path(base)
+                if base.name == "Concurrent" && self.is_builtin_namespace_unshadowed(&base.name))
+        {
+            return self.check_concurrent_each_call(expr, field.name.name == "each_settled");
+        }
+
+        // `Thread.run` executes a zero-argument callable on the managed native
+        // pool. Keep its effect and ownership checks at this boundary: a body
+        // must have a complete summary and cannot suspend or create executor
+        // tasks while running on the native worker.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Thread"
+            && !thread_namespace_is_shadowed
+            && field.name.name == "run"
+        {
+            // The caller cooperatively waits for the native worker to join;
+            // this is a blocking effect even when the callback itself is pure.
+            // Propagate it so non-blocking cleanup regions reject Thread.run.
+            self.mark_may_block();
+            self.thread_run_calls.insert(expr.span);
+            if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`Thread.run` takes one positional zero-argument function",
+                    format!("received {} argument(s)", expr.args.len()),
+                    Some("pass one zero-argument function or lambda".into()),
+                );
+            }
+            if let Some(arg) = expr.args.first() {
+                let summary_span = match &arg.value {
+                    Expr::Lambda(lambda) => Some(lambda.span),
+                    Expr::Path(ident) if self.scopes.lookup(&ident.name).is_none() => {
+                        let declared = self.resolved_name(&ident.name, ident.span);
+                        self.functions
+                            .get(&declared)
+                            .map(|signature| signature.span)
+                    }
+                    _ => None,
+                };
+                self.thread_run_callables
+                    .push((arg.value.span(), summary_span));
+            }
+            if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::UNKNOWN;
+            }
+            let arg = &expr.args[0];
+            let actual = self.check_expr(&arg.value);
+            if let Expr::Lambda(lambda) = &arg.value
+                && let Some(info) = self.lambdas.get(&lambda.span).cloned()
+            {
+                self.check_capture_boundary(arg.value.span(), "`Thread.run`", &info.captures);
+            }
+            let span = arg.value.span();
+            if let Base::Function(function) = actual.base
+                && let Some(shape) = self.fn_types.get(function as usize).cloned()
+            {
+                if !shape.params.is_empty() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        span,
+                        "`Thread.run` requires a zero-argument function",
+                        format!("found {} parameter(s)", shape.params.len()),
+                        None,
+                    );
+                }
+                self.check_concurrent_result(span, "`Thread.run`", shape.returns, false);
+                return shape.returns;
+            }
+            if !actual.is_unknown() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    span,
+                    "`Thread.run` requires a function value",
+                    format!("found `{}`", self.name(actual)),
+                    Some("pass a zero-argument function or lambda".into()),
+                );
+            }
+            return Type::UNKNOWN;
         }
 
         // `Parallel.each(coll, fn)` (design D2/D3 of `parallel-cpu-regions`,
@@ -18491,10 +21419,169 @@ impl<'a> Checker<'a> {
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
             && base.name == "Parallel"
-            && self.scopes.lookup(&base.name).is_none()
+            && self.is_builtin_namespace_unshadowed(&base.name)
             && field.name.name == "each"
         {
             return self.check_parallel_each_call(expr);
+        }
+
+        // `Concurrent.of` is recognized as a type-checking boundary. It
+        // validates homogeneous zero-argument thunks, then reports
+        // `NOT_LOWERED` rather than resolving a nonexistent runtime symbol.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Concurrent"
+            && self.is_builtin_namespace_unshadowed(&base.name)
+            && field.name.name == "of"
+        {
+            return self.check_concurrent_of_call(expr, false).0;
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Concurrent"
+            && self.is_builtin_namespace_unshadowed(&base.name)
+            && field.name.name == "protect"
+        {
+            return self.check_concurrent_protect_call(expr);
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "App"
+            && self.is_builtin_namespace_unshadowed(&base.name)
+            && field.name.name == "set_shutdown_grace"
+        {
+            if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`App.set_shutdown_grace` takes one positional `Duration`",
+                    format!("received {} argument(s)", expr.args.len()),
+                    Some("pass one non-negative Duration".into()),
+                );
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::VOID;
+            }
+            let arg = &expr.args[0].value;
+            let actual = self.check_expr(arg);
+            self.expect_assignable(Type::DURATION, actual, arg.span(), "the shutdown grace");
+            let negative_literal = match arg {
+                Expr::Duration(duration) => duration.nanos < 0,
+                Expr::Unary(unary) if matches!(unary.op, UnaryOp::Neg) => {
+                    matches!(&*unary.operand, Expr::Duration(duration) if duration.nanos > 0)
+                }
+                _ => false,
+            };
+            if negative_literal {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.span(),
+                    "`App.set_shutdown_grace` requires a non-negative Duration",
+                    "the literal duration is negative",
+                    Some("use `0ns` or a positive duration".into()),
+                );
+            }
+            return Type::VOID;
+        }
+
+        // `Concurrent.detach` starts a zero-argument Void callback under the
+        // executor's bounded application-background supervisor.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Concurrent"
+            && self.is_builtin_namespace_unshadowed(&base.name)
+            && field.name.name == "detach"
+        {
+            if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`Concurrent.detach` takes one positional zero-argument function",
+                    format!("received {} argument(s)", expr.args.len()),
+                    Some("pass one zero-argument function or lambda".into()),
+                );
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::UNKNOWN;
+            }
+
+            let arg = &expr.args[0];
+            let callable = self.check_expr(&arg.value);
+            let Base::Function(function) = callable.base else {
+                if !callable.is_unknown() {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        arg.value.span(),
+                        "`Concurrent.detach` requires a zero-argument function",
+                        format!("found `{}`", self.name(callable)),
+                        Some("pass a zero-argument function or lambda".into()),
+                    );
+                }
+                return Type::UNKNOWN;
+            };
+            let shape = self.fn_types[function as usize].clone();
+            if !shape.params.is_empty() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "`Concurrent.detach` requires a zero-argument function",
+                    format!("found {} parameter(s)", shape.params.len()),
+                    Some("write `(): Void => ...`".into()),
+                );
+                return Type::UNKNOWN;
+            }
+            if shape.returns != Type::VOID {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    arg.value.span(),
+                    "`Concurrent.detach` callback must return `Void`",
+                    format!("the callback returns `{}`", self.name(shape.returns)),
+                    Some("discard the value inside the callback".into()),
+                );
+                return Type::UNKNOWN;
+            }
+            if let Expr::Lambda(lambda) = &arg.value
+                && let Some(info) = self.lambdas.get(&lambda.span).cloned()
+            {
+                self.check_capture_boundary(
+                    arg.value.span(),
+                    "`Concurrent.detach`",
+                    &info.captures,
+                );
+            }
+            return Type::VOID;
+        }
+
+        // Background work and application services have normative contracts,
+        // but no source-level lowering or lifecycle integration yet. Keep
+        // these known APIs behind an explicit Phase 5 diagnostic instead of
+        // letting them degrade into undeclared-name errors.
+        let pending_background_api = match &*expr.callee {
+            Expr::Field(field)
+                if field.name.name == "spawn_service"
+                    && matches!(&*field.object, Expr::Path(base)
+                        if base.name == "application" && self.is_builtin_namespace_unshadowed(&base.name)) =>
+            {
+                Some("`application.spawn_service`")
+            }
+            _ => None,
+        };
+        if let Some(api) = pending_background_api {
+            self.error(
+                codes::PENDING_FEATURE,
+                expr.span,
+                format!("{api} is not available yet"),
+                "managed background and service lifecycle integration arrives in Phase 5",
+                Some("keep the work inside the current structured scope until this API is implemented".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
         }
 
         // `Int32.parse("5")`, `Float64.parse("1.5")`, `Regex.parse(p)`
@@ -18756,6 +21843,22 @@ impl<'a> Checker<'a> {
                 && !field.safe
                 && !object.nullable
                 && let Some(ty) = self.check_channel_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            if matches!(object.base, Base::Atomic(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_atomic_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
+            if matches!(object.base, Base::Mutex(_))
+                && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_mutex_method_call(expr, field, object)
             {
                 return ty;
             }
@@ -19830,6 +22933,10 @@ impl<'a> Checker<'a> {
             // irreversible, so it needs both `unsafe` and a nested `commit`,
             // with no purity inference.
             if let Some(signature) = self.externs.get(&declared).cloned() {
+                self.mark_suspend_unknown();
+                if self.parallel_depth > 0 {
+                    self.parallel_calls.push((expr.span, None));
+                }
                 if self.unsafe_depth == 0 || self.commit_depth == 0 {
                     self.error(
                         codes::EXTERN_CALL_OUTSIDE_UNSAFE_COMMIT,
@@ -19867,6 +22974,7 @@ impl<'a> Checker<'a> {
             self.ensure_inferred(&InferKey::Fn(declared.clone()), expr.span);
             if let Some(signature) = self.functions.get(&declared).cloned() {
                 self.require_visible(signature.span, signature.shared, callee, "function");
+                self.record_direct_function_call(signature.span, expr.span);
                 return self.check_direct_call(expr, &signature);
             }
 
@@ -20482,6 +23590,7 @@ impl<'a> Checker<'a> {
         Type {
             base,
             nullable: ty.nullable,
+            borrowed_scope: ty.borrowed_scope,
         }
     }
 
@@ -21055,6 +24164,213 @@ fn collect_assigned_fields(statements: &[Stmt], found: &mut std::collections::Ha
 /// reference hidden inside a nested lambda is rare, and a missed edge only
 /// costs a little concurrency — never soundness, since a branch cannot mutate
 /// an enclosing binding.
+fn collect_service_callback_references(program: &Program) -> HashSet<String> {
+    fn block(block: &Block, out: &mut HashSet<String>) {
+        for stmt in &block.statements {
+            statement(stmt, out);
+        }
+    }
+    fn statement(stmt: &Stmt, out: &mut HashSet<String>) {
+        match stmt {
+            Stmt::Let(s) => {
+                if let Some(e) = &s.init {
+                    expression(e, out);
+                }
+            }
+            Stmt::MultiLet(s) => {
+                for e in &s.inits {
+                    expression(e, out);
+                }
+            }
+            Stmt::Assign(s) => expression(&s.value, out),
+            Stmt::MultiAssign(s) => {
+                for e in &s.values {
+                    expression(e, out);
+                }
+            }
+            Stmt::If(s) => {
+                expression(&s.condition, out);
+                block(&s.then_branch, out);
+                if let Some(branch) = &s.else_branch {
+                    match branch {
+                        ElseBranch::Block(b) => block(b, out),
+                        ElseBranch::If(i) => {
+                            expression(&Expr::If(i.clone()), out);
+                        }
+                    }
+                }
+            }
+            Stmt::Loop(s) => {
+                if let Some(e) = &s.condition {
+                    expression(e, out);
+                }
+                if let Some(s) = &s.init {
+                    statement(s, out);
+                }
+                if let Some(s) = &s.step {
+                    statement(s, out);
+                }
+                block(&s.body, out);
+            }
+            Stmt::ForIn(s) => {
+                expression(&s.iterable, out);
+                block(&s.body, out);
+            }
+            Stmt::Return(s) => {
+                if let Some(e) = &s.value {
+                    expression(e, out);
+                }
+            }
+            Stmt::Throw(s) => {
+                if let Some(e) = &s.value {
+                    expression(e, out);
+                }
+            }
+            Stmt::Expr(s) => expression(&s.expr, out),
+            Stmt::Block(b) => block(b, out),
+            Stmt::Concurrent(s) => block(&s.body, out),
+            Stmt::Parallel(s) => block(&s.body, out),
+            Stmt::Unsafe(s) => block(&s.body, out),
+            Stmt::Commit(s) => block(&s.body, out),
+            Stmt::Try(s) => {
+                block(&s.body, out);
+                for c in &s.catches {
+                    block(&c.body, out);
+                }
+                if let Some(b) = &s.finally {
+                    block(b, out);
+                }
+            }
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::LocalClass(_) => {}
+        }
+    }
+    fn expression(expr: &Expr, out: &mut HashSet<String>) {
+        match expr {
+            Expr::Call(c) => {
+                if matches!(&*c.callee, Expr::Field(f) if f.name.name == "spawn_service"
+                    && matches!(&*f.object, Expr::Path(p) if p.name == "application"))
+                    && let Some(Expr::Path(callback)) = c.args.first().map(|a| &a.value)
+                {
+                    out.insert(callback.name.clone());
+                }
+                expression(&c.callee, out);
+                for a in &c.args {
+                    expression(&a.value, out);
+                }
+            }
+            Expr::Unary(e) => expression(&e.operand, out),
+            Expr::Binary(e) => {
+                expression(&e.left, out);
+                expression(&e.right, out);
+            }
+            Expr::Field(e) => expression(&e.object, out),
+            Expr::Index(e) => {
+                expression(&e.receiver, out);
+                expression(&e.index, out);
+            }
+            Expr::Slice(e) => {
+                expression(&e.receiver, out);
+                for x in [&e.start, &e.end, &e.step].into_iter().flatten() {
+                    expression(x, out);
+                }
+            }
+            Expr::Range(e) => {
+                expression(&e.start, out);
+                expression(&e.end, out);
+                if let Some(x) = &e.step {
+                    expression(x, out);
+                }
+            }
+            Expr::Ternary(e) => {
+                expression(&e.condition, out);
+                expression(&e.when_true, out);
+                expression(&e.when_false, out);
+            }
+            Expr::Cast(e) => expression(&e.expr, out),
+            Expr::Transfer(e) => expression(&e.expr, out),
+            Expr::Tuple(e) => {
+                for x in &e.elements {
+                    expression(x, out);
+                }
+            }
+            Expr::Collection(e) => {
+                for x in &e.elements {
+                    match x {
+                        CollectionElement::Scalar(e) => expression(e, out),
+                        CollectionElement::Spread(s) => expression(&s.expr, out),
+                    }
+                }
+            }
+            Expr::Record(e) => {
+                for x in &e.elements {
+                    match x {
+                        RecordLiteralElement::Field(f) => expression(&f.value, out),
+                        RecordLiteralElement::Spread(s) => expression(&s.expr, out),
+                    }
+                }
+            }
+            Expr::If(e) => statement(&Stmt::If((**e).clone()), out),
+            Expr::Lambda(e) => match &*e.body {
+                LambdaBody::Expr(e) => expression(e, out),
+                LambdaBody::Block(b) => block(b, out),
+            },
+            Expr::Match(e) => {
+                expression(&e.scrutinee, out);
+                for arm in &e.arms {
+                    match &arm.body {
+                        ArmBody::Expr(e) => expression(e, out),
+                        ArmBody::Block(b) => block(b, out),
+                    }
+                }
+            }
+            Expr::Spawn(e) => match &e.body {
+                SpawnBody::Expr(e) => expression(e, out),
+                SpawnBody::Block(b) => block(b, out),
+            },
+            Expr::Unsafe(e) => block(&e.body, out),
+            Expr::Commit(e) => block(&e.body, out),
+            Expr::Parallel(e) => block(&e.body, out),
+            Expr::Println(e) => {
+                for x in &e.args {
+                    expression(x, out);
+                }
+            }
+            Expr::Interpolated(e) => {
+                for part in &e.parts {
+                    if let InterpolatedPart::Expr(x) = part {
+                        expression(x, out);
+                    }
+                }
+            }
+            Expr::Increment(e) => match &e.target {
+                AssignTarget::Index(i) => {
+                    expression(&i.receiver, out);
+                    expression(&i.index, out);
+                }
+                AssignTarget::Field(f) => expression(&f.object, out),
+                _ => {}
+            },
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Duration(_)
+            | Expr::Regex(_)
+            | Expr::Char(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Null(_)
+            | Expr::Path(_)
+            | Expr::This(_)
+            | Expr::Super(_)
+            | Expr::Variant(_) => {}
+        }
+    }
+    let mut out = HashSet::new();
+    for function in &program.functions {
+        block(&function.body, &mut out);
+    }
+    out
+}
+
 fn collect_path_names(expr: &Expr, out: &mut Vec<(String, Span)>) {
     match expr {
         Expr::Path(ident) => out.push((ident.name.clone(), ident.span)),
@@ -21352,4 +24668,310 @@ fn has_natural_order(ty: Type) -> bool {
         ty.base,
         Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String | Base::Char | Base::Boolean
     )
+}
+
+#[cfg(test)]
+mod borrowed_view_checker_tests {
+    use super::*;
+    use zirk_diagnostics::{RenderStyle, SourceFile};
+
+    #[test]
+    fn standard_io_source_detection_accepts_windows_paths() {
+        assert!(is_standard_io_source(
+            r"D:\a\zirk-lang\zirk-lang\stdlib\std\io\stderr.zrk"
+        ));
+        assert!(is_standard_io_package_source(
+            r"D:\a\zirk-lang\zirk-lang\stdlib\std\io\package.zrk"
+        ));
+        assert!(is_standard_io_source("std.io/stderr.zrk"));
+    }
+
+    fn check_composite(
+        expression: &str,
+        base: impl FnOnce(&mut Checker<'_>) -> Base,
+    ) -> (Type, String) {
+        let source_text = format!("fn main(): Void {{ {expression}; }}");
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("borrowed-view.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = zirk_lexer::tokenize(source, &mut sink);
+        let program = zirk_parser::parse(source, &tokens, &mut sink);
+        let Stmt::Expr(stmt) = &program.functions[0].body.statements[0] else {
+            panic!("test expression should parse as an expression statement")
+        };
+        let expression = stmt.expr.clone();
+
+        let mut checker = Checker::new(&sources, &mut sink);
+        checker.scopes.push();
+        let scope = checker.scopes.current_scope_id().unwrap();
+        let base = base(&mut checker);
+        checker.scopes.declare(Binding {
+            name: "guarded".into(),
+            ty: Type::of(base).as_borrowed_in(scope),
+            mutability: Mutability::Immutable,
+            span: expression.span(),
+            initialized: true,
+            moved: false,
+            pinned: false,
+        });
+
+        let checked = checker.check_expr(&expression);
+        drop(checker);
+        let diagnostics = sink.render(RenderStyle::Human);
+        (checked, diagnostics)
+    }
+
+    fn store_projection(
+        initializer: &str,
+        base: impl FnOnce(&mut Checker<'_>) -> Base,
+    ) -> (Type, String) {
+        let source_text = format!("fn main(): Void {{ mut projected = {initializer}; }}");
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("borrowed-store.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = zirk_lexer::tokenize(source, &mut sink);
+        let program = zirk_parser::parse(source, &tokens, &mut sink);
+        let Stmt::Let(stmt) = &program.functions[0].body.statements[0] else {
+            panic!("test declaration should parse as a let statement")
+        };
+
+        let mut checker = Checker::new(&sources, &mut sink);
+        checker.scopes.push();
+        let scope = checker.scopes.current_scope_id().unwrap();
+        let base = base(&mut checker);
+        checker.scopes.declare(Binding {
+            name: "guarded".into(),
+            ty: Type::of(base).as_borrowed_in(scope),
+            mutability: Mutability::Immutable,
+            span: stmt.span,
+            initialized: true,
+            moved: false,
+            pinned: false,
+        });
+        checker.check_let(stmt);
+        let stored = checker.scopes.lookup("projected").unwrap().ty;
+        drop(checker);
+        (stored, sink.render(RenderStyle::Human))
+    }
+
+    fn minimal_class(name: &str, fields: Vec<FieldInfo>) -> ClassType {
+        ClassType {
+            name: name.into(),
+            kind: ClassKind::Class,
+            base: None,
+            fields,
+            constructors: Vec::new(),
+            methods: Vec::new(),
+            contracts: Vec::new(),
+            contract_instances: Vec::new(),
+            abstract_bases: Vec::new(),
+            type_params: Vec::new(),
+            shared: false,
+            is_final: false,
+            enclosing: None,
+            nested: Vec::new(),
+            span: Span::new(0, 1),
+        }
+    }
+
+    #[test]
+    fn class_field_and_nested_member_projection_preserve_the_borrowed_scope() {
+        let (projected, diagnostics) = check_composite("guarded.child.name", |checker| {
+            checker.classes.push(minimal_class(
+                "Outer",
+                vec![FieldInfo {
+                    name: "child".into(),
+                    ty: Type::of(Base::Class(1)),
+                    visibility: Visibility::Public,
+                    mutability: Mutability::Immutable,
+                    span: Span::new(0, 1),
+                    owner: 0,
+                    default: None,
+                    is_static: false,
+                    promoted: false,
+                }],
+            ));
+            checker.classes.push(minimal_class(
+                "Child",
+                vec![FieldInfo {
+                    name: "name".into(),
+                    ty: Type::STRING,
+                    visibility: Visibility::Public,
+                    mutability: Mutability::Immutable,
+                    span: Span::new(0, 1),
+                    owner: 1,
+                    default: None,
+                    is_static: false,
+                    promoted: false,
+                }],
+            ));
+            Base::Class(0)
+        });
+        assert!(projected.borrowed_scope().is_some());
+        assert!(
+            !diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+
+        let (stored, diagnostics) = store_projection("guarded.child", |checker| {
+            checker.classes.push(minimal_class(
+                "Outer",
+                vec![FieldInfo {
+                    name: "child".into(),
+                    ty: Type::of(Base::Class(1)),
+                    visibility: Visibility::Public,
+                    mutability: Mutability::Immutable,
+                    span: Span::new(0, 1),
+                    owner: 0,
+                    default: None,
+                    is_static: false,
+                    promoted: false,
+                }],
+            ));
+            checker.classes.push(minimal_class("Child", Vec::new()));
+            Base::Class(0)
+        });
+        assert!(stored.borrowed_scope().is_some());
+        assert!(!diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
+    }
+
+    #[test]
+    fn tuple_and_collection_projection_preserve_the_borrowed_scope() {
+        let (tuple_element, diagnostics) = check_composite("guarded[0]", |checker| {
+            checker.tuple_types.push(TupleType {
+                elements: vec![Type::of(Base::Class(0))],
+            });
+            Base::Tuple(0)
+        });
+        assert!(tuple_element.borrowed_scope().is_some());
+        assert!(
+            !diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+
+        let (stored, diagnostics) = store_projection("guarded[0]", |checker| {
+            checker.list_types.push(Type::of(Base::Class(0)));
+            Base::List(0)
+        });
+        assert!(stored.borrowed_scope().is_some());
+        assert!(!diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
+
+        let (list_element, diagnostics) = check_composite("guarded[0]", |checker| {
+            checker.list_types.push(Type::of(Base::Class(0)));
+            Base::List(0)
+        });
+        assert!(list_element.borrowed_scope().is_some());
+        assert!(
+            !diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+
+        let (array_element, diagnostics) = check_composite("guarded[0]", |checker| {
+            checker.array_types.push(Type::of(Base::Class(0)));
+            Base::Array(0)
+        });
+        assert!(array_element.borrowed_scope().is_some());
+        assert!(
+            !diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+    }
+
+    #[test]
+    fn scalar_operator_results_end_borrows_but_nested_collection_storage_fails_closed() {
+        let (sum, diagnostics) =
+            check_composite("guarded + 1", |_| Base::Int(crate::types::IntWidth::I32));
+        assert_eq!(sum.base, Base::Int(crate::types::IntWidth::I32));
+        assert!(sum.borrowed_scope().is_none());
+        assert!(!diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
+
+        let (collection, diagnostics) = check_composite("[guarded]", |_| Base::Class(0));
+        assert!(collection.is_unknown());
+        assert!(diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
+    }
+
+    #[test]
+    fn borrowed_view_cannot_be_assigned_to_an_outer_binding() {
+        let source_text = "fn main(): Void { outer = guarded; }";
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("borrowed-assign.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = zirk_lexer::tokenize(source, &mut sink);
+        let program = zirk_parser::parse(source, &tokens, &mut sink);
+        let Stmt::Assign(stmt) = &program.functions[0].body.statements[0] else {
+            panic!("test statement should parse as an assignment")
+        };
+
+        let mut checker = Checker::new(&sources, &mut sink);
+        checker.scopes.push();
+        checker.scopes.declare(Binding {
+            name: "outer".into(),
+            ty: Type::STRING,
+            mutability: Mutability::Mutable,
+            span: stmt.span,
+            initialized: true,
+            moved: false,
+            pinned: false,
+        });
+        checker.scopes.push();
+        let inner = checker.scopes.current_scope_id().unwrap();
+        checker.scopes.declare(Binding {
+            name: "guarded".into(),
+            ty: Type::STRING.as_borrowed_in(inner),
+            mutability: Mutability::Immutable,
+            span: stmt.span,
+            initialized: true,
+            moved: false,
+            pinned: false,
+        });
+        checker.check_assign(stmt);
+        drop(checker);
+        let diagnostics = sink.render(RenderStyle::Human);
+        assert!(
+            diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+    }
+
+    #[test]
+    fn borrowed_view_cannot_be_returned_or_captured_by_a_closure() {
+        let source_text = "fn main(): Void { return guarded; }";
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("borrowed-return.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = zirk_lexer::tokenize(source, &mut sink);
+        let program = zirk_parser::parse(source, &tokens, &mut sink);
+        let Stmt::Return(stmt) = &program.functions[0].body.statements[0] else {
+            panic!("test statement should parse as a return")
+        };
+        let mut checker = Checker::new(&sources, &mut sink);
+        checker.scopes.push();
+        let scope = checker.scopes.current_scope_id().unwrap();
+        checker.scopes.declare(Binding {
+            name: "guarded".into(),
+            ty: Type::STRING.as_borrowed_in(scope),
+            mutability: Mutability::Immutable,
+            span: stmt.span,
+            initialized: true,
+            moved: false,
+            pinned: false,
+        });
+        checker.check_return(stmt);
+        drop(checker);
+        let diagnostics = sink.render(RenderStyle::Human);
+        assert!(
+            diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+
+        let (_, diagnostics) = check_composite("(): Void => { _ = guarded; }", |_| Base::String);
+        assert!(
+            diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()),
+            "{diagnostics}"
+        );
+    }
 }

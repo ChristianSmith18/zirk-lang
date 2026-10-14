@@ -1,0 +1,3 @@
+fn main(): Void {
+    App.on_background_error = (error: Throwable): Int32 => 1;
+}

@@ -1,0 +1,5 @@
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1];
+    mut rows: List<Int32> = [7];
+    Concurrent.each(values, (item: Int32): Int32 => rows[0] + item);
+}

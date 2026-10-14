@@ -1,0 +1,9 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut winner: Int32 = Concurrent.of(
+        (): Int32 => 1,
+        (): Int32 => 2,
+    ).first();
+    stdout.println(winner);
+}

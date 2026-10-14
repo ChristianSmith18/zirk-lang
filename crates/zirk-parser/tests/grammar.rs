@@ -1296,6 +1296,15 @@ fn valid_prefix_cast_chains_a_field_access_after_it() {
 }
 
 #[test]
+fn reserved_with_keyword_is_allowed_after_member_access_operator() {
+    let e = expression("mutex.with");
+    let Expr::Field(field) = e else {
+        panic!("expected a member access, got {e:?}");
+    };
+    assert_eq!(field.name.name, "with");
+}
+
+#[test]
 fn valid_postfix_cast_binds_tighter_than_a_following_call() {
     let e = expression("value as String");
     assert_eq!(shape(&e), "(value as String)");

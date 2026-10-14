@@ -1,0 +1,4 @@
+fn main(): Void {
+    inmut application: Int32 = 1;
+    application.spawn_service((context: ServiceContext): Void => { });
+}

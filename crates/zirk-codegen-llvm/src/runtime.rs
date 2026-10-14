@@ -14,38 +14,107 @@ use inkwell::values::FunctionValue;
 
 /// Names of the runtime symbols, in one place so codegen and tests agree.
 pub mod symbols {
+    /// Allocates an inline GC-traced mutex payload: `(ptr, usize, usize, ptr,
+    /// usize, ptr) -> ptr`, where the final pointer receives a status code.
+    pub const GC_MUTEX_ALLOC: &str = "zirk_rt_gc_mutex_alloc";
+    /// Acquires a mutex and writes the borrowed payload pointer/status out.
+    pub const GC_MUTEX_ACQUIRE: &str = "zirk_rt_gc_mutex_acquire";
+    /// Releases the current participant's acquisition and writes status out.
+    pub const GC_MUTEX_RELEASE: &str = "zirk_rt_gc_mutex_release";
+    /// Runs a synchronous borrowed-payload callback and releases via RAII.
+    pub const GC_MUTEX_WITH: &str = "zirk_rt_gc_mutex_with";
+    pub const ATOMIC_MANAGED_NEW: &str = "zirk_rt_atomic_managed_new";
+    pub const ATOMIC_MANAGED_LOAD: &str = "zirk_rt_atomic_managed_load";
+    pub const ATOMIC_MANAGED_LOAD_ORDERED: &str = "zirk_rt_atomic_managed_load_ordered";
+    pub const ATOMIC_MANAGED_STORE: &str = "zirk_rt_atomic_managed_store";
+    pub const ATOMIC_MANAGED_STORE_ORDERED: &str = "zirk_rt_atomic_managed_store_ordered";
+    pub const ATOMIC_MANAGED_EXCHANGE: &str = "zirk_rt_atomic_managed_exchange";
+    pub const ATOMIC_MANAGED_EXCHANGE_ORDERED: &str = "zirk_rt_atomic_managed_exchange_ordered";
+    pub const ATOMIC_MANAGED_COMPARE_EXCHANGE: &str = "zirk_rt_atomic_managed_compare_exchange";
+    pub const ATOMIC_MANAGED_FETCH_ADD: &str = "zirk_rt_atomic_managed_fetch_add";
+    pub const ATOMIC_MANAGED_FETCH_ADD_ORDERED: &str = "zirk_rt_atomic_managed_fetch_add_ordered";
+    pub const ATOMIC_MANAGED_FETCH_SUB: &str = "zirk_rt_atomic_managed_fetch_sub";
+    pub const ATOMIC_MANAGED_FETCH_SUB_ORDERED: &str = "zirk_rt_atomic_managed_fetch_sub_ordered";
+    /// Creates an opaque, runtime-aligned scalar AtomicCell handle.
+    pub const ATOMIC_NEW: &str = "zirk_rt_atomic_new";
+    /// Frees an AtomicCell handle after all concurrent users have stopped.
+    pub const ATOMIC_FREE: &str = "zirk_rt_atomic_free";
+    /// Sequentially consistent AtomicCell load.
+    pub const ATOMIC_LOAD: &str = "zirk_rt_atomic_load";
+    /// Sequentially consistent AtomicCell store.
+    pub const ATOMIC_STORE: &str = "zirk_rt_atomic_store";
+    /// Sequentially consistent AtomicCell exchange.
+    pub const ATOMIC_EXCHANGE: &str = "zirk_rt_atomic_exchange";
+    /// Atomic compare-exchange; runtime validates both memory orderings.
+    pub const ATOMIC_COMPARE_EXCHANGE: &str = "zirk_rt_atomic_compare_exchange";
+    /// Sequentially consistent wrapping integer addition.
+    pub const ATOMIC_FETCH_ADD: &str = "zirk_rt_atomic_fetch_add";
+    /// Sequentially consistent wrapping integer subtraction.
+    pub const ATOMIC_FETCH_SUB: &str = "zirk_rt_atomic_fetch_sub";
+
     /// Initializes the runtime before `main`.
     pub const INIT: &str = "zirk_rt_init";
     /// Runs the Zirk entrypoint as the cooperative executor's root task.
     pub const RUN_MAIN: &str = "zirk_rt_run_main";
+    /// CLI host entrypoint; exits with status 124 at background-drain expiry.
+    pub const RUN_MAIN_CLI: &str = "zirk_rt_run_main_cli";
+    pub const APP_SET_SHUTDOWN_GRACE: &str = "zirk_rt_app_set_shutdown_grace";
+    pub const APP_SET_BACKGROUND_ERROR: &str = "zirk_rt_app_set_background_error";
+    pub const BACKGROUND_HANDLER_FAILED: &str = "zirk_rt_background_handler_failed";
+    pub const SERVICE_REGISTER: &str = "zirk_rt_service_register";
+    pub const SERVICE_READY: &str = "zirk_rt_service_ready";
+    pub const SERVICE_FAILED_CURRENT: &str = "zirk_rt_service_failed_current";
     /// Starts a child scheduler task from a body thunk and boxed-callable
     /// capture block. This provisional symbol is reused and renamed by
     /// `concurrent-blocks-and-timers`.
-    pub const SPAWN: &str = "zirk_rt_spawn";
+    pub const SPAWN: &str = "zirk_rt_spawn_checked";
+    /// Starts a detached task owned by the bounded background supervisor.
+    pub const BACKGROUND_SPAWN: &str = "zirk_rt_background_spawn";
     /// Suspends the current scheduler task until a child result is available.
     /// This provisional symbol is reused and renamed by
     /// `concurrent-blocks-and-timers`.
     pub const JOB_WAIT: &str = "zirk_rt_job_wait";
+    /// Runs one verified zero-argument Zirk callback on a registered managed
+    /// native worker and joins it before returning: `i32 (ptr, ptr, ptr, ptr, ptr)`.
+    pub const THREAD_RUN: &str = "zirk_rt_thread_run";
+    /// Waits for the earliest serialized completion among 2–8 job IDs and
+    /// returns its input index as `u64`; `u64::MAX` denotes caller cancellation.
+    pub const JOB_WAIT_ANY: &str = "zirk_rt_job_wait_any";
+    pub const JOB_WAIT_ANY_WITH_TIMER: &str = "zirk_rt_job_wait_any_with_timer";
+    /// Waits for a terminal job outcome and transfers managed payload pointers
+    /// into caller-rooted slots: `i32 (i64, ptr, ptr)`.
+    pub const JOB_OUTCOME_WAIT_TAKE: &str = "zirk_rt_job_outcome_wait_take";
+    pub const JOB_OUTCOME_TAKE: &str = "zirk_rt_job_outcome_take";
     /// Reports whether a job has reached a terminal state.
     pub const JOB_DONE: &str = "zirk_rt_job_done";
     /// `zirk_rt_parallel_for(kind, a, b, count, thunk, capture)` — the
     /// `parallel { for x in coll { ... } }` work-splitting dispatch
     /// (`parallel-cpu-regions` task 6.1).
     pub const PARALLEL_FOR: &str = "zirk_rt_parallel_for";
+    /// Polls the runtime safepoint from generated code (`void ()`).
+    pub const SAFEPOINT_POLL: &str = "zirk_rt_safepoint_poll";
     /// Opens a structured-concurrency scope.
     pub const SCOPE_ENTER: &str = "zirk_rt_scope_enter";
+    pub const SCOPE_ENTER_COLLECT_ALL: &str = "zirk_rt_scope_enter_collect_all";
     /// Advances the close protocol for a structured-concurrency scope.
     pub const SCOPE_EXIT: &str = "zirk_rt_scope_exit";
+    pub const SCOPE_EXIT_COLLECT_ALL: &str = "zirk_rt_scope_exit_collect_all";
+    /// Waits for and takes one scoped branch outcome into caller-rooted slots.
+    pub const SCOPE_OUTCOME_WAIT_TAKE: &str = "zirk_rt_scope_outcome_wait_take";
+    /// Requests cancellation of all active branches in a scope.
+    pub const SCOPE_CANCEL: &str = "zirk_rt_scope_cancel";
     /// Registers a joinable branch with a scope.
     pub const BRANCH_REGISTER: &str = "zirk_rt_branch_register";
     /// Requests cooperative cancellation of a job.
     pub const CANCEL: &str = "zirk_rt_cancel";
+    /// Cancels a `Concurrent.first()` loser and promotes cleanup failures.
+    pub const CANCEL_WITH_CLEANUP_FAILURE: &str = "zirk_rt_cancel_with_cleanup_failure";
     /// Creates an ambient one-shot timer job.
-    pub const TIMER_AFTER: &str = "zirk_rt_timer_after";
+    pub const TIMER_AFTER: &str = "zirk_rt_timer_after_checked";
     /// Creates an ambient fixed-delay timer job.
-    pub const TIMER_EVERY: &str = "zirk_rt_timer_every";
+    pub const TIMER_EVERY: &str = "zirk_rt_timer_every_checked";
     /// Suspends the current job until a monotonic timer deadline.
-    pub const SLEEP: &str = "zirk_rt_sleep";
+    pub const SLEEP: &str = "zirk_rt_sleep_checked";
     /// Creates a typed channel. Elements cross this ABI through indirect slots.
     pub const CHAN_NEW: &str = "zirk_rt_chan_new";
     /// Attempts to send an element through a channel without suspension.
@@ -379,16 +448,51 @@ pub mod symbols {
 /// The runtime functions available to generated code.
 #[allow(dead_code)]
 pub struct Runtime<'ctx> {
+    pub gc_mutex_alloc: FunctionValue<'ctx>,
+    pub gc_mutex_acquire: FunctionValue<'ctx>,
+    pub gc_mutex_release: FunctionValue<'ctx>,
+    pub gc_mutex_with: FunctionValue<'ctx>,
+    pub atomic_managed_new: FunctionValue<'ctx>,
+    pub atomic_managed_load: FunctionValue<'ctx>,
+    pub atomic_managed_load_ordered: FunctionValue<'ctx>,
+    pub atomic_managed_store: FunctionValue<'ctx>,
+    pub atomic_managed_store_ordered: FunctionValue<'ctx>,
+    pub atomic_managed_exchange: FunctionValue<'ctx>,
+    pub atomic_managed_exchange_ordered: FunctionValue<'ctx>,
+    pub atomic_managed_compare_exchange: FunctionValue<'ctx>,
+    pub atomic_managed_fetch_add: FunctionValue<'ctx>,
+    pub atomic_managed_fetch_add_ordered: FunctionValue<'ctx>,
+    pub atomic_managed_fetch_sub: FunctionValue<'ctx>,
+    pub atomic_managed_fetch_sub_ordered: FunctionValue<'ctx>,
     pub init: FunctionValue<'ctx>,
     pub run_main: FunctionValue<'ctx>,
+    pub run_main_cli: FunctionValue<'ctx>,
+    pub app_set_shutdown_grace: FunctionValue<'ctx>,
+    pub app_set_background_error: FunctionValue<'ctx>,
+    pub background_handler_failed: FunctionValue<'ctx>,
+    pub service_register: FunctionValue<'ctx>,
+    pub service_ready: FunctionValue<'ctx>,
+    pub service_failed_current: FunctionValue<'ctx>,
     pub spawn: FunctionValue<'ctx>,
+    pub background_spawn: FunctionValue<'ctx>,
     pub job_wait: FunctionValue<'ctx>,
+    pub thread_run: FunctionValue<'ctx>,
+    pub job_wait_any: FunctionValue<'ctx>,
+    pub job_wait_any_with_timer: FunctionValue<'ctx>,
+    pub job_outcome_wait_take: FunctionValue<'ctx>,
+    pub job_outcome_take: FunctionValue<'ctx>,
     pub job_done: FunctionValue<'ctx>,
     pub parallel_for: FunctionValue<'ctx>,
+    pub safepoint_poll: FunctionValue<'ctx>,
     pub scope_enter: FunctionValue<'ctx>,
+    pub scope_enter_collect_all: FunctionValue<'ctx>,
     pub scope_exit: FunctionValue<'ctx>,
+    pub scope_exit_collect_all: FunctionValue<'ctx>,
+    pub scope_outcome_wait_take: FunctionValue<'ctx>,
+    pub scope_cancel: FunctionValue<'ctx>,
     pub branch_register: FunctionValue<'ctx>,
     pub cancel: FunctionValue<'ctx>,
+    pub cancel_with_cleanup_failure: FunctionValue<'ctx>,
     pub timer_after: FunctionValue<'ctx>,
     pub timer_every: FunctionValue<'ctx>,
     pub sleep: FunctionValue<'ctx>,
@@ -572,9 +676,116 @@ pub struct Runtime<'ctx> {
 pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'ctx> {
     let void = context.void_type();
     let i64 = context.i64_type();
+    let i32 = context.i32_type();
     let ptr = context.ptr_type(AddressSpace::default());
 
     let external = Some(Linkage::External);
+
+    // Mutex payload sizes/alignments/reference counts use native `usize`.
+    // Source Mutex emission is still gated until borrowed projections and
+    // all-exit cleanup are executable.
+    let gc_mutex_alloc = module.add_function(
+        symbols::GC_MUTEX_ALLOC,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let gc_mutex_acquire = module.add_function(
+        symbols::GC_MUTEX_ACQUIRE,
+        i32.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let gc_mutex_release = module.add_function(
+        symbols::GC_MUTEX_RELEASE,
+        i32.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let gc_mutex_with = module.add_function(
+        symbols::GC_MUTEX_WITH,
+        i32.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+
+    let atomic_managed_new = module.add_function(
+        symbols::ATOMIC_MANAGED_NEW,
+        i32.fn_type(&[i32.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_load = module.add_function(
+        symbols::ATOMIC_MANAGED_LOAD,
+        i32.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_load_ordered = module.add_function(
+        symbols::ATOMIC_MANAGED_LOAD_ORDERED,
+        i32.fn_type(&[ptr.into(), i32.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_store = module.add_function(
+        symbols::ATOMIC_MANAGED_STORE,
+        i32.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let atomic_managed_store_ordered = module.add_function(
+        symbols::ATOMIC_MANAGED_STORE_ORDERED,
+        i32.fn_type(&[ptr.into(), i64.into(), i32.into()], false),
+        external,
+    );
+    let atomic_managed_exchange = module.add_function(
+        symbols::ATOMIC_MANAGED_EXCHANGE,
+        i32.fn_type(&[ptr.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_exchange_ordered = module.add_function(
+        symbols::ATOMIC_MANAGED_EXCHANGE_ORDERED,
+        i32.fn_type(&[ptr.into(), i64.into(), i32.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_compare_exchange = module.add_function(
+        symbols::ATOMIC_MANAGED_COMPARE_EXCHANGE,
+        i32.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i32.into(),
+                i32.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let atomic_managed_fetch_add = module.add_function(
+        symbols::ATOMIC_MANAGED_FETCH_ADD,
+        i32.fn_type(&[ptr.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_fetch_add_ordered = module.add_function(
+        symbols::ATOMIC_MANAGED_FETCH_ADD_ORDERED,
+        i32.fn_type(&[ptr.into(), i64.into(), i32.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_fetch_sub = module.add_function(
+        symbols::ATOMIC_MANAGED_FETCH_SUB,
+        i32.fn_type(&[ptr.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let atomic_managed_fetch_sub_ordered = module.add_function(
+        symbols::ATOMIC_MANAGED_FETCH_SUB_ORDERED,
+        i32.fn_type(&[ptr.into(), i64.into(), i32.into(), ptr.into()], false),
+        external,
+    );
 
     let init = module.add_function(symbols::INIT, void.fn_type(&[], false), external);
     let run_main = module.add_function(
@@ -582,14 +793,89 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[ptr.into()], false),
         external,
     );
+    let run_main_cli = module.add_function(
+        symbols::RUN_MAIN_CLI,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let app_set_shutdown_grace = module.add_function(
+        symbols::APP_SET_SHUTDOWN_GRACE,
+        i32.fn_type(&[i64.into()], false),
+        external,
+    );
+    let app_set_background_error = module.add_function(
+        symbols::APP_SET_BACKGROUND_ERROR,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let background_handler_failed = module.add_function(
+        symbols::BACKGROUND_HANDLER_FAILED,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let service_register = module.add_function(
+        symbols::SERVICE_REGISTER,
+        i64.fn_type(
+            &[ptr.into(), ptr.into(), ptr.into(), i32.into(), ptr.into()],
+            false,
+        ),
+        external,
+    );
+    let service_ready = module.add_function(
+        symbols::SERVICE_READY,
+        i32.fn_type(&[i64.into()], false),
+        external,
+    );
+    let service_failed_current = module.add_function(
+        symbols::SERVICE_FAILED_CURRENT,
+        i32.fn_type(&[], false),
+        external,
+    );
     let spawn = module.add_function(
         symbols::SPAWN,
-        i64.fn_type(&[ptr.into(), ptr.into()], false),
+        i64.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let background_spawn = module.add_function(
+        symbols::BACKGROUND_SPAWN,
+        i32.fn_type(&[ptr.into(), ptr.into()], false),
         external,
     );
     let job_wait = module.add_function(
         symbols::JOB_WAIT,
         i64.fn_type(&[i64.into()], false),
+        external,
+    );
+    let thread_run = module.add_function(
+        symbols::THREAD_RUN,
+        context.i32_type().fn_type(
+            &[ptr.into(), ptr.into(), ptr.into(), ptr.into(), ptr.into()],
+            false,
+        ),
+        external,
+    );
+    let job_wait_any = module.add_function(
+        symbols::JOB_WAIT_ANY,
+        i64.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let job_wait_any_with_timer = module.add_function(
+        symbols::JOB_WAIT_ANY_WITH_TIMER,
+        i64.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let job_outcome_wait_take = module.add_function(
+        symbols::JOB_OUTCOME_WAIT_TAKE,
+        context
+            .i32_type()
+            .fn_type(&[i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let job_outcome_take = module.add_function(
+        symbols::JOB_OUTCOME_TAKE,
+        context
+            .i32_type()
+            .fn_type(&[i64.into(), ptr.into(), ptr.into()], false),
         external,
     );
     let job_done = module.add_function(
@@ -612,10 +898,34 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ),
         external,
     );
+    let safepoint_poll =
+        module.add_function(symbols::SAFEPOINT_POLL, void.fn_type(&[], false), external);
     let scope_enter = module.add_function(symbols::SCOPE_ENTER, i64.fn_type(&[], false), external);
+    let scope_enter_collect_all = module.add_function(
+        symbols::SCOPE_ENTER_COLLECT_ALL,
+        i64.fn_type(&[], false),
+        external,
+    );
     let scope_exit = module.add_function(
         symbols::SCOPE_EXIT,
         context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let scope_exit_collect_all = module.add_function(
+        symbols::SCOPE_EXIT_COLLECT_ALL,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let scope_outcome_wait_take = module.add_function(
+        symbols::SCOPE_OUTCOME_WAIT_TAKE,
+        context
+            .i32_type()
+            .fn_type(&[i64.into(), ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let scope_cancel = module.add_function(
+        symbols::SCOPE_CANCEL,
+        void.fn_type(&[i64.into()], false),
         external,
     );
     let branch_register = module.add_function(
@@ -628,17 +938,28 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[i64.into()], false),
         external,
     );
+    let cancel_with_cleanup_failure = module.add_function(
+        symbols::CANCEL_WITH_CLEANUP_FAILURE,
+        void.fn_type(&[i64.into()], false),
+        external,
+    );
     let timer_after = module.add_function(
         symbols::TIMER_AFTER,
-        i64.fn_type(&[i64.into(), i64.into(), ptr.into(), ptr.into()], false),
+        i64.fn_type(
+            &[i64.into(), i64.into(), ptr.into(), ptr.into(), ptr.into()],
+            false,
+        ),
         external,
     );
     let timer_every = module.add_function(
         symbols::TIMER_EVERY,
-        i64.fn_type(&[i64.into(), i64.into(), ptr.into(), ptr.into()], false),
+        i64.fn_type(
+            &[i64.into(), i64.into(), ptr.into(), ptr.into(), ptr.into()],
+            false,
+        ),
         external,
     );
-    let sleep = module.add_function(symbols::SLEEP, void.fn_type(&[i64.into()], false), external);
+    let sleep = module.add_function(symbols::SLEEP, i32.fn_type(&[i64.into()], false), external);
     // Channels carry values through caller-owned slots. The metadata supplied
     // to construction makes the runtime independent of every concrete `T`.
     let chan_new = module.add_function(
@@ -1501,16 +1822,51 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     }
 
     Runtime {
+        gc_mutex_alloc,
+        gc_mutex_acquire,
+        gc_mutex_release,
+        gc_mutex_with,
+        atomic_managed_new,
+        atomic_managed_load,
+        atomic_managed_load_ordered,
+        atomic_managed_store,
+        atomic_managed_store_ordered,
+        atomic_managed_exchange,
+        atomic_managed_exchange_ordered,
+        atomic_managed_compare_exchange,
+        atomic_managed_fetch_add,
+        atomic_managed_fetch_add_ordered,
+        atomic_managed_fetch_sub,
+        atomic_managed_fetch_sub_ordered,
         init,
         run_main,
+        run_main_cli,
+        app_set_shutdown_grace,
+        app_set_background_error,
+        background_handler_failed,
+        service_register,
+        service_ready,
+        service_failed_current,
         spawn,
+        background_spawn,
         job_wait,
+        thread_run,
+        job_wait_any,
+        job_wait_any_with_timer,
+        job_outcome_wait_take,
+        job_outcome_take,
         job_done,
         parallel_for,
+        safepoint_poll,
         scope_enter,
+        scope_enter_collect_all,
         scope_exit,
+        scope_exit_collect_all,
+        scope_outcome_wait_take,
+        scope_cancel,
         branch_register,
         cancel,
+        cancel_with_cleanup_failure,
         timer_after,
         timer_every,
         sleep,

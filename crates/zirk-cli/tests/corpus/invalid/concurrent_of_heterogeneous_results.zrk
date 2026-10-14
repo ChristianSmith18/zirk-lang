@@ -1,0 +1,6 @@
+fn main(): Void {
+    Concurrent.of(
+        (): Int32 => 1,
+        (): String => "two"
+    );
+}

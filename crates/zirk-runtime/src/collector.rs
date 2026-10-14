@@ -13,12 +13,11 @@
 //! heap. Collection is therefore *thread-aware* when — and only when — such a
 //! region is active (`mod heap` picks the running executor's published heap;
 //! `worker_pool_is_multithreaded` gates the path): a threshold crossing raises
-//! [`stw::REQUESTED`] instead of collecting inline, every worker parks at its
-//! next [`safepoint_poll`], and the executor thread coordinates one
-//! stop-the-world collection over every parked worker's shadow-stack chain plus
-//! its own task chains. With no `parallel` region, and for any thread outside
-//! the executor's world, collection stays exactly the inline single-threaded
-//! mark-sweep it has always been.
+//! [`stw::REQUESTED`] instead of collecting inline. Every registered mutator
+//! parks at its next [`safepoint_poll`] or enters the quiescent native-call
+//! state, and the executor coordinates collection over every registered
+//! shadow-frame chain plus its own task chains. Threads outside the executor's
+//! published heap keep using their thread-local bootstrap heaps.
 //!
 //! # Object header
 //!
@@ -27,16 +26,16 @@
 //! the dispatch descriptor):
 //!
 //! ```text
-//!    [ descriptor | next (mark bit in the low bit) | size | field₁ | … ]
+//!    [ descriptor | next | size (mark bit in the high bit) | field₁ | … ]
 //! ```
 //!
 //! `descriptor` is written by codegen (`FunctionEmitter`'s `Alloc` case),
 //! exactly as before this change. `next` and `size` are this module's own —
 //! nothing outside the collector reads or writes them. `next` threads every
-//! live allocation onto one intrusive singly-linked list, walked by sweep;
-//! its low bit doubles as the mark bit, which costs nothing extra since
-//! every allocation this collector hands out is aligned to at least
-//! [`GC_ALIGN`], so that bit is otherwise always zero.
+//! live allocation onto one intrusive singly-linked list, walked by sweep.
+//! The mark bit lives in the otherwise-unused high bit of the size word:
+//! valid `Layout`s are bounded by `isize::MAX`. Keeping `next` as a pointer
+//! (rather than packing its address into an integer) preserves provenance.
 //!
 //! The descriptor itself carries one more table than it used to
 //! (`crates/zirk-codegen-llvm/src/emit.rs`'s own descriptor-building loop,
@@ -53,6 +52,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
+
+#[path = "gc_mutex.rs"]
+pub(crate) mod gc_mutex;
 
 /// Allocation membership is indexed only by allocator-issued addresses. A
 /// compact integer mixer avoids paying the default randomized byte hasher on
@@ -108,10 +110,10 @@ const SIZE_WORD: usize = 2;
 /// regardless: [`register`] unconditionally writes `next`/`size` into words
 /// 1 and 2, so serving anything smaller would write past the allocation.
 pub(crate) const HEADER_BYTES: usize = 3 * std::mem::size_of::<usize>();
-/// The mark bit hidden in `next`'s low bit — free because every allocation
-/// is [`GC_ALIGN`]-aligned, so a real `next` pointer's low bit is always
-/// zero on its own.
-const MARK_BIT: usize = 1;
+/// The mark bit hidden in the size word's high bit. `Layout` rejects sizes
+/// larger than `isize::MAX`, so this bit is clear for every valid allocation.
+const MARK_BIT: usize = 1usize << (usize::BITS - 1);
+const SIZE_MASK: usize = !MARK_BIT;
 
 /// Raw descriptors used by dynamic array/list backing buffers. They are
 /// metadata rather than collector objects, so sweep must release them with
@@ -254,6 +256,10 @@ thread_local! {
     /// [`crate::clone::mark_clone_roots`].
     static TASK_ROOT_WALKER: Cell<Option<TaskRootWalker>> =
         const { Cell::new(None) };
+
+    /// Identity of a non-coordinator thread in the published heap's mutator
+    /// registry. The coordinator is identified by TASK_ROOT_WALKER instead.
+    static MUTATOR_ID: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 /// The non-moving heap (`ADR-003`).
@@ -342,6 +348,11 @@ mod heap {
 
     pub(super) fn unpublish() {
         PUBLISHED_HEAP.store(std::ptr::null_mut(), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_published_for_tests() -> bool {
+        !PUBLISHED_HEAP.load(Ordering::Acquire).is_null()
     }
 
     /// Marks the calling thread as part of the executor's world for as long as
@@ -465,17 +476,22 @@ unsafe fn header_word(object: *mut c_void, word: usize) -> *mut usize {
 }
 
 #[inline]
-unsafe fn get_next_raw(object: *mut c_void) -> usize {
-    unsafe { *header_word(object, NEXT_WORD) }
+unsafe fn get_next(object: *mut c_void) -> *mut c_void {
+    unsafe { *((object as *mut *mut c_void).add(NEXT_WORD)) }
 }
 
 #[inline]
-unsafe fn set_next_raw(object: *mut c_void, value: usize) {
-    unsafe { *header_word(object, NEXT_WORD) = value };
+unsafe fn set_next(object: *mut c_void, value: *mut c_void) {
+    unsafe { *((object as *mut *mut c_void).add(NEXT_WORD)) = value };
 }
 
 #[inline]
 unsafe fn get_size(object: *mut c_void) -> usize {
+    unsafe { get_size_raw(object) & SIZE_MASK }
+}
+
+#[inline]
+unsafe fn get_size_raw(object: *mut c_void) -> usize {
     unsafe { *header_word(object, SIZE_WORD) }
 }
 
@@ -502,19 +518,31 @@ pub(crate) unsafe fn object_descriptor(object: *mut c_void) -> *mut c_void {
     unsafe { *(object as *mut *mut c_void) }
 }
 
+/// Checks exact-base membership without reading a candidate pointer's header.
+/// Runtime handle ABIs use this before inspecting a managed object supplied by
+/// generated code.
+pub(crate) fn is_managed_allocation(object: *mut c_void) -> bool {
+    !object.is_null() && with_heap(|heap| heap.allocations.contains(&(object as usize)))
+}
+
 #[inline]
 unsafe fn set_size(object: *mut c_void, value: usize) {
-    unsafe { *header_word(object, SIZE_WORD) = value };
+    unsafe { *header_word(object, SIZE_WORD) = value & SIZE_MASK };
 }
 
 #[inline]
-fn is_marked(next_raw: usize) -> bool {
-    next_raw & MARK_BIT != 0
+unsafe fn mark_object(object: *mut c_void) {
+    unsafe { *header_word(object, SIZE_WORD) |= MARK_BIT };
 }
 
 #[inline]
-fn next_ptr(next_raw: usize) -> *mut c_void {
-    (next_raw & !MARK_BIT) as *mut c_void
+fn is_marked(object: *mut c_void) -> bool {
+    unsafe { get_size_raw(object) & MARK_BIT != 0 }
+}
+
+#[inline]
+fn next_ptr(object: *mut c_void) -> *mut c_void {
+    unsafe { get_next(object) }
 }
 
 /// Reads a class descriptor's own GC-field-offset table
@@ -601,128 +629,505 @@ pub(crate) fn set_task_root_walker(walker: Option<TaskRootWalker>) {
 }
 
 /// The stop-the-world safepoint protocol (`ADR-019` D4, `parallel-cpu-regions`
-/// tasks 3.1–3.3).
+/// tasks 3.1–3.3), generalized to every registered mutator.
 ///
-/// A garbage collection triggered while `parallel` worker threads are active
-/// cannot run inline: the triggering thread cannot walk another worker's stack
-/// while that worker is mutating it. Instead [`REQUESTED`] is raised; every
-/// worker parks at its next [`safepoint_poll`], the executor thread coordinates
-/// once every active worker is parked, walks all roots (its own task chains and
-/// every parked worker's chain), sweeps under [`heap::HEAP`]'s lock, clears the
-/// flag, and releases the workers.
-///
-/// The single-threaded path (no `parallel` region, or a size-1 pool) never
-/// raises [`REQUESTED`] — [`maybe_collect`] collects inline exactly as before.
+/// A collection in the published executor world is coordinated by the
+/// executor. A gate-protected participant registry freezes admission/removal,
+/// waits for each mutator to park or enter `InNative`, then scans every root
+/// chain before reopening the gate. Bootstrap heaps still collect inline.
 mod stw {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use super::Frame;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Condvar, Mutex};
 
     /// A stop-the-world collection has been requested and not yet completed.
     pub(super) static REQUESTED: AtomicBool = AtomicBool::new(false);
-    /// Worker threads that have dequeued a region chunk and not yet passed
-    /// their post-chunk safepoint — the set the coordinator waits to see fully
-    /// parked before it walks roots.
-    pub(super) static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
-    /// Worker threads currently parked at a safepoint for this collection.
-    static PARKED_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(dead_code)] // `InNative` is wired when the compiler enables managed FFI calls.
+    enum ParticipantState {
+        Running,
+        Parked,
+        InNative,
+    }
 
-    /// Generation counter, bumped once per completed collection. A parked
-    /// worker waits for either [`REQUESTED`] to clear or the generation to
-    /// move past the one it parked in — the second guard absorbs a lost or
-    /// spurious wake-up.
-    static GATE: Mutex<u64> = Mutex::new(0);
+    struct Participant {
+        roots: *mut Vec<Frame>,
+        state: ParticipantState,
+    }
+    // Only the coordinator reads a root pointer, after all participants have
+    // become quiescent. GATE serializes registration, transitions, and removal.
+    unsafe impl Send for Participant {}
+
+    /// Admission and participant identity/state share one lock. Counts alone
+    /// cannot provide the stable root-chain set required by mark/sweep.
+    struct Gate {
+        next_id: u64,
+        participants: HashMap<u64, Participant>,
+    }
+    static GATE: std::sync::LazyLock<Mutex<Gate>> = std::sync::LazyLock::new(|| {
+        Mutex::new(Gate {
+            next_id: 1,
+            participants: HashMap::new(),
+        })
+    });
     static PARK_CV: Condvar = Condvar::new();
     static ALL_PARKED_CV: Condvar = Condvar::new();
 
-    pub(super) fn worker_active_enter() {
-        ACTIVE_WORKERS.fetch_add(1, Ordering::SeqCst);
+    /// Reopens the mutator gate even if mark/sweep unwinds. Otherwise parked,
+    /// native-returning, and unregistering participants can wait forever.
+    struct CollectionRequestReset;
+
+    impl Drop for CollectionRequestReset {
+        fn drop(&mut self) {
+            let _gate = GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            REQUESTED.store(false, Ordering::SeqCst);
+            PARK_CV.notify_all();
+            ALL_PARKED_CV.notify_all();
+        }
     }
 
-    pub(super) fn worker_active_leave() {
-        ACTIVE_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    fn participant_mut(gate: &mut Gate, id: u64) -> &mut Participant {
+        gate.participants
+            .get_mut(&id)
+            .unwrap_or_else(|| panic!("GC mutator {id} is not registered"))
+    }
+
+    pub(super) fn register(roots: *mut Vec<Frame>) -> u64 {
+        let mut gate = GATE.lock().unwrap();
+        while REQUESTED.load(Ordering::SeqCst) {
+            gate = PARK_CV.wait(gate).unwrap();
+        }
+        let id = gate.next_id;
+        gate.next_id = gate.next_id.checked_add(1).expect("mutator id exhausted");
+        let previous = gate.participants.insert(
+            id,
+            Participant {
+                roots,
+                state: ParticipantState::Running,
+            },
+        );
+        debug_assert!(previous.is_none());
+        id
+    }
+
+    pub(super) fn unregister(id: u64) {
+        let mut gate = GATE.lock().unwrap();
+        while REQUESTED.load(Ordering::SeqCst) {
+            participant_mut(&mut gate, id).state = ParticipantState::Parked;
+            ALL_PARKED_CV.notify_all();
+            gate = PARK_CV.wait(gate).unwrap();
+        }
+        assert!(
+            gate.participants.remove(&id).is_some(),
+            "unregister called for unknown GC mutator {id}"
+        );
+    }
+
+    /// Closes admission before waking the executor coordinator. The same
+    /// mutex protects worker entry, so no participant can slip into the heap
+    /// after the coordinator takes its parked-set snapshot.
+    pub(super) fn request_collection() {
+        let _gate = GATE.lock().unwrap();
+        REQUESTED.store(true, Ordering::SeqCst);
+        ALL_PARKED_CV.notify_all();
     }
 
     /// A worker parks here until the coordinator finishes the collection.
-    pub(super) fn park_worker() {
+    pub(super) fn park(id: u64) {
         let mut generation = GATE.lock().unwrap();
-        let parked_in = *generation;
-        PARKED_WORKERS.fetch_add(1, Ordering::SeqCst);
-        ALL_PARKED_CV.notify_all();
-        while REQUESTED.load(Ordering::SeqCst) && *generation == parked_in {
+        while REQUESTED.load(Ordering::SeqCst) {
+            participant_mut(&mut generation, id).state = ParticipantState::Parked;
+            ALL_PARKED_CV.notify_all();
             generation = PARK_CV.wait(generation).unwrap();
         }
-        PARKED_WORKERS.fetch_sub(1, Ordering::SeqCst);
+        participant_mut(&mut generation, id).state = ParticipantState::Running;
+    }
+
+    #[allow(dead_code)] // Kept crate-private until FFI call sites carry the audited contract.
+    pub(super) fn enter_native(id: u64) {
+        let mut gate = GATE.lock().unwrap();
+        loop {
+            if REQUESTED.load(Ordering::SeqCst) {
+                participant_mut(&mut gate, id).state = ParticipantState::Parked;
+                ALL_PARKED_CV.notify_all();
+                gate = PARK_CV.wait(gate).unwrap();
+            } else {
+                participant_mut(&mut gate, id).state = ParticipantState::InNative;
+                return;
+            }
+        }
+    }
+
+    #[allow(dead_code)] // Kept crate-private until FFI call sites carry the audited contract.
+    pub(super) fn resume_from_native(id: u64) {
+        let mut gate = GATE.lock().unwrap();
+        while REQUESTED.load(Ordering::SeqCst) {
+            assert_eq!(
+                participant_mut(&mut gate, id).state,
+                ParticipantState::InNative,
+                "only an InNative GC mutator may wait to resume"
+            );
+            gate = PARK_CV.wait(gate).unwrap();
+        }
+        assert_eq!(
+            participant_mut(&mut gate, id).state,
+            ParticipantState::InNative,
+            "only an InNative GC mutator may resume"
+        );
+        participant_mut(&mut gate, id).state = ParticipantState::Running;
+    }
+
+    pub(super) fn has_participants() -> bool {
+        !GATE.lock().unwrap().participants.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn participant_count_for_tests() -> usize {
+        GATE.lock().unwrap().participants.len()
+    }
+
+    pub(super) fn participant_roots() -> Vec<*mut Vec<Frame>> {
+        let gate = GATE.lock().unwrap();
+        debug_assert!(REQUESTED.load(Ordering::SeqCst));
+        debug_assert!(
+            gate.participants
+                .values()
+                .all(|participant| participant.state != ParticipantState::Running)
+        );
+        gate.participants
+            .values()
+            .map(|participant| participant.roots)
+            .collect()
     }
 
     /// The executor thread coordinates one collection: wait for every active
     /// worker to park, run `collect`, then release them.
     pub(super) fn coordinate(collect: impl FnOnce()) {
+        let reset_request = CollectionRequestReset;
+        let mut gate = GATE.lock().unwrap();
+        while gate
+            .participants
+            .values()
+            .any(|participant| participant.state == ParticipantState::Running)
         {
-            let mut generation = GATE.lock().unwrap();
-            while PARKED_WORKERS.load(Ordering::SeqCst) < ACTIVE_WORKERS.load(Ordering::SeqCst) {
-                let (g, _timeout) = ALL_PARKED_CV
-                    .wait_timeout(generation, std::time::Duration::from_millis(1))
-                    .unwrap();
-                generation = g;
-            }
+            gate = ALL_PARKED_CV.wait(gate).unwrap();
         }
+        drop(gate);
 
+        // Admission, resume from native code, and unregistration remain closed
+        // until the request is cleared, so both the set and roots stay stable.
         collect();
 
-        let mut generation = GATE.lock().unwrap();
-        REQUESTED.store(false, Ordering::SeqCst);
-        *generation += 1;
-        PARK_CV.notify_all();
+        drop(reset_request);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::collector::{
+            PublishedHeap, enter_executor_world, free_all, is_live_for_tests,
+            publish_executor_heap, unpublish_executor_heap,
+        };
+        use std::ffi::c_void;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Barrier, mpsc};
+
+        #[test]
+        fn coordinator_waits_for_active_worker_and_releases_it_after_collection() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mutator = super::super::register_managed_mutator();
+            request_collection();
+
+            let (collected_tx, collected_rx) = mpsc::channel();
+            let coordinator = std::thread::spawn(move || {
+                coordinate(|| collected_tx.send(()).unwrap());
+            });
+
+            park(mutator.id);
+            collected_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("coordinator must collect after the worker parks");
+            coordinator.join().unwrap();
+            drop(mutator);
+
+            let gate = GATE.lock().unwrap();
+            assert!(gate.participants.is_empty());
+            assert!(!REQUESTED.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn admission_waits_until_collection_reopens_the_gate() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            request_collection();
+            let collection_finished = std::sync::Arc::new(AtomicBool::new(false));
+            let thread_finished = std::sync::Arc::clone(&collection_finished);
+            let start = std::sync::Arc::new(Barrier::new(2));
+            let thread_start = std::sync::Arc::clone(&start);
+            let entrant = std::thread::spawn(move || {
+                thread_start.wait();
+                let mutator = super::super::register_managed_mutator();
+                let collection_was_finished = thread_finished.load(Ordering::SeqCst);
+                drop(mutator);
+                collection_was_finished
+            });
+
+            start.wait();
+            coordinate(|| collection_finished.store(true, Ordering::SeqCst));
+            assert!(entrant.join().unwrap());
+
+            let gate = GATE.lock().unwrap();
+            assert!(gate.participants.is_empty());
+            assert!(!REQUESTED.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn blocked_native_mutator_keeps_stable_roots_visible_to_collection() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mutator = super::super::register_managed_mutator();
+            let mutator_id = mutator.id;
+            let native = mutator.enter_blocking_native();
+            request_collection();
+
+            let (collected_tx, collected_rx) = mpsc::channel();
+            let coordinator = std::thread::spawn(move || {
+                coordinate(|| {
+                    let roots = participant_roots();
+                    assert_eq!(roots.len(), 1);
+                    assert!(!roots[0].is_null());
+                    let gate = GATE.lock().unwrap();
+                    assert_eq!(
+                        gate.participants[&mutator_id].state,
+                        ParticipantState::InNative
+                    );
+                    collected_tx.send(()).unwrap();
+                });
+            });
+            collected_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("collection must finish while the mutator remains in native code");
+            coordinator.join().unwrap();
+
+            drop(native);
+            drop(mutator);
+            let gate = GATE.lock().unwrap();
+            assert!(gate.participants.is_empty());
+            assert!(!REQUESTED.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn unregister_waits_until_collection_stops_scanning_its_roots() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mutator = super::super::register_managed_mutator();
+            request_collection();
+            let collection_finished = std::sync::Arc::new(AtomicBool::new(false));
+            let thread_finished = std::sync::Arc::clone(&collection_finished);
+            let coordinator = std::thread::spawn(move || {
+                coordinate(|| thread_finished.store(true, Ordering::SeqCst));
+            });
+
+            // Drop publishes the participant as quiescent, then remains
+            // blocked until the coordinator has completed its root walk.
+            drop(mutator);
+            coordinator.join().unwrap();
+            assert!(collection_finished.load(Ordering::SeqCst));
+            assert!(GATE.lock().unwrap().participants.is_empty());
+        }
+
+        #[test]
+        fn native_reentry_waits_until_collection_reopens_admission() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mutator = super::super::register_managed_mutator();
+            let native = mutator.enter_blocking_native();
+            request_collection();
+            let collection_finished = std::sync::Arc::new(AtomicBool::new(false));
+            let thread_finished = std::sync::Arc::clone(&collection_finished);
+            let coordinator = std::thread::spawn(move || {
+                coordinate(|| thread_finished.store(true, Ordering::SeqCst));
+            });
+
+            drop(native);
+            assert!(collection_finished.load(Ordering::SeqCst));
+            coordinator.join().unwrap();
+            drop(mutator);
+            assert!(GATE.lock().unwrap().participants.is_empty());
+        }
+
+        #[test]
+        fn collection_unwind_reopens_gate_and_allows_native_cleanup() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mutator = super::super::register_managed_mutator();
+            let native = mutator.enter_blocking_native();
+            request_collection();
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                coordinate(|| panic!("injected collector unwind"));
+            }));
+            assert!(result.is_err());
+            assert!(!REQUESTED.load(Ordering::SeqCst));
+
+            // Cleanup after a failed collection must restore Running so future
+            // stop-the-world requests and unregister can make progress.
+            drop(native);
+            drop(mutator);
+            assert!(GATE.lock().unwrap().participants.is_empty());
+        }
+
+        #[test]
+        fn collection_preserves_object_rooted_by_registered_native_thread() {
+            let _guard = crate::collector::test_support::test_guard();
+            let _gc_world = crate::executor::lock_gc_world_for_test();
+            let mut heap = PublishedHeap::new();
+            publish_executor_heap(&mut *heap as *mut _);
+            let world = enter_executor_world();
+            let descriptor = crate::collector::test_support::descriptor_with_fields_for_tests(&[]);
+            let descriptor_addr = descriptor.as_ptr() as usize;
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let mutator = super::super::register_managed_mutator();
+                let object = unsafe {
+                    crate::collector::test_support::synthetic_object_for_tests(
+                        descriptor_addr as *const c_void,
+                        0,
+                    )
+                };
+                let mut slot = object;
+                let mut roots = [&mut slot as *mut *mut c_void as *mut c_void];
+                unsafe { crate::collector::zirk_rt_push_frame(roots.as_mut_ptr(), 1) };
+                let native = mutator.enter_blocking_native();
+                ready_tx.send(object as usize).unwrap();
+                resume_rx.recv().unwrap();
+                drop(native);
+                crate::collector::zirk_rt_pop_frame();
+                drop(mutator);
+                object as usize
+            });
+
+            let object_addr = ready_rx.recv().unwrap();
+            request_collection();
+            coordinate(crate::collector::collect_stw);
+            resume_tx.send(()).unwrap();
+            worker.join().unwrap();
+            assert!(is_live_for_tests(object_addr as *mut c_void));
+
+            unpublish_executor_heap();
+            free_all(&mut heap);
+            drop(world);
+            assert!(GATE.lock().unwrap().participants.is_empty());
+        }
     }
 }
 
-/// Registered frame chains of live `parallel` worker threads (`ADR-019` D4):
-/// one `*mut Vec<Frame>` per pool thread, pointing at that thread's own
-/// `BOOTSTRAP_FRAMES` inner vector. The coordinator walks each during a
-/// stop-the-world collection — sound because every worker is parked and thus
-/// not mutating its chain.
-mod worker_chains {
-    use super::Frame;
-    use std::sync::Mutex;
-
-    pub(super) struct ChainPtr(pub(super) *mut Vec<Frame>);
-    // SAFETY: dereferenced only by the coordinator, only while every worker is
-    // parked at a safepoint (`stw::coordinate`), so the pointed-at vector is
-    // never concurrently mutated.
-    unsafe impl Send for ChainPtr {}
-
-    pub(super) static CHAINS: Mutex<Vec<ChainPtr>> = Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn shutdown_snapshot_for_tests() -> (bool, usize) {
+    (
+        heap::is_published_for_tests(),
+        stw::participant_count_for_tests(),
+    )
 }
 
-/// A `parallel` worker thread calls this once at startup to publish its own
-/// shadow-stack chain for the coordinator to walk (`ADR-019` D4).
-pub(crate) fn register_worker_chain() {
-    BOOTSTRAP_FRAMES.with(|frames| {
-        worker_chains::CHAINS
-            .lock()
-            .unwrap()
-            .push(worker_chains::ChainPtr(frames.as_ptr()));
-    });
+/// Scoped registration for a non-coordinator thread that can access the
+/// executor's published heap. Its shadow-frame chain remains registered until
+/// it has stopped using the heap and any in-flight collection has completed.
+pub(crate) struct MutatorRegistration {
+    id: u64,
+    _world: WorldGuard,
+    // Registration is tied to TLS roots and executor-world state; moving the
+    // guard to a different OS thread would unregister/clear the wrong chain.
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-/// A `parallel` worker calls this around each region chunk so the coordinator
-/// knows how many threads it must see parked before it may collect.
-pub(crate) fn worker_active_enter() {
-    stw::worker_active_enter();
+impl MutatorRegistration {
+    /// Temporarily leave managed execution around a blocking native call.
+    /// While this guard is live, the native call must not touch managed values
+    /// or call back into Zirk/runtime code; the stable shadow frames remain
+    /// visible to the collector.
+    #[allow(dead_code)] // No source/IR path may use this until FFI effects are enforced.
+    pub(crate) fn enter_blocking_native(&self) -> BlockingNativeGuard {
+        enter_blocking_native(self.id)
+    }
 }
-pub(crate) fn worker_active_leave() {
-    stw::worker_active_leave();
+
+impl Drop for MutatorRegistration {
+    fn drop(&mut self) {
+        stw::unregister(self.id);
+        MUTATOR_ID.set(None);
+        BOOTSTRAP_FRAMES.with(|frames| frames.borrow_mut().clear());
+    }
+}
+
+/// RAII transition for a native call that cannot execute compiler safepoints.
+#[allow(dead_code)] // Constructed by the future managed-FFI lowering.
+pub(crate) struct BlockingNativeGuard {
+    mutator_id: u64,
+}
+
+impl Drop for BlockingNativeGuard {
+    fn drop(&mut self) {
+        stw::resume_from_native(self.mutator_id);
+    }
+}
+
+fn enter_blocking_native(mutator_id: u64) -> BlockingNativeGuard {
+    stw::enter_native(mutator_id);
+    BlockingNativeGuard { mutator_id }
+}
+
+/// Enters the collector's stable native state for a blocking runtime wait on a
+/// registered managed worker. The caller must not access managed values while
+/// the guard is live; dropping it resumes only after any active collection.
+pub(crate) fn enter_blocking_native_current() -> Option<BlockingNativeGuard> {
+    MUTATOR_ID.get().map(enter_blocking_native)
+}
+
+/// Whether the current thread is a registered non-coordinator managed worker.
+pub(crate) fn is_registered_managed_worker() -> bool {
+    MUTATOR_ID.get().is_some()
+}
+
+pub(crate) fn register_managed_mutator() -> MutatorRegistration {
+    assert!(
+        MUTATOR_ID.get().is_none(),
+        "mutator already registered on this thread"
+    );
+    let world = enter_executor_world();
+    let roots = BOOTSTRAP_FRAMES.with(|frames| frames.as_ptr());
+    let id = stw::register(roots);
+    MUTATOR_ID.set(Some(id));
+    MutatorRegistration {
+        id,
+        _world: world,
+        _thread_bound: std::marker::PhantomData,
+    }
+}
+
+/// Drops shadow-frame entries only after generated code has fully unwound and
+/// its stack slots are no longer valid. Call this before the next safepoint in
+/// a native wrapper that catches an unwind from managed execution.
+pub(crate) fn clear_unwound_mutator_roots() {
+    assert!(
+        MUTATOR_ID.get().is_some(),
+        "mutator roots require registration"
+    );
+    BOOTSTRAP_FRAMES.with(|frames| frames.borrow_mut().clear());
 }
 
 /// Whether a multi-threaded `parallel` region is running right now — the
 /// condition under which a threshold crossing defers to a safepoint instead of
 /// collecting inline (`ADR-019` D4). False whenever the pool is size 1 or no
 /// region is active.
-fn worker_pool_is_multithreaded() -> bool {
-    // Only a thread inside the executor's world (the executor thread or a
-    // `parallel` worker running a chunk) ever takes the stop-the-world path;
-    // any other thread collects inline on its own bootstrap heap.
-    in_executor_world() && crate::pool::pool_is_multithreaded()
+fn executor_has_concurrent_mutators() -> bool {
+    // Bootstrap heaps remain thread-local. Threads that join the published
+    // heap use one registry regardless of whether they came from `parallel`
+    // or a managed native-thread API.
+    in_executor_world() && (crate::pool::pool_is_multithreaded() || stw::has_participants())
 }
 
 /// Whether this is the cooperative-executor thread (the only thread that may
@@ -735,17 +1140,17 @@ fn on_executor_thread() -> bool {
 /// cross the configured threshold (design D3) — called by
 /// [`crate::memory::zirk_rt_alloc`] before it allocates anything.
 ///
-/// While a multi-threaded `parallel` region is active this raises
-/// [`stw::REQUESTED`] and cooperates at a [`safepoint_poll`] instead of
-/// collecting inline (`ADR-019` D4): the running thread cannot safely walk
-/// another worker's stack until every worker has parked.
+/// While another registered mutator can access the published heap, this
+/// raises [`stw::REQUESTED`] and cooperates at a [`safepoint_poll`] instead of
+/// collecting inline: every participant must be quiescent and its roots
+/// published before mark/sweep begins.
 pub(crate) fn maybe_collect(incoming: usize) {
     let over_threshold = with_heap(|heap| heap.live_bytes + incoming > heap.threshold);
     if !over_threshold {
         return;
     }
-    if worker_pool_is_multithreaded() {
-        stw::REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    if executor_has_concurrent_mutators() {
+        stw::request_collection();
         crate::executor::notify_pool_event();
         safepoint_poll();
     } else {
@@ -753,11 +1158,9 @@ pub(crate) fn maybe_collect(incoming: usize) {
     }
 }
 
-/// A safepoint: called at every `parallel` loop back-edge (via
-/// [`crate::pool::safepoint_poll_rust`] / `zirk_rt_safepoint_poll`), after each
-/// region chunk on a worker thread, and by the executor at its next scheduling
-/// turn. If a stop-the-world collection has been requested, the thread
-/// cooperates (`ADR-019` D4): a worker parks, the executor thread coordinates.
+/// A safepoint: called at every `parallel` loop back-edge, after each region
+/// chunk, and by the executor at its next scheduling turn. A registered
+/// mutator parks; the executor thread coordinates the collection.
 #[inline]
 pub(crate) fn safepoint_poll() {
     if !stw::REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
@@ -766,7 +1169,10 @@ pub(crate) fn safepoint_poll() {
     if on_executor_thread() {
         stw::coordinate(collect_stw);
     } else {
-        stw::park_worker();
+        let id = MUTATOR_ID
+            .get()
+            .expect("only a registered executor mutator may park for stop-the-world");
+        stw::park(id);
     }
 }
 
@@ -783,9 +1189,8 @@ pub(crate) unsafe fn register(object: *mut c_void, size: usize) {
     with_heap(|heap| {
         let head = heap.head;
         unsafe {
-            // `head` is itself either null or `GC_ALIGN`-aligned, so its low
-            // bit is already the clear mark bit this fresh object needs.
-            set_next_raw(object, head as usize);
+            // Store the link as a pointer to retain allocator provenance.
+            set_next(object, head);
             set_size(object, size);
         }
         heap.head = object;
@@ -820,21 +1225,21 @@ fn collect() {
     collect_with(false);
 }
 
-/// A stop-the-world collection, run by the executor thread once every
-/// `parallel` worker has parked at a safepoint (`ADR-019` D4). It additionally
-/// walks every parked worker's shadow-stack chain — safe precisely because
-/// they are parked and not mutating those chains.
+/// A stop-the-world collection, run by the executor after every registered
+/// mutator is parked or in the stable native-call state.
 fn collect_stw() {
     collect_with(true);
 }
 
-fn collect_with(walk_worker_chains: bool) {
-    // One lock on the current heap for the whole collection. Every other Zirk
-    // thread is either parked at a safepoint (multi-threaded `parallel`
-    // region) or does not exist (single-threaded / bootstrap), so nothing
-    // mutates the list or an object header while mark / weak-clear / sweep run.
+fn collect_with(walk_mutator_chains: bool) {
+    if std::env::var_os("ZIRK_GC_TRACE").is_some() {
+        eprintln!("[zirk-gc] collection");
+    }
+    // One lock on the current heap for the whole collection. Every other
+    // registered thread is parked or in the stable native-call state, so no
+    // participant mutates the list or object headers during mark/sweep.
     with_heap(|heap| {
-        mark(walk_worker_chains, &heap.allocations);
+        mark(walk_mutator_chains, &heap.allocations);
         clear_dead_weak_cells(heap.head);
         let (survivors, live_bytes) = sweep(heap.head, &mut heap.allocations);
         heap.head = survivors;
@@ -842,7 +1247,7 @@ fn collect_with(walk_worker_chains: bool) {
     });
 }
 
-fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
+fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
     let pending = std::cell::RefCell::new(Vec::new());
     let mut enqueue = |object| enqueue_candidate(&pending, allocations, object);
 
@@ -853,16 +1258,12 @@ fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
         }
     });
 
-    // Every parked `parallel` worker thread's own shadow-stack chain
-    // (`ADR-019` D4). Only during a stop-the-world collection: `stw::coordinate`
-    // has confirmed every active worker is parked, so none is mutating its
-    // chain. An ordinary bootstrap / single-threaded collection must NOT touch
-    // these — an idle-vs-running worker would be a data race — and does not
-    // need to, since worker roots only matter to the executor heap a STW walks.
-    if walk_worker_chains {
-        let chains = worker_chains::CHAINS.lock().unwrap();
-        for chain in chains.iter() {
-            let frames = unsafe { &*chain.0 };
+    // Every registered non-coordinator mutator's chain. During stop-the-world
+    // all are parked or inside an explicitly quiescent native call, and both
+    // admission and unregistration remain closed.
+    if walk_mutator_chains {
+        for chain in stw::participant_roots() {
+            let frames = unsafe { &*chain };
             for frame in frames.iter() {
                 mark_frame_roots(frame, &mut enqueue);
             }
@@ -895,11 +1296,10 @@ fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
             // collection, so no allocation can be freed between enqueue and
             // this header read; a second hash lookup here only duplicates the
             // exact-address safety check.
-            let next_raw = unsafe { get_next_raw(object) };
-            if is_marked(next_raw) {
+            if is_marked(object) {
                 continue;
             }
-            unsafe { set_next_raw(object, next_raw | MARK_BIT) };
+            unsafe { mark_object(object) };
 
             let descriptor = unsafe { *(object as *mut *mut c_void) };
 
@@ -909,6 +1309,10 @@ fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
             }
             if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
                 unsafe { crate::channel::mark_queued(object, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(descriptor, gc_mutex::descriptor()) {
+                unsafe { gc_mutex::mark_payload(object, &mut enqueue) };
                 continue;
             }
             if std::ptr::eq(descriptor, crate::map::map_descriptor()) {
@@ -930,7 +1334,7 @@ fn mark(walk_worker_chains: bool, allocations: &AllocationSet) {
         let mut added_exception_edge = false;
         crate::exceptions::visit_owned_edges(|owner, edge| {
             if allocations.contains(&(owner as usize))
-                && is_marked(unsafe { get_next_raw(owner) })
+                && is_marked(owner)
                 && visited_exception_edges.insert((owner as usize, edge as usize))
             {
                 enqueue_candidate(&pending, allocations, edge);
@@ -991,22 +1395,19 @@ fn clear_dead_weak_cells(list_head: *mut c_void) {
 
     let mut current = list_head;
     while !current.is_null() {
-        let next_raw = unsafe { get_next_raw(current) };
+        let next_object = next_ptr(current);
 
-        if is_marked(next_raw) {
+        if is_marked(current) {
             let descriptor = unsafe { *(current as *mut *mut c_void) };
             if descriptor == weak_cell_descriptor() {
                 let target = unsafe { get_weak_target(current) };
-                if !target.is_null() {
-                    let target_next_raw = unsafe { get_next_raw(target) };
-                    if !is_marked(target_next_raw) {
-                        unsafe { set_weak_target(current, std::ptr::null_mut()) };
-                    }
+                if !target.is_null() && !is_marked(target) {
+                    unsafe { set_weak_target(current, std::ptr::null_mut()) };
                 }
             }
         }
 
-        current = next_ptr(next_raw);
+        current = next_object;
     }
 }
 
@@ -1016,16 +1417,16 @@ fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_voi
     let mut live_bytes = 0usize;
 
     while !current.is_null() {
-        let next_raw = unsafe { get_next_raw(current) };
-        let next_object = next_ptr(next_raw);
+        let next_object = next_ptr(current);
 
-        if is_marked(next_raw) {
+        if is_marked(current) {
             // Relinks `current` onto the survivors list being built, in the
-            // process clearing its mark bit for the next cycle: `survivors`
-            // is itself always a plain, unmarked pointer.
-            unsafe { set_next_raw(current, survivors as usize) };
+            // process clearing its size-word mark bit for the next cycle.
+            let size = unsafe { get_size(current) };
+            unsafe { set_next(current, survivors) };
+            unsafe { set_size(current, size) };
             survivors = current;
-            live_bytes += unsafe { get_size(current) };
+            live_bytes += size;
         } else {
             let size = unsafe { get_size(current) };
             let descriptor = unsafe { object_descriptor(current) };
@@ -1035,6 +1436,8 @@ fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_voi
             // Run their destructor before freeing the raw collector block.
             if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
                 unsafe { crate::channel::drop_body(current) };
+            } else if std::ptr::eq(descriptor, gc_mutex::descriptor()) {
+                unsafe { gc_mutex::drop_object(current) };
             } else if std::ptr::eq(descriptor, crate::list::list_descriptor()) {
                 unsafe { crate::list::drop_body(current) };
             } else if std::ptr::eq(descriptor, crate::map::map_descriptor()) {
@@ -1074,6 +1477,12 @@ pub(crate) mod test_support {
     #[must_use = "hold the guard for the whole test body"]
     pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Reports whether any registered native mutator remains after a managed
+    /// worker has joined and the runtime has shut its worker pool down.
+    pub(crate) fn has_registered_participants_for_tests() -> bool {
+        stw::has_participants()
     }
 
     /// See `mod tests`' own `synthetic_object` — identical shape, exposed

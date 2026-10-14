@@ -1,0 +1,20 @@
+import { stdout } from std.io;
+
+fn noop(): Void { return; }
+
+fn main(): Void {
+    for i in 1 ..= 256 {
+        Concurrent.detach(noop);
+    }
+    try {
+        Concurrent.detach(noop);
+        stdout.println("unexpected admission");
+    } catch BackgroundCapacityError(error) {
+        stdout.println("background capacity caught");
+    }
+
+    Timer.sleep(1ms);
+    Concurrent.detach(noop);
+    Timer.sleep(1ms);
+    stdout.println("background capacity reused");
+}

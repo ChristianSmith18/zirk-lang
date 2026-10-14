@@ -121,6 +121,7 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $archivo
 
           7z x $archivo -oC:\extracted -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z terminó con código $LASTEXITCODE" }
 
           # El paquete puede traer todo en la raiz o dentro de un directorio.
           # Se resuelve en vez de asumirlo.
@@ -171,6 +172,23 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+      # Make the GC/managed-thread regressions an explicit Windows signal.
+      # The full workspace suite below also runs them, but this focused step
+      # makes failures attributable and visible before the broader test run.
+      - name: GC y managed threads (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test gc_worker_root_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test gc_mutex_abi -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test managed_callback_shutdown_lifetime -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test cancel_shutdown_gc_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test collector_concurrency_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib blocked_native_mutator_keeps_stable_roots_visible_to_collection -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib collection_preserves_object_rooted_by_registered_native_thread -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib unregister_waits_until_collection_stops_scanning_its_roots -- --test-threads=1 --nocapture
 
       - name: Formato canónico
         shell: bash

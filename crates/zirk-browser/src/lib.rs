@@ -725,7 +725,10 @@ mod tests {
                     diagnostic.code.as_str().to_owned(),
                     diagnostic.severity.as_str().to_owned(),
                     diagnostic.message.clone(),
-                    diagnostic.location.clone(),
+                    diagnostic.location.clone().map(|mut location| {
+                        location.file = location.file.replace('\\', "/");
+                        location
+                    }),
                 )
             })
             .collect::<Vec<_>>();
@@ -737,7 +740,10 @@ mod tests {
                     diagnostic.code.as_str().to_owned(),
                     diagnostic.severity.as_str().to_owned(),
                     diagnostic.message.clone(),
-                    diagnostic.location.clone(),
+                    diagnostic.location.clone().map(|mut location| {
+                        location.file = location.file.replace('\\', "/");
+                        location
+                    }),
                 )
             })
             .collect::<Vec<_>>();

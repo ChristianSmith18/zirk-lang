@@ -94,13 +94,17 @@ block of `.zkinit`:
 ```text
 globals {
     inmut APP_NAME: String = "App";
+    // Scalar Atomic<T> is available where the target supports the width.
     mut REQUEST_COUNT: Atomic<UInt64> = Atomic(0);
 }
 ```
 
-Each consumer uses `use APP_NAME;`. A mutable global accessed from `parallel` or
-`thread` must be protected with `sync` or `Atomic<T>`; otherwise it is a compile
-error.
+Each consumer uses `use APP_NAME;`. A mutable global accessed from an
+implemented `parallel` boundary must satisfy that boundary's capture and
+ownership checks. Managed `Thread.run` and `Mutex<T>.with` are available on
+their supported native targets. `RwLock`, `Semaphore`, `Barrier`, and `Once`
+remain unavailable as source APIs. Scalar `Atomic<T>` supports Boolean and
+signed/unsigned integers through 64 bits when the target provides that width.
 
 ## 3. Type system
 
@@ -732,9 +736,13 @@ are in `MEMORY_AND_UNSAFE_SEMANTICS.md`.
 constructs. The parser reports a targeted removal diagnostic that names the
 replacement; `scope` and `shield` are ordinary identifiers.
 
-The Phase 5 surface is defined by the pending `concurrent` / `spawn`,
-`parallel`, typed-channel, and concurrency-completion changes. `parallel`,
-`thread`, `Channel<T>`, `sync`, and `Atomic<T>` remain owned by their respective
-changes. There is no `async fn`, general detach, or independent `worker`.
+The delivered Phase 5 source surface includes `concurrent` / `spawn`,
+`parallel`, typed channels, scalar `Atomic<T>`, and managed `Thread.run` on
+supported native 64-bit targets. `Mutex<T>` exposes scoped access only through
+`mutex.with`; its borrowed payload view cannot escape, and the callback cannot
+suspend, block, or spawn. Completion combinators and bounded
+`Concurrent.detach` are also available. `RwLock<T>`, `Semaphore`, `Barrier`,
+and `Once<T>` remain unavailable as source APIs. There is no `async fn` or
+independent `worker`.
 Internal `Transfer`/`Share` properties are compiler-derived and never ordinary
 user-implemented contracts.

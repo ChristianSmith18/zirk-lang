@@ -20,11 +20,13 @@ private copy, silently going nowhere. A loop that does any of these still
 compiles; it just runs sequentially inside the region instead of splitting
 across the pool.
 
-`.parallel` runs the supported eager sequence terminals (`map`, `filter`,
-`for_each`, `reduce`, and `sum`) on the worker pool outside a region.
-`Parallel.each(coll, fn)` is the ordered parallel-map spelling and returns a
-`List<R>` in input order. `map` and `filter` preserve collection order; filter
-compacts only after every predicate result is available.
+`.parallel` routes supported eager sequence terminals (`map`, `filter`,
+`for_each`, associative `reduce`, and `sum`) through the worker pool outside a
+region; `reduce_ordered` remains sequential. `map` and `filter` preserve input
+order, with filter compaction after predicate results are available.
+`Parallel.each(coll, fn)` is also lowered to the same worker pool and returns
+its materialized `List<R>` in input order. It accepts the same CPU-only callback
+constraints as the collection adapter.
 
 Ordinary parallel `reduce` requires an associative lambda. Use
 `reduce_ordered` when grouping must remain left-to-right; it is sequential by

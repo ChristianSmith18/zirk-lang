@@ -72,6 +72,17 @@ fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
 
 /// Runs the compiler over a source file using an explicit command-line argument.
 fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: &[&str]) -> Output {
+    zirk_with_runtime_env(subcommand, source, name, arg, extra, &[])
+}
+
+fn zirk_with_runtime_env(
+    subcommand: &str,
+    source: &Path,
+    name: &str,
+    arg: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let dir = workspace(name);
     let copied = dir.join(source.file_name().expect("file name"));
     std::fs::copy(source, &copied).expect("copy the source");
@@ -80,6 +91,7 @@ fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: 
         .arg(subcommand)
         .arg(arg)
         .args(extra)
+        .envs(env.iter().copied())
         .current_dir(&dir)
         .output()
         .expect("run the compiler");
@@ -91,9 +103,52 @@ fn zirk_with_arg(subcommand: &str, source: &Path, name: &str, arg: &str, extra: 
     }
 }
 
+#[test]
+fn managed_background_error_handler_roots_throwable_and_captures_during_gc() {
+    let source = corpus("valid").join("background_error_handler_receives_throwable.zrk");
+    let output = zirk_with_runtime_env(
+        "run",
+        &source,
+        "managed_background_error_roots",
+        "background_error_handler_receives_throwable.zrk",
+        &[],
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "retained:detached failure\n");
+}
+
+#[test]
+fn managed_background_error_handler_failure_is_reported_without_recursion() {
+    let source = corpus("valid").join("background_error_handler_failure_contained.zrk");
+    let output = zirk(
+        "run",
+        &source,
+        "managed_background_error_handler_failure",
+        &[],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "handler-called\n");
+    assert!(
+        output
+            .stderr
+            .contains("background error handler failed for job BackgroundJobId(1)"),
+        "handler failure must be reported: {}",
+        output.stderr
+    );
+}
+
 // --- Valid programs ---------------------------------------------------------
 
-/// Every valid program compiles, runs, and prints exactly its `.out` file.
+/// Every valid program compiles, runs with its declared status, and prints its `.out` file.
 #[test]
 fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     let dir = corpus("valid");
@@ -113,12 +168,15 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
         let expected = std::fs::read_to_string(path.with_extension("out")).unwrap_or_else(|_| {
             panic!("`{name}.out` is missing: every valid program declares its expected output")
         });
+        let expected_status = std::fs::read_to_string(path.with_extension("exit"))
+            .map(|value| value.trim().parse::<i32>().expect("valid exit status"))
+            .unwrap_or(0);
 
         let output = zirk("run", &path, &format!("valid_{name}"), &[]);
 
         assert_eq!(
-            output.status, 0,
-            "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+            output.status, expected_status,
+            "`{name}` exited with an unexpected status.\nstdout:\n{}\nstderr:\n{}",
             output.stdout, output.stderr
         );
         assert_eq!(
@@ -133,6 +191,128 @@ fn the_valid_corpus_compiles_and_produces_the_expected_output() {
     assert!(
         checked >= 10,
         "the corpus shrank unexpectedly: {checked} programs"
+    );
+}
+
+#[test]
+fn concurrent_first_uses_completion_order_and_aggregates_failures() {
+    for name in [
+        "concurrent_first_completion_order",
+        "concurrent_first_tie_input_order",
+        "concurrent_first_failure_then_success",
+        "concurrent_first_all_fail_suppressed",
+        "concurrent_first_cleanup_failure",
+    ] {
+        let source = corpus("valid").join(format!("{name}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("focused first fixture has expected output");
+        let output = zirk("run", &source, &format!("focused_{name}"), &[]);
+        assert_eq!(
+            output.status, 0,
+            "`{name}` failed.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            normalize(&output.stdout),
+            normalize(&expected),
+            "`{name}` output"
+        );
+    }
+}
+
+#[test]
+fn concurrent_within_first_and_settled_enforce_deadlines() {
+    for name in [
+        "concurrent_within_first_winner",
+        "concurrent_within_first_timeout",
+        "concurrent_within_first_timeout_joins_cleanup",
+        "concurrent_within_first_caller_cancellation",
+        "concurrent_within_first_roots_managed_winner",
+        "concurrent_within_settled_timeout",
+        "concurrent_within_settled_timeout_joins_cleanup",
+        "concurrent_within_settled_success",
+        "concurrent_within_negative_duration",
+    ] {
+        let source = corpus("valid").join(format!("{name}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("focused within fixture has expected output");
+        let output = zirk("run", &source, &format!("focused_{name}"), &[]);
+        assert_eq!(
+            output.status, 0,
+            "`{name}` failed.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(
+            normalize(&output.stdout),
+            normalize(&expected),
+            "`{name}` output"
+        );
+    }
+}
+
+#[test]
+fn concurrent_task_capacity_is_caught_and_reusable_from_zirk() {
+    let name = "concurrent_task_capacity_ceiling";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("task-capacity fixture has expected output");
+    let output = zirk("run", &source, "concurrent_task_capacity_ceiling", &[]);
+
+    assert_eq!(
+        output.status, 0,
+        "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn background_capacity_error_is_constructible_and_catchable_from_zirk() {
+    let name = "background_capacity_error_catch";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("background-capacity fixture has expected output");
+    let output = zirk("run", &source, name, &[]);
+
+    assert_eq!(
+        output.status, 0,
+        "`{name}` did not run successfully.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn app_shutdown_grace_is_configurable_from_native_zirk_and_negative_literals_are_rejected() {
+    let name = "app_shutdown_grace_configured";
+    let source = corpus("valid").join(format!("{name}.zrk"));
+    let output = zirk("run", &source, name, &[]);
+    assert_eq!(
+        output.status, 124,
+        "configured shutdown grace should use the approved expiry status.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(
+        normalize(&output.stdout),
+        "negative rejected\nroot completed\n"
+    );
+    assert!(output.stderr.contains("background shutdown grace expired"));
+    assert!(output.stderr.contains("unfinished jobs: ["));
+
+    let negative = corpus("invalid").join("app_shutdown_grace_negative.zrk");
+    let output = zirk("check", &negative, "app_shutdown_grace_negative", &[]);
+    assert_ne!(output.status, 0, "negative literal grace must fail in sema");
+    assert!(output.stderr.contains("requires a non-negative Duration"));
+
+    let wrong_type = corpus("invalid").join("app_shutdown_grace_wrong_type.zrk");
+    let output = zirk("check", &wrong_type, "app_shutdown_grace_wrong_type", &[]);
+    assert_ne!(output.status, 0, "non-Duration grace must fail in sema");
+    assert!(
+        output
+            .stderr
+            .contains("no implicit conversion from Int32 to Duration"),
+        "{}",
+        output.stderr
     );
 }
 
@@ -167,6 +347,69 @@ fn the_concurrent_examples_program_runs() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "10\n1\n2\n3\n42\ncaught: boom\n");
+}
+
+#[test]
+fn concurrent_join_round_trips_nested_managed_record_results() {
+    let source = std::env::temp_dir().join(format!(
+        "zirk-managed-task-result-{}-{}.zrk",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         record Inner { text: String; }\n\
+         record Outer { prefix: Int64; inner: Inner; }\n\
+         enum MaybeText { Some(value: String), None }\n\
+         fn make_outer(): Outer { return Outer(prefix: 5, inner: Inner(text: \"task result survived\")); }\n\
+         fn make_enum(): MaybeText { return MaybeText.Some(value: \"enum result survived\"); }\n\
+         fn make_wide(): Int128 { return 123456789123456789012345678901234567; }\n\
+         fn churn(): Int32 { mut values: List<Int32> = [0 .. 4096]; return 7; }\n\
+         fn main(): Void {\n\
+           concurrent {\n\
+             inmut value: Outer = make_outer();\n\
+             inmut enum_value: MaybeText = make_enum();\n\
+             inmut wide: Int128 = make_wide();\n\
+             inmut churned: Int32 = churn();\n\
+           }\n\
+           stdout.println(value.inner.text);\n\
+           match enum_value {\n\
+             MaybeText.Some(text) => stdout.println(text);\n\
+             MaybeText.None => stdout.println(\"empty\");\n\
+           }\n\
+           stdout.println(wide);\n\
+         }\n",
+    )
+    .expect("write managed-result test source");
+    let dir = workspace("concurrent_managed_result_gc");
+    let input_name = "managed_result.zrk";
+    std::fs::copy(&source, dir.join(input_name)).expect("copy managed-result source");
+    let output = Command::new(compiler())
+        .arg("run")
+        .arg(input_name)
+        .env("ZIRK_GC_THRESHOLD", "8192")
+        .env("ZIRK_GC_TRACE", "1")
+        .current_dir(&dir)
+        .output()
+        .expect("run managed-result program under forced GC");
+    let _ = std::fs::remove_file(source);
+
+    assert_eq!(
+        output.status.code().unwrap_or(-1),
+        0,
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[zirk-gc] collection"),
+        "the managed-result regression must observe a real collection; stderr:\n{stderr}"
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "task result survived\nenum result survived\n123456789123456789012345678901234567\n"
+    );
 }
 
 #[test]
@@ -398,6 +641,360 @@ fn removed_concurrency_constructs_name_their_replacement() {
             output.stderr
         );
     }
+}
+
+#[test]
+fn pending_concurrency_types_report_the_phase_gate() {
+    for name in [
+        "thread_pending_type",
+        "rwlock_pending_type",
+        "semaphore_pending_type",
+        "barrier_pending_type",
+        "once_pending_type",
+    ] {
+        let source = corpus("invalid").join(format!("{name}.zrk"));
+        let output = zirk("check", &source, &format!("pending_{name}"), &[]);
+
+        assert_ne!(output.status, 0, "`{name}` should remain unavailable");
+        assert!(
+            output.stderr.contains("error[E0402]"),
+            "`{name}` should use the pending-type diagnostic:\n{}",
+            output.stderr
+        );
+        assert!(
+            output
+                .stderr
+                .contains("exists in the language but arrives in Phase 5"),
+            "`{name}` should identify its delivery phase:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn mutex_with_mutates_the_protected_payload_across_calls() {
+    let source = corpus("valid").join("mutex_with_mutates_payload.zrk");
+    let output = zirk("run", &source, "mutex_with_mutates_payload", &[]);
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "2\n");
+}
+
+#[test]
+fn mutex_roots_nested_record_references_while_mutating_inline_fields() {
+    let source = corpus("valid").join("mutex_with_nested_record.zrk");
+    let output = zirk_with_runtime_env(
+        "run",
+        &source,
+        "mutex_with_nested_record",
+        "mutex_with_nested_record.zrk",
+        &[],
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "8\n");
+}
+
+#[test]
+fn mutex_with_unlocks_after_source_exception_and_can_be_reacquired() {
+    let source = corpus("valid").join("mutex_with_exception_unlock.zrk");
+    let output = zirk("run", &source, "mutex_with_exception_unlock", &[]);
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "E_INVALID_ARGUMENT\n9\n");
+}
+
+#[test]
+fn atomic_supported_type_is_accepted_and_unsupported_payload_is_rejected() {
+    let supported = corpus("valid").join("atomic_supported_type.zrk");
+    let output = zirk("check", &supported, "atomic_supported_type", &[]);
+    assert_eq!(
+        output.status, 0,
+        "Atomic<Int32> is a supported type:\n{}",
+        output.stderr
+    );
+
+    let unsupported = corpus("invalid").join("atomic_unsupported_payload.zrk");
+    let output = zirk("check", &unsupported, "atomic_unsupported_payload", &[]);
+    assert_ne!(output.status, 0, "Atomic<String> must be rejected");
+    assert!(
+        output.stderr.contains("error[E0403]") || output.stderr.contains("error[E0402]"),
+        "unsupported Atomic payload should fail type checking:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+
+    let ordering = corpus("invalid").join("atomic_weak_order_requires_unsafe.zrk");
+    let output = zirk("check", &ordering, "atomic_weak_order_requires_unsafe", &[]);
+    assert_ne!(output.status, 0, "weaker atomic ordering requires unsafe");
+    assert!(
+        output
+            .stderr
+            .contains("non-sequentially-consistent atomic ordering"),
+        "ordering violation should be diagnosed at the CLI boundary:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn concurrent_protect_requires_non_suspending_cleanup() {
+    let invalid = corpus("invalid").join("concurrent_protect_suspension_rejected.zrk");
+    let output = zirk("check", &invalid, "protect_suspension_rejected", &[]);
+    assert_ne!(output.status, 0, "suspending cleanup must be rejected");
+    assert!(
+        output.stderr.contains("error[E0483]"),
+        "suspending cleanup should retain the guard diagnostic:\n{}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+
+    let valid = corpus("valid").join("concurrent_protect_cleanup.zrk");
+    let expected = std::fs::read_to_string(valid.with_extension("out"))
+        .expect("valid cleanup fixture has expected output");
+    let output = zirk("run", &valid, "protect_cleanup", &[]);
+    assert_eq!(
+        output.status, 0,
+        "synchronous cleanup should run:\n{}",
+        output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn thread_run_executes_managed_callback_and_returns_its_result() {
+    for fixture in ["thread_run_managed_result", "thread_run_throwable"] {
+        let source = corpus("valid").join(format!("{fixture}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("managed Thread.run fixture has expected output");
+        let output = zirk("run", &source, fixture, &[]);
+        assert_eq!(output.status, 0, "{fixture}: {}", output.stderr);
+        assert_eq!(normalize(&output.stdout), normalize(&expected), "{fixture}");
+    }
+}
+
+#[test]
+fn thread_run_preserves_ownership_diagnostics() {
+    for (fixture, ownership_code) in [
+        ("thread_run_mutable_capture", "E0430"),
+        ("thread_run_pointer_result", "E0482"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("thread_run_security_{fixture}"),
+            &[],
+        );
+
+        assert_ne!(output.status, 0, "{fixture} must remain rejected");
+        let ownership_reported = output.stderr.contains(&format!("error[{ownership_code}]"))
+            || (fixture == "thread_run_mutable_capture" && output.stderr.contains("mutable alias"));
+        assert!(
+            ownership_reported,
+            "{fixture} must report its ownership failure as well:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn thread_run_checks_effects_and_accepts_complete_callbacks() {
+    for (fixture, forbidden_effect) in [
+        ("thread_run_transitive_channel_effect", "E0484"),
+        ("thread_run_try_channel", "E0484"),
+        ("thread_run_transitive_unsafe_effect", "E0484"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, &format!("thread_effect_{fixture}"), &[]);
+        assert_ne!(output.status, 0, "{fixture} must remain rejected");
+        assert!(
+            output
+                .stderr
+                .contains(&format!("error[{forbidden_effect}]")),
+            "{fixture} must preserve the effect diagnostic alongside the gate:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let source = corpus("valid").join("thread_run_managed_result.zrk");
+    let output = zirk("check", &source, "thread_pure_callback_check", &[]);
+    assert_eq!(output.status, 0, "{}", output.stderr);
+}
+
+#[test]
+fn concurrent_boundary_fixtures_reject_invalid_result_and_thunk_types() {
+    for (fixture, expected_code) in [
+        ("concurrent_of_heterogeneous_results", "E0403"),
+        ("concurrent_each_void_result", "E0403"),
+        ("concurrent_each_settled_void_result", "E0403"),
+        ("concurrent_each_non_collection", "E0403"),
+        ("concurrent_each_nontransferable_result", "E0482"),
+        ("concurrent_each_nested_mutable_element", "E0482"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("concurrent_boundary_{fixture}"),
+            &[],
+        );
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{expected_code}]")),
+            "{fixture} must fail at its source type boundary:\n{}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+fn ownership_boundary_corpus_covers_each_exercisable_api_boundary() {
+    for (fixture, expected_code) in [
+        ("spawn_mutable_capture", "E0430"),
+        ("spawn_nontransferable_result", "E0482"),
+        ("channel_nontransferable_send", "E0482"),
+        ("channel_nontransferable_receive", "E0482"),
+        ("timer_mutable_capture", "E0430"),
+        ("timer_nontransferable_result", "E0482"),
+        ("parallel_nontransferable_result", "E0482"),
+        ("concurrent_of_mutable_capture", "E0430"),
+        ("concurrent_of_nontransferable_result", "E0482"),
+        ("concurrent_each_mutable_capture", "E0430"),
+        ("concurrent_detach_mutable_capture", "E0430"),
+        ("parallel_boundary_alias", "E0430"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk(
+            "check",
+            &source,
+            &format!("ownership_boundary_{fixture}"),
+            &[],
+        );
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{expected_code}]")),
+            "{fixture} must report its boundary ownership error {expected_code}:\n{}",
+            output.stderr
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{fixture} unexpectedly wrote stdout"
+        );
+    }
+}
+
+#[test]
+fn service_source_callbacks_register_ready_and_shutdown_cleanly() {
+    for fixture in [
+        "application_spawn_service_lambda",
+        "application_spawn_service_named",
+        "application_spawn_service_capacity_catch",
+        "application_spawn_service_ready_lifecycle_error",
+    ] {
+        let source = corpus("valid").join(format!("{fixture}.zrk"));
+        let output = zirk("run", &source, fixture, &[]);
+        assert_eq!(output.status, 0, "{fixture}: {}", output.stderr);
+        let expected = match fixture {
+            "application_spawn_service_capacity_catch" => "E_SERVICE_CAPACITY\n",
+            "application_spawn_service_ready_lifecycle_error" => "E_SERVICE_LIFECYCLE\n",
+            _ => "ready\n",
+        };
+        assert_eq!(normalize(&output.stdout), expected, "{fixture}");
+    }
+}
+
+#[test]
+fn service_callback_shape_ownership_capability_and_namespace_are_checked() {
+    for (fixture, code) in [
+        ("application_spawn_service_wrong_signature", "E0403"),
+        ("application_spawn_service_mutable_capture", "E0430"),
+        ("service_context_ready_outside_callback", "E0403"),
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, fixture, &[]);
+        assert_ne!(output.status, 0, "{fixture} must be rejected");
+        assert!(
+            output.stderr.contains(&format!("error[{code}]")),
+            "{fixture}: {}",
+            output.stderr
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let source = corpus("invalid").join("application_namespace_shadowed.zrk");
+    let output = zirk("check", &source, "application_namespace_shadowed", &[]);
+    assert_ne!(
+        output.status, 0,
+        "a shadowed application name is an ordinary value"
+    );
+    assert!(
+        !output.stderr.contains("type-checked but not lowered"),
+        "shadowing must disable the builtin: {}",
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn concurrent_each_collection_requires_strict_deep_share_ownership() {
+    for fixture in [
+        "concurrent_each_mutable_list",
+        "concurrent_each_inline_list",
+    ] {
+        let source = corpus("invalid").join(format!("{fixture}.zrk"));
+        let output = zirk("check", &source, &format!("each_ownership_{fixture}"), &[]);
+
+        assert_ne!(
+            output.status, 0,
+            "{fixture} must fail the ownership boundary"
+        );
+        assert!(
+            output.stderr.contains("error[E0482]"),
+            "{fixture} must fail with the ownership diagnostic:\n{}",
+            output.stderr,
+        );
+        assert!(output.stdout.is_empty());
+    }
+
+    let strict = corpus("valid").join("concurrent_each_ordered.zrk");
+    let output = zirk("check", &strict, "each_ownership_strict_list", &[]);
+    assert_eq!(
+        output.status, 0,
+        "a deeply shareable strict binding is supported:\n{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("error[E0424]"), "{}", output.stderr);
+}
+
+#[test]
+fn concurrent_first_wrong_arity_has_a_specific_diagnostic() {
+    let source = corpus("invalid").join("concurrent_first_wrong_arity.zrk");
+    let output = zirk("check", &source, "first_wrong_arity", &[]);
+    assert_ne!(output.status, 0);
+    assert!(output.stderr.contains("error[E0406]"), "{}", output.stderr);
+    assert!(
+        output
+            .stderr
+            .contains("`Concurrent.first()` takes no arguments"),
+        "{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("E0424"), "{}", output.stderr);
 }
 
 #[test]
@@ -690,7 +1287,15 @@ fn standard_error_is_written_to_the_process_error_stream() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(output.stdout, "");
-    assert_eq!(output.stderr, "warning");
+    // CI enables the optional LLVM progress trace to diagnose native backend
+    // failures. Keep the assertion focused on the program's stderr payload.
+    let program_stderr = output
+        .stderr
+        .lines()
+        .filter(|line| !line.starts_with("[zirk-codegen] "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(program_stderr, "warning");
 }
 
 #[test]

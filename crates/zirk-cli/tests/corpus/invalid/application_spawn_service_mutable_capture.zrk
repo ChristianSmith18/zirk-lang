@@ -1,0 +1,15 @@
+import { stdout } from std.io;
+
+class Counter {
+    mut value: Int32;
+    construct() { this.value = 1; }
+    read(): Int32 { return this.value; }
+}
+
+fn main(): Void {
+    mut counter = Counter();
+    application.spawn_service((context: ServiceContext): Void => {
+        stdout.println(counter.read());
+        context.ready();
+    });
+}

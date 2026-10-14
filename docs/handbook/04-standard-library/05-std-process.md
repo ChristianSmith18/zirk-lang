@@ -15,7 +15,7 @@ inmut operation = Process.command("git")
     .capture()
     .run(timeout: 5s);
 
-match await operation {
+match operation {
     Ok(result) => inspect(result),
     Error(error) => report(error),
 }
@@ -97,10 +97,9 @@ reaps the exit. This policy prevents zombies and leaked pipes. A process may
 outlive its scope only through explicit privileged `detach()`, which transfers
 responsibility rather than silently abandoning it.
 
-Child operations are task-aware cancellation points. Cancelling a task requests
-child cleanup and awaits it before the task finishes. Processes therefore obey
-the same `Task.all`, `Task.first`, `Task.settled` and `select` policies as other
-structured work.
+Child operations are cooperative cancellation points. Cancelling a branch
+requests child cleanup and waits for it before the branch finishes. Process
+operations do not expose the removed `Task` aggregation or `select` APIs.
 
 ## Pipelines
 

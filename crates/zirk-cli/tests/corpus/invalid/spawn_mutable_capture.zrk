@@ -1,0 +1,7 @@
+fn main(): Void {
+    mut rows: List<Int32> = [1];
+    concurrent {
+        mut job: Job<Int32> = spawn (): Int32 => rows[0];
+        mut value: Int32 = job.wait();
+    }
+}

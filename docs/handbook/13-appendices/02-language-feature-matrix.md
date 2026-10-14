@@ -10,7 +10,7 @@
 | Time | `Duration` nanosecond primitive; civil/zone temporal family |
 | Failure | `Result`, exceptions, `fatalError` |
 | Memory | Automatic; no public ownership/RC semantics |
-| Concurrency | `task`, `await`, `parallel`, `thread`, channels |
+| Concurrency | `concurrent`, `spawn`/`Job<T>`, `Timer`, `parallel`, typed channels; managed OS threads and synchronization APIs are not currently exposed |
 | Resources | `Resource<E>` and `match with` |
 | Native | C ABI, `unsafe`, pointers, intrinsics, SIMD |
 | Build | LLVM, portable IR, native targets, locked packages |

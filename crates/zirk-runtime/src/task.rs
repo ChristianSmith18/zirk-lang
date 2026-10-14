@@ -14,6 +14,15 @@ use std::any::Any;
 use crate::collector::Frame;
 use crate::context::TaskContext;
 
+/// Maximum number of non-terminal tasks admitted by one executor.
+pub const MAX_ACTIVE_TASKS: usize = 4096;
+
+/// A task could not be admitted by its executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskAdmissionError {
+    CapacityExceeded,
+}
+
 /// A generational reference to a task slot in the [`TaskRegistry`].
 ///
 /// Packs to a `u64` (`generation << 32 | index`) for the `extern "C"` surface
@@ -50,8 +59,16 @@ impl ScopeId {
 /// Runtime bookkeeping for a lexical `concurrent` scope. Failures are kept as
 /// task ids: their outcome remains owned by the task control block until the
 /// scope has joined and propagated it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScopeMode {
+    #[default]
+    FailFast,
+    CollectAll,
+}
+
 #[derive(Debug, Default)]
 pub struct ScopeControlBlock {
+    pub mode: ScopeMode,
     pub branches: Vec<TaskId>,
     /// Timer jobs are owned by the lexical scope but do not participate in
     /// its join. Closing the scope requests their cancellation so a periodic
@@ -198,6 +215,8 @@ pub enum WaitReason {
     Yielded,
     /// Blocked in `await` on another task; wakes when that task is terminal.
     AwaitingTask(TaskId),
+    /// Blocked until any task in the executor's wait set becomes terminal.
+    AwaitingAny,
     /// Blocked on a timer; wakes when it fires. The `u64` is the timer id
     /// (`crate::timer::TimerId`), stored untyped to keep this module leaf.
     Timer(u64),
@@ -206,20 +225,60 @@ pub enum WaitReason {
     /// branches keep running; it wakes when every chunk has joined
     /// (`ADR-019` D1, `parallel-cpu-regions`).
     Parallel,
+    /// Parked until a registered managed-pool callback publishes an event.
+    PoolEvent,
     /// Blocked sending to a full channel. The channel owns a stable copy of
     /// the element until it is accepted or the branch resumes for closure or
     /// cancellation.
     ChannelSend,
     /// Blocked receiving from an empty open channel.
     ChannelReceive,
+    /// Blocked waiting to acquire a cooperative mutex.
+    Mutex,
+    /// Blocked waiting to acquire a cooperative read/write lock.
+    RwLock,
+    /// Blocked waiting for a cooperative semaphore permit.
+    Semaphore,
+    /// Blocked at a cooperative fixed-party barrier.
+    Barrier,
+    /// Blocked while another task initializes a cooperative once cell.
+    Once,
 }
 
 /// What a finished task produced.
 pub enum TaskOutcome {
-    /// The body returned this machine word (0 for `Void`).
+    /// The body returned one machine word. Generated non-void Zirk branches
+    /// use it for a descriptor-backed managed result box; runtime-native tasks
+    /// may also use a scalar word. `Void` uses zero.
     Value(usize),
     /// The body panicked / an unhandled throwable escaped.
     Panicked(Box<dyn Any + Send>),
+}
+
+/// Status values returned by the internal `zirk_rt_job_outcome_take` ABI.
+/// Keep this representation stable for compiler codegen.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobOutcomeStatus {
+    Fulfilled = 0,
+    Rejected = 1,
+    Cancelled = 2,
+    /// The waiting caller was cancelled. The target outcome remains available.
+    CallerCancelled = 3,
+}
+
+/// Status values returned when a collect-all scope yields its earliest
+/// unconsumed child outcome. Keep aligned with the generated-code ABI.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeOutcomeStatus {
+    Fulfilled = 0,
+    Rejected = 1,
+    Cancelled = 2,
+    CallerCancelled = 3,
+    /// Every registered child result has already been consumed (or the scope
+    /// has no children); `ordinal_out` is set to `u64::MAX`.
+    Drained = 4,
 }
 
 /// The default cancellation reason (`STRUCTURED_CONCURRENCY_SEMANTICS.md` §3).
@@ -251,6 +310,8 @@ pub struct TaskControlBlock {
     pub context: Option<TaskContext>,
     /// `Some` once the body has finished; taken exactly once by `await`.
     pub outcome: Option<TaskOutcome>,
+    /// Monotonic executor sequence assigned at terminal completion.
+    pub completion_sequence: Option<u64>,
     /// Set by `await` when it takes `outcome`; a second `await` is a fatal
     /// use-after-consume.
     pub result_consumed: bool,
@@ -260,6 +321,13 @@ pub struct TaskControlBlock {
     /// Cooperative-cancellation flag; read at safe points by the
     /// structured-tasks change.
     pub cancel_requested: bool,
+    /// This timer-backed task owns a TimerService capacity reservation until
+    /// terminal completion, including periodic callback gaps.
+    pub timer_reservation: bool,
+    /// Promote failures raised by cancellation cleanup to a failed job outcome.
+    pub promote_cancel_cleanup_failure: bool,
+    /// First cleanup Throwable, retained as a GC root until outcome transfer.
+    pub cancel_cleanup_failure: Option<usize>,
     pub cancel_reason: Option<CancelReason>,
     /// `cancellation shield` nesting; delivery deferred while `> 0`.
     pub shield_depth: u32,
@@ -280,10 +348,14 @@ impl TaskControlBlock {
             state: TaskState::Ready,
             context: Some(context),
             outcome: None,
+            completion_sequence: None,
             result_consumed: false,
             waiter: None,
             wait: WaitReason::None,
             cancel_requested: false,
+            timer_reservation: false,
+            promote_cancel_cleanup_failure: false,
+            cancel_cleanup_failure: None,
             cancel_reason: None,
             shield_depth: 0,
             roots: Vec::new(),

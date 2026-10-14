@@ -15,17 +15,94 @@ use zirk_browser::contract::{Completion, FailureKind, Request};
 /// Programs the browser deliberately cannot run, with the feature label the
 /// capability diagnostic must name.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("app_shutdown_grace_configured", "managed background work"),
+    (
+        "background_error_handler_failure_contained",
+        "managed background work",
+    ),
+    (
+        "background_error_handler_receives_throwable",
+        "managed background work",
+    ),
+    ("atomic_managed_operations", "type Atomic"),
+    ("atomic_supported_type", "type Atomic"),
     ("concurrent_dataflow", "job handles"),
+    (
+        "concurrent_detach_capacity_and_reuse",
+        "managed background work",
+    ),
+    (
+        "concurrent_detach_runs_and_drains",
+        "managed background work",
+    ),
     ("concurrent_fanout", "job handles"),
+    (
+        "concurrent_each_caller_cancel_joins",
+        "structured concurrency",
+    ),
+    (
+        "concurrent_each_fail_fast_cancels_and_joins",
+        "managed completion outcomes",
+    ),
+    (
+        "concurrent_each_invalid_before_admission",
+        "managed completion outcomes",
+    ),
+    ("concurrent_each_ordered", "managed completion outcomes"),
+    (
+        "concurrent_each_settled_caller_cancel_joins",
+        "structured concurrency",
+    ),
+    (
+        "concurrent_each_settled_ordered",
+        "managed completion outcomes",
+    ),
+    ("concurrent_first_all_fail_suppressed", "timers"),
+    ("concurrent_first_cleanup_failure", "job handles"),
+    ("concurrent_first_completion_order", "job handles"),
+    ("concurrent_first_failure_then_success", "timers"),
+    ("concurrent_first_tie_input_order", "job handles"),
+    ("concurrent_within_first_caller_cancellation", "timers"),
+    (
+        "concurrent_within_first_roots_managed_winner",
+        "job handles",
+    ),
+    ("concurrent_within_first_timeout", "job handles"),
+    ("concurrent_within_first_timeout_joins_cleanup", "timers"),
+    ("concurrent_within_first_winner", "job handles"),
+    ("concurrent_within_negative_duration", "job handles"),
+    ("concurrent_within_settled_success", "job handles"),
+    ("concurrent_within_settled_timeout", "job handles"),
+    ("concurrent_within_settled_timeout_joins_cleanup", "timers"),
+    (
+        "concurrent_settled_failure_channels",
+        "managed completion outcomes",
+    ),
+    (
+        "concurrent_settled_nested_payload",
+        "managed completion outcomes",
+    ),
+    ("concurrent_settled_success", "managed completion outcomes"),
     ("concurrent_sibling_failure", "timers"),
     ("concurrent_spawn_loop", "structured concurrency"),
+    ("concurrent_task_capacity_ceiling", "structured concurrency"),
     ("dependent_local_only", "type Dependent"),
     ("extern_call", "`unsafe` journal blocks"),
     ("native_slice_basic", "type NativeSliceMut"),
     ("native_slice_bounds_error_caught", "type NativeSlice"),
+    ("mutex_with_exception_unlock", "type Mutex"),
+    ("mutex_with_mutates_payload", "type Mutex"),
+    ("mutex_with_nested_record", "type Mutex"),
     ("parallel_adapter", "`parallel` regions"),
     ("parallel_cores_option", "`parallel` regions"),
     ("parallel_for", "`parallel` regions"),
+    ("application_spawn_service_capacity_catch", "ServiceReady"),
+    ("application_spawn_service_lambda", "ServiceStart"),
+    ("application_spawn_service_named", "ServiceReady"),
+    (
+        "application_spawn_service_ready_lifecycle_error",
+        "ServiceStart",
+    ),
     ("phase_4e_surface", "type Dependent"),
     ("pin_automatic_unpin", "type Pin"),
     (
@@ -39,6 +116,8 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("slice_extent_ok", "`unsafe` journal blocks"),
     ("timer_every_stops", "structured concurrency"),
     ("timer_sleep_yields", "timers"),
+    ("thread_run_managed_result", "managed native threads"),
+    ("thread_run_throwable", "managed native threads"),
     ("transfer_resource", "resource transfer"),
     ("typed_channel_basic", "type Channel"),
     ("universal_to_string", "structured concurrency"),
@@ -116,7 +195,9 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
             (None, None) => {
                 if response.completion != Some(Completion::Completed) || output != expected {
                     problems.push(format!(
-                        "{name}: browser output differs from native\nexpected: {expected:?}\nactual:   {output:?}"
+                        "{name}: browser output differs from native\nexpected: {expected:?}\nactual:   {output:?}\ncompletion: {:?}\ndiagnostics: {:?}",
+                        response.completion,
+                        response.diagnostics.iter().map(|diagnostic| (&diagnostic.code, &diagnostic.message)).collect::<Vec<_>>()
                     ));
                 } else {
                     passed += 1;

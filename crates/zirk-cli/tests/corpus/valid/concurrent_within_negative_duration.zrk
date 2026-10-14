@@ -1,0 +1,12 @@
+import { stdout } from std.io;
+fn main(): Void {
+    try {
+        mut value: Int32 = Concurrent.of(
+            (): Int32 => { stdout.println("branch started"); return 1; },
+            (): Int32 => 2,
+        ).within(-1ms).first();
+        stdout.println(value);
+    } catch NativeError(e) {
+        stdout.println("invalid duration");
+    }
+}

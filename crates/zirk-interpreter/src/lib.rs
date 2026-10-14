@@ -875,15 +875,32 @@ fn excluded_feature(kind: &InstKind) -> (String, String) {
         .unwrap_or_default()
         .to_string();
     let feature = match variant.as_str() {
-        "ScopeEnter" | "ScopeExit" | "BranchStart" => {
-            "structured concurrency (`concurrent`, `spawn`)"
+        "ScopeEnter"
+        | "ScopeExit"
+        | "ScopeEnterCollectAll"
+        | "ScopeExitCollectAll"
+        | "ScopeCancel"
+        | "BranchStart" => "structured concurrency (`concurrent`, `spawn`)",
+        "BackgroundStart" | "AppSetShutdownGrace" | "AppSetBackgroundError" => {
+            "managed background work"
         }
+        "ThreadRun" => "managed native threads",
         "ParallelForStart" => "`parallel` regions",
-        "JobWait" | "JobDone" | "JobCancel" => "job handles",
+        "JobWait"
+        | "JobWaitAny"
+        | "JobWaitAnyWithTimer"
+        | "JobDone"
+        | "JobCancel"
+        | "JobCancelWithCleanupFailure" => "job handles",
+        "JobOutcomeWaitTake" | "ScopeOutcomeWaitTake" | "JobOutcomeTake" | "JobResultLoad" => {
+            "managed completion outcomes"
+        }
         "TimerSleep" => "timers",
         "ResourceTransfer" => "resource transfer",
         "DependentFrom" => "dependent references",
+        name if name.starts_with("Atomic") => "managed `Atomic<T>` operations",
         "PinObject" | "UnpinObject" => "pinning",
+        "MutexAcquire" | "MutexRelease" => "synchronization locks",
         name if name.starts_with("Channel") => "channels",
         name if name.starts_with("Pointer") => "`Pointer<T>` operations",
         name if name.starts_with("Weak") => "`Weak<T>`",
@@ -1371,6 +1388,25 @@ impl<'module> Interpreter<'module> {
         host: &mut dyn InterpreterHost,
     ) -> Result<Option<Value>, ExecutionFault> {
         match &instruction.kind {
+            // The interpreter owns its heap and does not run generated code on
+            // concurrent managed mutators. Polls are therefore semantic
+            // no-ops here; native codegen maps the same IR instruction to the
+            // runtime collector ABI.
+            InstKind::SafepointPoll => Ok(None),
+            // Job values and the completion-order scheduler are not modeled by
+            // this interpreter. Browser preflight rejects this operation; keep
+            // a defensive failure here so future execution paths cannot invent
+            // a completion index or confuse cancellation with a completed job.
+            InstKind::JobWaitAny { .. } => Err(ExecutionFault::Internal(
+                "JobWaitAny cannot execute without interpreter job handles and a scheduler".into(),
+            )),
+            InstKind::JobWaitAnyWithTimer { .. } => Err(ExecutionFault::Internal(
+                "JobWaitAnyWithTimer cannot execute without interpreter job handles and a scheduler"
+                    .into(),
+            )),
+            InstKind::ThreadRun { .. } => Err(ExecutionFault::Internal(
+                "ThreadRun requires the native managed-thread runtime and is unavailable in the interpreter".into(),
+            )),
             InstKind::FatalError(message) => Err(ExecutionFault::Runtime {
                 category: "FatalError".into(),
                 message: self.render_value(frame_index, *message)?,
@@ -5601,7 +5637,10 @@ pub const fn type_support(ty: IrType) -> BrowserSupport {
         | IrType::NativeSlice(_)
         | IrType::NativeSliceMut(_)
         | IrType::Dependent(_)
-        | IrType::Pin(_) => BrowserSupport::Excluded,
+        | IrType::Pin(_)
+        | IrType::BorrowedView { .. }
+        | IrType::Atomic(_)
+        | IrType::Mutex(_) => BrowserSupport::Excluded,
     }
 }
 
@@ -5621,6 +5660,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::ConstBool(_)
         | InstKind::Load(_)
         | InstKind::Store(_, _)
+        | InstKind::SafepointPoll
         | InstKind::BuildValue { .. }
         | InstKind::BuildEnum { .. }
         | InstKind::Discriminant(_)
@@ -5710,6 +5750,18 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::IsCancelled
         | InstKind::CancelShieldEnter
         | InstKind::CancelShieldExit => BrowserSupport::BoundedHost,
+        InstKind::MutexAcquire { .. } | InstKind::MutexRelease { .. } => BrowserSupport::Excluded,
+        InstKind::BorrowViewStart { .. }
+        | InstKind::BorrowViewEnd { .. }
+        | InstKind::BorrowViewLoad { .. }
+        | InstKind::BorrowViewStore { .. }
+        | InstKind::BorrowViewFieldLoad { .. }
+        | InstKind::BorrowViewFieldStore { .. }
+        | InstKind::MutexNew { .. }
+        | InstKind::MutexWithCall { .. } => BrowserSupport::Excluded,
+        // Long-lived application services are hosted by the native executor
+        // and have no browser lifecycle supervisor.
+        InstKind::ServiceStart { .. } | InstKind::ServiceReady { .. } => BrowserSupport::Excluded,
         InstKind::FatalError(_)
         | InstKind::Throw(_)
         | InstKind::SetSuppressed { .. }
@@ -5718,12 +5770,33 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HasPendingException
         | InstKind::TakePendingException => BrowserSupport::StructuredFailure,
         InstKind::ScopeEnter
+        | InstKind::ScopeEnterCollectAll
         | InstKind::ScopeExit { .. }
+        | InstKind::ScopeExitCollectAll { .. }
+        | InstKind::ScopeCancel { .. }
         | InstKind::BranchStart { .. }
+        | InstKind::JobWaitAny { .. }
+        | InstKind::JobWaitAnyWithTimer { .. }
+        | InstKind::JobOutcomeWaitTake { .. }
+        | InstKind::ScopeOutcomeWaitTake { .. }
+        | InstKind::JobOutcomeTake { .. }
+        | InstKind::JobResultLoad { .. }
         | InstKind::ParallelForStart { .. }
         | InstKind::JobWait { .. }
+        | InstKind::ThreadRun { .. }
+        | InstKind::AppSetShutdownGrace { .. }
+        | InstKind::AppSetBackgroundError { .. }
         | InstKind::JobDone { .. }
         | InstKind::JobCancel { .. }
+        | InstKind::JobCancelWithCleanupFailure { .. }
+        | InstKind::BackgroundStart { .. }
+        | InstKind::AtomicNew { .. }
+        | InstKind::AtomicLoad { .. }
+        | InstKind::AtomicStore { .. }
+        | InstKind::AtomicExchange { .. }
+        | InstKind::AtomicFetchAdd { .. }
+        | InstKind::AtomicFetchSub { .. }
+        | InstKind::AtomicCompareExchange { .. }
         | InstKind::TimerSleep { .. }
         | InstKind::ChannelNew { .. }
         | InstKind::ChannelSend { .. }
@@ -5986,6 +6059,261 @@ mod tests {
             BrowserSupport::Direct
         );
         assert_eq!(type_support(IrType::Job), BrowserSupport::Excluded);
+        assert_eq!(
+            type_support(IrType::Atomic(zirk_ir::AtomicKind::I32)),
+            BrowserSupport::Excluded
+        );
+    }
+
+    #[test]
+    fn managed_atomic_instructions_fail_closed_with_a_capability_diagnostic() {
+        for instruction in [
+            InstKind::AtomicNew {
+                kind: zirk_ir::AtomicKind::I32,
+                value: Operand(ValueId(0)),
+                object: SlotId(0),
+            },
+            InstKind::AtomicLoad {
+                object: Operand(ValueId(0)),
+                order: None,
+                out: SlotId(0),
+            },
+        ] {
+            assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+            assert_eq!(
+                excluded_feature(&instruction).0,
+                "managed `Atomic<T>` operations"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_run_is_excluded_from_browser_and_interpreter_execution() {
+        let instruction = InstKind::ThreadRun {
+            callable_slot: SlotId(0),
+            result_slot: None,
+            exception_slot: SlotId(1),
+        };
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("managed native threads".into(), "ThreadRun".into())
+        );
+
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: vec![
+                    Slot {
+                        name: "callable".into(),
+                        ty: IrType::Callable(0),
+                        span: Span::empty(0),
+                    },
+                    Slot {
+                        name: "exception".into(),
+                        ty: IrType::Object(0),
+                        span: Span::empty(0),
+                    },
+                ],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: instruction,
+                        ty: IrType::Int(IntWidth::U32),
+                        span: Span::empty(7),
+                    }],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: vec![SlotId(0), SlotId(1)],
+            }],
+            closures: vec![zirk_ir::ClosureLayout {
+                captures: vec![],
+                params: vec![],
+                returns: IrType::Void,
+            }],
+            objects: vec![zirk_ir::ObjectLayout {
+                name: "Throwable".into(),
+                fields: vec![],
+                contracts: vec![],
+                methods: vec![],
+                ancestors: vec![0],
+            }],
+            ..Module::default()
+        };
+        let failures =
+            preflight(&module).expect_err("managed native threads have no browser executor");
+        assert!(failures.iter().any(|failure| {
+            failure.code == "ZB002" && failure.message.contains("managed native threads")
+        }));
+    }
+
+    #[test]
+    fn background_start_is_excluded_with_a_managed_background_diagnostic() {
+        let instruction = InstKind::BackgroundStart {
+            target: "background.test".into(),
+            body: Operand(ValueId(0)),
+            status_slot: SlotId(0),
+        };
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("managed background work".into(), "BackgroundStart".into())
+        );
+    }
+
+    #[test]
+    fn app_shutdown_grace_is_excluded_with_a_managed_background_diagnostic() {
+        let instruction = InstKind::AppSetShutdownGrace {
+            nanos: Operand(ValueId(0)),
+        };
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            (
+                "managed background work".into(),
+                "AppSetShutdownGrace".into()
+            )
+        );
+    }
+
+    #[test]
+    fn job_wait_any_is_excluded_with_a_job_handles_diagnostic() {
+        let instruction = InstKind::JobWaitAny {
+            jobs: vec![Operand(ValueId(0)), Operand(ValueId(1))],
+        };
+
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("job handles".into(), "JobWaitAny".into())
+        );
+
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(2)),
+                        kind: instruction,
+                        ty: IrType::Int(IntWidth::U64),
+                        span: Span::empty(7),
+                    }],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+
+        let failures = preflight(&module).expect_err("wait-any needs the native scheduler");
+        assert!(failures.iter().any(|failure| {
+            failure.code == "ZB002"
+                && failure.span == Some(Span::empty(7))
+                && failure.message.contains("job handles")
+                && failure.message.contains("JobWaitAny")
+        }));
+    }
+
+    #[test]
+    fn job_wait_any_with_timer_is_excluded_with_a_job_handles_diagnostic() {
+        let instruction = InstKind::JobWaitAnyWithTimer {
+            jobs: vec![
+                Operand(ValueId(0)),
+                Operand(ValueId(1)),
+                Operand(ValueId(2)),
+            ],
+        };
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("job handles".into(), "JobWaitAnyWithTimer".into())
+        );
+
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Job,
+                            span: Span::empty(1),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Job,
+                            span: Span::empty(2),
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::Undefined,
+                            ty: IrType::Job,
+                            span: Span::empty(3),
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: instruction.clone(),
+                            ty: IrType::Int(IntWidth::U64),
+                            span: Span::empty(11),
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let failures =
+            preflight(&module).expect_err("timer wait-any requires the native scheduler");
+        assert!(failures.iter().any(|failure| {
+            failure.code == "ZB002"
+                && failure.span == Some(Span::empty(11))
+                && failure.message.contains("job handles")
+                && failure.message.contains("JobWaitAnyWithTimer")
+        }));
+
+        // Even if a caller bypasses browser preflight, the interpreter must
+        // fail closed instead of inventing a completion index or timeout.
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let mut host = CapturedHost::default();
+        let error = interpreter
+            .execute_instruction(0, &module.functions[0].blocks[0].instructions[3], &mut host)
+            .unwrap_err();
+        assert!(
+            matches!(error, ExecutionFault::Internal(message) if message.contains("JobWaitAnyWithTimer") && message.contains("scheduler"))
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_cancellation_is_excluded_with_a_job_handles_diagnostic() {
+        let instruction = InstKind::JobCancelWithCleanupFailure {
+            job: Operand(ValueId(0)),
+        };
+
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("job handles".into(), "JobCancelWithCleanupFailure".into())
+        );
     }
 
     #[test]

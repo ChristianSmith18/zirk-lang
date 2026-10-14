@@ -1,0 +1,28 @@
+import { stdout } from std.io;
+
+record Payload {
+    text: String;
+}
+
+fn main(): Void {
+    mut outcomes = Concurrent.of(
+        (): Payload => Payload(text: "nested settled one"),
+        (): Payload => Payload(text: "nested settled two"),
+    ).settled(
+
+    );
+
+    mut i: Int32 = 0;
+    while i < 20_000 {
+        mut temporary: String = "allocation-" + i.to_string();
+        i += 1;
+    }
+
+    for outcome in outcomes {
+        match outcome {
+            Outcome.Fulfilled(payload) => stdout.println(payload.text);
+            Outcome.Rejected(_) => stdout.println("unexpected rejection");
+            Outcome.Cancelled(_) => stdout.println("unexpected cancellation");
+        }
+    }
+}

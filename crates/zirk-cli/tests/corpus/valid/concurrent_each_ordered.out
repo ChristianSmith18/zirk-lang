@@ -1,0 +1,12 @@
+start 1
+start 2
+done 2
+start 3
+done 3
+start 4
+done 4
+done 1
+2
+4
+6
+8

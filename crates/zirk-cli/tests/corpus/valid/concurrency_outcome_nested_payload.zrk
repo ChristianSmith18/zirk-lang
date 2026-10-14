@@ -1,0 +1,26 @@
+import { stdout } from std.io;
+
+enum Payload {
+    Text(value: String),
+}
+
+fn main(): Void {
+    mut outcome: Outcome<Payload> = Outcome.Fulfilled(Payload.Text("kept through GC"));
+
+    // Force allocations and safepoints while the generic Outcome remains live.
+    mut i: Int32 = 0;
+    while i < 20_000 {
+        mut discarded: String = "temporary-" + i.to_string();
+        i += 1;
+    }
+
+    match outcome {
+        Outcome.Fulfilled(payload) => {
+            match payload {
+                Payload.Text(value) => stdout.println(value);
+            }
+        }
+        Outcome.Rejected(_) => stdout.println("unexpected rejection");
+        Outcome.Cancelled(_) => stdout.println("unexpected cancellation");
+    }
+}

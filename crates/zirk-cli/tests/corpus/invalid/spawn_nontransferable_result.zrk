@@ -1,0 +1,7 @@
+fn make_action(): Fn() => Void { return (): Void => { }; }
+fn main(): Void {
+    concurrent {
+        mut job: Job<Fn() => Void> = spawn make_action();
+        mut value: Fn() => Void = job.wait();
+    }
+}

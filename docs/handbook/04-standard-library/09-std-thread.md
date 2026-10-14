@@ -1,8 +1,15 @@
 # `std.thread`
 
+> **Implementation status — specified, not implemented.** This chapter defines
+> the future `std.thread` contract; the current compiler does not expose
+> `Thread<T>` or a Zirk thread-creation/join API. See the [feature status
+> catalog](../../init/ZIRK_FEATURE_STATUS.md) for delivered concurrency
+> capabilities and remaining work.
+
 `Thread<T>` represents an operating-system thread for native affinity, special
 stack/runtime requirements or blocking work that cannot use the standard pool.
-Ordinary concurrent I/O uses tasks and CPU data work uses `std.parallel`.
+Ordinary concurrent I/O uses structured concurrent branches; CPU data work uses
+the delivered `parallel` language surface and its collection operations.
 
 Threads are managed resources: scope exit joins and never abandons one. Creation
 may specify a diagnostic name and stack size, but priority and CPU affinity are

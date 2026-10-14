@@ -1,0 +1,7 @@
+fn waits(): Void {
+    Timer.sleep(1s);
+}
+
+fn main(): Void {
+    Thread.run(waits);
+}

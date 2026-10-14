@@ -79,7 +79,7 @@ fn linger(name: String, counter: Counter): Void throws Boom {
                 }
             } finally {
                 stdout.println("outer cleanup");
-                    fail_cleanup();
+                fail_cleanup();
             }
         }
         Error(_) => { }
@@ -92,12 +92,14 @@ fn main(): Void {
     mut three = Counter();
     mut four = Counter();
     try {
-        concurrent {
-            spawn explode();
-            spawn linger("one", one);
-            spawn linger("two", two);
-            spawn linger("three", three);
-            spawn linger("four", four);
+        unsafe {
+            concurrent {
+                spawn explode();
+                spawn linger("one", one);
+                spawn linger("two", two);
+                spawn linger("three", three);
+                spawn linger("four", four);
+            }
         }
         stdout.println("block completed");
     } catch Boom(e) {

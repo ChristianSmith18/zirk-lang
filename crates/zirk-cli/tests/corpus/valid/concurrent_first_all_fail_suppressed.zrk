@@ -1,0 +1,33 @@
+import { stdout } from std.io;
+
+class FirstFailure implements Throwable {
+    inmut label: String;
+    construct(label: String) { this.label = label; }
+    message(): String { return this.label; }
+    code(): String { return "FIRST_FAILURE"; }
+    cause(): Error? { return null; }
+    stack_trace(): StackTrace { return StackTrace(); }
+}
+
+fn fail_early(): Int32 throws FirstFailure {
+    Timer.sleep(1ms);
+    throw FirstFailure("early");
+}
+
+fn fail_late(): Int32 throws FirstFailure {
+    Timer.sleep(10ms);
+    throw FirstFailure("late");
+}
+
+fn main(): Void {
+    try {
+        mut ignored: Int32 = Concurrent.of(
+            (): Int32 => fail_early(),
+            (): Int32 => fail_late(),
+        ).first();
+        stdout.println(ignored);
+    } catch FirstFailure(primary) {
+        stdout.println(primary.message());
+        stdout.println(primary.suppressed()?.message() ?? "none");
+    }
+}

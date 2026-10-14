@@ -7,12 +7,13 @@
 import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const binary = args.find((arg) => !arg.startsWith("--")) ?? "target/debug/zirk";
-const root = resolve(new URL("..", import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const docsDir = join(root, "docs");
 
 function* markdownFiles(dir) {
@@ -45,9 +46,12 @@ const drifted = [];
 
 for (const file of markdownFiles(docsDir)) {
   const original = readFileSync(file, "utf8");
-  const lines = original.split("\n");
+  const newline = original.includes("\r\n") ? "\r\n" : "\n";
+  const lines = original.split(/\r?\n/);
   const edits = [];
   for (const fence of zirkFences(lines)) {
+    // Normalize extracted code so the canonical check is independent of the
+    // host checkout's Markdown line endings.
     const source = lines.slice(fence.start, fence.end).join("\n") + "\n";
     writeFileSync(scratchFile, source);
     const run = spawnSync(binary, ["format", scratchFile], { encoding: "utf8" });
@@ -69,7 +73,7 @@ for (const file of markdownFiles(docsDir)) {
   for (const edit of edits.reverse()) {
     lines.splice(edit.start, edit.end - edit.start, ...edit.lines);
   }
-  writeFileSync(file, lines.join("\n"));
+  writeFileSync(file, lines.join(newline));
 }
 
 console.log(

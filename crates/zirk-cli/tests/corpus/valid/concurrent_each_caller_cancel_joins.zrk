@@ -1,0 +1,20 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut::strict values: List<Int32> = [1, 2, 3, 4];
+    mut job = spawn {
+        mut results = Concurrent.each(values,(value: Int32): Int32 => {
+            stdout.println("callback started");
+            try {
+                Timer.sleep(500ms);
+            } finally {
+                stdout.println("callback cleanup");
+            }
+            return value;
+        }, 2);
+        stdout.println("returned partial results");
+    };
+    Timer.sleep(10ms);
+    job.cancel();
+    stdout.println("caller cancellation requested");
+}

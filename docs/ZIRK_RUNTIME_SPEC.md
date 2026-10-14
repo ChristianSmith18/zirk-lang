@@ -54,14 +54,42 @@ Normal termination happens when `main` ends and all of its root scopes have
 concluded. Orphan work is never silently awaited.
 
 **Implementation status.** The generated C `main` calls `zirk_rt_init`, then
-`zirk_rt_run_main(zirk_main)`, then — as before — checks for an uncaught Zirk
-exception, then `zirk_rt_shutdown`. `zirk_rt_run_main` runs `zirk_main` as the
+`zirk_rt_run_main_cli(zirk_main)`, then — as before — checks for an uncaught Zirk
+exception, then `zirk_rt_shutdown`. Both `zirk_rt_run_main` and
+`zirk_rt_run_main_cli` run `zirk_main` as the
 **root task (task 0)** of the single-threaded cooperative executor (`ADR-017`)
 and returns only once task 0 and every task it spawned has completed or been
 cleaned — so a background task keeps the process alive after `main` returns. The
 root task gets an 8 MiB stack (`main` historically ran on the OS main-thread
-stack); spawned tasks get 128 KiB. For a program with no `task` / `await` yet,
-`zirk_rt_run_main` is exactly one run of `zirk_main` to completion.
+stack); spawned tasks get 128 KiB. For a program with no `concurrent` / `spawn` yet,
+the selected run-main entrypoint is exactly one run of `zirk_main` to completion.
+
+The runtime also has a provisional, runtime-internal detached-job entry point
+(`zirk_rt_background_spawn`), separate from ordinary structured spawn. It
+admits at most 256 live jobs per executor run, retains each capture block as a
+GC root, and records completion/failure with the background supervisor. When
+the root task completes, admission closes, detached jobs receive cooperative
+cancellation, and the executor allows a fixed five-second grace before
+reporting unfinished job IDs to stderr. This is not yet a Zirk language API:
+`App.background`, `Concurrent.detach`, configurable grace, services, signal
+handling, and managed native-thread integration remain unavailable. The
+executor cannot preempt a task that never yields.
+
+The provisional background-spawn ABI distinguishes status `1` (background
+quota full) from status `4` (the executor's separate 4,096-task quota full),
+so source lowering can report `BackgroundCapacityError` and `TaskCapacityError`
+respectively. Status `2` means background admission is draining; status `3`
+means an internal duplicate/ID-exhaustion condition. Source-level status
+translation is not implemented yet.
+
+The Rust runtime also exposes a bounded `ServiceSupervisor` lifecycle model
+(default capacity 64). It tracks `Created`/`Starting`/`Ready`/`Draining`/
+`Stopped`, required-service readiness, and reverse actual-start-order shutdown.
+Services may declare dependencies on already registered services; startup is
+rejected until those dependencies are ready, and the registration rule makes
+dependency cycles impossible. This module records state and ordering only: it
+does not launch service tasks, retain their managed captures, receive host
+signals, or provide the Zirk `application.spawn_service` API.
 
 ## 3. Scheduler and I/O reactor
 
@@ -81,15 +109,16 @@ where the contract permits.
 is a **single-threaded cooperative executor**: one operating-system thread, a
 first-in-first-out ready queue, and a monotonic timer heap consulted once per
 scheduling turn. It never preempts a running task — a task yields only at a safe
-point (`await`, a suspending channel operation, `select`, a timer wait, an
-explicit cancellation check). There is no multicore pool, no work stealing, and
-no I/O reactor yet: I/O calls still block, and `parallel` / `thread` /
-`task.blocking` are not delivered. This keeps the garbage collector's
-single-threaded assumption intact (`ADR-003`); the multicore scheduler and the
-reactor described above are roadmap Phase 5 steps 4–6.
+point (a suspending `Job.wait`, channel operation, timer wait, or compiler
+safepoint poll in a loop). This is distinct from the separately delivered
+CPU worker pool used by `parallel` regions (see §6): the general task scheduler
+does not yet use multicore scheduling or work stealing, and there is no I/O
+reactor. I/O calls still block, and managed language threads (`Thread.run`)
+remain unavailable. The multicore scheduler and reactor described above are
+roadmap Phase 5 steps 4–6.
 
-Each `task` runs as a **stackful coroutine** (`ADR-017`): it owns a
-heap-allocated stack (fixed 128 KiB) with an OS guard page, and `await` performs
+Each managed executor task runs as a **stackful coroutine** (`ADR-017`): it owns a
+heap-allocated stack (fixed 128 KiB) with an OS guard page, and suspension performs
 a cooperative context switch back to the executor. A plain function call keeps
 the ordinary calling convention whether or not the callee awaits internally —
 there is no `async fn` and no function-body transformation. The context-switch
@@ -101,56 +130,60 @@ everywhere. Garbage-collection roots are enumerated through one shadow-stack
 chain per task, so a suspended task's references stay reachable across a
 collection.
 
-## 4. Tasks and await
+## 4. Structured concurrency
 
-`task` creates managed concurrent work:
+The delivered source surface is `concurrent { ... }`, `spawn`, linear
+`Job<T>` handles, and `Timer`. The former `task` / `await` / `select` language
+surface was removed; runtime task IDs and outcomes are internal scheduler
+concepts, not source-level `Task<T>` values.
+
+`concurrent` establishes a scope for branches, and `spawn` creates a dynamic
+branch whose result is represented by a must-use `Job<T>`:
 
 ```text
-mut operation = task {
-    load_data();
-};
-
-mut result = await operation;
+concurrent {
+    mut job = spawn (): Int32 => compute();
+    mut result = job.wait();
+}
 ```
 
-`await` suspends the current task, not an operating-system thread. There is no
-`async fn`: the type of a function describes its logical value and `task` makes
-concurrent execution explicit.
+`Job.wait()` suspends the current coroutine until the branch completes;
+`Job.cancel()` requests cooperative cancellation and `Job.done` observes
+completion. Scope exit joins or cancels and cleans up its owned branches.
+Unhandled branch failures propagate through scope exit after sibling cleanup.
+For non-void generated task results, the scheduler's one-word result is an
+opaque pointer to a managed box. The box stores the exact target LLVM layout
+of `T`, and its descriptor traces nested references until `Job.wait()` consumes
+the result. The branch thunk roots the box before running user code and fills
+it before publishing task completion; inline records, enums, and wide scalars
+are not reinterpreted as pointers or truncated to one word. Void-like results
+use the zero word. This result transport does not expose `Outcome<T>` or
+enable the still-gated completion combinators.
+`Timer.sleep`, `Timer.after` and `Timer.every` provide the delivered timer
+operations. General detachment and source-level aggregation/select combinators
+remain unavailable.
 
-Tasks are typed, propagate result/error and belong to a scope. On leaving the
-scope, their children must have finished or must receive cooperative
-cancellation and be awaited. No task may be implicitly orphaned.
-
-An unhandled child exception cancels siblings, awaits their cleanup and
-propagates as the primary failure with additional failures suppressed. A
-`Result.Error` is an ordinary fulfilled value. Long-lived work transfers to an
-application root supervisor; general detachment is not part of the contract.
-
-`Task.all` cancels remaining work on the first unhandled exception;
-`Task.first` returns the first completion and cancels the rest; `Task.settled`
-waits for all and preserves input order as `Fulfilled`, `Rejected`, or
-`Cancelled`. Fair `select` waits for one task/channel/timer/cancellation branch,
-supports `default`, and does not cancel losing operations.
+Each executor admits at most 4,096 nonterminal tasks and 4,096 active timer
+registrations. Generated Zirk calls use status-bearing runtime ABIs and lower
+saturation to catchable `TaskCapacityError` or `TimerCapacityError` values; the
+ABI does not encode failure as a task ID. `Timer.after/every` reserve task and
+timer capacity atomically before their callback becomes runnable. A task permit
+is returned after terminal completion and a timer permit after expiry or
+disarm; timer-job reservations persist across periodic waits until the job
+terminates.
 
 ## 5. Cancellation and timeout
 
-Cancellation is cooperative, idempotent and observable at safe points: `await`,
-I/O, channels, timers and checks in long-running loops. `task.cancel()` requests
-cancellation; it does not destroy execution at an arbitrary instruction.
+Cancellation is cooperative and idempotent. Job cancellation and scope exit
+request cancellation; the runtime does not destroy execution at an arbitrary
+instruction. Blocking channel/timer operations return at cancellation safe
+points, and generated cleanup code observes and delivers cancellation after
+cleanup. Loop back-edges poll collector safepoints; those polls do not by
+themselves preempt or cancel a running task.
 
-Cancellation propagates from parent to children. The task performs resource
-cleanup and finishes with a typed recoverable cancellation exception, unless its
-API explicitly turns it into a `Result`.
-
-```text
-await load_data() timeout 5s;
-```
-
-A timeout requests cancellation and produces a recoverable timeout exception.
-It awaits cleanup before `TimeoutError` escapes. `cancellation shield` defers a
-pending cancellation for bounded cleanup and delivers it immediately afterward.
-Durations admit `ms`, `s`, `m` and `h` and are represented internally with
-sufficient precision, even if they may be normalized.
+Timeout operators and source-level cancellation shields are not part of the
+currently available language surface. Timer durations are represented by the
+runtime timer API.
 
 ## 6. Parallel
 
@@ -181,9 +214,64 @@ associative primitives or safe accumulators. Ordered map-like operations
 preserve input order; completion-order variants are explicitly unordered.
 Grouping-sensitive reductions use a deterministic variant.
 
+**Delivered pool and admission behavior.** The runtime's separate parallel
+worker pool is capped at 64 native workers, including when
+`ZIRK_PARALLEL_CORES` requests a higher count. Its pending-job queue is bounded
+to `min(4 × configured_workers, 1,024)`; submissions block with backpressure
+while the queue is full. When the submitting branch belongs to the executor,
+timed waits poll collector safepoints so a worker-triggered collection can progress.
+For `parallel_for`, the runtime partitions the index range into at most the
+queue-window number of jobs and polls the collector after every iteration, so
+large ranges do not allocate one closure per element. `run_region` consumes an
+exact-size job iterator directly, and `parallel_map` creates closures on demand
+as the bounded queue accepts them. Ordered result slots remain proportional to
+the input length; generic callers that construct a `Vec` before calling
+`run_region` also retain that caller-owned vector.
+
+`Executor::with_background_shutdown_grace(Duration)` configures the detached-job
+shutdown grace for runtime callers; `Executor::new()` uses the five-second
+`BACKGROUND_SHUTDOWN_GRACE` default. When that grace expires, the runtime reports unfinished
+jobs. Generated CLI executables exit with status 124; embedded hosts select
+`zirk_rt_run_main_with_deadline_policy` with policy `0` to wait safely or policy
+`1` to exit with status 124. The generic `zirk_rt_run_main` uses policy `0`.
+Process-level exit does not free the heap while native callbacks can still
+reference it; the operating system reclaims it with the process. The wait policy
+continues servicing safepoints and joining outstanding parallel
+regions before unpublishing or freeing the shared heap. Thus the grace deadline
+does not forcibly terminate workers or authorize releasing their roots or heap
+while they may still use them. A worker that never returns can therefore keep
+the wait policy, and host-controlled shutdown, waiting indefinitely. This guarantee covers
+the parallel pool remains distinct from the managed `Thread.run` worker pool.
+`Thread.run` uses at most 64 process-wide workers and 1,024 queued callbacks;
+when the queue is full, the caller yields until it can submit. The worker
+registers as a collector mutator, and the caller retains its rooted callable,
+result, and exception slots until cooperative join. Caller cancellation does
+not abandon an accepted callback. Source execution is supported on native
+64-bit targets; Wasm and 32-bit pointer ABIs fail closed. Blocking native calls
+whose effect and collector transition cannot be proven remain rejected.
+
+The background supervisor retains at most the 1,024 most recent diagnostics;
+recording a newer diagnostic evicts the oldest one. This is a bounded runtime
+history, not a durable audit log.
+The runtime-only error callback runs outside the supervisor state lock and may
+be called concurrently when jobs fail on different completion threads. Its
+closure must therefore support concurrent calls. A failure reported recursively
+from the same callback thread is recorded as suppressed instead of recursively
+calling the handler; callback panics are contained and retained as diagnostics.
+
 ## 7. Threads
 
-`thread` creates a real operating-system thread:
+`Thread.run(fn)` is available on supported native 64-bit targets through a
+bounded managed worker pool. The collector registers each callback worker and
+scans its shadow roots at safepoints. The caller yields to the executor and
+joins the worker before its rooted capture/result slots can leave scope. Queue
+capacity is 1,024 and the process-wide worker ceiling is 64. Caller
+cancellation does not abandon accepted work. Wasm and 32-bit pointer ABIs are
+rejected by codegen. Blocking FFI calls remain rejected unless a complete
+effect summary and the generated `InNative` transition can both be proven.
+The separate `Thread<T>` handle API remains unavailable.
+
+`Thread.run` invokes its callback on a real managed operating-system worker:
 
 ```text
 mut native_thread = thread "worker" {
@@ -197,24 +285,32 @@ A thread has an optional name, a result, `join` and a cooperative cancellation
 request where applicable. It cannot be implicitly abandoned when its scope ends.
 Sharing mutable memory requires `sync`, a mutex or atomics.
 
-Legacy blocking APIs invoked from tasks use `task.blocking`, which runs them on
-a pool separate from scheduler threads.
+Legacy blocking APIs run on the calling thread; a managed blocking executor is
+not currently available.
 
 There is no `worker` as a language entity. An isolated or dedicated worker is
 built from a supervised thread/task and one or more channels.
 
 ## 8. Channels, synchronization and atomics
 
-`Channel<T>` is a typed, thread-safe queue between tasks, parallel work and
-threads:
+Channels are implemented as listed in the feature status catalog. Scalar
+`Atomic<T>` is available for Boolean and signed/unsigned integers through 64
+bits when the target provides the matching atomic width. Its payload is stored
+inline in the GC-managed object; pointer atomics are unsupported. The public
+`Mutex`, `RwLock`, `Semaphore`, `Barrier`, and `Once` APIs remain unavailable.
+
+`Channel<T>` is a typed queue for communication between cooperative branches.
+Channel operations inside `parallel` regions are rejected because pool
+callbacks cannot suspend; communication with the parallel worker pool or
+managed OS threads is not currently exposed:
 
 ```text
 mut messages: Channel<String> = Channel();
 messages.send("ok");
-mut message = await messages.receive();
+mut message = messages.receive();
 ```
 
-`receive` suspends efficiently inside a task. Try operations return typed
+`receive` suspends efficiently inside a cooperative branch. Try operations return typed
 outcomes that distinguish success, closure, and temporary absence/fullness.
 Channels support explicit closing,
 wake waiters, drain queued values, and apply backpressure on bounded channels.
@@ -224,15 +320,17 @@ references may share, exclusive mutable references may transfer, clones become
 independent, and synchronization-aware references may share. `Transfer` and
 `Share` are internal compiler-derived properties, not forgeable user traits.
 
-`sync` delimits protected access. Mutexes must not be held across `await` except
-for a type expressly designed for it; the compiler/linter diagnoses this.
+`sync` delimits protected access. The future synchronization API must prevent
+holding a mutex across a suspending operation unless that lock explicitly
+supports it; the compiler/linter diagnoses this.
 
-`Atomic<T>` exists only for supported types and operations. It exposes
-load/store, exchange, compare-exchange and numeric operations such as increment.
-The default memory ordering is sequentially consistent; weaker orderings are
-explicit unsafe operations. `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>`
-are library types. Safe code rejects every supported unsynchronized concurrent
-access where at least one access mutates shared state.
+`Atomic<T>` exposes `load`, `store`, `exchange`, `compare_exchange` and integer
+`fetch_add`/`fetch_sub`. Operations default to `SeqCst`; weaker orderings require
+`unsafe`. Statically invalid order combinations are rejected during compilation;
+a dynamically invalid order raises `InvalidArgumentError` before the atomic is
+accessed. No pointer atomic operation is available. This API protects individual
+atomic operations and does not make arbitrary shared state race-free. The public
+`RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` APIs remain unavailable.
 
 ## 9. Memory
 

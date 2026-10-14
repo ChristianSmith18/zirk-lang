@@ -26,6 +26,7 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-020](./ADR-020-browser-ir-interpreter.md) | Browser-hosted verified-IR interpretation is tooling, not a Zirk target | accepted |
 | [ADR-021](./ADR-021-package-and-module-boundaries.md) | Package and module boundaries | accepted |
 | [ADR-022](./ADR-022-browser-execution-trace.md) | Browser execution trace is an observation channel | accepted |
+| [ADR-023](./ADR-023-concurrency-completion-contracts.md) | Safe completion contracts for Phase 5 concurrency | accepted |
 
 ## Status of Phase 0 pending items
 

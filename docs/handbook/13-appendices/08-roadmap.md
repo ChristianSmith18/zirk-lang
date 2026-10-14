@@ -17,7 +17,15 @@ changes: trait defaults under generic substitution, nested contract
 arguments (`Container<Box<T>>`), type-parameter defaults and bodies for
 user-defined generic functions, and `static` on `record`/`enum`.
 
-The remaining sequence moves through structured concurrency,
+Phase 5 structured concurrency is in progress: the existing structured
+executor, `parallel`, and typed-channel slices are delivered, while bounded
+combinators, public background/service APIs, managed `Thread.run`, language
+synchronizers, language-level atomics, and complete race/effect guarantees
+remain gated on compiler, runtime, GC, and target evidence. Runtime foundations
+such as `AtomicCell`, background supervision, and a managed blocking pool do
+not by themselves make those Zirk APIs available. Cancellation remains
+cooperative, and runtime shutdown does not promise to forcibly stop arbitrary
+native work. After Phase 5, the remaining sequence moves through
 projects/permissions, the rest of the standard library, functional style,
 packaging, developer tooling, decorators, hardening, and eventual
 self-hosting. Every feature requires one owning phase, end-to-end tests,

@@ -1,0 +1,4 @@
+fn make_action(): Fn() => Void { return (): Void => { }; }
+fn main(): Void {
+    mut value: Fn() => Void = parallel { make_action() };
+}

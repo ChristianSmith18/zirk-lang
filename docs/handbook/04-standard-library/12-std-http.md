@@ -6,7 +6,7 @@ streaming bodies, connection pooling, cookies, redirects, middleware, Server-Sen
 Events (SSE), and WebSocket upgrades. It supports HTTP/1.1 and HTTP/2 through one
 application API.
 
-All waiting operations suspend tasks, body flow applies backpressure, disconnects
+All waiting operations suspend cooperative branches, body flow applies backpressure, disconnects
 cancel their structured work, and network permissions are revalidated at every
 dynamic destination. Framework routing, dependency injection, templating, and ORM
 behavior belong in packages built on this module.
@@ -58,7 +58,7 @@ mut filter = {
     "tags": ["zirk", "language"],
 };
 
-match await HTTP.query(
+match HTTP.query(
     URL("https://api.example.com/articles"),
     json: filter,
     timeout: 10s,
@@ -104,10 +104,10 @@ request with secure defaults:
 ```zirk
 mut url = URL("https://api.example.com/profile");
 
-match await HTTP.get(url:, timeout: 10s) {
+match HTTP.get(url:, timeout: 10s) {
     Ok(response) => {
         using response {
-            match await response.json<Profile>() {
+            match response.json<Profile>() {
                 Ok(profile) => stdout.println(profile.name);
                 Error(error) => stderr.println(error);
             }
@@ -133,7 +133,7 @@ mut client = HTTPClient.create(
 );
 
 using client {
-    mut result = await client.get(URL("https://example.com"));
+    mut result = client.get(URL("https://example.com"));
 }
 ```
 
@@ -295,7 +295,7 @@ paths automatically.
 
 ## Servers and routing
 
-`HTTPServer` is configured explicitly and served as a structured task:
+`HTTPServer` is configured explicitly and served as a structured branch:
 
 ```zirk
 mut server = HTTPServer(
@@ -309,7 +309,7 @@ server.route(HTTPMethod.Query, "/users", query_users);
 server.get("/health", health);
 server.query("/users", query_users);
 
-await server.serve();
+server.serve();
 ```
 
 `HTTPMethod.Get` and `HTTPMethod.Query` are enum cases, not language keywords.
@@ -424,8 +424,8 @@ connection into a message-oriented full-duplex resource:
 match WebSocket.upgrade(request) {
     Ok(socket) => {
         using socket {
-            match await socket.receive() {
-                Value(message) => await socket.send(message);
+            match socket.receive() {
+                Value(message) => socket.send(message);
                 End => {}
                 Error(error) => stderr.println(error);
             }

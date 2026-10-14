@@ -71,13 +71,12 @@ A test can return any of:
 ```zirk
 Void
 Result<Void, E>
-Task<Void>
-Task<Result<Void, E>>
+// Concurrent work is owned by the test scope.
 ```
 
-The runner waits for `Task` results without introducing `async fn`. A returned
-`Error`, thrown `AssertionError`, unexpected throwable, timeout, cancellation,
-or leaked resource produces a failed test with its distinct category.
+A returned `Error`, thrown `AssertionError`, unexpected throwable, timeout,
+cancellation, or leaked resource produces a failed test with its distinct
+category.
 
 An assertion aborts only the current case, after which cleanup runs. Independent
 tests continue according to the selected runner failure policy. The runner
@@ -310,7 +309,7 @@ E2E declarations exercise public application boundaries:
 
 ```zirk
 @e2e(name: "serves the health endpoint", tags: ["http"])
-fn serves_health_endpoint(): Task<Result<Void, TestError>> {
+fn serves_health_endpoint(): Result<Void, TestError> {
     // Start through documented public APIs and verify the observable boundary.
 }
 ```

@@ -1,0 +1,3 @@
+fn main(): Void {
+    App.set_shutdown_grace(-1ms);
+}

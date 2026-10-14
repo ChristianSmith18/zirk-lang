@@ -1,0 +1,9 @@
+class Counter {
+    mut value: Int32;
+    construct() { this.value = 0; }
+    read(): Int32 { return this.value; }
+}
+fn main(): Void {
+    mut counter = Counter();
+    Timer.after(1s, (): Int32 => counter.read());
+}
