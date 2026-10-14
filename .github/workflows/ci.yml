@@ -189,6 +189,7 @@ jobs:
           cargo test -p zirk-runtime --lib blocked_native_mutator_keeps_stable_roots_visible_to_collection -- --test-threads=1 --nocapture
           cargo test -p zirk-runtime --lib collection_preserves_object_rooted_by_registered_native_thread -- --test-threads=1 --nocapture
           cargo test -p zirk-runtime --lib unregister_waits_until_collection_stops_scanning_its_roots -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test optimization_bench mixed_task_and_registered_worker_waiters_keep_fifo_order -- --test-threads=1 --nocapture
 
       - name: Formato canónico
         shell: bash

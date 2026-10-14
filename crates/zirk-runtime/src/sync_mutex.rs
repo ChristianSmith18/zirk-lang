@@ -454,30 +454,28 @@ mod tests {
                 worker_done.store(true, Ordering::Release);
             });
 
-            // Ensure the worker is first in the FIFO before enqueueing the
-            // executor task behind it.
-            for _ in 0..1000 {
-                if run_mutex
-                    .state
-                    .lock()
-                    .unwrap()
-                    .waiters
-                    .iter()
-                    .any(|waiter| matches!(waiter, Participant::Worker(_)))
-                {
+            // Cooperative yields do not guarantee that the OS schedules a
+            // newly spawned native worker. Wait for its explicit blocked
+            // state instead of relying on an arbitrary number of yields.
+            let worker_wait_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let worker_is_blocked = {
+                    let state = run_mutex.state.lock().unwrap();
+                    state.native_waiters == 1
+                        && state
+                            .waiters
+                            .iter()
+                            .any(|waiter| matches!(waiter, Participant::Worker(_)))
+                };
+                if worker_is_blocked {
                     break;
                 }
-                crate::executor::yield_now();
+                assert!(
+                    Instant::now() < worker_wait_deadline,
+                    "registered worker did not enter the mutex wait queue"
+                );
+                std::thread::yield_now();
             }
-            assert!(
-                run_mutex
-                    .state
-                    .lock()
-                    .unwrap()
-                    .waiters
-                    .iter()
-                    .any(|waiter| matches!(waiter, Participant::Worker(_)),)
-            );
 
             let task_mutex = run_mutex.clone();
             let task_order = run_order.clone();
@@ -511,11 +509,14 @@ mod tests {
             );
             run_mutex.release().unwrap();
 
-            for _ in 0..1000 {
-                if run_worker_done.load(Ordering::Acquire) && run_order.lock().unwrap().len() == 2 {
-                    break;
-                }
+            let completion_deadline = Instant::now() + Duration::from_secs(10);
+            while !run_worker_done.load(Ordering::Acquire) || run_order.lock().unwrap().len() != 2 {
+                assert!(
+                    Instant::now() < completion_deadline,
+                    "worker and task did not both complete after mutex handoff"
+                );
                 crate::executor::yield_now();
+                std::thread::yield_now();
             }
             assert!(run_worker_done.load(Ordering::Acquire));
             assert_eq!(run_order.lock().unwrap().len(), 2);
