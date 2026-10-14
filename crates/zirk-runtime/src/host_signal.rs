@@ -12,36 +12,66 @@ use std::time::{Duration, Instant};
 const DEFAULT_GRACE_NANOS: u64 = 5_000_000_000;
 const WATCHDOG_POLL: Duration = Duration::from_millis(1);
 
-static PENDING: AtomicUsize = AtomicUsize::new(0);
-// Retains the first signal even after the cooperative executor consumes
-// PENDING. The CLI watchdog needs to keep enforcing the same shutdown grace
-// while the executor is blocked in native code.
-static WATCHDOG_SIGNAL: AtomicUsize = AtomicUsize::new(0);
+struct SignalState {
+    pending: AtomicUsize,
+    // Retains the first signal even after the cooperative executor consumes
+    // `pending`. The CLI watchdog needs to keep enforcing the same shutdown
+    // grace while the executor is blocked in native code.
+    watchdog_signal: AtomicUsize,
+}
+
+impl SignalState {
+    const fn new() -> Self {
+        Self {
+            pending: AtomicUsize::new(0),
+            watchdog_signal: AtomicUsize::new(0),
+        }
+    }
+
+    fn request(&self, signal: i32) -> bool {
+        if !(1..=127).contains(&signal) {
+            return false;
+        }
+        if self
+            .pending
+            .compare_exchange(0, signal as usize, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let _ = self.watchdog_signal.compare_exchange(
+            0,
+            signal as usize,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        true
+    }
+
+    fn take(&self) -> Option<i32> {
+        let signal = self.pending.swap(0, Ordering::AcqRel);
+        (signal != 0).then_some(signal as i32)
+    }
+
+    fn reset(&self) {
+        self.pending.store(0, Ordering::Release);
+        self.watchdog_signal.store(0, Ordering::Release);
+    }
+}
+
+static SIGNAL_STATE: SignalState = SignalState::new();
 static SHUTDOWN_GRACE_NANOS: AtomicU64 = AtomicU64::new(DEFAULT_GRACE_NANOS);
 
 pub fn request(signal: i32) -> bool {
-    if !(1..=127).contains(&signal) {
-        return false;
-    }
-    if PENDING
-        .compare_exchange(0, signal as usize, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return false;
-    }
-    let _ =
-        WATCHDOG_SIGNAL.compare_exchange(0, signal as usize, Ordering::AcqRel, Ordering::Acquire);
-    true
+    SIGNAL_STATE.request(signal)
 }
 
 pub fn take() -> Option<i32> {
-    let signal = PENDING.swap(0, Ordering::AcqRel);
-    (signal != 0).then_some(signal as i32)
+    SIGNAL_STATE.take()
 }
 
 pub fn reset() {
-    PENDING.store(0, Ordering::Release);
-    WATCHDOG_SIGNAL.store(0, Ordering::Release);
+    SIGNAL_STATE.reset();
     SHUTDOWN_GRACE_NANOS.store(DEFAULT_GRACE_NANOS, Ordering::Release);
 }
 
@@ -199,7 +229,7 @@ impl CliShutdownWatchdog {
                     if thread_stop.load(Ordering::Acquire) {
                         return;
                     }
-                    if WATCHDOG_SIGNAL.load(Ordering::Acquire) != 0 {
+                    if SIGNAL_STATE.watchdog_signal.load(Ordering::Acquire) != 0 {
                         let started = deadline.get_or_insert_with(Instant::now);
                         let grace =
                             Duration::from_nanos(SHUTDOWN_GRACE_NANOS.load(Ordering::Acquire));
@@ -259,22 +289,19 @@ fn hard_exit_124() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Barrier, Mutex};
+    use std::sync::Barrier;
     use std::thread;
-
-    static SIGNAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn request_is_portable_atomic_and_first_signal_wins() {
-        let _guard = SIGNAL_STATE_TEST_LOCK.lock().expect("signal test lock");
-        reset();
-        assert!(!request(0));
-        assert!(!request(128));
-        assert!(request(2));
-        assert!(!request(15));
-        assert_eq!(take(), Some(2));
-        assert_eq!(take(), None);
-        assert_eq!(WATCHDOG_SIGNAL.load(Ordering::Acquire), 2);
+        let state = SignalState::new();
+        assert!(!state.request(0));
+        assert!(!state.request(128));
+        assert!(state.request(2));
+        assert!(!state.request(15));
+        assert_eq!(state.take(), Some(2));
+        assert_eq!(state.take(), None);
+        assert_eq!(state.watchdog_signal.load(Ordering::Acquire), 2);
     }
 
     #[cfg(windows)]
@@ -289,17 +316,17 @@ mod tests {
 
     #[test]
     fn concurrent_signal_requests_publish_exactly_one_winner_under_stress() {
-        let _guard = SIGNAL_STATE_TEST_LOCK.lock().expect("signal test lock");
         for _ in 0..64 {
-            reset();
+            let state = SignalState::new();
             let start = Barrier::new(9);
             thread::scope(|scope| {
                 let workers: Vec<_> = (1..=8)
                     .map(|signal| {
                         let start = &start;
+                        let state = &state;
                         scope.spawn(move || {
                             start.wait();
-                            request(signal)
+                            state.request(signal)
                         })
                     })
                     .collect();
@@ -311,10 +338,9 @@ mod tests {
                     .count();
                 assert_eq!(accepted, 1);
             });
-            let winner = take().expect("one signal was published");
+            let winner = state.take().expect("one signal was published");
             assert!((1..=8).contains(&winner));
-            assert_eq!(PENDING.load(Ordering::Acquire), 0);
+            assert_eq!(state.pending.load(Ordering::Acquire), 0);
         }
-        reset();
     }
 }
