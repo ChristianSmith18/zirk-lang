@@ -24863,11 +24863,12 @@ mod borrowed_view_checker_tests {
     }
 
     #[test]
-    fn operators_and_nested_collection_storage_fail_closed() {
+    fn scalar_operator_results_end_borrows_but_nested_collection_storage_fails_closed() {
         let (sum, diagnostics) =
             check_composite("guarded + 1", |_| Base::Int(crate::types::IntWidth::I32));
-        assert!(sum.is_unknown());
-        assert!(diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
+        assert_eq!(sum.base, Base::Int(crate::types::IntWidth::I32));
+        assert!(sum.borrowed_scope().is_none());
+        assert!(!diagnostics.contains(BORROWED_VIEW_ESCAPE_CODE.as_str()));
 
         let (collection, diagnostics) = check_composite("[guarded]", |_| Base::Class(0));
         assert!(collection.is_unknown());
