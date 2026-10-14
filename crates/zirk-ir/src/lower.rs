@@ -9285,12 +9285,10 @@ impl<'a> FunctionLowering<'a> {
         // uninitialized non-Void callback result slot.
         let unit = self.emit(InstKind::Undefined, IrType::Void, span);
         self.lower_throws_check(unit, IrType::Void, span);
-        let result = if let Some(slot) = result_slot {
-            self.emit(InstKind::Load(slot), returns, span)
-        } else {
-            self.emit(InstKind::Undefined, IrType::Void, span)
-        };
-        result
+        match result_slot {
+            Some(slot) => self.emit(InstKind::Load(slot), returns, span),
+            None => self.emit(InstKind::Undefined, IrType::Void, span),
+        }
     }
 
     fn lower_atomic_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
