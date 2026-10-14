@@ -1287,7 +1287,15 @@ fn standard_error_is_written_to_the_process_error_stream() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(output.stdout, "");
-    assert_eq!(output.stderr, "warning");
+    // CI enables the optional LLVM progress trace to diagnose native backend
+    // failures. Keep the assertion focused on the program's stderr payload.
+    let program_stderr = output
+        .stderr
+        .lines()
+        .filter(|line| !line.starts_with("[zirk-codegen] "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(program_stderr, "warning");
 }
 
 #[test]

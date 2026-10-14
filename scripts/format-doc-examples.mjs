@@ -46,9 +46,12 @@ const drifted = [];
 
 for (const file of markdownFiles(docsDir)) {
   const original = readFileSync(file, "utf8");
-  const lines = original.split("\n");
+  const newline = original.includes("\r\n") ? "\r\n" : "\n";
+  const lines = original.split(/\r?\n/);
   const edits = [];
   for (const fence of zirkFences(lines)) {
+    // Normalize extracted code so the canonical check is independent of the
+    // host checkout's Markdown line endings.
     const source = lines.slice(fence.start, fence.end).join("\n") + "\n";
     writeFileSync(scratchFile, source);
     const run = spawnSync(binary, ["format", scratchFile], { encoding: "utf8" });
@@ -70,7 +73,7 @@ for (const file of markdownFiles(docsDir)) {
   for (const edit of edits.reverse()) {
     lines.splice(edit.start, edit.end - edit.start, ...edit.lines);
   }
-  writeFileSync(file, lines.join("\n"));
+  writeFileSync(file, lines.join(newline));
 }
 
 console.log(
