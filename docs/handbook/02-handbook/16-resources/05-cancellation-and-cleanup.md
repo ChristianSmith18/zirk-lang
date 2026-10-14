@@ -5,7 +5,7 @@
 > cooperative; GC safepoint polling does not itself check cancellation, and a
 > non-cooperative call can delay it. The broader contract below for resource
 > ownership, cancellation-triggered closure, and related diagnostics remains
-> partially implemented; see the [feature-status catalog](../../init/ZIRK_FEATURE_STATUS.md).
+> partially implemented; see the [feature-status catalog](../../../init/ZIRK_FEATURE_STATUS.md).
 
 Cancellation is cooperative and observed at safe points. Before a cancelled task finishes, its resource scopes close and the runtime waits for required cleanup.
 
