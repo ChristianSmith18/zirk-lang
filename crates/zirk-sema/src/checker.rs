@@ -21,6 +21,16 @@ use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
 const BORROWED_VIEW_ESCAPE_CODE: Code = Code::new("E0485");
 
+fn is_standard_io_source(name: &str) -> bool {
+    let name = name.replace('\\', "/");
+    name.contains("/stdlib/std/io/") || name.starts_with("std.io/")
+}
+
+fn is_standard_io_package_source(name: &str) -> bool {
+    let name = name.replace('\\', "/");
+    name.ends_with("/stdlib/std/io/package.zrk") || name.ends_with("std.io/package.zrk")
+}
+
 fn is_borrowed_scalar_value(ty: Type) -> bool {
     !ty.is_unknown()
         && matches!(
@@ -2448,7 +2458,7 @@ impl<'a> Checker<'a> {
         for module in &program.modules {
             let file = module.body.span.file;
             let source_name = self.sources.file(file).name();
-            if (source_name.contains("/stdlib/std/io/") || source_name.starts_with("std.io/"))
+            if is_standard_io_source(source_name)
                 && matches!(module.name.name.as_str(), "stdin" | "stdout" | "stderr")
             {
                 self.standard_stream_source_modules
@@ -2857,8 +2867,6 @@ impl<'a> Checker<'a> {
         }
         let owner_name = self.sources.file(owner.file).name();
         let used_name = self.sources.file(used.span.file).name();
-        let is_standard_io_source =
-            |name: &str| name.contains("/stdlib/std/io/") || name.starts_with("std.io/");
         if is_standard_io_source(owner_name) && is_standard_io_source(used_name) {
             return;
         }
@@ -3987,11 +3995,9 @@ impl<'a> Checker<'a> {
             shared: decl.shared,
             span: decl.name.span,
         });
-        if decl.name.name == "Stringifiable" && {
-            let source_name = self.sources.file(decl.name.span.file).name();
-            source_name.ends_with("/stdlib/std/io/package.zrk")
-                || source_name.ends_with("std.io/package.zrk")
-        } {
+        if decl.name.name == "Stringifiable"
+            && is_standard_io_package_source(self.sources.file(decl.name.span.file).name())
+        {
             self.native_stringifiable = Some(id);
         }
     }
@@ -24668,6 +24674,17 @@ fn has_natural_order(ty: Type) -> bool {
 mod borrowed_view_checker_tests {
     use super::*;
     use zirk_diagnostics::{RenderStyle, SourceFile};
+
+    #[test]
+    fn standard_io_source_detection_accepts_windows_paths() {
+        assert!(is_standard_io_source(
+            r"D:\a\zirk-lang\zirk-lang\stdlib\std\io\stderr.zrk"
+        ));
+        assert!(is_standard_io_package_source(
+            r"D:\a\zirk-lang\zirk-lang\stdlib\std\io\package.zrk"
+        ));
+        assert!(is_standard_io_source("std.io/stderr.zrk"));
+    }
 
     fn check_composite(
         expression: &str,
