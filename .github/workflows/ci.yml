@@ -20,13 +20,18 @@ on:
         required: false
         default: ""
         type: string
+      runtime_test_filter:
+        description: Optional zirk-runtime library test-name filter for native diagnostics
+        required: false
+        default: ""
+        type: string
 
 # Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
 # matriz es cara y solo importa el ultimo commit.
 concurrency:
   # Keep focused workflow_dispatch diagnostics independent from the full push
   # matrix so native platform failures can be isolated without waiting for it.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.test_filter || 'full' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.test_filter || inputs.runtime_test_filter || 'full' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -45,7 +50,7 @@ jobs:
       # Un fallo en una plataforma no debe ocultar el estado de las demas:
       # necesitamos saber si el problema es de una o de todas.
       fail-fast: false
-      matrix: ${{ fromJSON(((github.event_name != 'workflow_dispatch' || inputs.test_filter == '') && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}' ) || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}') }}
+      matrix: ${{ fromJSON(((github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '')) && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}' ) || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}') }}
           #
           # macOS volvio a la matriz al hacerse publico el repositorio: Actions
           # es gratis e ilimitado ahi, y el argumento de costo que lo habia
@@ -182,7 +187,7 @@ jobs:
       # The full workspace suite below also runs them, but this focused step
       # makes failures attributable and visible before the broader test run.
       - name: GC y managed threads (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter == ''
+        if: runner.os == 'Windows' && inputs.test_filter == '' && inputs.runtime_test_filter == ''
         shell: bash
         run: |
           cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture
@@ -264,8 +269,22 @@ jobs:
           RUST_BACKTRACE: "1"
           ZIRK_TRACE: "1"
 
+      - name: Focused runtime tests (Windows)
+        if: runner.os == 'Windows' && inputs.runtime_test_filter != ''
+        run: cargo test -p zirk-runtime --lib "$env:RUNTIME_TEST_FILTER" -- --exact --test-threads=1 --nocapture
+        env:
+          RUNTIME_TEST_FILTER: ${{ inputs.runtime_test_filter }}
+          RUST_BACKTRACE: "1"
+
+      - name: Focused runtime tests (Unix)
+        if: runner.os != 'Windows' && inputs.runtime_test_filter != ''
+        run: cargo test -p zirk-runtime --lib "$RUNTIME_TEST_FILTER" -- --exact --test-threads=1 --nocapture
+        env:
+          RUNTIME_TEST_FILTER: ${{ inputs.runtime_test_filter }}
+          RUST_BACKTRACE: "1"
+
       - name: Tests
-        if: inputs.test_filter == ''
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         run: cargo test --workspace -- --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: "1"
@@ -274,7 +293,7 @@ jobs:
           ZIRK_TRACE: "1"
 
       - name: Upload focused native crash dumps (Windows)
-        if: failure() && runner.os == 'Windows' && inputs.test_filter != ''
+        if: failure() && runner.os == 'Windows' && (inputs.test_filter != '' || inputs.runtime_test_filter != '')
         uses: actions/upload-artifact@v4
         with:
           name: zirk-native-dumps-${{ github.run_id }}
