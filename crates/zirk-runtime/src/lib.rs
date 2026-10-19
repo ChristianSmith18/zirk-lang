@@ -1426,11 +1426,13 @@ mod tests {
             unsafe {
                 zirk_rt_timer_after(scope, 2_000_000, after, std::ptr::null_mut());
                 zirk_rt_timer_every(scope, 2_000_000, tick, std::ptr::null_mut());
-                // A generous window (10x the repeating interval) so a
-                // contended CI runner's scheduling jitter — observed
-                // flaky on macOS CI with a tighter 7x margin — still
-                // leaves comfortable room for at least two re-arms.
-                zirk_rt_sleep(20_000_000);
+                // Keep the timer scope alive until the repeating callback has
+                // actually re-armed, rather than relying on a fixed sleep that
+                // can expire before the executor gets CPU on a loaded runner.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                while TICKS.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+                    zirk_rt_sleep(2_000_000);
+                }
             }
             assert!(unsafe { zirk_rt_scope_exit(scope) });
         }

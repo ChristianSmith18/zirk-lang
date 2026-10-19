@@ -64,6 +64,14 @@ fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
+fn approval_security_directory(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let root = home.join("AppData/Local/Zirk");
+    #[cfg(not(windows))]
+    let root = home.join(".local/share/zirk");
+    root.join("security")
+}
+
 /// Runs the compiler over a source file, from its own working directory.
 fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
     let file_name = source.file_name().expect("file name").to_string_lossy();
@@ -1644,7 +1652,11 @@ fn main(): Void {
         )],
     );
 
-    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        output.status, 0,
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status, output.stdout, output.stderr
+    );
     assert_eq!(
         normalize(&output.stdout),
         "201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
@@ -1680,7 +1692,11 @@ fn main(): Void {
         )],
     );
 
-    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        output.status, 0,
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status, output.stdout, output.stderr
+    );
     assert_eq!(normalize(&output.stdout), "42\nInvalidJson\nInvalidText\n");
 }
 
@@ -1743,7 +1759,11 @@ fn standard_http_headers_enforce_the_field_count_bound() {
     );
     let output = crate_of("http_headers_field_count_limit", &[("main.zrk", &source)]);
 
-    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        output.status, 0,
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status, output.stdout, output.stderr
+    );
     assert_eq!(
         normalize(&output.stdout),
         "TooManyFields\nreplacement accepted\nTooManyFields\n"
@@ -1987,6 +2007,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2013,7 +2034,7 @@ fn main(): Void throws SecretFailure {
     assert!(approval_output.contains("environment.read: APPROVAL_DIRECT_PACKAGE_VALUE"));
     assert!(approval_output.contains("environment.read: APPROVAL_NESTED_PACKAGE_VALUE"));
     assert!(approval_output.contains("Project and dependency fingerprint:"));
-    let security_directory = home.join(".local/share/zirk/security");
+    let security_directory = approval_security_directory(&home);
     let approved_token = zirk_cli::approvals::verified_token_in(&project, &security_directory)
         .unwrap()
         .expect("the launcher should accept the persisted signed approval");
@@ -2043,6 +2064,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .env("APPROVAL_FIXTURE_VALUE", "approved")
         .env("APPROVAL_NESTED_PACKAGE_VALUE", "nested-package-approved")
@@ -2093,6 +2115,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .env("APPROVAL_FIXTURE_VALUE", "approved")
         .env("APPROVAL_FIXTURE_INT", "42")
@@ -2124,6 +2147,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .env("APPROVAL_FIXTURE_VALUE", "approved")
         .env("APPROVAL_FIXTURE_INT", "42")
@@ -2172,6 +2196,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .env("APPROVAL_FIXTURE_VALUE", "must-not-leak")
         .env("APPROVAL_FIXTURE_INT", "900")
@@ -2198,6 +2223,7 @@ fn main(): Void throws SecretFailure {
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
+        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
         .output()
         .expect("revoke the project approval");
