@@ -41,21 +41,11 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    if: inputs.test_filter == '' || matrix.name == 'windows-x86_64'
     strategy:
       # Un fallo en una plataforma no debe ocultar el estado de las demas:
       # necesitamos saber si el problema es de una o de todas.
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-latest
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-          - name: windows-x86_64
-            runner: windows-latest
-          - name: macos-aarch64
-            runner: macos-14
+      matrix: ${{ fromJSON(((github.event_name != 'workflow_dispatch' || inputs.test_filter == '') && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}' ) || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}') }}
           #
           # macOS volvio a la matriz al hacerse publico el repositorio: Actions
           # es gratis e ilimitado ahi, y el argumento de costo que lo habia
