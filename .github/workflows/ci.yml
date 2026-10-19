@@ -14,6 +14,12 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      test_filter:
+        description: Optional end-to-end test-name filter for native diagnostics
+        required: false
+        default: ""
+        type: string
 
 # Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
 # matriz es cara y solo importa el ultimo commit.
@@ -233,17 +239,24 @@ jobs:
       # intensiva. Ejecutar en serie es la unica garantia real; el costo es
       # despreciable con esta cantidad de tests.
       - name: Tests
-        run: cargo test --workspace -- --test-threads=1 --nocapture
+        shell: bash
+        run: |
+          if [[ -n "$TEST_FILTER" ]]; then
+            echo "Running focused end-to-end tests matching: $TEST_FILTER"
+            cargo test -p zirk-cli --test end_to_end "$TEST_FILTER" -- --test-threads=1 --nocapture
+          else
+            cargo test --workspace -- --test-threads=1 --nocapture
+          fi
         env:
+          TEST_FILTER: ${{ inputs.test_filter }}
           RUST_BACKTRACE: "1"
           # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
           ZIRK_TRACE: "1"
 
       # Native Zirk executables can fail after producing their expected output.
-      # End-to-end tests execute generated binaries named after each source file
-      # (for example `main.exe`), not `zirk.exe`. Surface faults from executables
-      # under the checkout without collecting dumps that could contain secrets.
+      # End-to-end tests execute generated binaries in temporary project folders,
+      # not necessarily under the checkout. Surface fault metadata without dumps.
       - name: Diagnose native Zirk crashes (Windows)
         if: failure() && runner.os == 'Windows'
         continue-on-error: true
@@ -263,7 +276,10 @@ jobs:
             }
             $appPath = [string]$data.AppPath
             $workspaceRoot = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\') + '\'
-            if ($appPath.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+            $isWorkspaceExecutable = $appPath.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)
+            $isTemporaryExecutable = $appPath.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)
+            if ($isWorkspaceExecutable -or $isTemporaryExecutable) {
               [pscustomobject]@{
                 Time = $event.TimeCreated.ToUniversalTime().ToString('o')
                 App = $data.AppName
@@ -280,5 +296,5 @@ jobs:
           if ($crashEvents) {
             $crashEvents | Format-Table -AutoSize | Out-String | Write-Host
           } else {
-            Write-Host 'No Application Error events for executables under the workspace were found.'
+            Write-Host 'No Application Error events for executables under the workspace or temp directory were found.'
           }

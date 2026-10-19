@@ -6689,7 +6689,8 @@ fn main(): Void {{
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
-        "stdout: {}; stderr: {}",
+        "status: {}; stdout: {}; stderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -6833,7 +6834,8 @@ fn main(): Void {{
     let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
-        "stdout: {}; stderr: {}",
+        "status: {}; stdout: {}; stderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
