@@ -2414,8 +2414,14 @@ fn bundled_std_http_get_and_head_return_managed_responses_under_an_exact_grant()
                 "HTTP/1.1 200 OK\r\nSet-Cookie: first=1\r\nContent-Type: text/plain\r\nSet-Cookie: second=2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 response_body.len()
             );
-            stream.write_all(headers.as_bytes()).unwrap();
-            stream.write_all(response_body).unwrap();
+            let response_write = stream
+                .write_all(headers.as_bytes())
+                .and_then(|()| stream.write_all(response_body));
+            // The last two requests intentionally close streams early, so a
+            // peer reset while writing their remaining bodies is expected.
+            if request_index < 6 {
+                response_write.unwrap();
+            }
             if request_index >= 4 {
                 let mut probe = [0; 1];
                 assert!(matches!(stream.read(&mut probe), Ok(0) | Err(_)));
