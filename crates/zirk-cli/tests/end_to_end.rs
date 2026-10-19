@@ -2287,7 +2287,10 @@ fn main(): Void {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "sink rejected\n");
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "sink rejected\n"
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("never-send-this-in-plaintext"));
     assert!(
         matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock)
@@ -5904,7 +5907,7 @@ fn bundled_std_net_ip_address_parser_canonicalizes_literals_without_dns() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(
-        output.stdout,
+        normalize(&output.stdout),
         "2001:db8::1\nhost name rejected\nscoped IPv6 address rejected\n"
     );
 }
@@ -5944,7 +5947,7 @@ fn bundled_std_net_socket_address_formats_ipv4_and_ipv6_origins() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(
-        output.stdout,
+        normalize(&output.stdout),
         "tcp://127.0.0.1:8080\ntcp://[2001:db8::1]:443\nhost name rejected\nzero port rejected\nscoped IPv6 socket address rejected\n"
     );
 }
@@ -5995,7 +5998,7 @@ fn bundled_std_net_host_port_address_normalizes_idna_without_dns() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(
-        output.stdout,
+        normalize(&output.stdout),
         "tcp://xn--exmple-cua.com:443\ntcp://[2001:db8::1]:443\ninvalid hostname rejected\nzero port rejected\nPermissionDenied\nscoped IPv6 host rejected\n"
     );
 }
@@ -6020,7 +6023,7 @@ fn main(): Void {
     let output = crate_of("standard_net_tls_denied", &[("main.zrk", source)]);
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
-    assert_eq!(output.stdout, "permission denied\n");
+    assert_eq!(normalize(&output.stdout), "permission denied\n");
 }
 
 #[test]
@@ -6196,7 +6199,7 @@ fn main(): Void {
     let output = crate_of("standard_net_tls_listener_denied", &[("main.zrk", source)]);
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
-    assert_eq!(output.stdout, "permission denied\n");
+    assert_eq!(normalize(&output.stdout), "permission denied\n");
 }
 
 #[test]
@@ -10415,11 +10418,11 @@ fn main(): Void {{
     assert!(
         output.status.success(),
         "stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         "TooManyFields\n200\n201\n"
     );
     server.join().unwrap();
@@ -10614,11 +10617,11 @@ fn main(): Void {{
         output.status.success(),
         "status: {}; stdout: {}; stderr: {}",
         output.status,
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         "update:one\ncontinued:cursor-2\n100\n1\nmessage:two:cursor-2\nend\ntrue\ninvalid-id:Protocol\nmessage:resumed:cursor-3\nautomatic\n1\nresumed automatically\n1\nauto closed\nno-content stopped\n"
     );
     server.join().unwrap();
@@ -10802,11 +10805,11 @@ fn main(): Void {{
     assert!(
         output.status.success(),
         "stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         "201\n201\n201\nInvalidArgument\n"
     );
     server.join().unwrap();
@@ -10910,11 +10913,11 @@ fn main(): Void {{
     assert!(
         output.status.success(),
         "stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         "cancelled\nproducer failed\nmidstream failed\n"
     );
     assert!(
@@ -11051,11 +11054,11 @@ fn main(): Void {{
     assert!(
         output.status.success(),
         "stdout: {}; stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        normalize(&String::from_utf8_lossy(&output.stdout)),
         "200\ninvalid buffered chunk size\nbody consumed\n2\n104\n101\n2\n108\n108\n1\n111\nstream EOF\nstream closed\n"
     );
     server.join().unwrap();
@@ -11163,7 +11166,7 @@ fn main(): Void {{
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).ends_with("upload task joined\n"));
+    assert!(normalize(&String::from_utf8_lossy(&output.stdout)).ends_with("upload task joined\n"));
     let next_frame = server.join().unwrap();
     assert!(
         next_frame.is_empty(),
