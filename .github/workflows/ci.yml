@@ -24,7 +24,9 @@ on:
 # Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
 # matriz es cara y solo importa el ultimo commit.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Keep focused workflow_dispatch diagnostics independent from the full push
+  # matrix so native platform failures can be isolated without waiting for it.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.test_filter || 'full' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
