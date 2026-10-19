@@ -207,6 +207,19 @@ jobs:
         shell: bash
         run: ./scripts/check-format.sh
 
+      - name: Enable focused native crash dumps (Windows)
+        if: runner.os == 'Windows' && inputs.test_filter != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDirectory = Join-Path $env:RUNNER_TEMP 'zirk-native-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDirectory | Out-Null
+          $registryPath = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $registryPath -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpFolder -Value $dumpDirectory -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpCount -Value 3 -PropertyType DWord -Force | Out-Null
+
       # A permission-isolation E2E clears the child process environment. Restore
       # the native linker/SDK variables explicitly so clang can still link the
       # generated executable inside that intentionally isolated process.
@@ -266,6 +279,15 @@ jobs:
           # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
           ZIRK_TRACE: "1"
+
+      - name: Upload focused native crash dumps (Windows)
+        if: failure() && runner.os == 'Windows' && inputs.test_filter != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: zirk-native-dumps-${{ github.run_id }}
+          path: ${{ runner.temp }}/zirk-native-dumps/*.dmp
+          if-no-files-found: warn
+          retention-days: 1
 
       # Native Zirk executables can fail after producing their expected output.
       # End-to-end tests execute generated binaries in temporary project folders,
