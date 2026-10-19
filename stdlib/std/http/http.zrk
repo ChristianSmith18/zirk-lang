@@ -581,7 +581,7 @@ share class HTTPResponse {
     private static utf8_bytes(value: String): Array<Byte> {
         mut encoded = value.bytes();
         mut bytes: Array<Byte> = Array(encoded.length);
-        mut index: Int32 = 0;
+        mut index: UInt64 = 0;
         while index < encoded.length {
             bytes[index] = encoded[index];
             index = index + 1;
@@ -2560,7 +2560,7 @@ share class HTTPWebSocket {
     private static encode_payload(kind: Byte, payload: Array<Byte>): Array<Byte> {
         mut frame: Array<Byte> = Array(payload.length + 1);
         frame[0] = kind;
-        mut index: Int32 = 0;
+        mut index: UInt64 = 0;
         while index < payload.length {
             frame[index + 1] = payload[index];
             index += 1;
@@ -2571,7 +2571,7 @@ share class HTTPWebSocket {
     private static string_bytes(value: String): Array<Byte> {
         mut encoded = value.bytes();
         mut bytes: Array<Byte> = Array(encoded.length);
-        mut index: Int32 = 0;
+        mut index: UInt64 = 0;
         while index < encoded.length {
             bytes[index] = encoded[index];
             index += 1;
@@ -2587,7 +2587,7 @@ share class HTTPWebSocket {
             if frame.length < 3 { return HTTPWebSocket.message_error(HTTPError.Protocol); }
             mut code: UInt16 =((frame[1] as UInt16) << 8) |(frame[2] as UInt16);
             mut reason_bytes: Array<Byte> = Array(frame.length - 3);
-            mut index: Int32 = 3;
+            mut index: UInt64 = 3;
             while index < frame.length {
                 reason_bytes[index - 3] = frame[index];
                 index += 1;
@@ -2599,7 +2599,7 @@ share class HTTPWebSocket {
         }
         if kind < 0 || kind > 3 { return HTTPWebSocket.message_error(HTTPError.Protocol); }
         mut payload: Array<Byte> = Array(frame.length - 1);
-        mut index: Int32 = 1;
+        mut index: UInt64 = 1;
         while index < frame.length {
             payload[index - 1] = frame[index];
             index += 1;
@@ -3233,7 +3233,7 @@ share class HTTPClient {
     private static string_body_bytes(value: String): Array<Byte> {
         mut source = value.bytes();
         mut bytes: Array<Byte> = Array(source.length);
-        mut index: Int32 = 0;
+        mut index: UInt64 = 0;
         while index < source.length {
             bytes[index] = source[index];
             index = index + 1;
@@ -3656,7 +3656,7 @@ share class HTTP {
     private static string_body_bytes(value: String): Array<Byte> {
         mut source = value.bytes();
         mut bytes: Array<Byte> = Array(source.length);
-        mut index: Int32 = 0;
+        mut index: UInt64 = 0;
         while index < source.length {
             bytes[index] = source[index];
             index = index + 1;

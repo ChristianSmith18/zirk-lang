@@ -1683,7 +1683,7 @@ fn main(): Void {
     stdout.println("after string bytes");
     mut copied: Array<Byte> = Array(encoded.length);
     stdout.println("after byte allocation");
-    mut copy_index: Int32 = 0;
+    mut copy_index: UInt64 = 0;
     while copy_index < encoded.length {
         stdout.println("before byte copy item");
         copied[copy_index] = encoded[copy_index];
