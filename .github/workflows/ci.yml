@@ -10,7 +10,7 @@ name: CI
 # CI corre en las dos ramas de larga vida y en toda PR que apunte a ellas.
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, 'codex/**']
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
