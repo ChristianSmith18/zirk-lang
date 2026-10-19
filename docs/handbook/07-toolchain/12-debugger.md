@@ -3,7 +3,7 @@
 > **Implementation status:** the debugger is not implemented yet. This chapter records
 > its target behavior; it is not a list of currently available commands or runtime
 > capabilities. See the [feature status](../11-reference/12-feature-status.md) and
-> [compiler status](../../../init/ZIRK_FEATURE_STATUS.md) for delivered tooling.
+> [compiler status](../../init/ZIRK_FEATURE_STATUS.md) for delivered tooling.
 
 When implemented, debug metadata should map native execution to `.zrk`, including
 tasks, awaits, threads, channels, generated wrappers, decorator applications and
