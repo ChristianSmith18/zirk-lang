@@ -1682,9 +1682,12 @@ fn main(): Void {
     stdout.println(encoded.length);
     stdout.println("after string bytes");
     mut copied: Array<Byte> = Array(encoded.length);
+    stdout.println("after byte allocation");
     mut copy_index: Int32 = 0;
     while copy_index < encoded.length {
+        stdout.println("before byte copy item");
         copied[copy_index] = encoded[copy_index];
+        stdout.println("after byte copy item");
         copy_index = copy_index + 1;
     }
     stdout.println("after byte copy");
@@ -1714,7 +1717,7 @@ fn main(): Void {
     );
     assert_eq!(
         normalize(&output.stdout),
-        "before bytes response\n199\nbefore string bytes\n5\nafter string bytes\nafter byte copy\nbefore first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
+        "before bytes response\n199\nbefore string bytes\n5\nafter string bytes\nafter byte allocation\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nafter byte copy\nbefore first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
     );
 }
 
