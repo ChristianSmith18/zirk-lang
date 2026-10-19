@@ -1668,7 +1668,9 @@ fn standard_http_response_text_and_json_constructors_set_content_type() {
             r#"import { HTTPError, HTTPResponse } from std.http;
 import { stdout } from std.io;
 fn main(): Void {
+    stdout.println("before first response");
     mut text = HTTPResponse.from_text(201, "hello");
+    stdout.println("after first response");
     stdout.println(text.status_code());
     match text.bytes() { Ok(body) => stdout.println(body.length); Error(error) => stdout.println(error.to_string()); }
     match text.text() { Ok(_) => stdout.println("duplicate body read accepted"); Error(error) => match error { HTTPError.BodyConsumed => stdout.println("body consumed"); _ => stdout.println("unexpected body error"); } }
@@ -1692,7 +1694,7 @@ fn main(): Void {
     );
     assert_eq!(
         normalize(&output.stdout),
-        "201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
+        "before first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
     );
 }
 
@@ -8713,7 +8715,7 @@ fn main(): Void {{
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout)
+        normalize(&String::from_utf8_lossy(&output.stdout))
             .matches("Protocol\n")
             .count()
             == 2,
