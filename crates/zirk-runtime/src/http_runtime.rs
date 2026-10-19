@@ -40,6 +40,8 @@ use crate::network_transport::{
 
 type HttpClientRequestBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 
+const DEFAULT_HTTP_USER_AGENT: &str = concat!("Zirk-http-client/", env!("CARGO_PKG_VERSION"));
+
 fn buffered_client_request_body(bytes: Vec<u8>) -> HttpClientRequestBody {
     Full::new(Bytes::from(bytes)).boxed_unsync()
 }
@@ -615,69 +617,78 @@ fn decode_response_body(
         headers.remove("content-encoding");
         return Ok((headers, body, None));
     }
-    let (input, compressed_bytes) = HttpBodyReader::new(body);
-    let input = tokio::io::BufReader::with_capacity(8 * 1024, input);
-    let mut decoder: Pin<Box<dyn AsyncRead + Send>> = match coding {
-        ContentCoding::Brotli => Box::pin(BrotliDecoder::new(input)),
-        ContentCoding::Gzip => Box::pin(GzipDecoder::new(input)),
-        // HTTP's `deflate` content coding uses the zlib-wrapped format.
-        ContentCoding::Deflate => Box::pin(ZlibDecoder::new(input)),
-        ContentCoding::Identity => unreachable!("identity returned above"),
-    };
     let (sender, receiver) = tokio::sync::mpsc::channel(2);
-    let worker = tokio::spawn(async move {
-        let mut expanded = 0usize;
-        let mut decoder_cpu_time = Duration::ZERO;
-        let mut bytes = vec![0u8; 64 * 1024];
-        loop {
-            let count = match read_with_cpu_budget(
-                &mut decoder,
-                &mut bytes,
-                &mut decoder_cpu_time,
-                HTTP_CONTENT_CODING_CPU_BUDGET,
-            )
-            .await
-            {
-                Ok(count) => count,
-                Err(error) => {
-                    let _ = sender.send(Err(map_body_reader_error(&error))).await;
+    // Codec constructors can allocate substantial state (notably miniz's
+    // inflater). Construct them on the native reactor stack, never on a Zirk
+    // task's fixed 128 KiB stack.
+    let worker = crate::network_future::spawn_on_reactor(async move {
+        let (input, compressed_bytes) = HttpBodyReader::new(body);
+        let input = tokio::io::BufReader::with_capacity(8 * 1024, input);
+        let mut decoder: Pin<Box<dyn AsyncRead + Send>> = match coding {
+            ContentCoding::Brotli => Box::pin(BrotliDecoder::new(input)),
+            ContentCoding::Gzip => Box::pin(GzipDecoder::new(input)),
+            // HTTP's `deflate` content coding uses the zlib-wrapped format.
+            ContentCoding::Deflate => Box::pin(ZlibDecoder::new(input)),
+            ContentCoding::Identity => unreachable!("identity returned above"),
+        };
+        tokio::spawn(async move {
+            let mut expanded = 0usize;
+            let mut decoder_cpu_time = Duration::ZERO;
+            let mut bytes = vec![0u8; 64 * 1024];
+            loop {
+                let count = match read_with_cpu_budget(
+                    &mut decoder,
+                    &mut bytes,
+                    &mut decoder_cpu_time,
+                    HTTP_CONTENT_CODING_CPU_BUDGET,
+                )
+                .await
+                {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = sender.send(Err(map_body_reader_error(&error))).await;
+                        return;
+                    }
+                };
+                if count == 0 {
                     return;
                 }
-            };
-            if count == 0 {
-                return;
+                let Some(next_expanded) = expanded.checked_add(count) else {
+                    let _ = sender.send(Err(HttpRuntimeError::BodyTooLarge)).await;
+                    return;
+                };
+                let compressed = compressed_bytes.load(Ordering::Relaxed);
+                if next_expanded > HTTP_EXPANDED_RESPONSE_LIMIT
+                    || next_expanded
+                        > compressed
+                            .max(1)
+                            .saturating_mul(HTTP_MAX_DECOMPRESSION_RATIO)
+                {
+                    let _ = sender.send(Err(HttpRuntimeError::BodyTooLarge)).await;
+                    return;
+                }
+                expanded = next_expanded;
+                if sender
+                    .send(Ok(Bytes::copy_from_slice(&bytes[..count])))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
             }
-            let Some(next_expanded) = expanded.checked_add(count) else {
-                let _ = sender.send(Err(HttpRuntimeError::BodyTooLarge)).await;
-                return;
-            };
-            let compressed = compressed_bytes.load(Ordering::Relaxed);
-            if next_expanded > HTTP_EXPANDED_RESPONSE_LIMIT
-                || next_expanded
-                    > compressed
-                        .max(1)
-                        .saturating_mul(HTTP_MAX_DECOMPRESSION_RATIO)
-            {
-                let _ = sender.send(Err(HttpRuntimeError::BodyTooLarge)).await;
-                return;
-            }
-            expanded = next_expanded;
-            if sender
-                .send(Ok(Bytes::copy_from_slice(&bytes[..count])))
-                .await
-                .is_err()
-            {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
+        })
+        .abort_handle()
     });
+    let worker = crate::network_future::block_on_current(worker)
+        .map_err(map_network_future_error)?
+        .map_err(|_| HttpRuntimeError::Transport)?;
     headers.remove("content-encoding");
     headers.remove("content-length");
     Ok((
         headers,
         HttpStreamingBody::Chunks(receiver),
-        Some(AbortOnDrop(worker.abort_handle())),
+        Some(AbortOnDrop(worker)),
     ))
 }
 
@@ -1523,12 +1534,15 @@ impl Http2RequestSender {
                 hyper::Method::from_bytes(request.method_token.as_bytes())
                     .map_err(|_| HttpRuntimeError::InvalidRequest)?,
             )
-            .uri(request_target(&request.url))
+            .uri(http2_request_uri(&request.url))
             .header(hyper::header::HOST, expected_authority);
         for (name, value) in request.headers.iter() {
             if name != hyper::header::HOST && name != hyper::header::CONNECTION {
                 builder = builder.header(name, value);
             }
+        }
+        if request.headers.get("user-agent").is_none() {
+            builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
         }
         if request.headers.get("accept-encoding").is_none() {
             builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
@@ -1626,12 +1640,15 @@ impl Http2RequestSender {
                 hyper::Method::from_bytes(request.method_token.as_bytes())
                     .map_err(|_| HttpRuntimeError::InvalidRequest)?,
             )
-            .uri(request_target(&request.url))
-            .header(hyper::header::HOST, expected_authority);
+            .uri(http2_request_uri(&request.url))
+            .header(hyper::header::HOST, authority(&request.url));
         for (name, value) in request.headers.iter() {
             if name != hyper::header::HOST && name != hyper::header::CONNECTION {
                 builder = builder.header(name, value);
             }
+        }
+        if request.headers.get("user-agent").is_none() {
+            builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
         }
         if request.headers.get("accept-encoding").is_none() {
             builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
@@ -2027,6 +2044,9 @@ impl Http1ReusableConnection {
                 builder = builder.header(name, value);
             }
         }
+        if request.headers.get("user-agent").is_none() {
+            builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
+        }
         if request.headers.get("accept-encoding").is_none() {
             builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
         }
@@ -2173,6 +2193,9 @@ impl Http1ReusableConnection {
             if name != hyper::header::HOST && name != hyper::header::CONNECTION {
                 builder = builder.header(name, value);
             }
+        }
+        if request.headers.get("user-agent").is_none() {
+            builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
         }
         if request.headers.get("accept-encoding").is_none() {
             builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
@@ -4136,11 +4159,18 @@ fn send_once_streaming_with_tls_config(
             hyper::Method::from_bytes(request.method_token.as_bytes())
                 .map_err(|_| HttpRuntimeError::InvalidRequest)?,
         )
-        .uri(request_target(&url));
+        .uri(if use_http2 {
+            http2_request_uri(&url)
+        } else {
+            request_target(&url)
+        });
     for (name, value) in request.headers.iter() {
         if name != hyper::header::HOST && name != hyper::header::CONNECTION {
             builder = builder.header(name, value);
         }
+    }
+    if request.headers.get("user-agent").is_none() {
+        builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
     }
     if request.headers.get("accept-encoding").is_none() {
         builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
@@ -4332,11 +4362,18 @@ pub(crate) fn send_once_streaming_with_producer(
             hyper::Method::from_bytes(request.method_token.as_bytes())
                 .map_err(|_| HttpRuntimeError::InvalidRequest)?,
         )
-        .uri(request_target(&url));
+        .uri(if use_http2 {
+            http2_request_uri(&url)
+        } else {
+            request_target(&url)
+        });
     for (name, value) in request.headers.iter() {
         if name != hyper::header::HOST && name != hyper::header::CONNECTION {
             builder = builder.header(name, value);
         }
+    }
+    if request.headers.get("user-agent").is_none() {
+        builder = builder.header(hyper::header::USER_AGENT, DEFAULT_HTTP_USER_AGENT);
     }
     if request.headers.get("accept-encoding").is_none() {
         builder = builder.header(hyper::header::ACCEPT_ENCODING, "br, gzip, deflate");
@@ -5936,6 +5973,19 @@ fn request_target(url: &zirk_runtime_core::http_values::Url) -> String {
         target.push_str(query);
     }
     target
+}
+
+/// Hyper derives HTTP/2's `:scheme`, `:authority`, and `:path` pseudo-fields
+/// from an absolute request URI. An origin-form path plus a `Host` header is
+/// sufficient for HTTP/1.1, but leaves the HTTP/2 authority absent and causes
+/// otherwise valid peers to reject the request (or fail the stream).
+fn http2_request_uri(url: &zirk_runtime_core::http_values::Url) -> String {
+    format!(
+        "{}://{}{}",
+        url.scheme(),
+        authority(url),
+        request_target(url)
+    )
 }
 
 fn validate_client_request(request: &HttpRequestValues) -> Result<(), HttpRuntimeError> {

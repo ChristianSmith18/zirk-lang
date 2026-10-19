@@ -390,7 +390,9 @@ fn client_tls_config(allow_tls12: bool) -> Result<Arc<RustlsClientConfig>, Netwo
 
 pub(crate) fn client_tls_config_for_http() -> Result<Arc<RustlsClientConfig>, NetworkTransportError>
 {
-    client_tls_config(false)
+    // HTTP interoperability includes TLS 1.2 peers. Rustls still prefers
+    // TLS 1.3, while retaining TLS 1.2 as the standards-compliant fallback.
+    client_tls_config(true)
 }
 
 fn build_client_tls_config(
@@ -537,7 +539,7 @@ impl TlsClientStream {
         grant: Arc<EffectiveNetworkGrant>,
         timeout: Duration,
     ) -> Result<(Self, NegotiatedHttpProtocol), NetworkTransportError> {
-        Self::connect_for_http_with_config(url, grant, timeout, client_tls_config(false)?)
+        Self::connect_for_http_with_config(url, grant, timeout, client_tls_config_for_http()?)
     }
 
     pub(crate) fn connect_for_http_with_config(
@@ -1477,14 +1479,19 @@ mod tests {
     fn http_tls_alpn_selects_h2_and_falls_back_to_http1() {
         use tokio_rustls::rustls::pki_types::CertificateDer;
 
-        fn negotiate(server_protocols: Vec<Vec<u8>>, expected: NegotiatedHttpProtocol) {
+        fn negotiate(
+            server_protocols: Vec<Vec<u8>>,
+            expected: NegotiatedHttpProtocol,
+            allow_tls12: bool,
+        ) {
             let certificate = include_bytes!("../testdata/tls-loopback-cert.der").to_vec();
             let private_key = include_bytes!("../testdata/tls-loopback-key.der").to_vec();
-            let server_config = TlsServerConfig::from_der(vec![certificate], private_key, false)
-                .unwrap()
-                .with_alpn_protocols(server_protocols.clone());
+            let server_config =
+                TlsServerConfig::from_der(vec![certificate], private_key, allow_tls12)
+                    .unwrap()
+                    .with_alpn_protocols(server_protocols.clone());
             let client_config = build_client_tls_config(
-                false,
+                allow_tls12,
                 vec![CertificateDer::from(
                     include_bytes!("../testdata/tls-loopback-root.der").to_vec(),
                 )],
@@ -1546,8 +1553,17 @@ mod tests {
             }
         }
 
-        negotiate(vec![b"h2".to_vec()], NegotiatedHttpProtocol::Http2);
-        negotiate(vec![b"http/1.1".to_vec()], NegotiatedHttpProtocol::Http1);
+        negotiate(vec![b"h2".to_vec()], NegotiatedHttpProtocol::Http2, false);
+        negotiate(
+            vec![b"http/1.1".to_vec()],
+            NegotiatedHttpProtocol::Http1,
+            false,
+        );
+        negotiate(
+            vec![b"http/1.1".to_vec()],
+            NegotiatedHttpProtocol::Http1,
+            true,
+        );
     }
 
     #[test]

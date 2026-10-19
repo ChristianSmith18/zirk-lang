@@ -201,6 +201,33 @@ jobs:
         shell: bash
         run: ./scripts/check-format.sh
 
+      # A permission-isolation E2E clears the child process environment. Restore
+      # the native linker/SDK variables explicitly so clang can still link the
+      # generated executable inside that intentionally isolated process.
+      - name: Prepare the MSVC linker environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe was not found at $vswhere" }
+          $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstall) { throw 'No Visual Studio installation with x64 C++ tools was found.' }
+          $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat was not found at $vcvars" }
+
+          $toolchain = & cmd.exe /d /s /c "call `"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed with exit code $LASTEXITCODE" }
+          $required = @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'UniversalCRTSdkDir', 'UCRTVersion', 'VisualStudioVersion')
+          foreach ($line in $toolchain) {
+            $separator = $line.IndexOf('=')
+            if ($separator -le 0) { continue }
+            $name = $line.Substring(0, $separator)
+            if ($required -contains $name) {
+              "$name=$($line.Substring($separator + 1))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
+
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
       # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
       # intensiva. Ejecutar en serie es la unica garantia real; el costo es
@@ -214,9 +241,10 @@ jobs:
           ZIRK_TRACE: "1"
 
       # Native Zirk executables can fail after producing their expected output.
-      # On Windows, surface the OS faulting module and offset without collecting
-      # process dumps, which could contain environment values or credentials.
-      - name: Diagnosticar fallos nativos de Zirk (Windows)
+      # End-to-end tests execute generated binaries named after each source file
+      # (for example `main.exe`), not `zirk.exe`. Surface faults from executables
+      # under the checkout without collecting dumps that could contain secrets.
+      - name: Diagnose native Zirk crashes (Windows)
         if: failure() && runner.os == 'Windows'
         continue-on-error: true
         shell: pwsh
@@ -233,11 +261,15 @@ jobs:
             foreach ($item in ([xml]$event.ToXml()).Event.EventData.Data) {
               $data[[string]$item.Name] = [string]$item.'#text'
             }
-            if ($data.AppName -match '(?i)^zirk\.exe$') {
+            $appPath = [string]$data.AppPath
+            $workspaceRoot = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\') + '\'
+            if ($appPath.StartsWith($workspaceRoot, [StringComparison]::OrdinalIgnoreCase)) {
               [pscustomobject]@{
                 Time = $event.TimeCreated.ToUniversalTime().ToString('o')
                 App = $data.AppName
+                AppPath = $appPath
                 Module = $data.ModuleName
+                ModulePath = $data.ModulePath
                 ExceptionCode = $data.ExceptionCode
                 FaultingOffset = $data.FaultingOffset
                 ProcessId = $data.ProcessId
@@ -248,5 +280,5 @@ jobs:
           if ($crashEvents) {
             $crashEvents | Format-Table -AutoSize | Out-String | Write-Host
           } else {
-            Write-Host 'No Windows Application Error events for zirk.exe were found.'
+            Write-Host 'No Application Error events for executables under the workspace were found.'
           }

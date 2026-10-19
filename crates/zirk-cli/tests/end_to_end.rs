@@ -72,6 +72,39 @@ fn approval_security_directory(home: &Path) -> PathBuf {
     root.join("security")
 }
 
+/// Restores only operating-system and native-linker variables after a test
+/// deliberately clears the environment. On Windows, `clang` needs these to
+/// locate the MSVC linker/SDK and to start child tools; the test still supplies
+/// its own PATH and controlled application variables.
+fn preserve_native_toolchain_environment(command: &mut Command) {
+    #[cfg(windows)]
+    for name in [
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "PATHEXT",
+        "COMSPEC",
+        "VSINSTALLDIR",
+        "VCINSTALLDIR",
+        "VCToolsInstallDir",
+        "VCToolsVersion",
+        "WindowsSdkDir",
+        "UniversalCRTSdkDir",
+        "UCRTVersion",
+        "VisualStudioVersion",
+        "INCLUDE",
+        "LIB",
+        "LIBPATH",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 /// Runs the compiler over a source file, from its own working directory.
 fn zirk(subcommand: &str, source: &Path, name: &str, extra: &[&str]) -> Output {
     let file_name = source.file_name().expect("file name").to_string_lossy();
@@ -2002,7 +2035,8 @@ fn main(): Void throws SecretFailure {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
+    let mut approval_command = Command::new(compiler());
+    approval_command
         .args(["permissions", "approve", "."])
         .current_dir(&project)
         .env_clear()
@@ -2011,7 +2045,9 @@ fn main(): Void throws SecretFailure {
         .env("PATH", &toolchain_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    preserve_native_toolchain_environment(&mut approval_command);
+    let mut approval = approval_command
         .spawn()
         .expect("start explicit permission approval");
     approval
@@ -2059,7 +2095,8 @@ fn main(): Void throws SecretFailure {
         );
     }
 
-    let run = Command::new(compiler())
+    let mut run_command = Command::new(compiler());
+    run_command
         .args(["run", "."])
         .current_dir(&project)
         .env_clear()
@@ -2085,9 +2122,9 @@ fn main(): Void throws SecretFailure {
             {
                 std::ffi::OsString::from("valid-on-this-platform")
             }
-        })
-        .output()
-        .expect("run with signed approval");
+        });
+    preserve_native_toolchain_environment(&mut run_command);
+    let run = run_command.output().expect("run with signed approval");
     assert!(
         run.status.success(),
         "{}",
@@ -2110,7 +2147,8 @@ fn main(): Void throws SecretFailure {
         "secret leaked through Throwable.message(): {stderr}"
     );
 
-    let uncaught = Command::new(compiler())
+    let mut uncaught_command = Command::new(compiler());
+    uncaught_command
         .args(["run", "."])
         .current_dir(&project)
         .env_clear()
@@ -2125,7 +2163,9 @@ fn main(): Void throws SecretFailure {
         .env("APPROVAL_FIXTURE_PORT", "custom-port")
         .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
         .env("APPROVAL_FIXTURE_SECRET", "secret-value")
-        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes")
+        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes");
+    preserve_native_toolchain_environment(&mut uncaught_command);
+    let uncaught = uncaught_command
         .output()
         .expect("run with an uncaught secret-bearing throwable");
     assert!(
@@ -2142,7 +2182,8 @@ fn main(): Void throws SecretFailure {
         "secret leaked through unhandled exception reporting: {uncaught_stderr}"
     );
 
-    let uncaught_json = Command::new(compiler())
+    let mut uncaught_json_command = Command::new(compiler());
+    uncaught_json_command
         .args(["run", "--json", "."])
         .current_dir(&project)
         .env_clear()
@@ -2157,7 +2198,9 @@ fn main(): Void throws SecretFailure {
         .env("APPROVAL_FIXTURE_PORT", "custom-port")
         .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
         .env("APPROVAL_FIXTURE_SECRET", "secret-value")
-        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes")
+        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes");
+    preserve_native_toolchain_environment(&mut uncaught_json_command);
+    let uncaught_json = uncaught_json_command
         .output()
         .expect("run with JSON diagnostics and an uncaught secret-bearing throwable");
     assert!(
@@ -2191,7 +2234,8 @@ fn main(): Void throws SecretFailure {
         manifest.replace("APPROVAL_FIXTURE_VALUE", "OTHER_APPROVAL_VALUE"),
     )
     .unwrap();
-    let stale = Command::new(compiler())
+    let mut stale_command = Command::new(compiler());
+    stale_command
         .args(["run", "."])
         .current_dir(&project)
         .env_clear()
@@ -2206,7 +2250,9 @@ fn main(): Void throws SecretFailure {
         .env("APPROVAL_FIXTURE_PORT", "stale-port")
         .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
         .env("APPROVAL_FIXTURE_SECRET", "must-not-leak-secret")
-        .env(zirk_cli::approvals::RUNTIME_GRANT_ENV, approved_token)
+        .env(zirk_cli::approvals::RUNTIME_GRANT_ENV, approved_token);
+    preserve_native_toolchain_environment(&mut stale_command);
+    let stale = stale_command
         .output()
         .expect("run after requested scopes changed");
     assert!(
@@ -2218,13 +2264,16 @@ fn main(): Void throws SecretFailure {
         normalize(&String::from_utf8_lossy(&stale.stdout)),
         "denied\nPermissionDenied\npresent fallback denied\nrequire denied\nfallback denied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nnull denied\ncontains denied\ncontains denied\nlisting denied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nsecret denied\n"
     );
-    let revoke = Command::new(compiler())
+    let mut revoke_command = Command::new(compiler());
+    revoke_command
         .args(["permissions", "revoke", "."])
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
         .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path)
+        .env("PATH", &toolchain_path);
+    preserve_native_toolchain_environment(&mut revoke_command);
+    let revoke = revoke_command
         .output()
         .expect("revoke the project approval");
     assert!(
@@ -5225,6 +5274,7 @@ fn bundled_std_http_client_reuses_authenticated_http2_connection() {
     let server_accepted = Arc::clone(&accepted);
     let server_requests = Arc::clone(&requests);
     let server_overlapped = Arc::clone(&overlapped);
+    let expected_authority = format!("127.0.0.1:{port}");
     let certificate = include_bytes!("../../zirk-runtime/testdata/tls-loopback-cert.der");
     let private_key = include_bytes!("../../zirk-runtime/testdata/tls-loopback-key.der");
     let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
@@ -5259,9 +5309,28 @@ fn bundled_std_http_client_reuses_authenticated_http2_connection() {
                         let arrivals = arrivals.clone();
                         let first_arrival = Arc::clone(&first_arrival);
                         let overlapped = Arc::clone(&server_overlapped);
+                        let expected_authority = expected_authority.clone();
                         async move {
                             assert_eq!(request.version(), hyper::Version::HTTP_2);
+                            assert_eq!(
+                                request
+                                    .headers()
+                                    .get(hyper::header::HOST)
+                                    .and_then(|value| value.to_str().ok()),
+                                Some(expected_authority.as_str()),
+                                "HTTP/2 :authority must match the request host"
+                            );
+                            assert_eq!(request.uri().path(), "/reuse");
                             assert_eq!(request.method(), "QUERY");
+                            assert_eq!(
+                                request
+                                    .headers()
+                                    .get("user-agent")
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap(),
+                                format!("Zirk-http-client/{}", env!("CARGO_PKG_VERSION")).as_str()
+                            );
                             assert_eq!(
                                 request.headers().get("content-type").unwrap(),
                                 "application/query+json"
