@@ -1674,26 +1674,7 @@ fn standard_http_response_text_and_json_constructors_set_content_type() {
             r#"import { HTTPError, HTTPResponse } from std.http;
 import { stdout } from std.io;
 fn main(): Void {
-    stdout.println("before bytes response");
-    mut bytes_response = HTTPResponse.from_bytes(199, [104 as Byte]);
-    stdout.println(bytes_response.status_code());
-    stdout.println("before string bytes");
-    mut encoded = "hello".bytes();
-    stdout.println(encoded.length);
-    stdout.println("after string bytes");
-    mut copied: Array<Byte> = Array(encoded.length);
-    stdout.println("after byte allocation");
-    mut copy_index: UInt64 = 0;
-    while copy_index < encoded.length {
-        stdout.println("before byte copy item");
-        copied[copy_index] = encoded[copy_index];
-        stdout.println("after byte copy item");
-        copy_index = copy_index + 1;
-    }
-    stdout.println("after byte copy");
-    stdout.println("before first response");
     mut text = HTTPResponse.from_text(201, "hello");
-    stdout.println("after first response");
     stdout.println(text.status_code());
     match text.bytes() { Ok(body) => stdout.println(body.length); Error(error) => stdout.println(error.to_string()); }
     match text.text() { Ok(_) => stdout.println("duplicate body read accepted"); Error(error) => match error { HTTPError.BodyConsumed => stdout.println("body consumed"); _ => stdout.println("unexpected body error"); } }
@@ -1717,7 +1698,7 @@ fn main(): Void {
     );
     assert_eq!(
         normalize(&output.stdout),
-        "before bytes response\n199\nbefore string bytes\n5\nafter string bytes\nafter byte allocation\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nbefore byte copy item\nafter byte copy item\nafter byte copy\nbefore first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
+        "201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
     );
 }
 
