@@ -55,11 +55,15 @@ Every environment read, containment query, name listing, and secret read SHALL v
 
 ### Requirement: Secret values are non-printable by default
 
-`get_secret` SHALL require secret-specific authority and return `SecretString`. Secret values SHALL NOT have general string conversion, interpolation, ordinary formatting, or unredacted diagnostic/debug/test output. Reveal SHALL occur only at an explicitly authorized sink boundary.
+`get_secret` SHALL require secret-specific authority and return `SecretString`. Secret values SHALL NOT have general string conversion, interpolation, ordinary formatting, or unredacted output through any implemented diagnostic sink. Reveal SHALL occur only at an explicitly authorized sink boundary. Any future debugger, heap snapshot, test runner, or test reporter that can expose `SecretString` values SHALL redact them before presentation or persistence.
 
-#### Scenario: A secret is rendered in diagnostics
-- **WHEN** a `SecretString` is included in a log, exception, debugger view, test report, or structured output
+#### Scenario: A secret is rendered in an implemented diagnostic sink
+- **WHEN** a `SecretString` is included in supported formatting, interpolation, an exception, or structured runtime diagnostic output
 - **THEN** only the redacted marker is observable
+
+#### Scenario: A future debugger or test reporter exposes a secret
+- **WHEN** a debugger, heap snapshot, test runner, or test reporter is implemented and can display or persist a `SecretString`
+- **THEN** it redacts the value before presentation or persistence
 
 #### Scenario: A secret is passed to an authorized sink
 - **WHEN** code passes a secret to a sink that explicitly accepts secret values and has matching authority
