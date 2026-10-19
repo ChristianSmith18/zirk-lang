@@ -224,7 +224,7 @@ jobs:
 
           $toolchain = & cmd.exe /d /s /c "call `"$vcvars`" >nul && set"
           if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed with exit code $LASTEXITCODE" }
-          $required = @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'UniversalCRTSdkDir', 'UCRTVersion', 'VisualStudioVersion')
+          $required = @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCIDEInstallDir', 'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'UniversalCRTSdkDir', 'UCRTVersion', 'VisualStudioVersion', 'VSCMD_VER', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_app_plat', 'DevEnvDir')
           foreach ($line in $toolchain) {
             $separator = $line.IndexOf('=')
             if ($separator -le 0) { continue }
