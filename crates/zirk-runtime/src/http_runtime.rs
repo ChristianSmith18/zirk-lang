@@ -9910,17 +9910,35 @@ mod tests {
                     compressed,
                     "response coding must match the slow-consumer case"
                 );
-                std::thread::sleep(Duration::from_millis(500));
-                let stalled_count = PRODUCER_CALLS.load(Ordering::Acquire);
-                std::thread::sleep(Duration::from_millis(100));
-                let later_count = PRODUCER_CALLS.load(Ordering::Acquire);
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut previous = PRODUCER_CALLS.load(Ordering::Acquire);
+                let mut stable_intervals = 0;
+                let stalled_count = loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let current = PRODUCER_CALLS.load(Ordering::Acquire);
+                    if current > 0 && current == previous {
+                        stable_intervals += 1;
+                        if stable_intervals == 3 {
+                            break current;
+                        }
+                    } else {
+                        previous = current;
+                        stable_intervals = 0;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the unread HTTP/1.1 response should eventually backpressure its producer"
+                    );
+                };
                 assert!(
                     stalled_count > 0,
                     "the server never started the SSE producer"
                 );
+                std::thread::sleep(Duration::from_millis(100));
                 assert_eq!(
-                    later_count, stalled_count,
-                    "the Zirk producer advanced while the transport peer stopped reading"
+                    PRODUCER_CALLS.load(Ordering::Acquire),
+                    stalled_count,
+                    "the Zirk producer advanced after the HTTP/1.1 transport stopped accepting data"
                 );
                 drop(stream);
             });
@@ -10157,7 +10175,7 @@ mod tests {
                                 loop {
                                     tokio::time::sleep(Duration::from_millis(100)).await;
                                     let current = PRODUCER_CALLS.load(Ordering::Acquire);
-                                    if current == previous {
+                                    if current > 0 && current == previous {
                                         stable_intervals += 1;
                                         if stable_intervals == 3 {
                                             break current;
