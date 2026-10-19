@@ -238,17 +238,30 @@ jobs:
       # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
       # intensiva. Ejecutar en serie es la unica garantia real; el costo es
       # despreciable con esta cantidad de tests.
-      - name: Tests
-        shell: bash
+      - name: Focused tests (Windows)
+        if: runner.os == 'Windows' && inputs.test_filter != ''
         run: |
-          if [[ -n "$TEST_FILTER" ]]; then
-            echo "Running focused end-to-end tests matching: $TEST_FILTER"
-            cargo test -p zirk-cli --test end_to_end "$TEST_FILTER" -- --test-threads=1 --nocapture
-          else
-            cargo test --workspace -- --test-threads=1 --nocapture
-          fi
+          Write-Host "Running focused end-to-end tests matching: $env:TEST_FILTER"
+          cargo test -p zirk-cli --test end_to_end "$env:TEST_FILTER" -- --test-threads=1 --nocapture
         env:
           TEST_FILTER: ${{ inputs.test_filter }}
+          RUST_BACKTRACE: "1"
+          ZIRK_TRACE: "1"
+
+      - name: Focused tests (Unix)
+        if: runner.os != 'Windows' && inputs.test_filter != ''
+        run: |
+          echo "Running focused end-to-end tests matching: $TEST_FILTER"
+          cargo test -p zirk-cli --test end_to_end "$TEST_FILTER" -- --test-threads=1 --nocapture
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
+          RUST_BACKTRACE: "1"
+          ZIRK_TRACE: "1"
+
+      - name: Tests
+        if: inputs.test_filter == ''
+        run: cargo test --workspace -- --test-threads=1 --nocapture
+        env:
           RUST_BACKTRACE: "1"
           # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
