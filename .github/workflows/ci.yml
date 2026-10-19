@@ -212,3 +212,41 @@ jobs:
           # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
           ZIRK_TRACE: "1"
+
+      # Native Zirk executables can fail after producing their expected output.
+      # On Windows, surface the OS faulting module and offset without collecting
+      # process dumps, which could contain environment values or credentials.
+      - name: Diagnosticar fallos nativos de Zirk (Windows)
+        if: failure() && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $events = Get-WinEvent -FilterHashtable @{
+            LogName = 'Application'
+            ProviderName = 'Application Error'
+            Id = 1000
+            StartTime = (Get-Date).AddHours(-3)
+          } -ErrorAction SilentlyContinue
+
+          $crashEvents = foreach ($event in $events) {
+            $data = @{}
+            foreach ($item in ([xml]$event.ToXml()).Event.EventData.Data) {
+              $data[[string]$item.Name] = [string]$item.'#text'
+            }
+            if ($data.AppName -match '(?i)^zirk\.exe$') {
+              [pscustomobject]@{
+                Time = $event.TimeCreated.ToUniversalTime().ToString('o')
+                App = $data.AppName
+                Module = $data.ModuleName
+                ExceptionCode = $data.ExceptionCode
+                FaultingOffset = $data.FaultingOffset
+                ProcessId = $data.ProcessId
+              }
+            }
+          }
+
+          if ($crashEvents) {
+            $crashEvents | Format-Table -AutoSize | Out-String | Write-Host
+          } else {
+            Write-Host 'No Windows Application Error events for zirk.exe were found.'
+          }
