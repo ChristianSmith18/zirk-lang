@@ -296,15 +296,17 @@ mod tests {
     #[test]
     fn timers_fire_in_deadline_order() {
         let mut timers = TimerService::new();
+        let start = Instant::now();
         let far = timers.arm(50_000_000, 111).unwrap();
         let near = timers.arm(1_000_000, 222).unwrap();
         assert!(!timers.is_empty());
 
         // Nothing is due immediately.
-        assert!(timers.poll_expired(Instant::now()).is_empty());
+        assert!(timers.poll_expired(start).is_empty());
 
-        std::thread::sleep(StdDuration::from_millis(5));
-        let fired = timers.poll_expired(Instant::now());
+        // Advance the service's clock explicitly instead of sleeping; a loaded
+        // CI runner may otherwise delay the test past both deadlines.
+        let fired = timers.poll_expired(start + StdDuration::from_millis(5));
         assert_eq!(fired, vec![(near, 222)]);
         assert!(!timers.is_empty(), "the far timer is still pending");
         let _ = far;
