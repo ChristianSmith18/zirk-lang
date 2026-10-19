@@ -41,6 +41,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    if: inputs.test_filter == '' || matrix.name == 'windows-x86_64'
     strategy:
       # Un fallo en una plataforma no debe ocultar el estado de las demas:
       # necesitamos saber si el problema es de una o de todas.
