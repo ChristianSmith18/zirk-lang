@@ -1499,16 +1499,21 @@ share class HTTPMultipartData {
     part_count(): UInt64 { return this.names.length; }
 
     part(index: Int32): HTTPMultipartPart? {
-        if index < 0 || index >= this.names.length { return null; }
+        if index < 0 { return null; }
+        mut native_index: UInt64 = index as UInt64;
+        if native_index >= this.names.length { return null; }
         return HTTPMultipartPart(
-            this.names[index],
-            HTTPMultipartData.optional_text(this.filename_present[index], this.filenames[index]),
+            this.names[native_index],
             HTTPMultipartData.optional_text(
-            this.content_type_present[index],
-            this.content_types[index],
+            this.filename_present[native_index],
+            this.filenames[native_index],
         ),
-            this.bodies[index],
-            this.upload_handles[index],
+            HTTPMultipartData.optional_text(
+            this.content_type_present[native_index],
+            this.content_types[native_index],
+        ),
+            this.bodies[native_index],
+            this.upload_handles[native_index],
         );
     }
 

@@ -1791,7 +1791,7 @@ fn standard_http_headers_enforce_the_field_count_bound() {
         .collect::<Vec<_>>()
         .join(", ");
     let mut source = format!(
-        "import {{ HTTPHeaders }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmut headers = HTTPHeaders.create();\nmut names: Array<String> = [{names}];\nmut index = 0;\nwhile index < names.length {{ _ = headers.add(names[index], \"v\"); index += 1; }}\n"
+        "import {{ HTTPHeaders }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmut headers = HTTPHeaders.create();\nmut names: Array<String> = [{names}];\nmut index: UInt64 = 0;\nwhile index < names.length {{ _ = headers.add(names[index], \"v\"); index += 1; }}\n"
     );
     source.push_str(
         "match headers.add(\"x-overflow\", \"v\") { Ok(_) => stdout.println(\"overflow accepted\"); Error(error) => stdout.println(error.to_string()); }\nmatch headers.set(\"x-0\", \"replaced\") { Ok(_) => stdout.println(\"replacement accepted\"); Error(error) => stdout.println(error.to_string()); }\nmatch headers.set(\"x-new\", \"v\") { Ok(_) => stdout.println(\"new field accepted\"); Error(error) => stdout.println(error.to_string()); }\n}\n",
@@ -2016,7 +2016,7 @@ fn main(): Void throws SecretFailure {
     match Env.get<Int32>("APPROVAL_FIXTURE_MISSING") { Error(error) => stdout.println(error.to_string()); Ok(_) => stdout.println("unexpected generic typed value"); }
     match Env.get_int32("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
     match Env.get_int32("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected parsed integer"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get("APPROVAL_FIXTURE_INVALID_UTF8") { Ok(_) => stdout.println("unexpected decoded environment value"); Error(error) => stdout.println(error.to_string()); }
+    match Env.get("APPROVAL_FIXTURE_INVALID_UTF8") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
     match Env.contains("APPROVAL_FIXTURE_INVALID_UTF8") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
     match Env.get<Int32>("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
     match Env.get<Int32>("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected generic parsed integer"); Error(error) => stdout.println(error.to_string()); }
