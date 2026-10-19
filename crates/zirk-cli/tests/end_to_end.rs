@@ -1674,6 +1674,9 @@ fn standard_http_response_text_and_json_constructors_set_content_type() {
             r#"import { HTTPError, HTTPResponse } from std.http;
 import { stdout } from std.io;
 fn main(): Void {
+    stdout.println("before bytes response");
+    mut bytes_response = HTTPResponse.from_bytes(199, [104 as Byte]);
+    stdout.println(bytes_response.status_code());
     stdout.println("before first response");
     mut text = HTTPResponse.from_text(201, "hello");
     stdout.println("after first response");
@@ -1700,7 +1703,7 @@ fn main(): Void {
     );
     assert_eq!(
         normalize(&output.stdout),
-        "before first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
+        "before bytes response\n199\nbefore first response\nafter first response\n201\n5\nbody consumed\nworld\nbody consumed\ntext/plain; charset=utf-8\n202\napplication/json\nInvalidStatus\napplication/json\n"
     );
 }
 
