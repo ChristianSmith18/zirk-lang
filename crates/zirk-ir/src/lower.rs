@@ -10,13 +10,14 @@
 //! reaches this point.
 
 use crate::ir::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
-    ParamInfo, TupleType, Type, TypeNames, VariantMapping, describe,
+    ParamInfo, Signature, TupleType, Type, TypeNames, VariantMapping, describe,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
@@ -61,6 +62,48 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     ] {
         if !checked.list_types.contains(&element) {
             checked.list_types.push(element);
+        }
+    }
+
+    // Generic free functions are emitted only for concrete call-site
+    // instantiations. Their source declarations remain templates and never
+    // reach LLVM with a `Base::Param` ABI type.
+    let generic_function_specializations =
+        specialize_generic_functions(&program.functions, &mut checked);
+    let generic_static_method_specializations =
+        specialize_generic_static_methods(program, &mut checked);
+    // Generic bodies can mention compound types such as `Result<T, E>` in a
+    // match even when no call-site signature mentions that exact
+    // instantiation. Materialize those layouts under each monomorphization
+    // before the IR enum/class tables are frozen below.
+    for (declaration, substitution) in &generic_function_specializations {
+        let types = checked
+            .expr_types
+            .iter()
+            .filter(|(span, _)| {
+                span.file == declaration.span.file
+                    && span.start >= declaration.span.start
+                    && span.end <= declaration.span.end
+            })
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        for ty in types {
+            materialize_specialized_type(&mut checked, ty, substitution);
+        }
+    }
+    for (_, _, declaration, _, substitution) in &generic_static_method_specializations {
+        let types = checked
+            .expr_types
+            .iter()
+            .filter(|(span, _)| {
+                span.file == declaration.span.file
+                    && span.start >= declaration.span.start
+                    && span.end <= declaration.span.end
+            })
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        for ty in types {
+            materialize_specialized_type(&mut checked, ty, substitution);
         }
     }
     let specialized: Vec<ClassType> = checked
@@ -205,6 +248,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                         methods: checked.contracts[*id as usize]
                             .methods
                             .iter()
+                            .filter(|required| !required.is_static)
                             .map(|required| {
                                 let supplied = class
                                     .method(&required.name)
@@ -441,27 +485,27 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     module.array_types = checked
         .array_types
         .iter()
-        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .map(|&element| ir_type_or_template(element, instance_base, enum_instance_base, checked))
         .collect();
     module.list_types = checked
         .list_types
         .iter()
-        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .map(|&element| ir_type_or_template(element, instance_base, enum_instance_base, checked))
         .collect();
     module.map_types = checked
         .map_types
         .iter()
         .map(|t| {
             (
-                ir_type(t.key, instance_base, enum_instance_base, checked),
-                ir_type(t.value, instance_base, enum_instance_base, checked),
+                ir_type_or_template(t.key, instance_base, enum_instance_base, checked),
+                ir_type_or_template(t.value, instance_base, enum_instance_base, checked),
             )
         })
         .collect();
     module.set_types = checked
         .set_types
         .iter()
-        .map(|&element| ir_type(element, instance_base, enum_instance_base, checked))
+        .map(|&element| ir_type_or_template(element, instance_base, enum_instance_base, checked))
         .collect();
 
     // `universal-to-string-and-multiline-strings`: entries the `to_string`
@@ -2015,11 +2059,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
     // Default values are written in the declaration but evaluated at the call
     // site, so the lowering needs the declarations while lowering the calls.
-    let declarations: HashMap<&str, &ast::FnDecl> = program
+    let mut declarations: HashMap<&str, &ast::FnDecl> = program
         .functions
         .iter()
         .map(|f| (f.name.name.as_str(), f))
         .collect();
+    for (function, _) in &generic_function_specializations {
+        declarations.insert(function.name.name.as_str(), function);
+    }
 
     // The sixteen hand-built method bodies of the four native failure
     // classes (`fase-4d-runtimeerror`, D8) — the same "no `program.classes`
@@ -2079,6 +2126,21 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             instance_base,
             enum_instance_base,
         );
+    }
+
+    for (class_id, class, method, symbol, substitution) in &generic_static_method_specializations {
+        let body = method.body.as_ref().expect("specialized method has a body");
+        let lowering = FunctionLowering::new(
+            &mut module,
+            checked,
+            &declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .with_type_substitution(substitution.clone());
+        let (lowered, lifted) = lowering.run_method(class, method, body, *class_id, Some(symbol));
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
     }
 
     // A boxed value's contract-table wrapper (`fase-3-value-type-contract-
@@ -2149,6 +2211,9 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     for function in &program.functions {
+        if !function.type_params.is_empty() {
+            continue;
+        }
         let lowering = FunctionLowering::new(
             &mut module,
             checked,
@@ -2160,6 +2225,20 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         module.functions.push(lowered);
         // Lambdas become module functions of their own: the closure value only
         // carries a pointer to one plus the captures. Decision D10.
+        module.functions.extend(lifted);
+    }
+
+    for (function, substitution) in &generic_function_specializations {
+        let lowering = FunctionLowering::new(
+            &mut module,
+            checked,
+            &declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .with_type_substitution(substitution.clone());
+        let (lowered, lifted) = lowering.run(function);
+        module.functions.push(lowered);
         module.functions.extend(lifted);
     }
 
@@ -2521,6 +2600,11 @@ fn lower_class_body<'a>(
     // A method is the same shape as a constructor: a function whose first
     // parameter is the receiver.
     for method in &class.methods {
+        // Generic methods are emitted only for concrete call-site
+        // instantiations below. Their template ABI can contain `Param<T>`.
+        if !method.type_params.is_empty() {
+            continue;
+        }
         let Some(body) = &method.body else { continue };
         let lowering = FunctionLowering::new(
             module,
@@ -2529,7 +2613,7 @@ fn lower_class_body<'a>(
             instance_base,
             enum_instance_base,
         );
-        let (lowered, lifted) = lowering.run_method(class, method, body, id);
+        let (lowered, lifted) = lowering.run_method(class, method, body, id, None);
         module.functions.push(lowered);
         module.functions.extend(lifted);
     }
@@ -2630,6 +2714,619 @@ fn class_decls<'a>(
         walk_block(&function.body, checked, &mut out);
     }
     out
+}
+
+/// One emitted monomorphization of a top-level generic function and the
+/// substitution applied while lowering its body.
+type GenericFunctionSpecialization = (ast::FnDecl, HashMap<u32, Type>);
+
+type GenericStaticMethodSpecialization = (
+    u32,
+    ast::ClassDecl,
+    ast::MethodDecl,
+    String,
+    HashMap<u32, Type>,
+);
+
+/// Emits one static-method body per concrete generic call. Restricting this
+/// first slice to non-generic owners and direct type-parameter ABI positions
+/// keeps class specialization and nested generic-layout rules independent.
+fn specialize_generic_static_methods(
+    program: &ast::Program,
+    checked: &mut CheckedProgram,
+) -> Vec<GenericStaticMethodSpecialization> {
+    let declarations = class_decls(program, checked);
+    let calls: Vec<_> = checked
+        .generic_call_substitutions
+        .values()
+        .filter(|call| call.is_static_method && call.owner_class.is_some())
+        .cloned()
+        .collect();
+    let mut specializations = Vec::new();
+    let mut emitted = HashSet::new();
+
+    for call in calls {
+        let Some(owner) = call.owner_class else {
+            continue;
+        };
+        let Some(class_info) = checked.classes.get(owner as usize).cloned() else {
+            continue;
+        };
+        if !class_info.type_params.is_empty() {
+            continue;
+        }
+        let Some(method_info) = class_info.method(&call.callable).cloned() else {
+            continue;
+        };
+        if !method_info.is_static || method_info.type_params.is_empty() {
+            continue;
+        }
+        let Some(arguments) = method_info
+            .type_params
+            .iter()
+            .map(|parameter| call.substitutions.get(parameter).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if arguments
+            .iter()
+            .any(|argument| type_contains_param(checked, *argument, &mut HashSet::new()))
+        {
+            continue;
+        }
+        let substitution: HashMap<_, _> = method_info
+            .type_params
+            .iter()
+            .copied()
+            .zip(arguments.iter().copied())
+            .collect();
+        if method_info.params.iter().any(|parameter| {
+            type_contains_param(
+                checked,
+                substitute_specialized_type(checked, parameter.ty, &substitution),
+                &mut HashSet::new(),
+            )
+        }) || type_contains_param(
+            checked,
+            substitute_specialized_type(checked, method_info.returns, &substitution),
+            &mut HashSet::new(),
+        ) {
+            continue;
+        }
+        let Some(class_decl) = declarations.get(&owner) else {
+            continue;
+        };
+        let Some(method_decl) = class_decl
+            .methods
+            .iter()
+            .find(|method| method.name.name == method_info.name)
+        else {
+            continue;
+        };
+        if method_decl.body.is_none() {
+            continue;
+        }
+        let symbol = generic_static_method_symbol(&class_info.name, &method_info.name, &arguments);
+        if !emitted.insert(symbol.clone()) {
+            continue;
+        }
+        let mut method = method_decl.clone();
+        method.type_params.clear();
+        specializations.push((owner, (*class_decl).clone(), method, symbol, substitution));
+    }
+    specializations
+}
+
+fn generic_static_method_symbol(class: &str, method: &str, arguments: &[Type]) -> String {
+    let mut hasher = DefaultHasher::new();
+    arguments.hash(&mut hasher);
+    format!(
+        "{}$generic${:016x}",
+        static_method_symbol(class, method),
+        hasher.finish()
+    )
+}
+
+fn specialize_generic_functions(
+    declarations: &[ast::FnDecl],
+    checked: &mut CheckedProgram,
+) -> Vec<GenericFunctionSpecialization> {
+    let calls: Vec<_> = checked
+        .generic_call_substitutions
+        .values()
+        .cloned()
+        .collect();
+    let mut specializations = Vec::new();
+    let mut emitted = HashSet::new();
+
+    for call in calls {
+        let Some(signature) = checked.functions.get(&call.callable).cloned() else {
+            continue;
+        };
+        if signature.type_params.is_empty() {
+            continue;
+        }
+        let Some(declaration) = declarations
+            .iter()
+            .find(|function| function.name.name == call.callable)
+        else {
+            // Generic methods use a different symbol and receiver ABI; they
+            // remain gated until their class-aware specialization lands.
+            continue;
+        };
+
+        let Some(arguments) = signature
+            .type_params
+            .iter()
+            .map(|parameter| call.substitutions.get(parameter).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if arguments
+            .iter()
+            .any(|argument| type_contains_param(checked, *argument, &mut HashSet::new()))
+        {
+            // A generic function called from another generic body is expanded
+            // once that enclosing body's substitution is known.
+            continue;
+        }
+
+        let symbol = generic_function_symbol(&call.callable, &arguments);
+        let substitution: HashMap<_, _> = signature
+            .type_params
+            .iter()
+            .copied()
+            .zip(arguments.iter().copied())
+            .collect();
+        let mut specialized_signature = signature.clone();
+        specialized_signature.name = symbol.clone();
+        specialized_signature.type_params.clear();
+        specialized_signature.params = specialized_signature
+            .params
+            .into_iter()
+            .map(|mut parameter| {
+                parameter.ty = substitute_specialized_type(checked, parameter.ty, &substitution);
+                parameter
+            })
+            .collect();
+        specialized_signature.returns =
+            substitute_specialized_type(checked, specialized_signature.returns, &substitution);
+        if specialized_signature
+            .params
+            .iter()
+            .any(|parameter| type_contains_param(checked, parameter.ty, &mut HashSet::new()))
+            || type_contains_param(checked, specialized_signature.returns, &mut HashSet::new())
+        {
+            continue;
+        }
+        if !emitted.insert(symbol.clone()) {
+            continue;
+        }
+        checked
+            .functions
+            .insert(symbol.clone(), specialized_signature);
+
+        let mut specialized_declaration = declaration.clone();
+        specialized_declaration.name.name = symbol;
+        specialized_declaration.type_params.clear();
+        specializations.push((specialized_declaration, substitution));
+    }
+
+    specializations
+}
+
+fn generic_function_symbol(name: &str, arguments: &[Type]) -> String {
+    let mut hasher = DefaultHasher::new();
+    arguments.hash(&mut hasher);
+    format!("{name}$generic${:016x}", hasher.finish())
+}
+
+/// Recursively ensures the concrete compound-type identities a specialized
+/// generic body will need. The checker records `Result<T, E>` in the template
+/// body with `T` unresolved; a caller can specialize the enclosing method
+/// without ever declaring that exact `Result<Concrete, E>` in its own
+/// signature. IR layouts are indexed by the checker's intern tables, so add
+/// these concrete instances before building the module layouts.
+fn materialize_specialized_type(
+    checked: &mut CheckedProgram,
+    ty: Type,
+    substitution: &HashMap<u32, Type>,
+) -> Type {
+    if let Base::Param(id) = ty.base
+        && let Some(replacement) = substitution.get(&id).copied()
+    {
+        return if ty.nullable {
+            replacement.as_nullable()
+        } else {
+            replacement.without_null()
+        };
+    }
+
+    let base = match ty.base {
+        Base::Instance(id) => {
+            let Some(instance) = checked.generic_instances.get(id as usize).cloned() else {
+                return ty;
+            };
+            let args = instance
+                .args
+                .iter()
+                .map(|arg| materialize_specialized_type(checked, *arg, substitution))
+                .collect::<Vec<_>>();
+            if args == instance.args {
+                Base::Instance(id)
+            } else {
+                let concrete = checked
+                    .generic_instances
+                    .iter()
+                    .position(|candidate| {
+                        candidate.class == instance.class && candidate.args == args
+                    })
+                    .unwrap_or_else(|| {
+                        let id = checked.generic_instances.len() as u32;
+                        checked.generic_instances.push(zirk_sema::GenericInstance {
+                            class: instance.class,
+                            args,
+                        });
+                        id as usize
+                    });
+                Base::Instance(concrete as u32)
+            }
+        }
+        Base::ContractInstance(id) => {
+            let Some(instance) = checked.contract_instances.get(id as usize).cloned() else {
+                return ty;
+            };
+            let args = instance
+                .args
+                .iter()
+                .map(|arg| materialize_specialized_type(checked, *arg, substitution))
+                .collect::<Vec<_>>();
+            if args == instance.args {
+                Base::ContractInstance(id)
+            } else {
+                let concrete = checked
+                    .contract_instances
+                    .iter()
+                    .position(|candidate| {
+                        candidate.contract == instance.contract && candidate.args == args
+                    })
+                    .unwrap_or_else(|| {
+                        let id = checked.contract_instances.len() as u32;
+                        checked
+                            .contract_instances
+                            .push(zirk_sema::GenericContractInstance {
+                                contract: instance.contract,
+                                args,
+                            });
+                        id as usize
+                    });
+                Base::ContractInstance(concrete as u32)
+            }
+        }
+        Base::EnumInstance(id) => {
+            let Some(instance) = checked.enum_instances.get(id as usize).cloned() else {
+                return ty;
+            };
+            let args = instance
+                .args
+                .iter()
+                .map(|arg| materialize_specialized_type(checked, *arg, substitution))
+                .collect::<Vec<_>>();
+            if args == instance.args {
+                Base::EnumInstance(id)
+            } else {
+                let concrete = checked
+                    .enum_instances
+                    .iter()
+                    .position(|candidate| {
+                        candidate.enum_id == instance.enum_id && candidate.args == args
+                    })
+                    .unwrap_or_else(|| {
+                        let id = checked.enum_instances.len() as u32;
+                        checked.enum_instances.push(zirk_sema::GenericEnumInstance {
+                            enum_id: instance.enum_id,
+                            args,
+                        });
+                        id as usize
+                    });
+                Base::EnumInstance(concrete as u32)
+            }
+        }
+        _ => return ty,
+    };
+    ty.with_base(base)
+}
+
+/// Replaces generic parameters inside already-interned compound types. The
+/// checker interns concrete call-site shapes while validating the invocation;
+/// this lookup keeps lowering from inventing type identities of its own.
+fn substitute_specialized_type(
+    checked: &CheckedProgram,
+    ty: Type,
+    substitution: &HashMap<u32, Type>,
+) -> Type {
+    let replacement = match ty.base {
+        Base::Param(id) => substitution.get(&id).copied(),
+        Base::Instance(id) => checked
+            .generic_instances
+            .get(id as usize)
+            .and_then(|instance| {
+                let args: Vec<_> = instance
+                    .args
+                    .iter()
+                    .map(|ty| substitute_specialized_type(checked, *ty, substitution))
+                    .collect();
+                checked
+                    .generic_instances
+                    .iter()
+                    .position(|candidate| {
+                        candidate.class == instance.class && candidate.args == args
+                    })
+                    .map(|id| Type::of(Base::Instance(id as u32)))
+            }),
+        Base::ContractInstance(id) => {
+            checked
+                .contract_instances
+                .get(id as usize)
+                .and_then(|instance| {
+                    let args: Vec<_> = instance
+                        .args
+                        .iter()
+                        .map(|ty| substitute_specialized_type(checked, *ty, substitution))
+                        .collect();
+                    checked
+                        .contract_instances
+                        .iter()
+                        .position(|candidate| {
+                            candidate.contract == instance.contract && candidate.args == args
+                        })
+                        .map(|id| Type::of(Base::ContractInstance(id as u32)))
+                })
+        }
+        Base::EnumInstance(id) => checked
+            .enum_instances
+            .get(id as usize)
+            .and_then(|instance| {
+                let args: Vec<_> = instance
+                    .args
+                    .iter()
+                    .map(|ty| substitute_specialized_type(checked, *ty, substitution))
+                    .collect();
+                checked
+                    .enum_instances
+                    .iter()
+                    .position(|candidate| {
+                        candidate.enum_id == instance.enum_id && candidate.args == args
+                    })
+                    .map(|id| Type::of(Base::EnumInstance(id as u32)))
+            }),
+        Base::Function(id) => checked.fn_types.get(id as usize).and_then(|function| {
+            let params: Vec<_> = function
+                .params
+                .iter()
+                .map(|ty| substitute_specialized_type(checked, *ty, substitution))
+                .collect();
+            let returns = substitute_specialized_type(checked, function.returns, substitution);
+            if params == function.params && returns == function.returns {
+                return Some(Type::of(Base::Function(id)));
+            }
+            checked
+                .fn_types
+                .iter()
+                .position(|candidate| candidate.params == params && candidate.returns == returns)
+                .map(|id| Type::of(Base::Function(id as u32)))
+        }),
+        Base::Job(id) => checked.job_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.job_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Job(id)))
+        }),
+        Base::Channel(id) => checked.channel_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.channel_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Channel(id)))
+        }),
+        Base::Atomic(id) => checked.atomic_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.atomic_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Atomic(id)))
+        }),
+        Base::Mutex(id) => checked.mutex_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.mutex_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Mutex(id)))
+        }),
+        Base::Pointer(id) => checked.pointer_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.pointer_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Pointer(id)))
+        }),
+        Base::Weak(id) => checked.weak_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.weak_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Weak(id)))
+        }),
+        Base::NativeSlice(id) => checked
+            .native_slice_types
+            .get(id as usize)
+            .and_then(|inner| {
+                find_type(
+                    &checked.native_slice_types,
+                    substitute_specialized_type(checked, *inner, substitution),
+                )
+                .map(|id| Type::of(Base::NativeSlice(id)))
+            }),
+        Base::NativeSliceMut(id) => {
+            checked
+                .native_slice_mut_types
+                .get(id as usize)
+                .and_then(|inner| {
+                    find_type(
+                        &checked.native_slice_mut_types,
+                        substitute_specialized_type(checked, *inner, substitution),
+                    )
+                    .map(|id| Type::of(Base::NativeSliceMut(id)))
+                })
+        }
+        Base::Dependent(id) => checked.dependent_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.dependent_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Dependent(id)))
+        }),
+        Base::Pin(id) => checked.pin_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.pin_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Pin(id)))
+        }),
+        Base::Array(id) => checked.array_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.array_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Array(id)))
+        }),
+        Base::List(id) => checked.list_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.list_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::List(id)))
+        }),
+        Base::Range(id) => checked.range_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.range_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Range(id)))
+        }),
+        Base::Set(id) => checked.set_types.get(id as usize).and_then(|inner| {
+            find_type(
+                &checked.set_types,
+                substitute_specialized_type(checked, *inner, substitution),
+            )
+            .map(|id| Type::of(Base::Set(id)))
+        }),
+        Base::Map(id) => checked.map_types.get(id as usize).and_then(|map| {
+            let key = substitute_specialized_type(checked, map.key, substitution);
+            let value = substitute_specialized_type(checked, map.value, substitution);
+            checked
+                .map_types
+                .iter()
+                .position(|candidate| candidate.key == key && candidate.value == value)
+                .map(|id| Type::of(Base::Map(id as u32)))
+        }),
+        Base::Tuple(id) => checked.tuple_types.get(id as usize).and_then(|tuple| {
+            let elements: Vec<_> = tuple
+                .elements
+                .iter()
+                .map(|ty| substitute_specialized_type(checked, *ty, substitution))
+                .collect();
+            checked
+                .tuple_types
+                .iter()
+                .position(|candidate| candidate.elements == elements)
+                .map(|id| Type::of(Base::Tuple(id as u32)))
+        }),
+        _ => None,
+    };
+    replacement.map_or(ty, |replacement| {
+        let concrete = ty.with_base(replacement.base);
+        if ty.nullable || replacement.nullable {
+            concrete.as_nullable()
+        } else {
+            concrete
+        }
+    })
+}
+
+fn find_type(types: &[Type], target: Type) -> Option<u32> {
+    types
+        .iter()
+        .position(|candidate| *candidate == target)
+        .map(|id| id as u32)
+}
+
+fn type_contains_param(checked: &CheckedProgram, ty: Type, seen: &mut HashSet<(u8, u32)>) -> bool {
+    let contains = |ty, seen: &mut HashSet<_>| type_contains_param(checked, ty, seen);
+    match ty.base {
+        Base::Param(_) => true,
+        Base::Instance(id) => checked.generic_instances[id as usize]
+            .args
+            .iter()
+            .any(|ty| contains(*ty, seen)),
+        Base::ContractInstance(id) => checked.contract_instances[id as usize]
+            .args
+            .iter()
+            .any(|ty| contains(*ty, seen)),
+        Base::EnumInstance(id) => checked.enum_instances[id as usize]
+            .args
+            .iter()
+            .any(|ty| contains(*ty, seen)),
+        Base::Function(id) => {
+            if !seen.insert((0, id)) {
+                return false;
+            }
+            let function = &checked.fn_types[id as usize];
+            function.params.iter().any(|ty| contains(*ty, seen)) || contains(function.returns, seen)
+        }
+        Base::Tuple(id) => {
+            if !seen.insert((1, id)) {
+                return false;
+            }
+            checked.tuple_types[id as usize]
+                .elements
+                .iter()
+                .any(|ty| contains(*ty, seen))
+        }
+        Base::Job(id) => contains(checked.job_types[id as usize], seen),
+        Base::Channel(id) => contains(checked.channel_types[id as usize], seen),
+        Base::Atomic(id) => contains(checked.atomic_types[id as usize], seen),
+        Base::Mutex(id) => contains(checked.mutex_types[id as usize], seen),
+        Base::Pointer(id) => contains(checked.pointer_types[id as usize], seen),
+        Base::Weak(id) => contains(checked.weak_types[id as usize], seen),
+        Base::NativeSlice(id) => contains(checked.native_slice_types[id as usize], seen),
+        Base::NativeSliceMut(id) => contains(checked.native_slice_mut_types[id as usize], seen),
+        Base::Dependent(id) => contains(checked.dependent_types[id as usize], seen),
+        Base::Pin(id) => contains(checked.pin_types[id as usize], seen),
+        Base::Range(id) => contains(checked.range_types[id as usize], seen),
+        Base::Array(id) => contains(checked.array_types[id as usize], seen),
+        Base::List(id) => contains(checked.list_types[id as usize], seen),
+        Base::Set(id) => contains(checked.set_types[id as usize], seen),
+        Base::Map(id) => {
+            if !seen.insert((2, id)) {
+                return false;
+            }
+            let map = &checked.map_types[id as usize];
+            contains(map.key, seen) || contains(map.value, seen)
+        }
+        Base::Union(id) => {
+            if !seen.insert((3, id)) {
+                return false;
+            }
+            checked.unions[id as usize]
+                .iter()
+                .any(|base| contains(Type::of(*base), seen))
+        }
+        _ => false,
+    }
 }
 
 /// One generic class's own `T` replaced by one instantiation's concrete
@@ -3068,6 +3765,28 @@ fn enum_has_payload(checked: &CheckedProgram, id: u32) -> bool {
         .any(|v| !v.associated.is_empty())
 }
 
+fn is_http_status_class_property(name: &str) -> bool {
+    matches!(
+        name,
+        "is_informational" | "is_success" | "is_redirect" | "is_client_error" | "is_server_error"
+    )
+}
+
+fn is_http_method_property(name: &str) -> bool {
+    matches!(name, "is_safe" | "is_idempotent")
+}
+
+fn http_method_property_value(variant: &str, property: &str) -> bool {
+    match property {
+        "is_safe" => matches!(variant, "Get" | "Head" | "Options" | "Trace" | "Query"),
+        "is_idempotent" => matches!(
+            variant,
+            "Get" | "Head" | "Put" | "Delete" | "Options" | "Trace" | "Query"
+        ),
+        _ => unreachable!("only HTTP method metadata reaches this helper"),
+    }
+}
+
 /// The name a user wrote for a class — a class declared inside a block is
 /// interned as `Name$local$N` so two blocks can each declare `Name`, but
 /// that suffix is a compiler detail that must never surface in rendered
@@ -3253,6 +3972,24 @@ fn ir_type(
     IrType::Nullable(Nullable::of(base).expect("the checker rejects `Void?`"))
 }
 
+/// Compound types interned only while checking a generic template have no
+/// runtime representation until specialization. Keep their table slots
+/// stable with a harmless scalar placeholder; generic template bodies are
+/// never emitted, and every concrete body points at the separate interned
+/// specialization entry.
+fn ir_type_or_template(
+    ty: Type,
+    instance_base: u32,
+    enum_instance_base: u32,
+    checked: &CheckedProgram,
+) -> IrType {
+    if type_contains_param(checked, ty, &mut HashSet::new()) {
+        IrType::Int(IntWidth::I8)
+    } else {
+        ir_type(ty, instance_base, enum_instance_base, checked)
+    }
+}
+
 /// The static shadow-stack root descriptor for a finished function's own slot
 /// table (`fase-4e-colector-mark-sweep`, design D2): every slot — named or
 /// D4's synthetic ones, [`FunctionLowering::emit`] already spilled every
@@ -3385,6 +4122,8 @@ struct FunctionLowering<'a> {
     instance_base: u32,
     /// See `ir_type`'s `enum_instance_base` parameter.
     enum_instance_base: u32,
+    /// Concrete type arguments for one monomorphized generic function body.
+    type_substitution: HashMap<u32, Type>,
 
     slots: Vec<Slot>,
     blocks: Vec<Block>,
@@ -3778,6 +4517,7 @@ impl<'a> FunctionLowering<'a> {
             declarations,
             instance_base,
             enum_instance_base,
+            type_substitution: HashMap::new(),
             slots: Vec::new(),
             blocks: Vec::new(),
             current: BlockId(0),
@@ -3799,6 +4539,11 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    fn with_type_substitution(mut self, substitution: HashMap<u32, Type>) -> Self {
+        self.type_substitution = substitution;
+        self
+    }
+
     /// Hands out the next push-order sequence number (design D2 of
     /// `fase-4e-unsafe-journal`) — see `TryFrame::pushed_at`/`UnsafeFrame::pushed_at`.
     fn new_scope_seq(&mut self) -> u64 {
@@ -3808,6 +4553,7 @@ impl<'a> FunctionLowering<'a> {
 
     /// [`ir_type`], with this lowering's own `instance_base`/`enum_instance_base` applied.
     fn ir_type(&self, ty: Type) -> IrType {
+        let ty = substitute_specialized_type(self.checked, ty, &self.type_substitution);
         ir_type(
             ty,
             self.instance_base,
@@ -4003,6 +4749,35 @@ impl<'a> FunctionLowering<'a> {
         }
         let ident = callee_ident(call);
         self.declaration_of(&ident.name, ident.span)
+    }
+
+    fn generic_function_specialization(
+        &self,
+        call: &ast::CallExpr,
+        name: &str,
+    ) -> Option<(String, Signature)> {
+        let info = self.checked.generic_call_substitutions.get(&call.span)?;
+        if info.callable != name {
+            return None;
+        }
+        let template = self.checked.functions.get(&info.callable)?;
+        if template.type_params.is_empty() {
+            return None;
+        }
+        let arguments: Vec<Type> = template
+            .type_params
+            .iter()
+            .map(|parameter| info.substitutions.get(parameter).copied())
+            .collect::<Option<_>>()?;
+        if arguments
+            .iter()
+            .any(|ty| type_contains_param(self.checked, *ty, &mut HashSet::new()))
+        {
+            return None;
+        }
+        let specialized_name = generic_function_symbol(&info.callable, &arguments);
+        let signature = self.checked.functions.get(&specialized_name)?.clone();
+        Some((specialized_name, signature))
     }
 
     /// The declaration a written name refers to, following import aliases.
@@ -4767,7 +5542,10 @@ impl<'a> FunctionLowering<'a> {
                         .checked
                         .list_types
                         .iter()
-                        .position(|&t| self.ir_type(t) == element)
+                        .position(|&t| {
+                            !type_contains_param(self.checked, t, &mut HashSet::new())
+                                && self.ir_type(t) == element
+                        })
                         .expect("the checker interned the variadic list type")
                         as u32;
                     IrType::List(list_id)
@@ -5180,6 +5958,7 @@ impl<'a> FunctionLowering<'a> {
         method: &ast::MethodDecl,
         body: &ast::Block,
         id: u32,
+        symbol_override: Option<&str>,
     ) -> (Function, Vec<Function>) {
         // Read from the checked class rather than the written annotation: a
         // specialized copy's method returns `Int32` where the AST still says
@@ -5247,7 +6026,9 @@ impl<'a> FunctionLowering<'a> {
         let lifted = std::mem::take(&mut self.lifted);
         let lowered = Function {
             // See the identical note in `run_constructor`.
-            name: if is_static {
+            name: if let Some(symbol) = symbol_override {
+                symbol.to_string()
+            } else if is_static {
                 static_method_symbol(&self.checked.classes[id as usize].name, &method.name.name)
             } else {
                 method_symbol(&self.checked.classes[id as usize].name, &method.name.name)
@@ -7943,6 +8724,1604 @@ impl<'a> FunctionLowering<'a> {
                     let returns = self.type_of_operand(result);
                     return self.lower_throws_check(result, returns, span);
                 }
+                if let Some(binding) = self.checked.standard_environment_calls.get(&e.span) {
+                    let semantic = self.checked.expr_types[&e.span];
+                    let returns = self.ir_type(semantic);
+                    let IrType::Enum(enum_id) = returns else {
+                        unreachable!("Environment host calls return a typed Result enum")
+                    };
+                    return match binding.as_str() {
+                        "std.environment.Environment.get" => {
+                            let name = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::EnvironmentGet {
+                                    name,
+                                    enum_id,
+                                    secret: false,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.environment.Environment.get_secret_value" => {
+                            let name = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::EnvironmentGet {
+                                    name,
+                                    enum_id,
+                                    secret: true,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.environment.Environment.contains_authorized" => {
+                            let name = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::EnvironmentContains { name, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.environment.Environment.list_names" => {
+                            self.emit(InstKind::EnvironmentListNames { enum_id }, returns, span)
+                        }
+                        _ => unreachable!("closed environment binding registry"),
+                    };
+                }
+                if let Some(binding) = self.checked.standard_network_calls.get(&e.span) {
+                    let semantic = self.checked.expr_types[&e.span];
+                    let returns = self.ir_type(semantic);
+                    return match binding.as_str() {
+                        "std.net.tls.connect" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS connect returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkTlsConnect { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.connect_with_trust_roots" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("configured TLS connect returns a typed Result enum")
+                            };
+                            // Reuse normal call-argument holding so a later
+                            // array/control-flow expression cannot strand an
+                            // earlier SSA value in another block.
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [endpoint, roots_der, allow_tls12] = arguments.as_slice() else {
+                                unreachable!("TLS trust connect has exactly three arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsConnectWithRoots {
+                                    endpoint: *endpoint,
+                                    roots_der: *roots_der,
+                                    allow_tls12: *allow_tls12,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.listen" | "std.net.tls.listen_http" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS listen returns a typed Result enum")
+                            };
+                            let layout = &self.module.enums[enum_id as usize];
+                            let listener_field = layout.variants[0][0];
+                            assert_eq!(
+                                layout.fields[listener_field as usize].ty,
+                                IrType::Int(IntWidth::U64),
+                                "TLS listener bind returns an opaque handle"
+                            );
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [
+                                endpoint,
+                                certificate_chain_der,
+                                private_key_der,
+                                allow_tls12,
+                            ] = arguments.as_slice()
+                            else {
+                                unreachable!("TLS listen has exactly four arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsListen {
+                                    endpoint: *endpoint,
+                                    certificate_chain_der: *certificate_chain_der,
+                                    private_key_der: *private_key_der,
+                                    allow_tls12: *allow_tls12,
+                                    http_alpn: binding == "std.net.tls.listen_http",
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.accept" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS accept returns a typed Result enum")
+                            };
+                            let layout = &self.module.enums[enum_id as usize];
+                            let stream_field = layout.variants[0][0];
+                            let IrType::Object(stream_class_id) =
+                                layout.fields[stream_field as usize].ty
+                            else {
+                                unreachable!("TLS accept success contains TLSStream")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsAccept {
+                                    handle,
+                                    enum_id,
+                                    stream_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.close_listener" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS listener close returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsCloseListener { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.is_listener_closed" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsListenerIsClosed { handle },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.read" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS read returns a typed result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            let max_bytes = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::NetworkTlsRead {
+                                    handle,
+                                    max_bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.write_all" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS write-all returns a typed Result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::NetworkTlsWriteAll {
+                                    handle,
+                                    bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.shutdown" | "std.net.tls.close" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS resource operation returns a typed Result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            let kind = if binding == "std.net.tls.shutdown" {
+                                InstKind::NetworkTlsShutdown { handle, enum_id }
+                            } else {
+                                InstKind::NetworkTlsClose { handle, enum_id }
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.tls.is_closed" => {
+                            let handle = self.lower_expr(&e.args[0].value);
+                            self.emit(InstKind::NetworkTlsIsClosed { handle }, returns, span)
+                        }
+                        "std.net.tls.peer_address" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS peer address returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsPeerAddress { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.address.parse" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("IP address parsing returns a typed Result enum")
+                            };
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkIpAddressParse { value, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.address.origin_parse" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP origin parsing returns a typed Result enum")
+                            };
+                            let host = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let port =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U16));
+                            self.emit(
+                                InstKind::NetworkTcpOriginNormalize {
+                                    host,
+                                    port,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.dns.resolve" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("DNS resolve returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkDnsResolve { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.connect" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP connect returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkTcpConnect { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.listen" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP listen returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkTcpListen { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.accept" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP accept returns a typed Result enum")
+                            };
+                            let layout = &self.module.enums[enum_id as usize];
+                            let stream_field = layout.variants[0][0];
+                            let IrType::Object(stream_class_id) =
+                                layout.fields[stream_field as usize].ty
+                            else {
+                                unreachable!("TCP accept success contains TCPStream")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTcpAccept {
+                                    handle,
+                                    enum_id,
+                                    stream_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.read" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP read returns a typed enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let max_bytes =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTcpRead {
+                                    handle,
+                                    max_bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.write" | "std.net.tcp.write_all" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP write returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            let kind = if binding == "std.net.tcp.write" {
+                                InstKind::NetworkTcpWrite {
+                                    handle,
+                                    bytes,
+                                    enum_id,
+                                }
+                            } else {
+                                InstKind::NetworkTcpWriteAll {
+                                    handle,
+                                    bytes,
+                                    enum_id,
+                                }
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.tcp.shutdown" | "std.net.tcp.close" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP resource operation returns a Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let kind = if binding == "std.net.tcp.shutdown" {
+                                InstKind::NetworkTcpShutdown { handle, enum_id }
+                            } else {
+                                InstKind::NetworkTcpClose { handle, enum_id }
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.tcp.close_listener" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP listener close returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTcpCloseListener { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.listener_is_closed" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTcpListenerIsClosed { handle },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.is_closed" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::NetworkTcpIsClosed { handle }, returns, span)
+                        }
+                        "std.net.tcp.peer_address" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP peer address returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTcpPeerAddress { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        _ => unreachable!("closed network binding registry"),
+                    };
+                }
+                if let Some(binding) = self.checked.standard_http_calls.get(&e.span) {
+                    let semantic = self.checked.expr_types[&e.span];
+                    let returns = self.ir_type(semantic);
+                    return match binding.as_str() {
+                        "std.http.get" | "std.http.get_cached" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP GET returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP GET success contains an HTTPResponse object")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpGet {
+                                    url,
+                                    cached: binding == "std.http.get_cached",
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.request" | "std.http.request_cached" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP request returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP request success contains an HTTPResponse")
+                            };
+                            let method = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let url = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let body = self.lower_expr(&e.args[2].value);
+                            let headers = self.lower_expr(&e.args[3].value);
+                            let validate_json = if binding == "std.http.request" && e.args.len() > 4
+                            {
+                                self.lower_expr_as(&e.args[4].value, IrType::Boolean)
+                            } else {
+                                self.emit(InstKind::ConstBool(false), IrType::Boolean, span)
+                            };
+                            self.emit(
+                                InstKind::HttpRequest {
+                                    method,
+                                    url,
+                                    body,
+                                    headers,
+                                    validate_json,
+                                    cached: binding == "std.http.request_cached",
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_create" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client creation returns a typed Result enum")
+                            };
+                            let max_origins =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                            self.emit(
+                                InstKind::HttpClientCreate {
+                                    max_origins,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_create_with_options" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client creation returns a typed Result enum")
+                            };
+                            let max_origins =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::I32));
+                            let connect_timeout_ms =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::I64));
+                            let response_headers_timeout_ms =
+                                self.lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::I64));
+                            let response_idle_timeout_ms =
+                                self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
+                            self.emit(
+                                InstKind::HttpClientCreateWithOptions {
+                                    max_origins,
+                                    connect_timeout_ms,
+                                    response_headers_timeout_ms,
+                                    response_idle_timeout_ms,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_create_with_trust_roots" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client creation returns a typed Result enum")
+                            };
+                            let roots = self.lower_expr(&e.args[0].value);
+                            let max_origins =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::I32));
+                            let connect_timeout_ms =
+                                self.lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::I64));
+                            let response_headers_timeout_ms =
+                                self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
+                            let response_idle_timeout_ms =
+                                self.lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
+                            self.emit(
+                                InstKind::HttpClientCreateWithTrustRoots {
+                                    roots,
+                                    max_origins,
+                                    connect_timeout_ms,
+                                    response_headers_timeout_ms,
+                                    response_idle_timeout_ms,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_create_with_proxy"
+                        | "std.http.client_create_with_proxy_and_trust_roots" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client creation returns a typed Result enum")
+                            };
+                            let proxy = self.lower_expr(&e.args[0].value);
+                            let IrType::Object(proxy_class_id) = self.type_of_operand(proxy) else {
+                                unreachable!("HTTP proxy configuration is an HTTPProxy object")
+                            };
+                            let (
+                                proxy_url_index,
+                                proxy_url_type,
+                                credentials_index,
+                                credentials_type,
+                            ) = {
+                                let proxy_layout = &self.module.objects[proxy_class_id as usize];
+                                let proxy_url_index = proxy_layout
+                                    .fields
+                                    .iter()
+                                    .position(|field| field.name == "proxy_url")
+                                    .expect("bundled HTTPProxy exposes its private URL field");
+                                let credentials_index = proxy_layout
+                                    .fields
+                                    .iter()
+                                    .position(|field| field.name == "credentials")
+                                    .expect(
+                                        "bundled HTTPProxy exposes its private credentials field",
+                                    );
+                                (
+                                    proxy_url_index as u32,
+                                    proxy_layout.fields[proxy_url_index].ty,
+                                    credentials_index as u32,
+                                    proxy_layout.fields[credentials_index].ty,
+                                )
+                            };
+                            let proxy_url_object = self.emit(
+                                InstKind::LoadField {
+                                    object: proxy,
+                                    index: proxy_url_index,
+                                },
+                                proxy_url_type,
+                                span,
+                            );
+                            let IrType::Object(url_class_id) =
+                                self.type_of_operand(proxy_url_object)
+                            else {
+                                unreachable!("HTTPProxy URL field is a URL object")
+                            };
+                            let url_value_index = self.module.objects[url_class_id as usize]
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "value")
+                                .expect("bundled URL exposes its private normalized value")
+                                as u32;
+                            let proxy_url = self.emit(
+                                InstKind::LoadField {
+                                    object: proxy_url_object,
+                                    index: url_value_index,
+                                },
+                                IrType::String,
+                                span,
+                            );
+                            let credentials_object = self.emit(
+                                InstKind::LoadField {
+                                    object: proxy,
+                                    index: credentials_index,
+                                },
+                                credentials_type,
+                                span,
+                            );
+                            let IrType::Object(credentials_class_id) =
+                                self.type_of_operand(credentials_object)
+                            else {
+                                unreachable!("HTTPProxy credentials are held by SecretString")
+                            };
+                            let secret_value_index = self.module.objects
+                                [credentials_class_id as usize]
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "value")
+                                .expect("bundled SecretString exposes its private value field")
+                                as u32;
+                            let proxy_credentials = self.emit(
+                                InstKind::LoadField {
+                                    object: credentials_object,
+                                    index: secret_value_index,
+                                },
+                                IrType::String,
+                                span,
+                            );
+                            if binding == "std.http.client_create_with_proxy_and_trust_roots" {
+                                let roots = self.lower_expr(&e.args[1].value);
+                                let max_origins = self
+                                    .lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::I32));
+                                let connect_timeout_ms = self
+                                    .lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
+                                let response_headers_timeout_ms = self
+                                    .lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
+                                let response_idle_timeout_ms = self
+                                    .lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::I64));
+                                self.emit(
+                                    InstKind::HttpClientCreateWithProxyAndTrustRoots {
+                                        proxy_url,
+                                        proxy_credentials,
+                                        roots,
+                                        max_origins,
+                                        connect_timeout_ms,
+                                        response_headers_timeout_ms,
+                                        response_idle_timeout_ms,
+                                        enum_id,
+                                    },
+                                    returns,
+                                    span,
+                                )
+                            } else {
+                                let max_origins = self
+                                    .lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::I32));
+                                let connect_timeout_ms = self
+                                    .lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::I64));
+                                let response_headers_timeout_ms = self
+                                    .lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
+                                let response_idle_timeout_ms = self
+                                    .lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
+                                self.emit(
+                                    InstKind::HttpClientCreateWithProxy {
+                                        proxy_url,
+                                        proxy_credentials,
+                                        max_origins,
+                                        connect_timeout_ms,
+                                        response_headers_timeout_ms,
+                                        response_idle_timeout_ms,
+                                        enum_id,
+                                    },
+                                    returns,
+                                    span,
+                                )
+                            }
+                        }
+                        "std.http.client_request" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client request returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP client success contains HTTPResponse")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let method = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let url = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            let body = self.lower_expr(&e.args[3].value);
+                            let headers = self.lower_expr(&e.args[4].value);
+                            let validate_json =
+                                self.lower_expr_as(&e.args[5].value, IrType::Boolean);
+                            self.emit(
+                                InstKind::HttpClientRequest {
+                                    handle,
+                                    method,
+                                    url,
+                                    body,
+                                    headers,
+                                    validate_json,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_request_stream" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client streaming request returns Result")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP client success contains HTTPResponse")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let method = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let url = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            let headers = self.lower_expr(&e.args[3].value);
+                            let callback = self.lower_expr(&e.args[4].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP client body producer is callable")
+                            };
+                            self.emit(
+                                InstKind::HttpClientRequestStream {
+                                    handle,
+                                    method,
+                                    url,
+                                    headers,
+                                    callback,
+                                    callback_layout,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.client_enable_cookies" | "std.http.client_close" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP client action returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::HttpClientAction {
+                                    handle,
+                                    close: binding == "std.http.client_close",
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.connect" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket connect returns a typed Result enum")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let origin = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let subprotocols = self.lower_expr(&e.args[2].value);
+                            self.emit(
+                                InstKind::HttpWebSocketConnect {
+                                    url,
+                                    origin,
+                                    subprotocols,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.connect_with_trust_roots" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket connect returns a typed Result enum")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let origin = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let subprotocols = self.lower_expr(&e.args[2].value);
+                            let roots_der = self.lower_expr(&e.args[3].value);
+                            let allow_tls12 = self.lower_expr_as(&e.args[4].value, IrType::Boolean);
+                            self.emit(
+                                InstKind::HttpWebSocketConnectWithTrustRoots {
+                                    url,
+                                    origin,
+                                    subprotocols,
+                                    roots_der,
+                                    allow_tls12,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.send" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket send returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let record = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::HttpWebSocketSend {
+                                    handle,
+                                    record,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.receive" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket receive returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::HttpWebSocketReceive { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.close" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket close returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::HttpWebSocketClose { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.close_with" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket close_with returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let code =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U16));
+                            let reason = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpWebSocketCloseWith {
+                                    handle,
+                                    code,
+                                    reason,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.request_secret" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP request returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP request success contains an HTTPResponse")
+                            };
+                            let method = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let url = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let body = self.lower_expr(&e.args[2].value);
+                            let headers = self.lower_expr(&e.args[3].value);
+                            let header_name = self.lower_expr_as(&e.args[4].value, IrType::String);
+                            let secret = self.lower_expr(&e.args[5].value);
+                            let IrType::Object(secret_class_id) = self.type_of_operand(secret)
+                            else {
+                                unreachable!("secret HTTP sink receives SecretString")
+                            };
+                            let secret_layout = &self.module.objects[secret_class_id as usize];
+                            let value_index = secret_layout
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "value")
+                                .expect("bundled SecretString exposes its private value field")
+                                as u32;
+                            let secret_value = self.emit(
+                                InstKind::LoadField {
+                                    object: secret,
+                                    index: value_index,
+                                },
+                                IrType::String,
+                                span,
+                            );
+                            self.emit(
+                                InstKind::HttpRequestSecret {
+                                    method,
+                                    url,
+                                    body,
+                                    headers,
+                                    header_name,
+                                    secret_value,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.head" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP HEAD returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP HEAD success contains an HTTPResponse object")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpHead {
+                                    url,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.query" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP QUERY returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP QUERY success contains an HTTPResponse object")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let query = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpQuery {
+                                    url,
+                                    query,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.query_with_content_type" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP QUERY returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP QUERY success contains an HTTPResponse object")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let query = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let content_type = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpQueryWithContentType {
+                                    url,
+                                    query,
+                                    content_type,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.post" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP POST returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("HTTP POST success contains an HTTPResponse object")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let body = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpPost {
+                                    url,
+                                    body,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.post_json" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP JSON POST returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!(
+                                    "HTTP JSON POST success contains an HTTPResponse object"
+                                )
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let body = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpPostJson {
+                                    url,
+                                    body,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.post_bytes" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP byte POST returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!(
+                                    "HTTP byte POST success contains an HTTPResponse object"
+                                )
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let body = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::HttpPostBytes {
+                                    url,
+                                    body,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.get_stream" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP streaming GET returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("streaming GET success contains an HTTPStreamResponse")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let headers = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::HttpGetStream {
+                                    url,
+                                    headers,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_to_stream" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("buffered response stream conversion returns Result")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!(
+                                    "buffered stream conversion returns HTTPStreamResponse"
+                                )
+                            };
+                            let status = self.lower_expr(&e.args[0].value);
+                            let body = self.lower_expr(&e.args[1].value);
+                            let headers = self.lower_expr(&e.args[2].value);
+                            self.emit(
+                                InstKind::HttpResponseToStream {
+                                    status,
+                                    body,
+                                    headers,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.request_stream"
+                        | "std.http.request_stream_result"
+                        | "std.http.request_stream_named_result" => {
+                            let result_callback = binding != "std.http.request_stream";
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP streaming POST returns a typed Result enum")
+                            };
+                            let result_layout = &self.module.enums[enum_id as usize];
+                            let response_field = result_layout.variants[0][0];
+                            let IrType::Object(response_class_id) =
+                                result_layout.fields[response_field as usize].ty
+                            else {
+                                unreachable!("streaming POST success contains HTTPStreamResponse")
+                            };
+                            let method = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let url = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let headers = self.lower_expr(&e.args[2].value);
+                            let callback = self.lower_expr(&e.args[3].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP body producer is callable")
+                            };
+                            self.emit(
+                                InstKind::HttpRequestStream {
+                                    method,
+                                    url,
+                                    headers,
+                                    callback,
+                                    callback_layout,
+                                    result_callback,
+                                    enum_id,
+                                    response_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.server_response_stream_register" => {
+                            let callback = self.lower_expr(&e.args[0].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP server body producer is callable")
+                            };
+                            self.emit(
+                                InstKind::HttpRegisterServerResponseProducer {
+                                    callback,
+                                    callback_layout,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_read_chunk" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP stream chunk returns a typed Result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            let max_bytes = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::HttpResponseReadChunk {
+                                    handle,
+                                    max_bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_read_all" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP stream read-all returns a typed Result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            self.emit(
+                                InstKind::HttpResponseReadAll { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_read_sse_event" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("SSE event reads return a typed Result enum")
+                            };
+                            let handle = self.lower_expr(&e.args[0].value);
+                            self.emit(
+                                InstKind::HttpResponseReadSseEvent { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_sse_heartbeat_count" => {
+                            let handle = self.lower_expr(&e.args[0].value);
+                            self.emit(
+                                InstKind::HttpResponseSseHeartbeatCount { handle },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_stream_close" => {
+                            let handle = self.lower_expr(&e.args[0].value);
+                            self.emit(InstKind::HttpResponseStreamClose { handle }, returns, span)
+                        }
+                        "std.http.url_normalize" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP URL parsing returns a typed Result enum")
+                            };
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(InstKind::HttpUrlNormalize { value, enum_id }, returns, span)
+                        }
+                        "std.http.url_resolve" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP URL resolution returns a typed Result enum")
+                            };
+                            let base = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let reference = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpUrlResolve {
+                                    base,
+                                    reference,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.response_text" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP response text returns a typed Result enum")
+                            };
+                            let body = self.lower_expr(&e.args[0].value);
+                            self.emit(InstKind::HttpResponseText { body, enum_id }, returns, span)
+                        }
+                        "std.http.response_header_values" | "std.http.request_header_values" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP header lookup returns a typed Result enum")
+                            };
+                            let headers = self.lower_expr(&e.args[0].value);
+                            let name = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpResponseHeaderValues {
+                                    headers,
+                                    name,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.route_pattern_validate" => {
+                            let pattern = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpRoutePatternValidate { pattern },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.route_pattern_conflict" => {
+                            let method = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let first = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let second = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpRoutePatternConflict {
+                                    method,
+                                    first,
+                                    second,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.route_match" => {
+                            let pattern = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let path = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(InstKind::HttpRouteMatch { pattern, path }, returns, span)
+                        }
+                        "std.http.route_allow_header" => {
+                            let patterns = self.lower_expr(&e.args[0].value);
+                            let methods = self.lower_expr(&e.args[1].value);
+                            let path = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpRouteAllowHeader {
+                                    patterns,
+                                    methods,
+                                    path,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.headers_encode" => {
+                            let names = self.lower_expr(&e.args[0].value);
+                            let values = self.lower_expr(&e.args[1].value);
+                            self.emit(InstKind::HttpHeadersEncode { names, values }, returns, span)
+                        }
+                        "std.http.form_parse" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP form parsing returns a typed Result enum")
+                            };
+                            let body = self.lower_expr(&e.args[0].value);
+                            let content_type = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpFormParse {
+                                    body,
+                                    content_type,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.multipart_parse" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP multipart parsing returns a typed Result enum")
+                            };
+                            let data_class_id = self.module.enums[enum_id as usize]
+                                .variants
+                                .first()
+                                .and_then(|variant| variant.first())
+                                .and_then(|field| {
+                                    self.module.enums[enum_id as usize]
+                                        .fields
+                                        .get(*field as usize)
+                                })
+                                .and_then(|field| match field.ty {
+                                    IrType::Object(id) => Some(id),
+                                    _ => None,
+                                })
+                                .expect("HTTP multipart result wraps HTTPMultipartData");
+                            let body = self.lower_expr(&e.args[0].value);
+                            let content_type = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpMultipartParse {
+                                    body,
+                                    content_type,
+                                    enum_id,
+                                    data_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.upload_read" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP upload reads return HTTPStreamChunk")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let offset =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64));
+                            let max_bytes =
+                                self.lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::HttpUploadRead {
+                                    handle,
+                                    offset,
+                                    max_bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.upload_close" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::HttpUploadClose { handle }, returns, span)
+                        }
+                        "std.http.form_values" => {
+                            let fields = self.lower_expr(&e.args[0].value);
+                            let name = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(InstKind::HttpFormValues { fields, name }, returns, span)
+                        }
+                        "std.http.form_encode" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP form encoding returns a typed Result enum")
+                            };
+                            let fields = self.lower_expr(&e.args[0].value);
+                            self.emit(InstKind::HttpFormEncode { fields, enum_id }, returns, span)
+                        }
+                        "std.http.multipart_encode" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP multipart encoding returns a typed Result enum")
+                            };
+                            let metadata = self.lower_expr(&e.args[0].value);
+                            let bodies = self.lower_expr(&e.args[1].value);
+                            let boundary = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::HttpMultipartEncode {
+                                    metadata,
+                                    bodies,
+                                    boundary,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.server.serve_once"
+                        | "std.http.server.serve_tls_once"
+                        | "std.http.server.serve_tls_requests" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP server dispatch returns a typed Result enum")
+                            };
+                            let stream = self.lower_expr(&e.args[0].value);
+                            let IrType::Object(stream_class_id) = self.type_of_operand(stream)
+                            else {
+                                unreachable!("HTTP server dispatch receives a stream object")
+                            };
+                            let stream_layout = &self.module.objects[stream_class_id as usize];
+                            let handle_index = stream_layout
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "handle")
+                                .expect("bundled TCPStream exposes its compiler-owned handle field")
+                                as u32;
+                            let stream_handle = self.emit(
+                                InstKind::LoadField {
+                                    object: stream,
+                                    index: handle_index,
+                                },
+                                IrType::Int(IntWidth::U64),
+                                span,
+                            );
+                            let requests_binding = binding == "std.http.server.serve_tls_requests";
+                            let max_requests = if requests_binding {
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64))
+                            } else {
+                                self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::U64), span)
+                            };
+                            let callback_index = if requests_binding { 2 } else { 1 };
+                            let callback = self.lower_expr(&e.args[callback_index].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP server handler is a callable")
+                            };
+                            let callback_signature =
+                                &self.module.closures[callback_layout as usize];
+                            let [IrType::Object(request_class_id)] =
+                                callback_signature.params.as_slice()
+                            else {
+                                unreachable!("HTTP handler takes one HTTPRequest")
+                            };
+                            let IrType::Object(response_class_id) = callback_signature.returns
+                            else {
+                                unreachable!("HTTP handler returns an HTTPResponse")
+                            };
+                            self.emit(
+                                InstKind::HttpServerServeOnce {
+                                    stream_handle,
+                                    secure: binding == "std.http.server.serve_tls_once"
+                                        || requests_binding,
+                                    max_requests,
+                                    require_http2: requests_binding,
+                                    callback,
+                                    callback_layout,
+                                    request_class_id: *request_class_id,
+                                    response_class_id,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.server.websocket_serve_once" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP WebSocket server returns a typed Result enum")
+                            };
+                            let stream = self.lower_expr(&e.args[0].value);
+                            let IrType::Object(stream_class_id) = self.type_of_operand(stream)
+                            else {
+                                unreachable!("HTTP WebSocket server receives a TCPStream object")
+                            };
+                            let handle_index = self.module.objects[stream_class_id as usize]
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "handle")
+                                .expect("bundled TCPStream exposes its compiler-owned handle")
+                                as u32;
+                            let stream_handle = self.emit(
+                                InstKind::LoadField {
+                                    object: stream,
+                                    index: handle_index,
+                                },
+                                IrType::Int(IntWidth::U64),
+                                span,
+                            );
+                            let path = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let allowed_origins = self.lower_expr(&e.args[2].value);
+                            let allow_missing_origin =
+                                self.lower_expr_as(&e.args[3].value, IrType::Boolean);
+                            let protocols = self.lower_expr(&e.args[4].value);
+                            let max_messages =
+                                self.lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::U64));
+                            let callback = self.lower_expr(&e.args[6].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP WebSocket handler is a callable")
+                            };
+                            let signature = &self.module.closures[callback_layout as usize];
+                            let [IrType::Object(websocket_class_id)] = signature.params.as_slice()
+                            else {
+                                unreachable!("HTTP WebSocket handler takes one session")
+                            };
+                            self.emit(
+                                InstKind::HttpServerWebSocketServeOnce {
+                                    stream_handle,
+                                    secure: false,
+                                    path,
+                                    allowed_origins,
+                                    allow_missing_origin,
+                                    protocols,
+                                    max_messages,
+                                    callback,
+                                    callback_layout,
+                                    websocket_class_id: *websocket_class_id,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.server.websocket_serve_tls_once" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP WebSocket server returns a typed Result enum")
+                            };
+                            let stream = self.lower_expr(&e.args[0].value);
+                            let IrType::Object(stream_class_id) = self.type_of_operand(stream)
+                            else {
+                                unreachable!("HTTP WebSocket server receives a TLSStream object")
+                            };
+                            let handle_index = self.module.objects[stream_class_id as usize]
+                                .fields
+                                .iter()
+                                .position(|field| field.name == "handle")
+                                .expect("bundled TLSStream exposes its compiler-owned handle")
+                                as u32;
+                            let stream_handle = self.emit(
+                                InstKind::LoadField {
+                                    object: stream,
+                                    index: handle_index,
+                                },
+                                IrType::Int(IntWidth::U64),
+                                span,
+                            );
+                            let path = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let allowed_origins = self.lower_expr(&e.args[2].value);
+                            let allow_missing_origin =
+                                self.lower_expr_as(&e.args[3].value, IrType::Boolean);
+                            let protocols = self.lower_expr(&e.args[4].value);
+                            let max_messages =
+                                self.lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::U64));
+                            let callback = self.lower_expr(&e.args[6].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP WebSocket handler is a callable")
+                            };
+                            let signature = &self.module.closures[callback_layout as usize];
+                            let [IrType::Object(websocket_class_id)] = signature.params.as_slice()
+                            else {
+                                unreachable!("HTTP WebSocket handler takes one session")
+                            };
+                            self.emit(
+                                InstKind::HttpServerWebSocketServeOnce {
+                                    stream_handle,
+                                    secure: true,
+                                    path,
+                                    allowed_origins,
+                                    allow_missing_origin,
+                                    protocols,
+                                    max_messages,
+                                    callback,
+                                    callback_layout,
+                                    websocket_class_id: *websocket_class_id,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        _ => unreachable!("closed HTTP binding registry"),
+                    };
+                }
                 if let ast::Expr::Field(field) = &*e.callee
                     && let ast::Expr::Path(base) = &*field.object
                     && base.name == "Channel"
@@ -8027,6 +10406,13 @@ impl<'a> FunctionLowering<'a> {
                 {
                     return self.lower_construction(e, id, span);
                 }
+                // Static user-class members must win over native instance
+                // method lowerers with the same spelling (`Environment.contains`
+                // versus `String.contains`, or `Environment.get_or` versus
+                // `Result.get_or`).
+                if let Some(operand) = self.lower_class_static_call(e, span) {
+                    return operand;
+                }
                 // `native-type-member-surface` statics and native methods
                 // have to be lowered before any lookup that would try to
                 // resolve their base name as a variable or contract method
@@ -8087,9 +10473,6 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
                     return operand;
                 }
-                if let Some(operand) = self.lower_class_static_call(e, span) {
-                    return operand;
-                }
                 if let Some(operand) = self.lower_method_call(e, span) {
                     let ty = self.type_of_operand(operand);
                     return self.lower_throws_check(operand, ty, span);
@@ -8111,6 +10494,21 @@ impl<'a> FunctionLowering<'a> {
                     };
                 }
                 let name = self.callee_name(e);
+                if let Some((specialized_name, signature)) =
+                    self.generic_function_specialization(e, &name)
+                {
+                    let args = self.lower_args_for_params(e, &signature.params);
+                    let returns = self.ir_type(signature.returns);
+                    let result = self.emit(
+                        InstKind::Call {
+                            callee: specialized_name,
+                            args,
+                        },
+                        returns,
+                        span,
+                    );
+                    return self.lower_throws_check(result, returns, span);
+                }
                 let args = self.lower_args(e);
                 let returns = self.signature_return(&name);
                 let result = self.emit(InstKind::Call { callee: name, args }, returns, span);
@@ -13941,8 +16339,8 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a class, not a contract value, and
         // `type_of` cannot resolve it.
-        if let ast::Expr::Path(base) = &*field.object
-            && self.checked.classes.iter().any(|c| c.name == base.name)
+        if self.checked.static_class_accesses.contains_key(&field.span)
+            || matches!(&*field.object, ast::Expr::Path(base) if self.class_id_from_path(base).is_some())
         {
             return None;
         }
@@ -13962,8 +16360,8 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a type, not a value; `type_of` cannot
         // resolve it and the static-call path handles it.
-        if let ast::Expr::Path(base) = &*field.object
-            && self.checked.classes.iter().any(|c| c.name == base.name)
+        if self.checked.static_class_accesses.contains_key(&field.span)
+            || matches!(&*field.object, ast::Expr::Path(base) if self.class_id_from_path(base).is_some())
         {
             return None;
         }
@@ -15037,6 +17435,7 @@ impl<'a> FunctionLowering<'a> {
         });
         ast::Expr::Call(ast::CallExpr {
             callee: Box::new(callee),
+            type_args: Vec::new(),
             args: Vec::new(),
             span,
         })
@@ -16038,11 +18437,58 @@ impl<'a> FunctionLowering<'a> {
             return false;
         };
         self.checked
-            .classes
-            .iter()
-            .find(|c| c.name == base.name)
+            .static_class_accesses
+            .get(&field.span)
+            .and_then(|id| self.checked.classes.get(*id as usize))
+            .or_else(|| {
+                self.static_type_param_class_id(field)
+                    .and_then(|id| self.checked.classes.get(id))
+            })
+            .or_else(|| {
+                self.class_id_from_path(base)
+                    .map(|id| &self.checked.classes[id])
+            })
             .and_then(|class| class.method(&field.name.name))
             .is_some_and(|method| method.is_static)
+    }
+
+    /// Resolves a static type-parameter call after this generic body has been
+    /// monomorphized with a concrete substitution.
+    fn static_type_param_class_id(&self, field: &ast::FieldExpr) -> Option<usize> {
+        let parameter = *self.checked.static_type_param_accesses.get(&field.span)?;
+        let concrete = self.type_substitution.get(&parameter)?;
+        match concrete.base {
+            zirk_sema::Base::Class(id) => Some(id as usize),
+            zirk_sema::Base::Instance(id) => self
+                .checked
+                .generic_instances
+                .get(id as usize)
+                .map(|instance| instance.class as usize),
+            _ => None,
+        }
+    }
+
+    /// Resolves a class name used as a static receiver, including an import
+    /// alias recorded by semantic analysis (such as `Env` for `Environment`).
+    fn class_id_from_path(&self, path: &ast::Ident) -> Option<usize> {
+        let mut name = self
+            .checked
+            .aliases
+            .get(&path.span)
+            .cloned()
+            .unwrap_or_else(|| path.name.clone());
+        for _ in 0..=self.checked.type_aliases.len() {
+            if let Some(id) = self
+                .checked
+                .classes
+                .iter()
+                .position(|class| class.name == name)
+            {
+                return Some(id);
+            }
+            name = self.checked.type_aliases.get(&name)?.name.clone();
+        }
+        None
     }
 
     /// The `MethodInfo` for a `ClassName.method(...)` `static fn` call.
@@ -16053,7 +18499,19 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Path(base) = &*field.object else {
             return None;
         };
-        let class = self.checked.classes.iter().find(|c| c.name == base.name)?;
+        let class = self
+            .checked
+            .static_class_accesses
+            .get(&field.span)
+            .and_then(|id| self.checked.classes.get(*id as usize))
+            .or_else(|| {
+                self.static_type_param_class_id(field)
+                    .and_then(|id| self.checked.classes.get(id))
+            })
+            .or_else(|| {
+                self.class_id_from_path(base)
+                    .map(|id| &self.checked.classes[id])
+            })?;
         class
             .method(&field.name.name)
             .filter(|method| method.is_static)
@@ -16069,19 +18527,56 @@ impl<'a> FunctionLowering<'a> {
         };
         let class_id = self
             .checked
-            .classes
-            .iter()
-            .position(|c| c.name == base.name)?;
+            .static_class_accesses
+            .get(&field.span)
+            .copied()
+            .map(|id| id as usize)
+            .or_else(|| self.static_type_param_class_id(field))
+            .or_else(|| self.class_id_from_path(base))?;
         let class = self.checked.classes[class_id].clone();
         let method = class.method(&field.name.name).cloned()?;
         if !method.is_static {
             return None;
         }
 
-        let returns = self.ir_type(method.returns);
-        let expected: Vec<IrType> = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
-        let args = self.lower_held_args(&call.args, &expected);
-        let callee = static_method_symbol(&class.name, &method.name);
+        let generic = self
+            .checked
+            .generic_call_substitutions
+            .get(&span)
+            .filter(|call| call.is_static_method && call.owner_class == Some(method.owner));
+        let arguments = generic.and_then(|call| {
+            method
+                .type_params
+                .iter()
+                .map(|parameter| call.substitutions.get(parameter).copied())
+                .collect::<Option<Vec<_>>>()
+        });
+        let substitution: HashMap<u32, Type> = generic
+            .map(|call| call.substitutions.clone())
+            .unwrap_or_default();
+        let returns = self
+            .checked
+            .expr_types
+            .get(&span)
+            .copied()
+            .filter(|ty| !ty.is_unknown())
+            .map(|ty| self.ir_type(ty))
+            .unwrap_or_else(|| self.ir_type(method.returns));
+        let params: Vec<_> = method
+            .params
+            .iter()
+            .cloned()
+            .map(|mut parameter| {
+                parameter.ty =
+                    substitute_specialized_type(self.checked, parameter.ty, &substitution);
+                parameter
+            })
+            .collect();
+        let args = self.lower_args_for_params(call, &params);
+        let callee = arguments
+            .as_deref()
+            .map(|types| generic_static_method_symbol(&class.name, &method.name, types))
+            .unwrap_or_else(|| static_method_symbol(&class.name, &method.name));
         Some(self.emit(InstKind::Call { callee, args }, returns, span))
     }
 
@@ -16095,8 +18590,8 @@ impl<'a> FunctionLowering<'a> {
         }
         // `ClassName.method(...)` names a class, not a contract value, and
         // `type_of` cannot resolve it.
-        if let ast::Expr::Path(base) = &*field.object
-            && self.checked.classes.iter().any(|c| c.name == base.name)
+        if self.checked.static_class_accesses.contains_key(&field.span)
+            || matches!(&*field.object, ast::Expr::Path(base) if self.class_id_from_path(base).is_some())
         {
             return None;
         }
@@ -18437,10 +20932,7 @@ impl<'a> FunctionLowering<'a> {
         let zirk_sema::Base::EnumInstance(instance_id) = result_sema.base else {
             unreachable!("checked_* and parse always type to a Result instance")
         };
-        let error_class = match self.checked.enum_instances[instance_id as usize].args[1].base {
-            zirk_sema::Base::Class(id) => id,
-            _ => unreachable!("the checker interned the error class"),
-        };
+        let error_ty = self.checked.enum_instances[instance_id as usize].args[1];
 
         let result_slot = self.declare_slot("<result>", result_ty, span);
         let ok_block = self.new_block();
@@ -18467,7 +20959,14 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(continue_block));
 
         self.current = error_block;
-        let error_object = self.build_native_failure(error_class, error_message, span);
+        let error_object = match error_ty.base {
+            zirk_sema::Base::Class(id) => self.build_native_failure(id, error_message, span),
+            zirk_sema::Base::String => {
+                let id = self.module.intern_string(error_message);
+                self.emit(InstKind::ConstString(id), IrType::String, span)
+            }
+            _ => unreachable!("parse Result errors use a failure class or String"),
+        };
         let error_value = self.emit(
             InstKind::BuildEnum {
                 enum_id: result_enum,
@@ -18525,13 +21024,31 @@ impl<'a> FunctionLowering<'a> {
         if field.name.name != "parse" {
             return None;
         }
-        let target = if base.name == "Regex" {
-            Type::REGEX
-        } else {
-            Type::from_name(&base.name)?
-        };
+        let target = self
+            .checked
+            .static_type_param_accesses
+            .get(&field.span)
+            .and_then(|parameter| self.type_substitution.get(parameter).copied())
+            .or_else(|| {
+                if base.name == "Regex" {
+                    Some(Type::REGEX)
+                } else {
+                    Type::from_name(&base.name)
+                }
+            })?;
         let text = self.lower_expr(&call.args[0].value);
         match target.base {
+            zirk_sema::Base::String => {
+                let text_slot = self.spill(text, IrType::String, span);
+                let ok = self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| lower.emit(InstKind::Load(text_slot), IrType::String, span),
+                    "String accepts every input value",
+                ))
+            }
             // `Date.parse`/`Time.parse`/`DateTime.parse`
             // (`temporal-rich-api`): strict ISO text in, `Result<_, ParseError>`
             // out through the shared `(ok, value)` probe.
@@ -22349,6 +24866,53 @@ impl<'a> FunctionLowering<'a> {
         span: Span,
     ) -> Operand {
         let prepared = self.lower_collection_elements(elements, element_ty, span);
+        // A scalar-only literal has a fully known length and every element's
+        // index is bounded by the AST size. Keep it in straight-line IR: the
+        // generic expanded path below emits a checked index increment (and a
+        // pair of overflow blocks) per item, which made byte-heavy TLS
+        // identities disproportionately expensive to compile.
+        if prepared
+            .iter()
+            .all(|item| matches!(item, PreparedCollectionElement::Scalar(_)))
+        {
+            let array_ty = IrType::Array(element_id);
+            let capacity = self.const_int_at(
+                i128::try_from(prepared.len())
+                    .expect("a source literal fits the target array index"),
+                IrType::Int(IntWidth::U64),
+                span,
+            );
+            let array = self.emit(
+                InstKind::ArrayNew {
+                    element_id,
+                    capacity,
+                },
+                array_ty,
+                span,
+            );
+            let array = self.spill(array, array_ty, span);
+            for (index, item) in prepared.into_iter().enumerate() {
+                let PreparedCollectionElement::Scalar(value) = item else {
+                    unreachable!("the scalar-only path checked every element")
+                };
+                let receiver = self.emit(InstKind::Load(array), array_ty, span);
+                let index = self.const_int_at(
+                    i128::try_from(index).expect("a source literal fits the target array index"),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let value = self.emit(InstKind::Load(value), element_ty, span);
+                self.emit_effect(
+                    InstKind::ArrayListStore {
+                        receiver,
+                        index,
+                        value,
+                    },
+                    span,
+                );
+            }
+            return self.emit(InstKind::Load(array), array_ty, span);
+        }
         // The accumulated capacity is held in a slot so it can survive across
         // `amount` computations (range-length checks, spread lengths) that open
         // new blocks.
@@ -22712,6 +25276,11 @@ impl<'a> FunctionLowering<'a> {
             // receiver and bounds are still expressions that can open
             // blocks of their own — spilling them is mandatory.
             ast::Expr::Slice(_) => true,
+            // Expanded collection literals may emit checked capacity/index
+            // arithmetic and therefore create fail/continue blocks even
+            // when all of their elements are plain scalars. An earlier call
+            // argument must be spilled across the collection construction.
+            ast::Expr::Collection(_) => true,
             ast::Expr::Call(_) => true,
             ast::Expr::Println(e) => e.args.iter().any(|arg| self.to_string_opens_blocks(arg)),
             ast::Expr::Interpolated(e) => e.parts.iter().any(|p| match p {
@@ -22736,6 +25305,16 @@ impl<'a> FunctionLowering<'a> {
             return None;
         };
         if field.safe {
+            return None;
+        }
+        // A static class method may share a name with a `Result<T, E>`
+        // combinator (for example `Environment.get_or`). Resolve the static
+        // owner before probing its path as though it were a runtime Result
+        // value; `type_of` deliberately cannot treat a class name as a value.
+        if self.checked.static_class_accesses.contains_key(&field.span)
+            || matches!(&*field.object, ast::Expr::Path(base)
+                if self.class_id_from_path(base).is_some())
+        {
             return None;
         }
         let name = match field.name.name.as_str() {
@@ -23474,7 +26053,34 @@ impl<'a> FunctionLowering<'a> {
         // consulting `generic_constructions` first. Every other enum's bare
         // name is unambiguous, the same way a non-generic class's is.
         let enum_id = match self.checked.variant_constructions.get(&call.span) {
-            Some(&instance) => self.enum_instance_base + instance,
+            Some(&instance) => {
+                let concrete = self
+                    .checked
+                    .enum_instances
+                    .get(instance as usize)
+                    .and_then(|generic| {
+                        let args: Vec<_> = generic
+                            .args
+                            .iter()
+                            .map(|ty| {
+                                substitute_specialized_type(
+                                    self.checked,
+                                    *ty,
+                                    &self.type_substitution,
+                                )
+                            })
+                            .collect();
+                        self.checked
+                            .enum_instances
+                            .iter()
+                            .position(|candidate| {
+                                candidate.enum_id == generic.enum_id && candidate.args == args
+                            })
+                            .map(|id| id as u32)
+                    })
+                    .unwrap_or(instance);
+                self.enum_instance_base + concrete
+            }
             None => {
                 let declared = self.declaration_of(&enum_name.name, enum_name.span);
                 self.checked.enums.iter().position(|e| e.name == declared)? as u32
@@ -23831,13 +26437,16 @@ impl<'a> FunctionLowering<'a> {
         }
 
         // A `ClassName.field` that names a `static` field of a user class.
-        if let ast::Expr::Path(base) = &*expr.object
-            && let Some(class_id) = self
-                .checked
-                .classes
-                .iter()
-                .position(|c| c.name == base.name)
-        {
+        let static_class_id = self
+            .checked
+            .static_class_accesses
+            .get(&expr.span)
+            .copied()
+            .or_else(|| match &*expr.object {
+                ast::Expr::Path(base) => self.class_id_from_path(base).map(|id| id as u32),
+                _ => None,
+            });
+        if let Some(class_id) = static_class_id.map(|id| id as usize) {
             let class = self.checked.classes[class_id].clone();
             if let Some(field) = class.field(&expr.name.name).cloned()
                 && field.is_static
@@ -24635,7 +27244,20 @@ impl<'a> FunctionLowering<'a> {
     fn lower_enum_property(&mut self, expr: &ast::FieldExpr, span: Span) -> Option<Operand> {
         let object = &expr.object;
         let name = expr.name.name.as_str();
-        if !matches!(name, "name" | "value" | "to_string") {
+        if !matches!(
+            name,
+            "name"
+                | "value"
+                | "code"
+                | "is_informational"
+                | "is_success"
+                | "is_redirect"
+                | "is_client_error"
+                | "is_server_error"
+                | "is_safe"
+                | "is_idempotent"
+                | "to_string"
+        ) {
             return None;
         }
         let sema = self.checked.expr_types.get(&object.span())?;
@@ -24652,15 +27274,28 @@ impl<'a> FunctionLowering<'a> {
             };
             let enum_id = self.enum_id_of(enum_name);
             let discriminant = self.discriminant(enum_name, &variant_expr.name.name) as usize;
-            let variant_name = self.checked.enums[enum_id as usize].variants[discriminant]
-                .name
-                .clone();
-            return if name == "value" {
-                Some(self.emit(
-                    InstKind::ConstInt(discriminant as i128),
-                    IrType::Int(IntWidth::I32),
+            let variant = &self.checked.enums[enum_id as usize].variants[discriminant];
+            let variant_name = variant.name.clone();
+            if is_http_method_property(name)
+                && self.checked.enums[enum_id as usize].name == "HTTPMethod"
+            {
+                return Some(self.emit(
+                    InstKind::ConstBool(http_method_property_value(&variant_name, name)),
+                    IrType::Boolean,
                     span,
-                ))
+                ));
+            }
+            return if matches!(name, "value" | "code") || is_http_status_class_property(name) {
+                let code = match variant.mapping {
+                    Some(zirk_sema::VariantMapping::Int(value)) => value as i128,
+                    _ => discriminant as i128,
+                };
+                let code = self.emit(InstKind::ConstInt(code), IrType::Int(IntWidth::I32), span);
+                Some(if is_http_status_class_property(name) {
+                    self.lower_http_status_class(code, name, span)
+                } else {
+                    code
+                })
             } else {
                 Some(self.const_string(&variant_name, span))
             };
@@ -24672,6 +27307,11 @@ impl<'a> FunctionLowering<'a> {
         // switch over it; only an algebraic value needs `Discriminant`.
         let receiver = self.lower_expr(object);
         let receiver_ty = self.type_of(object, object.span());
+        let object_slot = if let IrType::Enum(enum_id) = receiver_ty {
+            Some(self.spill(receiver, IrType::Enum(enum_id), span))
+        } else {
+            None
+        };
         let (enum_id, disc) = match receiver_ty {
             IrType::Enum(enum_id) => (
                 enum_id,
@@ -24685,22 +27325,28 @@ impl<'a> FunctionLowering<'a> {
                 let Base::Enum(enum_id) = sema.base else {
                     unreachable!("a non-payload enum value lowers to its Int32 discriminant")
                 };
-                if name == "value" {
+                if name == "value"
+                    && !self.checked.enums[enum_id as usize]
+                        .variants
+                        .iter()
+                        .any(|variant| {
+                            matches!(variant.mapping, Some(zirk_sema::VariantMapping::Int(_)))
+                        })
+                {
                     return Some(receiver);
                 }
                 (enum_id, receiver)
             }
             _ => unreachable!("an enum value lowers to IrType::Enum or its Int32 discriminant"),
         };
-        let result = self.declare_slot(
-            "<enum_prop>",
-            if name == "value" {
-                IrType::Int(IntWidth::I32)
-            } else {
-                IrType::String
-            },
-            span,
-        );
+        let result_ty = if is_http_status_class_property(name) || is_http_method_property(name) {
+            IrType::Boolean
+        } else if matches!(name, "value" | "code") {
+            IrType::Int(IntWidth::I32)
+        } else {
+            IrType::String
+        };
+        let result = self.declare_slot("<enum_prop>", result_ty, span);
         // Each arm's test runs in a block of its own, and an IR value never
         // crosses a block boundary — the discriminant goes through a slot
         // and is reloaded per test.
@@ -24734,22 +27380,70 @@ impl<'a> FunctionLowering<'a> {
                 else_block: next,
             });
             self.current = arm;
-            let value = if name == "value" {
+            let value = if is_http_method_property(name)
+                && self.checked.enums[enum_id as usize].name == "HTTPMethod"
+            {
                 self.emit(
-                    InstKind::ConstInt(i as i128),
-                    IrType::Int(IntWidth::I32),
+                    InstKind::ConstBool(http_method_property_value(&variant.name, name)),
+                    IrType::Boolean,
                     span,
                 )
+            } else if matches!(name, "value" | "code") || is_http_status_class_property(name) {
+                match variant.mapping {
+                    Some(zirk_sema::VariantMapping::Int(value)) => self.emit(
+                        InstKind::ConstInt(value as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    ),
+                    _ if self.checked.enums[enum_id as usize].name == "HTTPStatus"
+                        && variant.associated.iter().any(|field| field.name == "code") =>
+                    {
+                        let field_position = variant
+                            .associated
+                            .iter()
+                            .position(|field| field.name == "code")
+                            .expect("the HTTPStatus extension variant carries its code");
+                        let field_index =
+                            self.module.enums[enum_id as usize].variants[i][field_position];
+                        let field_ty =
+                            self.module.enums[enum_id as usize].fields[field_index as usize].ty;
+                        let object = self.emit(
+                            InstKind::Load(object_slot.expect("HTTPStatus uses an enum layout")),
+                            IrType::Enum(enum_id),
+                            span,
+                        );
+                        self.emit(
+                            InstKind::LoadField {
+                                object,
+                                index: field_index,
+                            },
+                            field_ty,
+                            span,
+                        )
+                    }
+                    _ => self.emit(
+                        InstKind::ConstInt(i as i128),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    ),
+                }
             } else {
                 self.const_string(&variant.name, span)
+            };
+            let value = if is_http_status_class_property(name) {
+                self.lower_http_status_class(value, name, span)
+            } else {
+                value
             };
             self.emit_effect(InstKind::Store(result, value), span);
             self.terminate(Terminator::Jump(continue_block));
             current = next;
         }
         self.current = current;
-        let fallback = if name == "value" {
+        let fallback = if matches!(name, "value" | "code") {
             self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span)
+        } else if is_http_status_class_property(name) || is_http_method_property(name) {
+            self.emit(InstKind::ConstBool(false), IrType::Boolean, span)
         } else {
             self.const_string("", span)
         };
@@ -24758,13 +27452,55 @@ impl<'a> FunctionLowering<'a> {
         self.current = continue_block;
         Some(self.emit(
             InstKind::Load(result),
-            if name == "value" {
+            if matches!(name, "value" | "code") {
                 IrType::Int(IntWidth::I32)
+            } else if is_http_status_class_property(name) || is_http_method_property(name) {
+                IrType::Boolean
             } else {
                 IrType::String
             },
             span,
         ))
+    }
+
+    fn lower_http_status_class(&mut self, code: Operand, property: &str, span: Span) -> Operand {
+        let (min, max) = match property {
+            "is_informational" => (100, 199),
+            "is_success" => (200, 299),
+            "is_redirect" => (300, 399),
+            "is_client_error" => (400, 499),
+            "is_server_error" => (500, 599),
+            _ => unreachable!("only HTTP status class properties reach this helper"),
+        };
+        let min = self.emit(InstKind::ConstInt(min), IrType::Int(IntWidth::I32), span);
+        let at_least_min = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::GtEq,
+                left: code,
+                right: min,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let max = self.emit(InstKind::ConstInt(max), IrType::Int(IntWidth::I32), span);
+        let at_most_max = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::LtEq,
+                left: code,
+                right: max,
+            },
+            IrType::Boolean,
+            span,
+        );
+        self.emit(
+            InstKind::Binary {
+                op: BinaryOp::And,
+                left: at_least_min,
+                right: at_most_max,
+            },
+            IrType::Boolean,
+            span,
+        )
     }
 
     /// Which body a safe method call (`u?.greet()`) reaches, once the
@@ -24991,11 +27727,7 @@ impl<'a> FunctionLowering<'a> {
 
         // `ClassName.field` that names a `static` field of a user class.
         if let ast::Expr::Path(base) = &*expr.object
-            && let Some(class_id) = self
-                .checked
-                .classes
-                .iter()
-                .position(|c| c.name == base.name)
+            && let Some(class_id) = self.class_id_from_path(base)
             && let Some(field) = self.checked.classes[class_id].field(&expr.name.name)
             && field.is_static
         {
@@ -25770,8 +28502,11 @@ impl<'a> FunctionLowering<'a> {
         span: Span,
     ) -> Operand {
         let element_ty = self.array_list_element_type(receiver_ty);
-        let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
         let index = self.lower_expr_as(index_expr, IrType::Int(IntWidth::I64));
+        // Index expressions may open checked-arithmetic or conditional blocks.
+        // Reload the receiver from its spill only after that control flow so
+        // its SSA definition dominates the ArrayListLoad instruction.
+        let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
         self.emit(
             InstKind::ArrayListLoad { receiver, index },
             element_ty,
@@ -28096,7 +30831,10 @@ impl<'a> FunctionLowering<'a> {
                 self.checked
                     .list_types
                     .iter()
-                    .position(|&t| self.ir_type(t) == element_ty)
+                    .position(|&t| {
+                        !type_contains_param(self.checked, t, &mut HashSet::new())
+                            && self.ir_type(t) == element_ty
+                    })
                     .expect("the checker interned the variadic list type") as u32;
             let list_ty = IrType::List(list_id);
             let list = self.emit(
@@ -28230,7 +30968,10 @@ impl<'a> FunctionLowering<'a> {
                 self.checked
                     .list_types
                     .iter()
-                    .position(|&t| self.ir_type(t) == element_ty)
+                    .position(|&t| {
+                        !type_contains_param(self.checked, t, &mut HashSet::new())
+                            && self.ir_type(t) == element_ty
+                    })
                     .expect("the checker interned the variadic list type") as u32;
             let list_ty = IrType::List(list_id);
             let list = self.emit(
@@ -29152,7 +31893,14 @@ impl<'a> FunctionLowering<'a> {
                 // `ClassName.method(...)` `static fn`: the base names a type,
                 // not a value; `method_of`/`contract_method_of` would panic.
                 if let Some(method) = self.class_static_method_of(e) {
-                    return self.ir_type(method.returns);
+                    return self
+                        .checked
+                        .expr_types
+                        .get(&e.span)
+                        .copied()
+                        .filter(|ty| !ty.is_unknown())
+                        .map(|ty| self.ir_type(ty))
+                        .unwrap_or_else(|| self.ir_type(method.returns));
                 }
 
                 // `native-type-member-surface`: the checker already resolved

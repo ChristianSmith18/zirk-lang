@@ -1034,6 +1034,9 @@ impl ClassType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodInfo {
     pub name: String,
+    /// Type parameters declared by this method itself, separate from any
+    /// parameters on its owning class or contract.
+    pub type_params: Vec<u32>,
     pub params: Vec<crate::scope::ParamInfo>,
     pub returns: Type,
     pub visibility: zirk_ast::Visibility,
@@ -1110,6 +1113,10 @@ pub struct ContractMethod {
     /// Its own `throws Type (| Type)*`, empty when it declares none (roadmap
     /// Phase 4b) — see [`crate::scope::Signature::throws`].
     pub throws: Vec<Type>,
+    /// `static` methods are type-level requirements and are checked against
+    /// static class members during conformance, never added to instance
+    /// dispatch tables.
+    pub is_static: bool,
 }
 
 /// One field of a class, as the checker sees it.

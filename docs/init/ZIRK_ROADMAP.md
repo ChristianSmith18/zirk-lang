@@ -467,6 +467,84 @@ Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
 `std.system`.
 
+`std.environment`, `std.net`, and `std.http` now have compiler-bundled source
+packages and native runtime previews under the active
+`deliver-std-http-and-environment` change. These previews cover permission-
+checked environment reads and typed parsing, address/DNS/TCP/TLS operations,
+and bounded HTTP/1.1 clients, routing, URL-encoded forms, multipart parsing and
+in-memory request building, and HTTP/1.1 plus bounded multiplexed HTTP/2 over
+accepted TLS connections. HTTP handlers can return bounded streaming responses
+through `HTTPResponse.from_stream`; finite server scopes can close their
+listener after the configured bound. Compiled-Zirk tests cover HTTP/1.1 and
+HTTP/2 chunks, and runtime tests verify capture-root cleanup after disconnect,
+task cancellation, and SIGPIPE-safe peer shutdown.
+The opt-in `HTTP.get_cached`/`HTTP.request_cached` preview also stores bounded,
+fresh GET/HEAD/QUERY responses by approved project and manifest, matches `Vary`,
+and supports ETag/Last-Modified conditional revalidation. It is process-local
+and is not owned by `HTTPClient`. The reusable client preview owns a bounded
+per-origin HTTP/1.1 and HTTPS pool, optional cookies, and connections using
+system or caller-supplied DER roots. An `HTTPClient` may be shared across tasks
+in the same verified executor and project/manifest identity. HTTP/1.1 requests
+use a cooperative bounded queue; HTTP/2 allows up to eight simultaneous
+streams per connection. `close()` waits for active requests and reopens admission if cooperatively cancelled before draining; executor shutdown releases any remaining client handles. The
+client advertises and incrementally decodes `br`, `gzip`, and `deflate` with
+16 MiB compressed/expanded bounds and a 1000:1 expansion ceiling; buffered
+and streaming server responses negotiate and compress the same codings.
+Request decoding and the cumulative codec CPU budget are implemented. Explicit
+HTTP and HTTPS forward proxies support absolute-form forwarding and HTTPS
+CONNECT with separately authorized proxy/destination origins and independent
+TLS validation. Basic proxy credentials flow through `SecretString` and are
+allowed for loopback HTTP proxies and HTTPS proxies; remote cleartext HTTP
+proxy authentication fails closed.
+Reusable-client redirects are opt-in (`Never`, `SameOrigin`, or `Follow`);
+303 drops the body and changes to GET except for HEAD, other supported statuses
+replay the method/body, each hop rechecks authority, and cross-origin hops strip
+known credentials plus custom headers marked with `HTTPHeaders.add_sensitive`/
+`set_sensitive`. Stream producers restart deterministically from index zero.
+Configurable timeout values are available across direct, proxy, and custom-root
+client factories. TLS identity checks derive SNI and certificate-name validation from the URL and use either platform or explicit custom roots; no custom verifier, hostname override, or public mutual-TLS client credential API is exposed. Cache state is exposed through the opt-in module-level API rather than `HTTPClient`.
+Ordinary buffered, cached, reusable-client, secret-header, and streaming
+requests reject exact `CONNECT` with `HTTPError.UnsupportedMethod` before
+permission lookup; the proxy and WebSocket APIs own their tunnel flows.
+Safe-method retries are implemented. A compiled-Zirk E2E also verifies
+that canceling an active cooperative HTTP/1.1 handler does not send a late
+response and releases the accepted listener on macOS aarch64 and Linux ARM64.
+Generic response-producer slow-consumer stress, long-lived HTTP/2 listener
+admission, additional secret sinks and debugger redaction, and the full native
+target matrix remain work for this phase. SSE slow-consumer transport tests now cover identity and gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and Linux ARM64; configurable server heartbeats and automatic client reconnect are implemented. A demand-driven SSE client is also
+available and validated through compiled Zirk code; its parser retains bounded
+state and closes the response on EOF, cancellation, or error. The feature status
+catalog and module handbook chapters track the verified subset and current gaps.
+
+Current target evidence (2026-10-18): the full compiled-Zirk CLI E2E suite passes
+155/155 on native macOS ARM64 and 155/155 on Linux ARM64 Docker on the
+immediately preceding source revision. After the typed `Env.get_or<T>` addition,
+the signed environment E2E passes 1/1 in Linux ARM64 Docker, but the full-suite
+rerun is inconclusive: the container exhausted disk while linking fixtures
+(57 passed, 98 failed from storage exhaustion). This is not a product test pass.
+The earlier Linux run was rebuilt with the current runtime archive and included
+the QUERY wildcard rejection and structured runtime-diagnostic cases. The combined native
+macOS runtime/runtime-core package run passes 1,019 tests with 12 ignored across
+28 suites. On Linux ARM64 Docker, runtime passes 498/3 ignored and runtime-core
+163/1 ignored; all package integration targets and doc tests exit successfully,
+including 309 passing optimization-benchmark tests. The reusable-client redirect
+matrix checks JSON, bytes, form, multipart, and deterministic stream replay across
+301/302/307/308, 303 handling, cross-origin credential stripping, and SameOrigin
+behavior. The updated IPv4/IPv6 IANA hostname-address policy matrix also passes
+on Linux x86_64 Docker emulation. Windows runtime-core and frontend CLI test
+targets compile through `cargo xwin`, but Windows execution remains unverified.
+Docker execution does not count as native Linux x86_64 evidence. The full native
+target gate remains open.
+The latest native macOS ARM64 full-workspace rerun passes 2,791 tests with 16
+ignored across 75 suites; this count supersedes earlier same-day workspace
+totals in the task log. Windows remains compile-only, and native Linux x86_64
+execution remains unverified.
+
+The current Linux x86_64 Docker-emulated run passes the CLI end-to-end suite
+155/155 (834.21 seconds), `zirk-runtime` 498 tests with 3 ignored, and
+`zirk-runtime-core` 164 tests with 1 ignored. This is an emulated target run;
+native Linux x86_64 execution and Windows execution remain unverified.
+
 Two families in this phase are **not** ordinary library objects, and the
 distinction changes who implements them:
 

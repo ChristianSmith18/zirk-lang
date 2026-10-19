@@ -1,9 +1,10 @@
 # `std.testing`
 
-`std.testing` provides compile-time-discovered tests, typed fixtures, direct and
-fluent assertions, explicit snapshots, and benchmark declarations. The `zirk
-test` runner executes unit and end-to-end workloads without adding private
-access, permissions, mutable global environment, or release-binary code.
+The planned `std.testing` module provides compile-time-discovered tests, typed
+fixtures, direct and fluent assertions, explicit snapshots, and benchmark
+declarations. The planned `zirk test` runner executes unit and end-to-end
+workloads without adding private access, permissions, mutable global
+environment, or release-binary code.
 
 Tests use the same language, type system, visibility, resource, task, and
 permission rules as ordinary source files. Testing APIs improve observation and
@@ -12,7 +13,10 @@ reporting; they do not weaken the program being tested.
 > **Implementation status:** this page defines the target Zirk 1.x module and
 > discovery contract. The dedicated [Testing](../08-testing/README.md) unit owns
 > runner isolation, CI, deterministic facilities, and benchmark methodology in
-> greater depth.
+> greater depth. No bundled `std.testing` package or `zirk test` reporter exists
+> yet. When test reports are implemented, they must preserve `SecretString`
+> redaction; this future reporter behavior is not currently available or
+> verified.
 
 ## Imports and discovery
 
@@ -285,23 +289,25 @@ operation in place.
 
 ## Snapshots
 
-Snapshots are explicit assertions:
+When the testing runner is implemented, snapshots are intended to be explicit
+assertions:
 
 ```zirk
 expect(rendered).to_match_snapshot();
 ```
 
-The default run compares but never rewrites snapshot files. Updates require:
+The target default run compares but never rewrites snapshot files. Updates
+require:
 
 ```text
 zirk test --update-snapshots
 ```
 
-The runner displays additions, removals, and modifications before writing.
-Snapshot storage is deterministic and associated with source identity and case
-name. Secrets, unstable addresses, unauthorized environment values, and other
-sensitive diagnostics remain redacted. Snapshot access requires the applicable
-test filesystem permission and is unavailable to release code.
+The target runner displays additions, removals, and modifications before
+writing. Snapshot storage is deterministic and associated with source identity
+and case name. Secret redaction, filesystem permissions, and release-code
+isolation are requirements for that future runner; they are not implemented or
+verified today.
 
 ## End-to-end tests
 
@@ -348,10 +354,10 @@ from `System.available_parallelism` and runner resource limits. Suite and test
 isolation constraints can reduce concurrency but never exceed the requested
 bound.
 
-`--report human` is the default readable output. `json` is a stable structured
-format for Zirk tooling and CI. `junit` provides ecosystem interoperability.
-Reports include suite/case identity, status, duration, source, failure, diff,
-and seed while redacting secrets and sensitive paths.
+The target `--report human` output is readable by default. `json` is intended as
+a stable structured format for Zirk tooling and CI; `junit` provides ecosystem
+interoperability. Report fields and secret/path redaction are requirements for
+the future reporter and are not implemented or verified today.
 
 ## Benchmarks
 
@@ -385,9 +391,11 @@ task/fixture context. Collection, text, JSON, and multiline values use structure
 diffs. Output is bounded and truncation is identified rather than silently
 hiding which side differed.
 
-No diagnostic prints `SecretString`, authorization fields, private environment
-values, or unapproved filesystem contents. Machine-readable reports preserve
-the same redaction guarantees as terminal output.
+When these testing diagnostics are implemented, they must not print
+`SecretString`, authorization fields, private environment values, or
+unapproved filesystem contents. Machine-readable reports must preserve the same
+redaction guarantees as terminal output. No `zirk test` diagnostic or reporter
+currently exists to validate this behavior.
 
 ---
 

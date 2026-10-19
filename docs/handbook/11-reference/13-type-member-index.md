@@ -16,7 +16,7 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | `Result<T,E>` | variant state | inspection, nullable extraction, fallback, map/chaining, unwrap, `or_throw` | [Result](../02-handbook/15-errors/01-result.md) |
 | `Throwable` | immutable identity | `message()`, `code()`, `cause()`, `suppressed()`, `stack_trace()` | [Exceptions](../02-handbook/15-errors/04-exceptions.md) |
 | `Resource<E>` | `is_closed()` | `close()`; type-specific transfer/duplicate operations | [Resources](../02-handbook/16-resources/README.md) |
-| `Environment` / `Env` | — | static get/default/required/secret/contains/list operations | [`std.environment`](../04-standard-library/18-std-environment.md) |
+| `Environment` / `Env` | — | static typed `get<T>`/`get_or<T>`, required/nullable/secret reads, containment and listing | [`std.environment`](../04-standard-library/18-std-environment.md) |
 | `Weak<T>` | `is_alive` | static `from()`, `upgrade()`, `to_string()` | [Safe References](../02-handbook/17-memory-and-safety/04-safe-references.md) |
 | `Pointer<T>` | `is_null` | `read()`, `write()`, `offset()`, `offset_bytes()`, `cast<T>()`, volatile access | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |
 | native slices | `length`, `is_empty` | bounds-checked indexing/iteration; mutable writes for `NativeSliceMut<T>` | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |

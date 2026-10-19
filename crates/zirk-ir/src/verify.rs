@@ -219,6 +219,85 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::StdinReadChar { .. }
             | InstKind::StdinReadBytes { .. }
             | InstKind::StdinReadExact { .. }
+            | InstKind::EnvironmentGet { .. }
+            | InstKind::EnvironmentContains { .. }
+            | InstKind::EnvironmentListNames { .. }
+            | InstKind::NetworkTcpConnect { .. }
+            | InstKind::NetworkDnsResolve { .. }
+            | InstKind::NetworkIpAddressParse { .. }
+            | InstKind::NetworkTcpOriginNormalize { .. }
+            | InstKind::NetworkTlsConnect { .. }
+            | InstKind::NetworkTlsConnectWithRoots { .. }
+            | InstKind::NetworkTlsListen { .. }
+            | InstKind::NetworkTlsAccept { .. }
+            | InstKind::NetworkTlsCloseListener { .. }
+            | InstKind::NetworkTlsListenerIsClosed { .. }
+            | InstKind::NetworkTlsPeerAddress { .. }
+            | InstKind::NetworkTlsRead { .. }
+            | InstKind::NetworkTlsWriteAll { .. }
+            | InstKind::NetworkTlsShutdown { .. }
+            | InstKind::NetworkTlsClose { .. }
+            | InstKind::NetworkTlsIsClosed { .. }
+            | InstKind::NetworkTcpRead { .. }
+            | InstKind::NetworkTcpWrite { .. }
+            | InstKind::NetworkTcpWriteAll { .. }
+            | InstKind::NetworkTcpShutdown { .. }
+            | InstKind::NetworkTcpClose { .. }
+            | InstKind::NetworkTcpIsClosed { .. }
+            | InstKind::NetworkTcpListen { .. }
+            | InstKind::NetworkTcpAccept { .. }
+            | InstKind::NetworkTcpCloseListener { .. }
+            | InstKind::NetworkTcpListenerIsClosed { .. }
+            | InstKind::HttpGet { .. }
+            | InstKind::HttpRequest { .. }
+            | InstKind::HttpClientCreate { .. }
+            | InstKind::HttpClientCreateWithOptions { .. }
+            | InstKind::HttpClientCreateWithTrustRoots { .. }
+            | InstKind::HttpClientCreateWithProxy { .. }
+            | InstKind::HttpClientCreateWithProxyAndTrustRoots { .. }
+            | InstKind::HttpClientRequest { .. }
+            | InstKind::HttpClientRequestStream { .. }
+            | InstKind::HttpClientAction { .. }
+            | InstKind::HttpWebSocketConnect { .. }
+            | InstKind::HttpWebSocketConnectWithTrustRoots { .. }
+            | InstKind::HttpWebSocketSend { .. }
+            | InstKind::HttpWebSocketReceive { .. }
+            | InstKind::HttpWebSocketClose { .. }
+            | InstKind::HttpWebSocketCloseWith { .. }
+            | InstKind::HttpRequestSecret { .. }
+            | InstKind::HttpHead { .. }
+            | InstKind::HttpQuery { .. }
+            | InstKind::HttpQueryWithContentType { .. }
+            | InstKind::HttpPost { .. }
+            | InstKind::HttpPostJson { .. }
+            | InstKind::HttpPostBytes { .. }
+            | InstKind::HttpGetStream { .. }
+            | InstKind::HttpResponseToStream { .. }
+            | InstKind::HttpRequestStream { .. }
+            | InstKind::HttpRegisterServerResponseProducer { .. }
+            | InstKind::HttpResponseReadChunk { .. }
+            | InstKind::HttpResponseReadAll { .. }
+            | InstKind::HttpResponseReadSseEvent { .. }
+            | InstKind::HttpResponseSseHeartbeatCount { .. }
+            | InstKind::HttpResponseStreamClose { .. }
+            | InstKind::HttpUrlNormalize { .. }
+            | InstKind::HttpUrlResolve { .. }
+            | InstKind::HttpResponseText { .. }
+            | InstKind::HttpResponseHeaderValues { .. }
+            | InstKind::HttpFormParse { .. }
+            | InstKind::HttpMultipartParse { .. }
+            | InstKind::HttpUploadRead { .. }
+            | InstKind::HttpUploadClose { .. }
+            | InstKind::HttpFormValues { .. }
+            | InstKind::HttpFormEncode { .. }
+            | InstKind::HttpMultipartEncode { .. }
+            | InstKind::HttpRoutePatternValidate { .. }
+            | InstKind::HttpRoutePatternConflict { .. }
+            | InstKind::HttpRouteMatch { .. }
+            | InstKind::HttpRouteAllowHeader { .. }
+            | InstKind::HttpHeadersEncode { .. }
+            | InstKind::HttpServerServeOnce { .. }
+            | InstKind::HttpServerWebSocketServeOnce { .. }
             | InstKind::ScopeExit { .. }
             | InstKind::ScopeExitCollectAll { .. }
             | InstKind::JobWait { .. }
@@ -1893,7 +1972,7 @@ fn verify_instruction(
                 }
                 for (field, given) in layout.fields.iter().zip(fields) {
                     if let Some(actual) = type_of(given)
-                        && actual != field.ty
+                        && !types_compatible(module, actual, field.ty)
                     {
                         report(format!(
                             "{position}: builds field `{}` of type {} from a {}",
@@ -1941,7 +2020,7 @@ fn verify_instruction(
                             continue;
                         };
                         if let Some(actual) = type_of(given)
-                            && actual != field.ty
+                            && !types_compatible(module, actual, field.ty)
                         {
                             report(format!(
                                 "{position}: builds field `{}` of type {} from a {}",
@@ -2325,6 +2404,2314 @@ fn verify_instruction(
                 report(format!(
                     "{position}: StdinReadExact receives {} for `count`, expected UInt64",
                     value.as_str()
+                ));
+            }
+        }
+
+        InstKind::EnvironmentGet { name, enum_id, .. } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "EnvironmentGet",
+                report,
+            );
+            if let Some(value) = type_of(name)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: EnvironmentGet receives {} for `name`, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::EnvironmentContains { name, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "EnvironmentContains",
+                report,
+            );
+            if let Some(value) = type_of(name)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: EnvironmentContains receives {} for `name`, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::EnvironmentListNames { enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "EnvironmentListNames",
+                report,
+            );
+        }
+
+        InstKind::NetworkTcpConnect { endpoint, enum_id }
+        | InstKind::NetworkDnsResolve { endpoint, enum_id }
+        | InstKind::NetworkTlsConnect { endpoint, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                if matches!(inst.kind, InstKind::NetworkDnsResolve { .. }) {
+                    "NetworkDnsResolve"
+                } else {
+                    "NetworkTcpConnect"
+                },
+                report,
+            );
+            if let Some(value) = type_of(endpoint)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: network endpoint instruction receives {} for `endpoint`, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkIpAddressParse { value, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkIpAddressParse",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: NetworkIpAddressParse receives {}, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpOriginNormalize {
+            host,
+            port,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpOriginNormalize",
+                report,
+            );
+            if let Some(actual) = type_of(host)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: NetworkTcpOriginNormalize receives {} for `host`, expected String",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(port)
+                && actual != IrType::Int(IntWidth::U16)
+            {
+                report(format!(
+                    "{position}: NetworkTcpOriginNormalize receives {} for `port`, expected UInt16",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpListen { endpoint, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpListen",
+                report,
+            );
+            if let Some(value) = type_of(endpoint)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: NetworkTcpListen receives {} for `endpoint`, expected String",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpAccept {
+            handle,
+            enum_id,
+            stream_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpAccept",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpAccept receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+            if *stream_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: NetworkTcpAccept references missing TCPStream class layout {stream_class_id}"
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpCloseListener { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpCloseListener",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpCloseListener receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpListenerIsClosed { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkTcpListenerIsClosed",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpListenerIsClosed receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpRead {
+            handle,
+            max_bytes,
+            enum_id,
+        }
+        | InstKind::NetworkTlsRead {
+            handle,
+            max_bytes,
+            enum_id,
+        }
+        | InstKind::NetworkTcpWrite {
+            handle,
+            bytes: max_bytes,
+            enum_id,
+        }
+        | InstKind::NetworkTcpWriteAll {
+            handle,
+            bytes: max_bytes,
+            enum_id,
+        }
+        | InstKind::NetworkTlsWriteAll {
+            handle,
+            bytes: max_bytes,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpOperation",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpOperation receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+            if let Some(value) = type_of(max_bytes)
+                && !matches!(value, IrType::Int(IntWidth::U64) | IrType::Array(_))
+            {
+                report(format!(
+                    "{position}: NetworkTcpOperation receives {} for its second operand, expected UInt64 or Array",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpShutdown { handle, enum_id }
+        | InstKind::NetworkTcpClose { handle, enum_id }
+        | InstKind::NetworkTlsShutdown { handle, enum_id }
+        | InstKind::NetworkTlsClose { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpResourceOperation",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpResourceOperation receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpIsClosed { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkTcpIsClosed",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpIsClosed receives {} for `handle`, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTcpPeerAddress { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTcpPeerAddress",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTcpPeerAddress receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsIsClosed { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkTlsIsClosed",
+                report,
+            );
+            if let Some(value) = type_of(handle)
+                && value != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsIsClosed receives {}, expected UInt64",
+                    value.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsListen {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            allow_tls12,
+            http_alpn: _,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsListen",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: NetworkTlsListen receives {} for `{label}`, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            for (operand, label) in [
+                (*certificate_chain_der, "certificate_chain_der"),
+                (*private_key_der, "private_key_der"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && !matches!(actual, IrType::Array(_))
+                {
+                    report(format!(
+                        "{position}: NetworkTlsListen receives {} for `{label}`, expected Array",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::NetworkTlsAccept {
+            handle,
+            enum_id,
+            stream_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsAccept",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsAccept receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if *stream_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: NetworkTlsAccept references missing stream object layout {}",
+                    stream_class_id
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsCloseListener { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsCloseListener",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsCloseListener receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsListenerIsClosed { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkTlsListenerIsClosed",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsListenerIsClosed receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsPeerAddress { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsPeerAddress",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsPeerAddress receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsConnectWithRoots {
+            endpoint,
+            roots_der,
+            allow_tls12,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsConnectWithRoots",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: NetworkTlsConnectWithRoots receives {} for `{label}`, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            if let Some(actual) = type_of(roots_der)
+                && !matches!(actual, IrType::Array(_))
+            {
+                report(format!(
+                    "{position}: NetworkTlsConnectWithRoots receives {} for `roots_der`, expected Array",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpGet {
+            url,
+            cached: _,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(inst.ty, IrType::Enum(*enum_id), position, "HttpGet", report);
+            if let Some(value) = type_of(url)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpGet receives {} for `url`, expected String",
+                    value.as_str()
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpGet references missing response object layout {}",
+                    response_class_id
+                ));
+            }
+        }
+        InstKind::HttpRequest {
+            method,
+            url,
+            body,
+            headers,
+            validate_json,
+            cached: _,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpRequest",
+                report,
+            );
+            for (label, operand) in [("method", method), ("url", url)] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpRequest receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            for (label, operand) in [("body", body), ("headers", headers)] {
+                let is_byte_array = match type_of(operand) {
+                    Some(IrType::Array(array_id)) => {
+                        module.array_types.get(array_id as usize).copied()
+                            == Some(IrType::Int(IntWidth::U8))
+                    }
+                    _ => false,
+                };
+                if !is_byte_array {
+                    report(format!(
+                        "{position}: HttpRequest receives a non-byte array for `{label}`"
+                    ));
+                }
+            }
+            if let Some(actual) = type_of(validate_json)
+                && actual != IrType::Boolean
+            {
+                report(format!(
+                    "{position}: HttpRequest receives {} for `validate_json`, expected Boolean",
+                    actual.as_str()
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpRequest references missing response object layout {}",
+                    response_class_id
+                ));
+            }
+        }
+        InstKind::HttpClientCreate {
+            max_origins,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientCreate",
+                report,
+            );
+            if let Some(actual) = type_of(max_origins)
+                && actual != IrType::Int(IntWidth::I32)
+            {
+                report(format!(
+                    "{position}: HttpClientCreate max_origins must be Int32"
+                ));
+            }
+        }
+        InstKind::HttpClientCreateWithOptions {
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientCreateWithOptions",
+                report,
+            );
+            for (operand, expected, label) in [
+                (max_origins, IrType::Int(IntWidth::I32), "max_origins"),
+                (
+                    connect_timeout_ms,
+                    IrType::Int(IntWidth::I64),
+                    "connect_timeout_ms",
+                ),
+                (
+                    response_headers_timeout_ms,
+                    IrType::Int(IntWidth::I64),
+                    "response_headers_timeout_ms",
+                ),
+                (
+                    response_idle_timeout_ms,
+                    IrType::Int(IntWidth::I64),
+                    "response_idle_timeout_ms",
+                ),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: HttpClientCreateWithOptions {label} has type {actual:?}, expected {expected:?}"
+                    ));
+                }
+            }
+        }
+        InstKind::HttpClientCreateWithTrustRoots {
+            roots,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientCreateWithTrustRoots",
+                report,
+            );
+            if !matches!(type_of(roots), Some(IrType::Array(_))) {
+                report(format!(
+                    "{position}: HttpClientCreateWithTrustRoots roots must be an array"
+                ));
+            }
+            if let Some(actual) = type_of(max_origins)
+                && actual != IrType::Int(IntWidth::I32)
+            {
+                report(format!(
+                    "{position}: HttpClientCreateWithTrustRoots max_origins must be Int32"
+                ));
+            }
+            for (operand, label) in [
+                (connect_timeout_ms, "connect_timeout_ms"),
+                (response_headers_timeout_ms, "response_headers_timeout_ms"),
+                (response_idle_timeout_ms, "response_idle_timeout_ms"),
+            ] {
+                if type_of(operand) != Some(IrType::Int(IntWidth::I64)) {
+                    report(format!(
+                        "{position}: HttpClientCreateWithTrustRoots {label} must be UInt64"
+                    ));
+                }
+            }
+        }
+        InstKind::HttpClientCreateWithProxy {
+            proxy_url,
+            proxy_credentials,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientCreateWithProxy",
+                report,
+            );
+            if let Some(actual) = type_of(proxy_url)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxy proxy_url must be String"
+                ));
+            }
+            if let Some(actual) = type_of(proxy_credentials)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxy proxy_credentials must be String"
+                ));
+            }
+            if let Some(actual) = type_of(max_origins)
+                && actual != IrType::Int(IntWidth::I32)
+            {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxy max_origins must be Int32"
+                ));
+            }
+            for (operand, label) in [
+                (connect_timeout_ms, "connect_timeout_ms"),
+                (response_headers_timeout_ms, "response_headers_timeout_ms"),
+                (response_idle_timeout_ms, "response_idle_timeout_ms"),
+            ] {
+                if type_of(operand) != Some(IrType::Int(IntWidth::I64)) {
+                    report(format!(
+                        "{position}: HttpClientCreateWithProxy {label} must be UInt64"
+                    ));
+                }
+            }
+        }
+        InstKind::HttpClientCreateWithProxyAndTrustRoots {
+            proxy_url,
+            proxy_credentials,
+            roots,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientCreateWithProxyAndTrustRoots",
+                report,
+            );
+            if type_of(proxy_url) != Some(IrType::String)
+                || type_of(proxy_credentials) != Some(IrType::String)
+            {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxyAndTrustRoots proxy values must be String"
+                ));
+            }
+            if !matches!(type_of(roots), Some(IrType::Array(_))) {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxyAndTrustRoots roots must be an array"
+                ));
+            }
+            if type_of(max_origins) != Some(IrType::Int(IntWidth::I32)) {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxyAndTrustRoots max_origins must be Int32"
+                ));
+            }
+            for (operand, label) in [
+                (connect_timeout_ms, "connect_timeout_ms"),
+                (response_headers_timeout_ms, "response_headers_timeout_ms"),
+                (response_idle_timeout_ms, "response_idle_timeout_ms"),
+            ] {
+                if type_of(operand) != Some(IrType::Int(IntWidth::I64)) {
+                    report(format!(
+                        "{position}: HttpClientCreateWithProxyAndTrustRoots {label} must be UInt64"
+                    ));
+                }
+            }
+        }
+        InstKind::HttpClientRequest {
+            handle,
+            method,
+            url,
+            body,
+            headers,
+            validate_json,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientRequest",
+                report,
+            );
+            if type_of(handle).is_some_and(|ty| ty != IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: HttpClientRequest handle must be UInt64"
+                ));
+            }
+            for (label, operand) in [("method", method), ("url", url)] {
+                if type_of(operand).is_some_and(|ty| ty != IrType::String) {
+                    report(format!(
+                        "{position}: HttpClientRequest {label} must be String"
+                    ));
+                }
+            }
+            for (label, operand) in [("body", body), ("headers", headers)] {
+                let bytes = matches!(type_of(operand), Some(IrType::Array(id)) if module.array_types.get(id as usize) == Some(&IrType::Int(IntWidth::U8)));
+                if !bytes {
+                    report(format!(
+                        "{position}: HttpClientRequest {label} must be Array<Byte>"
+                    ));
+                }
+            }
+            if type_of(validate_json).is_some_and(|ty| ty != IrType::Boolean) {
+                report(format!(
+                    "{position}: HttpClientRequest validate_json must be Boolean"
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpClientRequest references missing HTTPResponse layout"
+                ));
+            }
+        }
+        InstKind::HttpClientRequestStream {
+            handle,
+            method,
+            url,
+            headers,
+            callback,
+            callback_layout,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientRequestStream",
+                report,
+            );
+            if type_of(handle).is_some_and(|ty| ty != IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: HttpClientRequestStream handle must be UInt64"
+                ));
+            }
+            for (label, operand) in [("method", method), ("url", url)] {
+                if type_of(operand).is_some_and(|ty| ty != IrType::String) {
+                    report(format!(
+                        "{position}: HttpClientRequestStream {label} must be String"
+                    ));
+                }
+            }
+            let bytes = matches!(type_of(headers), Some(IrType::Array(id)) if module.array_types.get(id as usize) == Some(&IrType::Int(IntWidth::U8)));
+            if !bytes {
+                report(format!(
+                    "{position}: HttpClientRequestStream headers must be Array<Byte>"
+                ));
+            }
+            let callback_ok = module.closures.get(*callback_layout as usize).is_some_and(|layout| {
+                layout.params == [IrType::Int(IntWidth::U64)]
+                    && matches!(layout.returns, IrType::Array(id) if module.array_types.get(id as usize) == Some(&IrType::Int(IntWidth::U8)))
+            });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpClientRequestStream callback must take UInt64 and return Array<Byte>"
+                ));
+            }
+            if type_of(callback).is_some_and(|ty| ty != IrType::Callable(*callback_layout)) {
+                report(format!(
+                    "{position}: HttpClientRequestStream callback has an invalid callable layout"
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpClientRequestStream references missing HTTPResponse layout"
+                ));
+            }
+        }
+        InstKind::HttpClientAction {
+            handle, enum_id, ..
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpClientAction",
+                report,
+            );
+            if type_of(handle).is_some_and(|ty| ty != IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: HttpClientAction handle must be UInt64"
+                ));
+            }
+        }
+        InstKind::HttpWebSocketConnect {
+            url,
+            origin,
+            subprotocols,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpWebSocketConnect",
+                report,
+            );
+            if type_of(url) != Some(IrType::String) || type_of(origin) != Some(IrType::String) {
+                report(format!(
+                    "{position}: HttpWebSocketConnect URL and Origin must be String"
+                ));
+            }
+            if !matches!(type_of(subprotocols), Some(IrType::List(id)) if module.list_types.get(id as usize) == Some(&IrType::String))
+            {
+                report(format!(
+                    "{position}: HttpWebSocketConnect subprotocols must be List<String>"
+                ));
+            }
+        }
+        InstKind::HttpWebSocketConnectWithTrustRoots {
+            url,
+            origin,
+            subprotocols,
+            roots_der,
+            allow_tls12,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpWebSocketConnectWithTrustRoots",
+                report,
+            );
+            if type_of(url) != Some(IrType::String) || type_of(origin) != Some(IrType::String) {
+                report(format!(
+                    "{position}: HttpWebSocketConnectWithTrustRoots URL and Origin must be String"
+                ));
+            }
+            if !matches!(type_of(subprotocols), Some(IrType::List(id)) if module.list_types.get(id as usize) == Some(&IrType::String))
+            {
+                report(format!(
+                    "{position}: HttpWebSocketConnectWithTrustRoots subprotocols must be List<String>"
+                ));
+            }
+            if !matches!(type_of(roots_der), Some(IrType::Array(_))) {
+                report(format!(
+                    "{position}: HttpWebSocketConnectWithTrustRoots roots must be an array"
+                ));
+            }
+            if type_of(allow_tls12) != Some(IrType::Boolean) {
+                report(format!(
+                    "{position}: HttpWebSocketConnectWithTrustRoots allow_tls12 must be Boolean"
+                ));
+            }
+        }
+        InstKind::HttpWebSocketSend {
+            handle,
+            record,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpWebSocketSend",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: HttpWebSocketSend handle must be UInt64"
+                ));
+            }
+            if !matches!(type_of(record), Some(IrType::Array(id)) if module.array_types.get(id as usize) == Some(&IrType::Int(IntWidth::U8)))
+            {
+                report(format!(
+                    "{position}: HttpWebSocketSend record must be Array<Byte>"
+                ));
+            }
+        }
+        InstKind::HttpWebSocketReceive { handle, enum_id }
+        | InstKind::HttpWebSocketClose { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "WebSocket action",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: WebSocket action handle must be UInt64"
+                ));
+            }
+        }
+        InstKind::HttpWebSocketCloseWith {
+            handle,
+            code,
+            reason,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "WebSocket close_with",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: WebSocket close_with handle must be UInt64"
+                ));
+            }
+            if type_of(code) != Some(IrType::Int(IntWidth::U16)) {
+                report(format!(
+                    "{position}: WebSocket close_with code must be UInt16"
+                ));
+            }
+            if type_of(reason) != Some(IrType::String) {
+                report(format!(
+                    "{position}: WebSocket close_with reason must be String"
+                ));
+            }
+        }
+        InstKind::HttpRequestSecret {
+            method,
+            url,
+            body,
+            headers,
+            header_name,
+            secret_value,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpRequestSecret",
+                report,
+            );
+            for (label, operand) in [
+                ("method", method),
+                ("url", url),
+                ("header_name", header_name),
+                ("secret_value", secret_value),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpRequestSecret receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            for (label, operand) in [("body", body), ("headers", headers)] {
+                let is_byte_array = match type_of(operand) {
+                    Some(IrType::Array(array_id)) => {
+                        module.array_types.get(array_id as usize).copied()
+                            == Some(IrType::Int(IntWidth::U8))
+                    }
+                    _ => false,
+                };
+                if !is_byte_array {
+                    report(format!(
+                        "{position}: HttpRequestSecret receives a non-byte array for `{label}`"
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpRequestSecret references missing response object layout {}",
+                    response_class_id
+                ));
+            }
+        }
+        InstKind::HttpHead {
+            url,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpHead",
+                report,
+            );
+            if let Some(value) = type_of(url)
+                && value != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpHead receives {} for `url`, expected String",
+                    value.as_str()
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpHead references missing response object layout {}",
+                    response_class_id
+                ));
+            }
+        }
+        InstKind::HttpQuery {
+            url,
+            query,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpQuery",
+                report,
+            );
+            for (operand, label) in [(*url, "url"), (*query, "query")] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpQuery receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpQuery references missing response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpQueryWithContentType {
+            url,
+            query,
+            content_type,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpQueryWithContentType",
+                report,
+            );
+            for (operand, label) in [
+                (*url, "url"),
+                (*query, "query"),
+                (*content_type, "content_type"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpQueryWithContentType receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpQueryWithContentType references missing response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpPost {
+            url,
+            body,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpPost",
+                report,
+            );
+            for (operand, label) in [(*url, "url"), (*body, "body")] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpPost receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpPost references missing response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpPostJson {
+            url,
+            body,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpPostJson",
+                report,
+            );
+            for (operand, label) in [(*url, "url"), (*body, "body")] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpPostJson receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpPostJson references missing response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpPostBytes {
+            url,
+            body,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpPostBytes",
+                report,
+            );
+            if let Some(actual) = type_of(url)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpPostBytes receives {} for `url`, expected String",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(body) {
+                let is_byte_array = match actual {
+                    IrType::Array(array_id) => {
+                        module.array_types.get(array_id as usize).copied()
+                            == Some(IrType::Int(IntWidth::U8))
+                    }
+                    _ => false,
+                };
+                if !is_byte_array {
+                    report(format!(
+                        "{position}: HttpPostBytes receives {} for `body`, expected Array<Byte>",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpPostBytes references missing response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpGetStream {
+            url,
+            headers,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpGetStream",
+                report,
+            );
+            if let Some(actual) = type_of(url)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpGetStream receives {}, expected String URL",
+                    actual.as_str()
+                ));
+            }
+            if !matches!(type_of(headers), Some(IrType::Array(array_id))
+                if module.array_types.get(array_id as usize).copied()
+                    == Some(IrType::Int(IntWidth::U8)))
+            {
+                report(format!(
+                    "{position}: HttpGetStream expected encoded headers as Array<Byte>"
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpGetStream references missing stream-response object layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpResponseToStream {
+            status,
+            body,
+            headers,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseToStream",
+                report,
+            );
+            if let Some(actual) = type_of(status)
+                && actual != IrType::Int(IntWidth::I32)
+            {
+                report(format!(
+                    "{position}: HttpResponseToStream receives {} for status, expected Int32",
+                    actual.as_str()
+                ));
+            }
+            for (operand, label) in [(body, "body"), (headers, "headers")] {
+                let is_byte_array = matches!(type_of(operand), Some(IrType::Array(array_id))
+                    if module.array_types.get(array_id as usize).copied()
+                        == Some(IrType::Int(IntWidth::U8)));
+                if !is_byte_array {
+                    report(format!(
+                        "{position}: HttpResponseToStream {label} must be Array<Byte>"
+                    ));
+                }
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpResponseToStream references missing stream-response layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpRequestStream {
+            method,
+            url,
+            headers,
+            callback,
+            callback_layout,
+            result_callback,
+            enum_id,
+            response_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpRequestStream",
+                report,
+            );
+            if let Some(actual) = type_of(method)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpRequestStream receives {} for method, expected String",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(url)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpRequestStream receives {} for URL, expected String",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(headers)
+                && !matches!(actual, IrType::Array(_))
+            {
+                report(format!(
+                    "{position}: HttpRequestStream receives {} for headers, expected Array<Byte>",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(headers)
+                && let IrType::Array(array_id) = actual
+                && module.array_types.get(array_id as usize).copied()
+                    != Some(IrType::Int(IntWidth::U8))
+            {
+                report(format!(
+                    "{position}: HttpRequestStream headers must be Array<Byte>"
+                ));
+            }
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        let returns_bytes = |ty: IrType| {
+                            matches!(ty, IrType::Array(array_id)
+                            if module.array_types.get(array_id as usize).copied()
+                                == Some(IrType::Int(IntWidth::U8)))
+                        };
+                        let returns_result_bytes = |ty: IrType| {
+                            let IrType::Enum(result_id) = ty else {
+                                return false;
+                            };
+                            let Some(result) = module.enums.get(result_id as usize) else {
+                                return false;
+                            };
+                            result.variants.len() == 2
+                                && result.variants[0].first().is_some_and(|field| {
+                                    result
+                                        .fields
+                                        .get(*field as usize)
+                                        .is_some_and(|field| returns_bytes(field.ty))
+                                })
+                                && result.variants[1].first().is_some_and(|field| {
+                                    result
+                                        .fields
+                                        .get(*field as usize)
+                                        .is_some_and(|field| field.ty == IrType::Int(IntWidth::I32))
+                                })
+                        };
+                        layout.params == [IrType::Int(IntWidth::U64)]
+                            && if *result_callback {
+                                returns_result_bytes(layout.returns)
+                            } else {
+                                returns_bytes(layout.returns)
+                            }
+                    });
+            if !callback_ok {
+                let contract = if *result_callback {
+                    "UInt64 and return Result<Array<Byte>, HTTPStreamProducerError>"
+                } else {
+                    "UInt64 and return Array<Byte>"
+                };
+                report(format!(
+                    "{position}: HttpRequestStream callback must take {contract}"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpRequestStream receives {} for callback, expected callable layout {callback_layout}",
+                    actual.as_str()
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpRequestStream references missing stream-response layout {response_class_id}"
+                ));
+            }
+        }
+        InstKind::HttpRegisterServerResponseProducer {
+            callback,
+            callback_layout,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "HttpRegisterServerResponseProducer",
+                report,
+            );
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        layout.params == [IrType::Int(IntWidth::U64)]
+                            && matches!(layout.returns, IrType::Array(array_id)
+                            if module.array_types.get(array_id as usize).copied()
+                                == Some(IrType::Int(IntWidth::U8)))
+                    });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpRegisterServerResponseProducer callback must take UInt64 and return Array<Byte>"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpRegisterServerResponseProducer receives {} for callback, expected callable layout {callback_layout}",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::HttpResponseReadChunk {
+            handle,
+            max_bytes,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseReadChunk",
+                report,
+            );
+            for (operand, label) in [(*handle, "handle"), (*max_bytes, "max_bytes")] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: HttpResponseReadChunk receives {} for `{label}`, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::HttpResponseReadAll { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseReadAll",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpResponseReadAll receives {}, expected UInt64 handle",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::HttpResponseReadSseEvent { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseReadSseEvent",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpResponseReadSseEvent receives {}, expected UInt64 handle",
+                    actual.as_str()
+                ));
+            }
+            let success_is_list_string = module
+                .enums
+                .get(*enum_id as usize)
+                .and_then(|layout| layout.variants.first())
+                .and_then(|success| success.first())
+                .and_then(|field| {
+                    module
+                        .enums
+                        .get(*enum_id as usize)?
+                        .fields
+                        .get(*field as usize)
+                })
+                .is_some_and(|field| match field.ty {
+                    IrType::List(list_id) => {
+                        module.list_types.get(list_id as usize).copied() == Some(IrType::String)
+                    }
+                    _ => false,
+                });
+            if !success_is_list_string {
+                report(format!(
+                    "{position}: HttpResponseReadSseEvent success must contain List<String>"
+                ));
+            }
+        }
+        InstKind::HttpResponseSseHeartbeatCount { handle } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "HttpResponseSseHeartbeatCount",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpResponseSseHeartbeatCount receives {}, expected UInt64 handle",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::HttpResponseStreamClose { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "HttpResponseStreamClose",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpResponseStreamClose receives {}, expected UInt64 handle",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpUrlNormalize { value, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpUrlNormalize",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpUrlNormalize receives {}, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpUrlResolve {
+            base,
+            reference,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpUrlResolve",
+                report,
+            );
+            for (operand, label) in [(base, "base"), (reference, "reference")] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpUrlResolve receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::HttpResponseText { body, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseText",
+                report,
+            );
+            let is_byte_array = match type_of(body) {
+                Some(IrType::Array(id)) => {
+                    module.array_types.get(id as usize).copied() == Some(IrType::Int(IntWidth::U8))
+                }
+                _ => false,
+            };
+            if !is_byte_array {
+                report(format!(
+                    "{position}: HttpResponseText receives a non-byte array, expected Array<Byte>"
+                ));
+            }
+        }
+
+        InstKind::HttpResponseHeaderValues {
+            headers,
+            name,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpResponseHeaderValues",
+                report,
+            );
+            let headers_are_bytes = match type_of(headers) {
+                Some(IrType::Array(id)) => {
+                    module.array_types.get(id as usize).copied() == Some(IrType::Int(IntWidth::U8))
+                }
+                _ => false,
+            };
+            if !headers_are_bytes {
+                report(format!(
+                    "{position}: HttpResponseHeaderValues receives a non-byte array for encoded headers"
+                ));
+            }
+            if let Some(actual) = type_of(name)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpResponseHeaderValues receives {} for `name`, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpRoutePatternValidate { pattern } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "HttpRoutePatternValidate",
+                report,
+            );
+            if let Some(actual) = type_of(pattern)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpRoutePatternValidate receives {} for `pattern`, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpRoutePatternConflict {
+            method,
+            first,
+            second,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "HttpRoutePatternConflict",
+                report,
+            );
+            for (label, operand) in [
+                ("method", method),
+                ("first pattern", first),
+                ("second pattern", second),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpRoutePatternConflict receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::HttpRouteMatch { pattern, path } => {
+            if !matches!(inst.ty, IrType::List(_)) {
+                report(format!(
+                    "{position}: HttpRouteMatch returns {}, expected List<String>",
+                    inst.ty.as_str()
+                ));
+            } else if let IrType::List(list_id) = inst.ty
+                && module.list_types.get(list_id as usize).copied() != Some(IrType::String)
+            {
+                report(format!(
+                    "{position}: HttpRouteMatch returns List<{}>, expected List<String>",
+                    module
+                        .list_types
+                        .get(list_id as usize)
+                        .map(|list| list.as_str())
+                        .unwrap_or("<missing>"),
+                ));
+            }
+            for (label, operand) in [("pattern", pattern), ("path", path)] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: HttpRouteMatch receives {} for `{label}`, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::HttpRouteAllowHeader {
+            patterns,
+            methods,
+            path,
+        } => {
+            if let IrType::Array(array_id) = inst.ty {
+                if module.array_types.get(array_id as usize).copied()
+                    != Some(IrType::Int(IntWidth::U8))
+                {
+                    report(format!(
+                        "{position}: HttpRouteAllowHeader returns Array<{}>, expected Array<Byte>",
+                        module
+                            .array_types
+                            .get(array_id as usize)
+                            .map(|ty| ty.as_str())
+                            .unwrap_or("<missing>"),
+                    ));
+                }
+            } else {
+                report(format!(
+                    "{position}: HttpRouteAllowHeader returns {}, expected Array<Byte>",
+                    inst.ty.as_str()
+                ));
+            }
+            for (label, operand) in [("patterns", patterns), ("methods", methods)] {
+                if let Some(IrType::List(list_id)) = type_of(operand) {
+                    if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
+                        report(format!(
+                            "{position}: HttpRouteAllowHeader receives List<{}> for `{label}`, expected List<String>",
+                            module
+                                .list_types
+                                .get(list_id as usize)
+                                .map(|ty| ty.as_str())
+                                .unwrap_or("<missing>"),
+                        ));
+                    }
+                } else if let Some(actual) = type_of(operand) {
+                    report(format!(
+                        "{position}: HttpRouteAllowHeader receives {} for `{label}`, expected List<String>",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if let Some(actual) = type_of(path)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpRouteAllowHeader receives {} for `path`, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::HttpHeadersEncode { names, values } => {
+            if let IrType::Array(array_id) = inst.ty {
+                if module.array_types.get(array_id as usize).copied()
+                    != Some(IrType::Int(IntWidth::U8))
+                {
+                    report(format!(
+                        "{position}: HttpHeadersEncode must return Array<Byte>"
+                    ));
+                }
+            } else {
+                report(format!(
+                    "{position}: HttpHeadersEncode must return Array<Byte>"
+                ));
+            }
+            for (label, operand) in [("names", names), ("values", values)] {
+                if let Some(IrType::List(list_id)) = type_of(operand) {
+                    if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
+                        report(format!(
+                            "{position}: HttpHeadersEncode `{label}` must be List<String>"
+                        ));
+                    }
+                } else if type_of(operand).is_some() {
+                    report(format!(
+                        "{position}: HttpHeadersEncode `{label}` must be List<String>"
+                    ));
+                }
+            }
+        }
+        InstKind::HttpFormParse {
+            body,
+            content_type,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpFormParse",
+                report,
+            );
+            let is_bytes = match type_of(body) {
+                Some(IrType::Array(id)) => {
+                    module.array_types.get(id as usize).copied() == Some(IrType::Int(IntWidth::U8))
+                }
+                _ => false,
+            };
+            if !is_bytes {
+                report(format!(
+                    "{position}: HttpFormParse body must be Array<Byte>"
+                ));
+            }
+            if let Some(actual) = type_of(content_type)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpFormParse content type must be String, received {}",
+                    actual.as_str()
+                ));
+            }
+            let result_is_list_string = module
+                .enums
+                .get(*enum_id as usize)
+                .and_then(|layout| layout.variants.first())
+                .and_then(|success| success.first())
+                .and_then(|field| {
+                    module
+                        .enums
+                        .get(*enum_id as usize)?
+                        .fields
+                        .get(*field as usize)
+                })
+                .is_some_and(|field| match field.ty {
+                    IrType::List(list_id) => {
+                        module.list_types.get(list_id as usize).copied() == Some(IrType::String)
+                    }
+                    _ => false,
+                });
+            if !result_is_list_string {
+                report(format!(
+                    "{position}: HttpFormParse success must contain List<String>"
+                ));
+            }
+        }
+        InstKind::HttpMultipartParse {
+            body,
+            content_type,
+            enum_id,
+            data_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpMultipartParse",
+                report,
+            );
+            if !matches!(type_of(body), Some(IrType::Array(id)) if module.array_types.get(id as usize).copied() == Some(IrType::Int(IntWidth::U8)))
+            {
+                report(format!(
+                    "{position}: HttpMultipartParse body must be Array<Byte>"
+                ));
+            }
+            if let Some(actual) = type_of(content_type)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: HttpMultipartParse content type must be String, received {}",
+                    actual.as_str()
+                ));
+            }
+            let payload_class = module
+                .enums
+                .get(*enum_id as usize)
+                .and_then(|layout| layout.variants.first())
+                .and_then(|success| success.first())
+                .and_then(|field| {
+                    module
+                        .enums
+                        .get(*enum_id as usize)?
+                        .fields
+                        .get(*field as usize)
+                })
+                .is_some_and(|field| field.ty == IrType::Object(*data_class_id));
+            if !payload_class {
+                report(format!(
+                    "{position}: HttpMultipartParse success must contain its HTTPMultipartData object"
+                ));
+            }
+            let class_has_expected_fields = module
+                .objects
+                .get(*data_class_id as usize)
+                .is_some_and(|layout| {
+                    if layout.fields.len() != 7 {
+                        return false;
+                    }
+                    let field_types = layout
+                        .fields
+                        .iter()
+                        .map(|field| field.ty)
+                        .collect::<Vec<_>>();
+                    let list_item = |ty: IrType| match ty {
+                        IrType::List(id) => module.list_types.get(id as usize).copied(),
+                        _ => None,
+                    };
+                    let names_ok = list_item(field_types[0]) == Some(IrType::String);
+                    let filenames_ok = list_item(field_types[1]) == Some(IrType::String);
+                    let filename_presence_ok = list_item(field_types[2]) == Some(IrType::Boolean);
+                    let content_types_ok = list_item(field_types[3]) == Some(IrType::String);
+                    let content_type_presence_ok =
+                        list_item(field_types[4]) == Some(IrType::Boolean);
+                    let bodies_ok = match list_item(field_types[5]) {
+                        Some(IrType::Array(array_id)) => {
+                            module.array_types.get(array_id as usize).copied()
+                                == Some(IrType::Int(IntWidth::U8))
+                        }
+                        _ => false,
+                    };
+                    let upload_handles_ok =
+                        list_item(field_types[6]) == Some(IrType::Int(IntWidth::U64));
+                    names_ok
+                        && filenames_ok
+                        && filename_presence_ok
+                        && content_types_ok
+                        && content_type_presence_ok
+                        && bodies_ok
+                        && upload_handles_ok
+                });
+            if !class_has_expected_fields {
+                report(format!(
+                    "{position}: HttpMultipartParse data class must have the seven bundled parallel lists"
+                ));
+            }
+        }
+        InstKind::HttpUploadRead {
+            handle,
+            offset,
+            max_bytes,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpUploadRead",
+                report,
+            );
+            for (label, operand) in [
+                ("handle", handle),
+                ("offset", offset),
+                ("max_bytes", max_bytes),
+            ] {
+                if type_of(operand) != Some(IrType::Int(IntWidth::U64)) {
+                    report(format!("{position}: HttpUploadRead {label} must be UInt64"));
+                }
+            }
+            if module
+                .enums
+                .get(*enum_id as usize)
+                .is_none_or(|layout| layout.name != "HTTPStreamChunk")
+            {
+                report(format!(
+                    "{position}: HttpUploadRead must return HTTPStreamChunk"
+                ));
+            }
+        }
+        InstKind::HttpUploadClose { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "HttpUploadClose",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!("{position}: HttpUploadClose handle must be UInt64"));
+            }
+        }
+        InstKind::HttpFormValues { fields, name } => {
+            if let Some(IrType::List(list_id)) = type_of(fields) {
+                if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
+                    report(format!(
+                        "{position}: HttpFormValues fields must be List<String>"
+                    ));
+                }
+            } else if type_of(fields).is_some() {
+                report(format!(
+                    "{position}: HttpFormValues fields must be List<String>"
+                ));
+            }
+            if let Some(actual) = type_of(name)
+                && actual != IrType::String
+            {
+                report(format!("{position}: HttpFormValues name must be String"));
+            }
+            if let IrType::List(list_id) = inst.ty {
+                if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
+                    report(format!(
+                        "{position}: HttpFormValues must return List<String>"
+                    ));
+                }
+            } else {
+                report(format!(
+                    "{position}: HttpFormValues must return List<String>"
+                ));
+            }
+        }
+        InstKind::HttpFormEncode { fields, enum_id } => {
+            let fields_are_flat_strings = matches!(type_of(fields), Some(IrType::List(list_id))
+                if module.list_types.get(list_id as usize) == Some(&IrType::String));
+            if !fields_are_flat_strings {
+                report(format!(
+                    "{position}: HttpFormEncode fields must be List<String>"
+                ));
+            }
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpFormEncode",
+                report,
+            );
+            let success_is_byte_array = module
+                .enums
+                .get(*enum_id as usize)
+                .and_then(|layout| layout.variants.first())
+                .and_then(|success| success.first())
+                .and_then(|field| {
+                    module
+                        .enums
+                        .get(*enum_id as usize)?
+                        .fields
+                        .get(*field as usize)
+                })
+                .is_some_and(|field| match field.ty {
+                    IrType::Array(array_id) => {
+                        module.array_types.get(array_id as usize)
+                            == Some(&IrType::Int(IntWidth::U8))
+                    }
+                    _ => false,
+                });
+            if !success_is_byte_array {
+                report(format!(
+                    "{position}: HttpFormEncode success must contain Array<Byte>"
+                ));
+            }
+        }
+        InstKind::HttpMultipartEncode {
+            metadata,
+            bodies,
+            boundary,
+            enum_id,
+        } => {
+            let metadata_valid = matches!(type_of(metadata), Some(IrType::List(list_id))
+                if module.list_types.get(list_id as usize) == Some(&IrType::String));
+            let bodies_valid = matches!(type_of(bodies), Some(IrType::List(list_id))
+            if module.list_types.get(list_id as usize).is_some_and(|element| match element {
+                IrType::Array(array_id) => module.array_types.get(*array_id as usize)
+                    == Some(&IrType::Int(IntWidth::U8)),
+                _ => false,
+            }));
+            if !metadata_valid || !bodies_valid || type_of(boundary) != Some(IrType::String) {
+                report(format!(
+                    "{position}: HttpMultipartEncode expects metadata List<String>, bodies List<Array<Byte>>, and String boundary"
+                ));
+            }
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpMultipartEncode",
+                report,
+            );
+            let success_is_byte_array = module
+                .enums
+                .get(*enum_id as usize)
+                .and_then(|layout| layout.variants.first())
+                .and_then(|success| success.first())
+                .and_then(|field| {
+                    module
+                        .enums
+                        .get(*enum_id as usize)?
+                        .fields
+                        .get(*field as usize)
+                })
+                .is_some_and(|field| match field.ty {
+                    IrType::Array(array_id) => {
+                        module.array_types.get(array_id as usize)
+                            == Some(&IrType::Int(IntWidth::U8))
+                    }
+                    _ => false,
+                });
+            if !success_is_byte_array {
+                report(format!(
+                    "{position}: HttpMultipartEncode success must contain Array<Byte>"
+                ));
+            }
+        }
+
+        InstKind::HttpServerServeOnce {
+            stream_handle,
+            secure: _,
+            max_requests,
+            require_http2: _,
+            callback,
+            callback_layout,
+            request_class_id,
+            response_class_id,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpServerServeOnce",
+                report,
+            );
+            if let Some(actual) = type_of(stream_handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpServerServeOnce receives {} for stream handle, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(max_requests)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: HttpServerServeOnce receives {} for max requests, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if *request_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerServeOnce references missing request object layout {request_class_id}"
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerServeOnce references missing response object layout {response_class_id}"
+                ));
+            }
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        layout.params == vec![IrType::Object(*request_class_id)]
+                            && layout.returns == IrType::Object(*response_class_id)
+                    });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpServerServeOnce callback layout {callback_layout} must accept the request object and return the response object"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpServerServeOnce receives {} for callback, expected callable layout {callback_layout}",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpServerWebSocketServeOnce {
+            stream_handle,
+            secure: _,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            callback,
+            callback_layout,
+            websocket_class_id,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpServerWebSocketServeOnce",
+                report,
+            );
+            let string_list = module
+                .list_types
+                .iter()
+                .position(|element| *element == IrType::String)
+                .map(|id| IrType::List(id as u32));
+            for (operand, expected, label) in [
+                (*stream_handle, IrType::Int(IntWidth::U64), "stream handle"),
+                (*path, IrType::String, "path"),
+                (
+                    *allow_missing_origin,
+                    IrType::Boolean,
+                    "allow-missing-origin flag",
+                ),
+                (*max_messages, IrType::Int(IntWidth::U64), "max messages"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: HttpServerWebSocketServeOnce {label} has type {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            if let Some(expected) = string_list {
+                for (operand, label) in [
+                    (*allowed_origins, "allowed origins"),
+                    (*protocols, "subprotocols"),
+                ] {
+                    if let Some(actual) = type_of(&operand)
+                        && actual != expected
+                    {
+                        report(format!(
+                            "{position}: HttpServerWebSocketServeOnce {label} has type {}, expected {}",
+                            actual.as_str(),
+                            expected.as_str()
+                        ));
+                    }
+                }
+            } else {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeOnce requires List<String> in the module type table"
+                ));
+            }
+            if *websocket_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeOnce references missing HTTPWebSocket layout {websocket_class_id}"
+                ));
+            }
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        layout.params == vec![IrType::Object(*websocket_class_id)]
+                            && layout.returns == IrType::Void
+                    });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeOnce callback must accept HTTPWebSocket and return Void"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeOnce callback has type {}, expected callable layout {callback_layout}",
+                    actual.as_str()
                 ));
             }
         }
@@ -4544,6 +6931,26 @@ fn expect(
     }
 }
 
+/// Callable values are represented by a concrete closure layout, while a
+/// function-typed field stores the canonical erased layout for its signature.
+/// A captured lambda is compatible with that field when its call signature
+/// matches; the boxed callable retains its concrete capture descriptor.
+fn types_compatible(module: &Module, actual: IrType, expected: IrType) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let (IrType::Callable(actual_id), IrType::Callable(expected_id)) = (actual, expected) else {
+        return false;
+    };
+    let (Some(actual), Some(expected)) = (
+        module.closures.get(actual_id as usize),
+        module.closures.get(expected_id as usize),
+    ) else {
+        return false;
+    };
+    actual.params == expected.params && actual.returns == expected.returns
+}
+
 /// The type of field `index` of an object, if the operand is one and has it.
 fn field_type(module: &Module, object: Option<IrType>, index: u32) -> Option<IrType> {
     match object? {
@@ -4697,10 +7104,285 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::Print(operand)
         | InstKind::PrintlnStderr(operand)
         | InstKind::PrintStderr(operand) => vec![*operand],
-        InstKind::FlushStdout { .. } | InstKind::FlushStderr { .. } => Vec::new(),
+        InstKind::FlushStdout { .. }
+        | InstKind::FlushStderr { .. }
+        | InstKind::EnvironmentListNames { .. } => Vec::new(),
         InstKind::StdinReadLineResult { .. } | InstKind::StdinReadChar { .. } => Vec::new(),
         InstKind::StdinReadBytes { max, .. } => vec![*max],
         InstKind::StdinReadExact { count, .. } => vec![*count],
+        InstKind::EnvironmentGet { name, .. } | InstKind::EnvironmentContains { name, .. } => {
+            vec![*name]
+        }
+        InstKind::NetworkTcpConnect { endpoint, .. }
+        | InstKind::NetworkDnsResolve { endpoint, .. }
+        | InstKind::NetworkTlsConnect { endpoint, .. }
+        | InstKind::NetworkTcpListen { endpoint, .. } => vec![*endpoint],
+        InstKind::NetworkTlsConnectWithRoots {
+            endpoint,
+            roots_der,
+            allow_tls12,
+            ..
+        } => vec![*endpoint, *roots_der, *allow_tls12],
+        InstKind::NetworkTlsListen {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            allow_tls12,
+            ..
+        } => vec![
+            *endpoint,
+            *certificate_chain_der,
+            *private_key_der,
+            *allow_tls12,
+        ],
+        InstKind::NetworkIpAddressParse { value, .. } => vec![*value],
+        InstKind::NetworkTcpOriginNormalize { host, port, .. } => vec![*host, *port],
+        InstKind::NetworkTcpRead {
+            handle, max_bytes, ..
+        }
+        | InstKind::NetworkTlsRead {
+            handle, max_bytes, ..
+        } => vec![*handle, *max_bytes],
+        InstKind::NetworkTcpWrite { handle, bytes, .. }
+        | InstKind::NetworkTcpWriteAll { handle, bytes, .. }
+        | InstKind::NetworkTlsWriteAll { handle, bytes, .. } => vec![*handle, *bytes],
+        InstKind::NetworkTcpShutdown { handle, .. }
+        | InstKind::NetworkTcpClose { handle, .. }
+        | InstKind::NetworkTlsShutdown { handle, .. }
+        | InstKind::NetworkTlsClose { handle, .. }
+        | InstKind::NetworkTlsIsClosed { handle }
+        | InstKind::NetworkTlsListenerIsClosed { handle }
+        | InstKind::NetworkTlsPeerAddress { handle, .. }
+        | InstKind::NetworkTcpIsClosed { handle }
+        | InstKind::NetworkTcpPeerAddress { handle, .. } => vec![*handle],
+        InstKind::NetworkTcpAccept { handle, .. }
+        | InstKind::NetworkTcpCloseListener { handle, .. }
+        | InstKind::NetworkTcpListenerIsClosed { handle }
+        | InstKind::NetworkTlsAccept { handle, .. }
+        | InstKind::NetworkTlsCloseListener { handle, .. } => vec![*handle],
+        InstKind::HttpGet { url, .. } => vec![*url],
+        InstKind::HttpRequest {
+            method,
+            url,
+            body,
+            headers,
+            validate_json,
+            ..
+        } => vec![*method, *url, *body, *headers, *validate_json],
+        InstKind::HttpClientCreate { max_origins, .. } => vec![*max_origins],
+        InstKind::HttpClientCreateWithOptions {
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            ..
+        } => vec![
+            *max_origins,
+            *connect_timeout_ms,
+            *response_headers_timeout_ms,
+            *response_idle_timeout_ms,
+        ],
+        InstKind::HttpClientCreateWithTrustRoots {
+            roots,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            ..
+        } => vec![
+            *roots,
+            *max_origins,
+            *connect_timeout_ms,
+            *response_headers_timeout_ms,
+            *response_idle_timeout_ms,
+        ],
+        InstKind::HttpClientCreateWithProxy {
+            proxy_url,
+            proxy_credentials,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            ..
+        } => vec![
+            *proxy_url,
+            *proxy_credentials,
+            *max_origins,
+            *connect_timeout_ms,
+            *response_headers_timeout_ms,
+            *response_idle_timeout_ms,
+        ],
+        InstKind::HttpClientCreateWithProxyAndTrustRoots {
+            proxy_url,
+            proxy_credentials,
+            roots,
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            ..
+        } => vec![
+            *proxy_url,
+            *proxy_credentials,
+            *roots,
+            *max_origins,
+            *connect_timeout_ms,
+            *response_headers_timeout_ms,
+            *response_idle_timeout_ms,
+        ],
+        InstKind::HttpClientRequest {
+            handle,
+            method,
+            url,
+            body,
+            headers,
+            validate_json,
+            ..
+        } => {
+            vec![*handle, *method, *url, *body, *headers, *validate_json]
+        }
+        InstKind::HttpClientRequestStream {
+            handle,
+            method,
+            url,
+            headers,
+            callback,
+            ..
+        } => {
+            vec![*handle, *method, *url, *headers, *callback]
+        }
+        InstKind::HttpClientAction { handle, .. } => vec![*handle],
+        InstKind::HttpWebSocketConnect {
+            url,
+            origin,
+            subprotocols,
+            ..
+        } => {
+            vec![*url, *origin, *subprotocols]
+        }
+        InstKind::HttpWebSocketConnectWithTrustRoots {
+            url,
+            origin,
+            subprotocols,
+            roots_der,
+            allow_tls12,
+            ..
+        } => vec![*url, *origin, *subprotocols, *roots_der, *allow_tls12],
+        InstKind::HttpWebSocketSend { handle, record, .. } => vec![*handle, *record],
+        InstKind::HttpWebSocketReceive { handle, .. }
+        | InstKind::HttpWebSocketClose { handle, .. } => vec![*handle],
+        InstKind::HttpWebSocketCloseWith {
+            handle,
+            code,
+            reason,
+            ..
+        } => vec![*handle, *code, *reason],
+        InstKind::HttpRequestSecret {
+            method,
+            url,
+            body,
+            headers,
+            header_name,
+            secret_value,
+            ..
+        } => vec![*method, *url, *body, *headers, *header_name, *secret_value],
+        InstKind::HttpHead { url, .. } => vec![*url],
+        InstKind::HttpQuery { url, query, .. } => vec![*url, *query],
+        InstKind::HttpQueryWithContentType {
+            url,
+            query,
+            content_type,
+            ..
+        } => vec![*url, *query, *content_type],
+        InstKind::HttpPost { url, body, .. } => vec![*url, *body],
+        InstKind::HttpPostJson { url, body, .. } => vec![*url, *body],
+        InstKind::HttpPostBytes { url, body, .. } => vec![*url, *body],
+        InstKind::HttpGetStream { url, headers, .. } => vec![*url, *headers],
+        InstKind::HttpResponseToStream {
+            status,
+            body,
+            headers,
+            ..
+        } => vec![*status, *body, *headers],
+        InstKind::HttpRequestStream {
+            method,
+            url,
+            headers,
+            callback,
+            ..
+        } => vec![*method, *url, *headers, *callback],
+        InstKind::HttpRegisterServerResponseProducer { callback, .. } => vec![*callback],
+        InstKind::HttpResponseReadChunk {
+            handle, max_bytes, ..
+        } => vec![*handle, *max_bytes],
+        InstKind::HttpResponseReadAll { handle, .. } => vec![*handle],
+        InstKind::HttpResponseReadSseEvent { handle, .. } => vec![*handle],
+        InstKind::HttpResponseSseHeartbeatCount { handle } => vec![*handle],
+        InstKind::HttpResponseStreamClose { handle } => vec![*handle],
+        InstKind::HttpUrlNormalize { value, .. } => vec![*value],
+        InstKind::HttpUrlResolve {
+            base, reference, ..
+        } => vec![*base, *reference],
+        InstKind::HttpResponseText { body, .. } => vec![*body],
+        InstKind::HttpResponseHeaderValues { headers, name, .. } => vec![*headers, *name],
+        InstKind::HttpRoutePatternValidate { pattern } => vec![*pattern],
+        InstKind::HttpRoutePatternConflict {
+            method,
+            first,
+            second,
+        } => vec![*method, *first, *second],
+        InstKind::HttpRouteMatch { pattern, path } => vec![*pattern, *path],
+        InstKind::HttpRouteAllowHeader {
+            patterns,
+            methods,
+            path,
+        } => vec![*patterns, *methods, *path],
+        InstKind::HttpHeadersEncode { names, values } => vec![*names, *values],
+        InstKind::HttpFormParse {
+            body, content_type, ..
+        } => vec![*body, *content_type],
+        InstKind::HttpMultipartParse {
+            body, content_type, ..
+        } => vec![*body, *content_type],
+        InstKind::HttpUploadRead {
+            handle,
+            offset,
+            max_bytes,
+            ..
+        } => vec![*handle, *offset, *max_bytes],
+        InstKind::HttpUploadClose { handle } => vec![*handle],
+        InstKind::HttpFormValues { fields, name } => vec![*fields, *name],
+        InstKind::HttpFormEncode { fields, .. } => vec![*fields],
+        InstKind::HttpMultipartEncode {
+            metadata,
+            bodies,
+            boundary,
+            ..
+        } => vec![*metadata, *bodies, *boundary],
+        InstKind::HttpServerServeOnce {
+            stream_handle,
+            max_requests,
+            callback,
+            ..
+        } => vec![*stream_handle, *max_requests, *callback],
+        InstKind::HttpServerWebSocketServeOnce {
+            stream_handle,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            callback,
+            ..
+        } => vec![
+            *stream_handle,
+            *path,
+            *allowed_origins,
+            *allow_missing_origin,
+            *protocols,
+            *max_messages,
+            *callback,
+        ],
         InstKind::NullValue(_) => Vec::new(),
         InstKind::Wrap { value, .. } => vec![*value],
         InstKind::IsNull(operand) | InstKind::Unwrap(operand) => vec![*operand],

@@ -5,11 +5,14 @@ environment/secrets, and other effects. Only the application grants the final
 set in `.zkinit`; each operation identifies `during: build`, `runtime`, or
 `both`.
 
-The compiler infers requirements through privileged APIs and callable metadata;
-developers do not annotate each `Fn`. In a trusted interactive command, Zirk
-may show the exact call/dependency path and offer to add and approve a narrow
-grant. Deployed runtime never prompts or edits its manifest: dynamic denial is
-`Error(PermissionDeniedError)`. Secret values never enter manifests or lockfiles.
+The full permission model can infer requirements through privileged APIs and
+callable metadata; developers do not annotate each `Fn`. In the current native
+`std.net` and `std.environment` preview, package `.zkinit` files declare these
+requirements explicitly using a `permissions` block, while the application
+approval command resolves the locked dependency graph and asks for consent to
+the combined scopes. Deployed runtime never prompts or edits its manifest:
+dynamic denial is `Error(PermissionDeniedError)`. Secret values never enter
+manifests or lockfiles.
 
 ---
 

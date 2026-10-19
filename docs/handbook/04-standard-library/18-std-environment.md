@@ -4,6 +4,17 @@
 process environment. `Environment` is the full contract name and `Env` is its
 exact preferred alias. They expose the same static operations.
 
+Environment and network permissions in a package's `.zkinit` declare
+requirements; they do not grant access. `zirk permissions approve` resolves
+the application's locked dependency graph and asks for explicit consent to
+the union of application and package requirements. The approval is bound to
+the dependency manifests and lockfiles, so changing a transitive requirement
+requires approval again.
+
+Name matching follows the host platform: exact and case-sensitive on Unix,
+ordinal and case-insensitive on Windows. Permission checks use the same rule as
+host lookups, including for `contains` and `list_names`.
+
 Environment variables are external mutable state, not ordinary globals. Every
 read can fail, each name is checked against the effective project grant, and
 secret values remain redacted.
@@ -11,6 +22,10 @@ secret values remain redacted.
 > **Implementation status:** this chapter defines the target Zirk 1.x contract.
 > Initial Zirk intentionally has no API for mutating the current process
 > environment.
+>
+> The native preview provides generic `Env.get<T>` through the static
+> `EnvironmentParsable<T>` contract. `Env.get_int32` and `Env.get_float64`
+> remain available as explicit convenience methods.
 
 ## Import and basic access
 
@@ -28,23 +43,30 @@ Every public read preserves permission failure:
 ```zirk
 Env.get(name)             // Result<String, EnvironmentError>
 Env.get_or_null(name)     // Result<String?, EnvironmentError>
-Env.get_or(name, value)   // Result<String, EnvironmentError>
+Env.get_or<T>(name, value) // Result<T, EnvironmentError>; T defaults to String
 Env.require(name)         // Result<String, EnvironmentError>
 Env.contains(name)        // Result<Boolean, EnvironmentError>
 Env.list_names()          // Result<List<String>, EnvironmentError>
 Env.get_secret(name)      // Result<SecretString, SecretError>
 ```
 
-`get` and `require` both demand a present value; `require` produces the more
-configuration-oriented missing-value diagnostic intended for mandatory
-application settings. `get_or_null` returns a nullable value only for an
-authorized but absent variable. `get_or` returns its fallback only for that
-same absent case. Neither absence form hides permission, decoding, or platform
-failure.
+`get` and `require` both demand a present value and currently return the same
+`EnvironmentError` outcomes; `require` is an explicit spelling for mandatory
+application settings. `get_or_null` returns a nullable string only for an
+authorized but absent variable. `get_or<T>` returns its typed fallback only
+when the authorized name is absent. For a present value it uses the same
+`EnvironmentParsable<T>` parser as `get<T>`; malformed input returns
+`EnvironmentError.Parse`. Neither absence form hides permission, decoding, or
+platform failure.
 
 ```zirk
 match Env.get_or("LOG_LEVEL", "info") {
     Ok(level) => configure_logging(level);
+    Error(error) => report_configuration_error(error);
+}
+
+match Env.get_or<Int32>("WORKER_COUNT", 4) {
+    Ok(count) => configure_workers(count);
     Error(error) => report_configuration_error(error);
 }
 ```
@@ -54,29 +76,52 @@ match Env.get_or("LOG_LEVEL", "info") {
 Generic reads use the ordinary parsing contract of the requested type:
 
 ```zirk
-mut port = Env.get<Int>("PORT");
-mut debug = Env.get<Boolean>("DEBUG");
-mut endpoint = Env.get<URL>("API_URL");
-mut workers = Env.get_or<Int>("WORKERS", 4);
+mut port = Env.get<Int32>("PORT");
+mut timeout = Env.get<Float64>("TIMEOUT_SECONDS");
+mut label = Env.get("APP_LABEL"); // T defaults to String
+mut workers = Env.get<Int32>("WORKERS");
+mut workers_with_default = Env.get_or<Int32>("WORKERS", 4);
 ```
 
-The result distinguishes:
+The target result distinguishes:
 
-- `EnvironmentMissingError` when a required name is authorized but absent;
-- `EnvironmentParseError` when a present value is not valid for `T`;
-- `EnvironmentPermissionError` when the project lacks authority;
+- `EnvironmentError.Missing` when a required name is authorized but absent;
+- `EnvironmentError.Parse` when a present value is not valid for `T`;
+- `EnvironmentError.PermissionDenied` when the project lacks authority;
 - a platform/encoding error when the host value cannot be represented safely.
 
-Supported `T` implements the public environment-value parsing contract. This is
-compile-time constrained; `Env.get<T>` does not use runtime reflection or
-guess constructors. User-defined configuration types can implement the same
-contract with explicit parsing and typed failure.
+Supported `T` satisfies `EnvironmentParsable<T>`, whose static
+`parse(String)` returns `Result<T, String>`. This is compile-time constrained;
+`Env.get<T>` does not use runtime reflection or guess constructors. User types
+can implement the contract with explicit parsing:
+
+```zirk
+import { EnvironmentParsable, Env } from std.environment;
+
+class Port implements EnvironmentParsable<Port> {
+    value: String;
+    construct(value: String) { this.value = value; }
+    static parse(text: String): Result<Port, String> {
+        if (text == "") { return Error("port is empty"); }
+        return Ok(Port(text));
+    }
+}
+
+mut port = Env.get<Port>("PORT");
+```
+
+A parser failure maps to `EnvironmentError.Parse`; `get_or` applies its
+fallback only to authorized absence. Permission denial, decoding, and platform
+errors retain their own outcomes.
+Built-in string, numeric, decimal, and temporal parsers use compiler-owned
+intrinsics and satisfy the same constraint. The named `get_int32` and
+`get_float64` methods remain explicit convenience wrappers.
 
 Named shorthand follows the language-wide rule:
 
 ```zirk
 mut name = "PORT";
-mut port = Env.get<Int>(name:);
+mut port = Env.get<Int32>(name:);
 ```
 
 `name:` means `name: name`; it does not perform positional name matching.
@@ -87,13 +132,27 @@ Applications grant exact names or reviewed name patterns in `.zkinit`.
 Libraries declare requirements but cannot grant themselves access. Runtime code
 never prompts or edits the manifest.
 
-An unauthorized read returns `EnvironmentPermissionError` without revealing
-whether the requested variable exists. `contains` follows the same rule, so it
-cannot be used as an existence side channel.
+After declaring permissions, approve the exact request from the project root:
 
-`list_names()` returns only names visible under the effective grant. Discovering
-all environment names requires an explicit broad permission and the normal
-high-risk developer approval. It never returns values.
+```sh
+zirk permissions approve .
+```
+
+The command prints the scopes and saves consent only after you type `approve`.
+`zirk run .` uses that signed approval only while the current manifest still
+matches. A missing, changed, or invalid approval grants no access.
+Revoke the saved approval with `zirk permissions revoke .`.
+
+An unauthorized read returns `EnvironmentError.PermissionDenied` without
+revealing whether the requested variable exists. `contains` follows the same
+rule, so it cannot be used as an existence side channel.
+
+`list_names()` returns only names visible under the effective grant, in
+lexicographic order for stable results across platforms. Discovering all
+environment names requires an explicit broad permission and the normal
+high-risk developer approval. It never returns values; temporary process-local
+copies used by `contains()` and `list_names()` are zeroized after inspection.
+This does not erase the operating system's environment storage.
 
 Permission approvals remain bound to the project location, requester versions,
 dependency paths, and exact scope as described in the permissions model. A
@@ -110,16 +169,37 @@ match Env.get_secret("DATABASE_PASSWORD") {
 }
 ```
 
-`SecretString` has no general `to_string()` or ordinary interpolation path.
-Formatting, logs, diagnostics, stack traces, debugger views, snapshots, test
-reports, and structured tool output show a redacted marker. Deliberate reveal is
-limited to an authorized sink boundary, such as a credential field or explicitly
-granted child-process environment entry. The sink receives the secret without
-turning it into an accidentally printable ordinary `String`.
+`SecretString` exposes no raw-value accessor. Direct formatting,
+`to_string()`, interpolation, collection rendering (including lists and map values), and `Throwable.message()` redact it. Two explicit reveal sinks accept it directly:
+`HTTP.request_with_secret_header(method, url, body, headers, name, secret)`.
+It accepts the secret directly, requires an HTTPS URL, rejects a duplicate
+header name, and sends only after the HTTP runtime validates the exact network
+origin grant. It does not follow redirects. The secret is never returned to
+Zirk as an ordinary `String`.
 
-Equality and hashing operations that could expose a secret through timing or
-collections are restricted to their documented secret-safe contracts. Cloning
-does not remove redaction or authority metadata.
+For proxy authentication, pass the value to
+`HTTPProxy.create_authenticated(proxy_url, credentials)` and configure that
+proxy on an `HTTPClient`. The value must contain `username:password`; the
+runtime rejects an empty username, username colons, and control bytes before
+networking. Credentials can be sent to loopback HTTP proxies or HTTPS proxies;
+remote cleartext HTTP proxies fail closed. For HTTPS proxies, Zirk validates
+the proxy TLS identity before sending credentials, and never forwards proxy
+authorization through the destination tunnel. The client separately checks
+the proxy and destination grants. Formatting the proxy redacts its credentials.
+
+The opt-in interpreter execution trace redacts the private payload field,
+including inherited layouts. Fatal runtime diagnostics use a generic redacted
+`E0601` message in JSON mode. Debugger views, heap snapshots, test reports, and
+structured tool output still need dedicated redaction coverage; those sinks
+remain unavailable or unverified.
+
+`SecretString` prevents accidental disclosure through ordinary language sinks; it is not a locked or zeroizing heap allocation. The runtime zeroizes the temporary native copy after transferring the value into the managed heap, but the managed value follows ordinary garbage-collector lifetime and is not promised to be erased when collected.
+
+The wrapper defines no public equality or hashing API and carries no
+per-instance permission metadata. Secret-name permission is checked when
+`get_secret` reads the value; later reveal remains limited to explicit sink
+APIs. Wrapping or copying a value does not grant access to another environment
+name or bypass the sink's own permission checks.
 
 ## No global mutation
 

@@ -227,6 +227,8 @@ pub enum WaitReason {
     Parallel,
     /// Parked until a registered managed-pool callback publishes an event.
     PoolEvent,
+    /// Parked while a task-owned network future waits for readiness/completion.
+    Network,
     /// Blocked sending to a full channel. The channel owns a stable copy of
     /// the element until it is accepted or the branch resumes for closure or
     /// cancellation.

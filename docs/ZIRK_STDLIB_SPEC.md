@@ -603,13 +603,15 @@ reordered positional argument.
 `Env` exposes static `get`, `get_or_null`, `get_or`, `require`, `get_secret`,
 `contains` and `list_names`. Every operation returns `Result` so absence cannot
 hide permission, encoding, or platform failure. Generic `get<T>` and `get_or<T>`
-use a compile-time-constrained ordinary parsing contract, not reflection, and
-distinguish missing, invalid, and unauthorized values.
+use a compile-time-constrained ordinary parsing contract, not reflection. Both
+return `Parse` for malformed present values; `get_or<T>` uses its fallback only
+for authorized absence, and keeps permission and host failures distinct.
 
 Every operation checks its named environment or secret grant; broad listing
 needs broad authority and returns only visible names, never values. Unauthorized
-lookup does not disclose existence. `SecretString` has no general `to_string()`
-and can be revealed only to an authorized sink boundary. Environment mutation
+lookup does not disclose existence. Ordinary formatting and `to_string()` on
+`SecretString` yield only `<redacted>`; the value can be revealed only to an
+authorized sink boundary. Environment mutation
 is not in the initial API; child configuration belongs to `std.process` and
 tests use isolated runner environments.
 

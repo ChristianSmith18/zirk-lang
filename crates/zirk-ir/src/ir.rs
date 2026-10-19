@@ -1366,6 +1366,535 @@ pub enum InstKind {
         count: Operand,
         enum_id: u32,
     },
+    /// `std.environment.Environment.get(name)`: checks the authenticated
+    /// exact-name grant before performing the host lookup and returns a
+    /// `Result<String, EnvironmentError>`.
+    EnvironmentGet {
+        name: Operand,
+        enum_id: u32,
+        secret: bool,
+    },
+    /// `std.environment.Environment.contains(name)`: checks the exact-name
+    /// grant and host presence without constructing the host value in Zirk.
+    EnvironmentContains {
+        name: Operand,
+        enum_id: u32,
+    },
+    /// `std.environment.Environment.list_names()`: returns a names-only list
+    /// filtered by the authenticated effective environment grant.
+    EnvironmentListNames {
+        enum_id: u32,
+    },
+    /// `TCPStream.connect_native(endpoint)`: checks the signed exact `tcp`
+    /// origin grant before opening a socket and returns an opaque runtime
+    /// handle through `Result<UInt64, TCPError>`.
+    NetworkTcpConnect {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Resolves an exact granted origin into a bounded, validated list of IP
+    /// address strings through the task-aware network reactor.
+    NetworkDnsResolve {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Parses and canonicalizes an IP literal without performing DNS.
+    NetworkIpAddressParse {
+        value: Operand,
+        enum_id: u32,
+    },
+    /// Canonicalizes a TCP host/port authority without performing DNS.
+    NetworkTcpOriginNormalize {
+        host: Operand,
+        port: Operand,
+        enum_id: u32,
+    },
+    /// Opens an authenticated TLS client stream under an exact HTTPS grant.
+    NetworkTlsConnect {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Opens a TLS stream using explicitly supplied trusted root certificates.
+    NetworkTlsConnectWithRoots {
+        endpoint: Operand,
+        roots_der: Operand,
+        allow_tls12: Operand,
+        enum_id: u32,
+    },
+    /// Binds a task-owned TLS server listener with an explicit DER identity.
+    NetworkTlsListen {
+        endpoint: Operand,
+        certificate_chain_der: Operand,
+        private_key_der: Operand,
+        allow_tls12: Operand,
+        http_alpn: bool,
+        enum_id: u32,
+    },
+    /// Accepts and authenticates a peer, wrapping the task-owned server stream
+    /// in the public TLSStream class.
+    NetworkTlsAccept {
+        handle: Operand,
+        enum_id: u32,
+        stream_class_id: u32,
+    },
+    /// Closes a TLS listener through its managed Resource adapter.
+    NetworkTlsCloseListener {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Reports whether the current task owns a live TLS listener handle.
+    NetworkTlsListenerIsClosed {
+        handle: Operand,
+    },
+    /// Reads a bounded TLS plaintext chunk while preserving EOF and failures.
+    NetworkTlsRead {
+        handle: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+    },
+    /// Writes all plaintext bytes with transport backpressure.
+    NetworkTlsWriteAll {
+        handle: Operand,
+        bytes: Operand,
+        enum_id: u32,
+    },
+    NetworkTlsShutdown {
+        handle: Operand,
+        enum_id: u32,
+    },
+    NetworkTlsClose {
+        handle: Operand,
+        enum_id: u32,
+    },
+    NetworkTlsIsClosed {
+        handle: Operand,
+    },
+    /// Returns the numeric remote peer address for an owner-task TLS stream.
+    NetworkTlsPeerAddress {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Bounded task-aware TCP read. `TCPReadResult<Array<Byte>>` uses
+    /// `Value`, `End`, and `Error` as its three runtime tags.
+    NetworkTcpRead {
+        handle: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+    },
+    /// One partial write over an owner-task TCP stream.
+    NetworkTcpWrite {
+        handle: Operand,
+        bytes: Operand,
+        enum_id: u32,
+    },
+    /// Writes all bytes with backpressure and returns `Result<Void, TCPError>`.
+    NetworkTcpWriteAll {
+        handle: Operand,
+        bytes: Operand,
+        enum_id: u32,
+    },
+    /// Half-close the write side of the TCP stream.
+    NetworkTcpShutdown {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Idempotently closes and releases a TCP stream handle.
+    NetworkTcpClose {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Reports whether the owner-task handle has already been closed.
+    NetworkTcpIsClosed {
+        handle: Operand,
+    },
+    /// Returns the numeric remote peer address for an owner-task TCP stream.
+    NetworkTcpPeerAddress {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Binds an owner-task listener under a separate exact listen grant.
+    NetworkTcpListen {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Accepts a connection and wraps its opaque handle in a managed
+    /// `TCPStream` owned by the current Zirk task.
+    NetworkTcpAccept {
+        handle: Operand,
+        enum_id: u32,
+        stream_class_id: u32,
+    },
+    /// Closes an owner-task listener through its managed Resource adapter.
+    NetworkTcpCloseListener {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Reports whether the current task owns the listener handle.
+    NetworkTcpListenerIsClosed {
+        handle: Operand,
+    },
+    /// Performs one permission-checked HTTP GET and builds the public
+    /// `Result<HTTPResponse, HTTPError>` value from its bounded response.
+    HttpGet {
+        url: Operand,
+        cached: bool,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends an explicit method with bounded body bytes and validated headers.
+    HttpRequest {
+        method: Operand,
+        url: Operand,
+        body: Operand,
+        headers: Operand,
+        validate_json: Operand,
+        cached: bool,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Creates an opaque owner-task HTTP client handle.
+    HttpClientCreate {
+        max_origins: Operand,
+        enum_id: u32,
+    },
+    /// Creates a client with independently configured connection and response timeouts.
+    HttpClientCreateWithOptions {
+        max_origins: Operand,
+        connect_timeout_ms: Operand,
+        response_headers_timeout_ms: Operand,
+        response_idle_timeout_ms: Operand,
+        enum_id: u32,
+    },
+    /// Creates a reusable HTTP client with an explicit DER trust store.
+    HttpClientCreateWithTrustRoots {
+        roots: Operand,
+        max_origins: Operand,
+        connect_timeout_ms: Operand,
+        response_headers_timeout_ms: Operand,
+        response_idle_timeout_ms: Operand,
+        enum_id: u32,
+    },
+    /// Creates a reusable HTTP client with an explicitly permission-scoped proxy.
+    HttpClientCreateWithProxy {
+        proxy_url: Operand,
+        proxy_credentials: Operand,
+        max_origins: Operand,
+        connect_timeout_ms: Operand,
+        response_headers_timeout_ms: Operand,
+        response_idle_timeout_ms: Operand,
+        enum_id: u32,
+    },
+    /// Creates a reusable HTTP client with an explicit proxy and DER roots.
+    HttpClientCreateWithProxyAndTrustRoots {
+        proxy_url: Operand,
+        proxy_credentials: Operand,
+        roots: Operand,
+        max_origins: Operand,
+        connect_timeout_ms: Operand,
+        response_headers_timeout_ms: Operand,
+        response_idle_timeout_ms: Operand,
+        enum_id: u32,
+    },
+    /// Sends a request through a reusable HTTP client handle.
+    HttpClientRequest {
+        handle: Operand,
+        method: Operand,
+        url: Operand,
+        body: Operand,
+        headers: Operand,
+        validate_json: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends a producer-backed request through a reusable HTTP client.
+    HttpClientRequestStream {
+        handle: Operand,
+        method: Operand,
+        url: Operand,
+        headers: Operand,
+        callback: Operand,
+        callback_layout: u32,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Enables cookies or closes a reusable HTTP client.
+    HttpClientAction {
+        handle: Operand,
+        close: bool,
+        enum_id: u32,
+    },
+    /// Opens a permission-checked HTTP/1.1 WebSocket client.
+    HttpWebSocketConnect {
+        url: Operand,
+        origin: Operand,
+        subprotocols: Operand,
+        enum_id: u32,
+    },
+    /// Opens a WebSocket with an explicit bounded DER trust store.
+    HttpWebSocketConnectWithTrustRoots {
+        url: Operand,
+        origin: Operand,
+        subprotocols: Operand,
+        roots_der: Operand,
+        allow_tls12: Operand,
+        enum_id: u32,
+    },
+    /// Sends one tagged, bounded WebSocket message record.
+    HttpWebSocketSend {
+        handle: Operand,
+        record: Operand,
+        enum_id: u32,
+    },
+    /// Receives one tagged WebSocket message record or clean end-of-stream.
+    HttpWebSocketReceive {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Closes a task-owned WebSocket client.
+    HttpWebSocketClose {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Sends a status-bearing WebSocket close frame and completes its handshake.
+    HttpWebSocketCloseWith {
+        handle: Operand,
+        code: Operand,
+        reason: Operand,
+        enum_id: u32,
+    },
+    /// Sends a request with a SecretString revealed only into one validated
+    /// HTTPS request header at the native transport boundary.
+    HttpRequestSecret {
+        method: Operand,
+        url: Operand,
+        body: Operand,
+        headers: Operand,
+        header_name: Operand,
+        secret_value: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Performs one permission-checked HTTP HEAD and builds the public
+    /// `Result<HTTPResponse, HTTPError>` value from its bounded response.
+    HttpHead {
+        url: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends the bounded standard QUERY form with a JSON query document.
+    HttpQuery {
+        url: Operand,
+        query: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends a QUERY body using its caller-selected validated media type.
+    HttpQueryWithContentType {
+        url: Operand,
+        query: Operand,
+        content_type: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends a bounded UTF-8 text POST request.
+    HttpPost {
+        url: Operand,
+        body: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends a bounded JSON POST request after runtime JSON validation.
+    HttpPostJson {
+        url: Operand,
+        body: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Sends a bounded opaque byte POST request.
+    HttpPostBytes {
+        url: Operand,
+        body: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Opens a GET whose bounded response body is exposed through a task-owned stream.
+    HttpGetStream {
+        url: Operand,
+        headers: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Transfers a buffered response body into the common one-shot stream reader.
+    HttpResponseToStream {
+        status: Operand,
+        body: Operand,
+        headers: Operand,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Streams bounded chunks from a rooted Zirk callback into an HTTP request.
+    HttpRequestStream {
+        method: Operand,
+        url: Operand,
+        headers: Operand,
+        callback: Operand,
+        callback_layout: u32,
+        result_callback: bool,
+        enum_id: u32,
+        response_class_id: u32,
+    },
+    /// Registers a bounded source callback for a server response body. The
+    /// runtime retains the callable captures through an explicit GC root.
+    HttpRegisterServerResponseProducer {
+        callback: Operand,
+        callback_layout: u32,
+    },
+    /// Reads one bounded chunk from a task-owned response stream.
+    HttpResponseReadChunk {
+        handle: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+    },
+    /// Consumes all remaining bytes from a task-owned response stream.
+    HttpResponseReadAll {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Reads the next complete SSE event from a task-owned HTTP stream.
+    HttpResponseReadSseEvent {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Returns the cumulative heartbeat comments observed by an SSE stream.
+    HttpResponseSseHeartbeatCount {
+        handle: Operand,
+    },
+    /// Explicitly closes a task-owned response stream.
+    HttpResponseStreamClose {
+        handle: Operand,
+    },
+    /// Parses a credential-free HTTP URL and returns its normalized String.
+    HttpUrlNormalize {
+        value: Operand,
+        enum_id: u32,
+    },
+    /// Resolves a relative HTTP reference against an immutable absolute URL.
+    HttpUrlResolve {
+        base: Operand,
+        reference: Operand,
+        enum_id: u32,
+    },
+    /// Strictly decodes a bounded managed response byte array as UTF-8.
+    HttpResponseText {
+        body: Operand,
+        enum_id: u32,
+    },
+    /// Reads all values for one case-insensitive response header name.
+    HttpResponseHeaderValues {
+        headers: Operand,
+        name: Operand,
+        enum_id: u32,
+    },
+    /// Validates one bundled HTTP route pattern. Returns zero when valid or a
+    /// stable route-validation code otherwise.
+    HttpRoutePatternValidate {
+        pattern: Operand,
+    },
+    /// Checks a same-method pair for duplicate or ambiguous route patterns.
+    HttpRoutePatternConflict {
+        method: Operand,
+        first: Operand,
+        second: Operand,
+    },
+    /// Matches one route pattern and returns a List<String> encoded as an
+    /// empty list for no match or ["", name, value, ...] for a match.
+    HttpRouteMatch {
+        pattern: Operand,
+        path: Operand,
+    },
+    /// Encodes a bounded, deduplicated Allow field block for HTTP responses.
+    HttpRouteAllowHeader {
+        patterns: Operand,
+        methods: Operand,
+        path: Operand,
+    },
+    /// Encodes bounded parallel HTTP header name and value lists.
+    HttpHeadersEncode {
+        names: Operand,
+        values: Operand,
+    },
+    /// Strictly parses a bounded URL-encoded form and returns a flat
+    /// List<String> of alternating field names and values.
+    HttpFormParse {
+        body: Operand,
+        content_type: Operand,
+        enum_id: u32,
+    },
+    /// Parses a bounded multipart body and returns the bundled managed data
+    /// object through compiler-constructed list fields.
+    HttpMultipartParse {
+        body: Operand,
+        content_type: Operand,
+        enum_id: u32,
+        data_class_id: u32,
+    },
+    /// Reads a bounded range from a task-owned multipart upload file.
+    HttpUploadRead {
+        handle: Operand,
+        offset: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+    },
+    /// Closes and removes a task-owned multipart upload file.
+    HttpUploadClose {
+        handle: Operand,
+    },
+    /// Selects values for one name from an alternating bounded form list.
+    HttpFormValues {
+        fields: Operand,
+        name: Operand,
+    },
+    /// Encodes a bounded alternating name/value form list into URL-encoded
+    /// bytes and returns a typed Result<Array<Byte>, HTTPError>.
+    HttpFormEncode {
+        fields: Operand,
+        enum_id: u32,
+    },
+    /// Encodes metadata and binary payload lists into bounded multipart bytes.
+    HttpMultipartEncode {
+        metadata: Operand,
+        bodies: Operand,
+        boundary: Operand,
+        enum_id: u32,
+    },
+    /// Parses one request from an accepted TCP stream, invokes a generated
+    /// Zirk handler on the owning task stack, and serializes its response.
+    HttpServerServeOnce {
+        stream_handle: Operand,
+        secure: bool,
+        max_requests: Operand,
+        require_http2: bool,
+        callback: Operand,
+        callback_layout: u32,
+        request_class_id: u32,
+        response_class_id: u32,
+        enum_id: u32,
+    },
+    /// Accepts one RFC 6455 WebSocket upgrade and dispatches a typed session
+    /// callback on the accepted stream's owner task.
+    HttpServerWebSocketServeOnce {
+        stream_handle: Operand,
+        secure: bool,
+        path: Operand,
+        allowed_origins: Operand,
+        allow_missing_origin: Operand,
+        protocols: Operand,
+        max_messages: Operand,
+        callback: Operand,
+        callback_layout: u32,
+        websocket_class_id: u32,
+        enum_id: u32,
+    },
 
     /// The absent value of a nullable type.
     NullValue(Nullable),

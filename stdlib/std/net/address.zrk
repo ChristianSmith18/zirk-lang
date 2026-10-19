@@ -1,0 +1,115 @@
+package std.net.address;
+
+share enum AddressError {
+    InvalidAddress,
+}
+
+// Immutable canonical IP literal. Parsing never performs DNS resolution and
+// never accepts credentials, ports, host names, or scoped-address suffixes.
+share class IPAddress {
+    private inmut value: String;
+
+    private construct(value: String) { this.value = value; }
+
+    static parse(value: String): Result<IPAddress, AddressError> {
+        return match IPAddress.parse_native(value) {
+            Ok(canonical) => IPAddress.parse_ok(IPAddress(canonical));
+            Error(error) => IPAddress.parse_error(error);
+        };
+    }
+
+    as_string(): String { return this.value; }
+
+    private static parse_native(value: String): Result<String, AddressError> {
+        return Error(AddressError.InvalidAddress);
+    }
+
+    private static parse_ok(value: IPAddress): Result<IPAddress, AddressError> {
+        return Ok(value);
+    }
+
+    private static parse_error(error: AddressError): Result<IPAddress, AddressError> {
+        return Error(error);
+    }
+}
+
+// A canonical TCP socket endpoint assembled from a validated IP literal and
+// a non-zero port. Hostname resolution stays in `DNS.resolve`, where origin
+// permissions and every candidate address are checked before connecting.
+share class SocketAddress {
+    private inmut ip_value: IPAddress;
+    private inmut port_value: UInt16;
+
+    private construct(ip: IPAddress, port: UInt16) {
+        this.ip_value = ip;
+        this.port_value = port;
+    }
+
+    static parse(ip: String, port: UInt16): Result<SocketAddress, AddressError> {
+        if port == 0 { return SocketAddress.parse_error(AddressError.InvalidAddress); }
+        return match IPAddress.parse(ip) {
+            Ok(address) => SocketAddress.parse_ok(SocketAddress(address, port));
+            Error(error) => SocketAddress.parse_error(error);
+        };
+    }
+
+    ip(): IPAddress { return this.ip_value; }
+    port(): UInt16 { return this.port_value; }
+
+    // `std.net` transport APIs use canonical `tcp://` origins so permission
+    // matching preserves scheme, host, and port as separate components.
+    as_tcp_origin(): String {
+        inmut host = this.ip_value.as_string();
+        if host.contains(":") {
+            return "tcp://[" + host + "]:" + this.port_value.to_string();
+        }
+        return "tcp://" + host + ":" + this.port_value.to_string();
+    }
+
+    private static parse_ok(value: SocketAddress): Result<SocketAddress, AddressError> {
+        return Ok(value);
+    }
+
+    private static parse_error(error: AddressError): Result<SocketAddress, AddressError> {
+        return Error(error);
+    }
+}
+
+// An outbound TCP authority whose host may be a DNS name or an IP literal.
+// Parsing canonicalizes IDNA and IPv6 spelling but performs no DNS lookup;
+// TCPStream.connect_to_host still checks the exact origin grant before DNS.
+share class HostPortAddress {
+    private inmut origin_value: String;
+    private inmut port_value: UInt16;
+
+    private construct(origin: String, port: UInt16) {
+        this.origin_value = origin;
+        this.port_value = port;
+    }
+
+    static parse(host: String, port: UInt16): Result<HostPortAddress, AddressError> {
+        if port == 0 { return HostPortAddress.parse_error(AddressError.InvalidAddress); }
+        return match HostPortAddress.origin_parse_native(host, port) {
+            Ok(origin) => HostPortAddress.parse_ok(HostPortAddress(origin, port));
+            Error(error) => HostPortAddress.parse_error(error);
+        };
+    }
+
+    as_tcp_origin(): String { return this.origin_value; }
+    port(): UInt16 { return this.port_value; }
+
+    private static origin_parse_native(
+        host: String,
+        port: UInt16,
+    ): Result<String, AddressError> {
+        return Error(AddressError.InvalidAddress);
+    }
+
+    private static parse_ok(value: HostPortAddress): Result<HostPortAddress, AddressError> {
+        return Ok(value);
+    }
+
+    private static parse_error(error: AddressError): Result<HostPortAddress, AddressError> {
+        return Error(error);
+    }
+}

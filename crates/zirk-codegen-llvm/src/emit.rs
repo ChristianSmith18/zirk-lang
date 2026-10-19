@@ -63,6 +63,30 @@ fn closure_signature<'ctx>(
     }
 }
 
+/// Function-typed values erase their concrete capture layout. Their dispatch
+/// entry therefore receives the managed capture block as one opaque leading
+/// argument, followed by the declared source parameters.
+fn callable_dispatch_signature<'ctx>(
+    context: &'ctx Context,
+    layout: &ir::ClosureLayout,
+    closures: &[ir::ClosureLayout],
+    values: &[ir::ValueLayout],
+    enums: &[ir::EnumLayout],
+) -> inkwell::types::FunctionType<'ctx> {
+    let mut params = vec![context.ptr_type(AddressSpace::default()).into()];
+    for ty in &layout.params {
+        params.push(
+            llvm_type_in(context, *ty, closures, values, enums)
+                .expect("a callable parameter cannot be Void")
+                .into(),
+        );
+    }
+    match llvm_type_in(context, layout.returns, closures, values, enums) {
+        Some(ty) => ty.fn_type(&params, false),
+        None => context.void_type().fn_type(&params, false),
+    }
+}
+
 /// Translates an IR module into an LLVM module.
 pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> LlvmModule<'ctx> {
     let llvm = context.create_module(name);
@@ -407,10 +431,9 @@ fn llvm_type_in<'ctx>(
                 .expect("a verified module declares every closure layout");
             closure_struct(context, layout, closures, values, enums).into()
         }
-        // A boxed callable is a two-word `{ function pointer, capture block
-        // pointer }` pair. The capture block is allocated by the runtime and
-        // the captured values are read back at the call site
-        // (`phase-4d-callables`).
+        // A boxed callable keeps its concrete target/capture pair for the
+        // native callback ABIs and a uniform dispatch entry for calls through
+        // a function-typed parameter whose concrete capture layout is erased.
         ir::IrType::Callable(_) => callable_struct(context).into(),
         // Jobs cross the runtime boundary as packed generational ids.
         ir::IrType::Job => context.i64_type().into(),
@@ -568,11 +591,12 @@ fn closure_struct<'ctx>(
 /// included.
 const CLOSURE_HEADER_FIELDS: u32 = 1;
 
-/// The struct a boxed callable occupies: its function pointer, then a pointer
-/// to its heap-allocated capture block.
+/// A boxed callable contains its concrete function pointer, managed capture
+/// block, and uniform dispatch adapter pointer.
 fn callable_struct<'ctx>(context: &'ctx Context) -> inkwell::types::StructType<'ctx> {
     context.struct_type(
         &[
+            context.ptr_type(AddressSpace::default()).into(),
             context.ptr_type(AddressSpace::default()).into(),
             context.ptr_type(AddressSpace::default()).into(),
         ],
@@ -582,6 +606,7 @@ fn callable_struct<'ctx>(context: &'ctx Context) -> inkwell::types::StructType<'
 
 const CALLABLE_FUNCTION_FIELD: u32 = 0;
 const CALLABLE_CAPTURE_FIELD: u32 = 1;
+const CALLABLE_DISPATCH_FIELD: u32 = 2;
 
 /// The capture block returned by `zirk_rt_alloc_callable` starts with the
 /// same three-word GC header as every object (`crate::collector` design D1);
@@ -681,9 +706,9 @@ fn gc_reference_paths(
                 }
             }
         }
-        // A boxed `Callable` is `{ fn_ptr, capture_ptr }`; only the second
-        // field is a managed reference, and its own descriptor tells the GC
-        // where the captured managed references live.
+        // A boxed `Callable` is `{ fn_ptr, capture_ptr, dispatch_ptr }`; only
+        // the capture block is managed, and its descriptor traces the values
+        // held by a closure.
         ir::IrType::Callable(_) => {
             prefix.push(CALLABLE_CAPTURE_FIELD);
             out.push(prefix.clone());
@@ -1564,6 +1589,591 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .build_return(None)
             .expect("return from mutex adapter");
         thunk
+    }
+
+    fn http_server_handler_thunk(
+        &self,
+        layout_id: u32,
+        request_class_id: u32,
+        response_class_id: u32,
+    ) -> FunctionValue<'ctx> {
+        let name =
+            format!("zirk.http.server.thunk.{layout_id}.{request_class_id}.{response_class_id}");
+        if let Some(existing) = self.llvm.get_function(&name) {
+            return existing;
+        }
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let thunk = self.llvm.add_function(
+            &name,
+            i32_type.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        // HTTP server callbacks use `C-unwind` only for cooperative Zirk task
+        // cancellation. Keep unwind metadata on this generated owner-task
+        // thunk so cancellation can reach the runtime's per-stream join.
+        set_uwtable(self.context, thunk);
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(thunk, "entry");
+        builder.position_at_end(entry);
+
+        let request_layout = &self.module.objects[request_class_id as usize];
+        let request_type = object_struct(
+            self.context,
+            request_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let request_object = builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    request_type
+                        .size_of()
+                        .expect("HTTPRequest object size")
+                        .into(),
+                    request_type.get_alignment().into(),
+                ],
+                "http.request.object",
+            )
+            .expect("allocate HTTPRequest")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        builder
+            .build_store(request_object, self.descriptors[request_class_id as usize])
+            .expect("write HTTPRequest type descriptor");
+        let raw_request_type = self
+            .context
+            .struct_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false);
+        let raw_request = thunk
+            .get_nth_param(0)
+            .expect("HTTP request")
+            .into_pointer_value();
+        for index in 0..request_layout.fields.len() {
+            let raw_field = builder
+                .build_struct_gep(
+                    raw_request_type,
+                    raw_request,
+                    index as u32,
+                    "http.request.raw.field",
+                )
+                .expect("address raw HTTP request field");
+            let field_value = builder
+                .build_load(ptr, raw_field, "http.request.field")
+                .expect("load raw HTTP request field");
+            let object_field = builder
+                .build_struct_gep(
+                    request_type,
+                    request_object,
+                    index as u32 + OBJECT_HEADER_FIELDS,
+                    "http.request.object.field",
+                )
+                .expect("address HTTPRequest field");
+            builder
+                .build_store(object_field, field_value)
+                .expect("store HTTPRequest field");
+        }
+
+        let context_type = self
+            .context
+            .struct_type(&[callable_struct(self.context).into()], false);
+        let context_ptr = thunk
+            .get_nth_param(2)
+            .expect("HTTP handler context")
+            .into_pointer_value();
+        let context_value = builder
+            .build_load(context_type, context_ptr, "http.handler.context")
+            .expect("load handler context")
+            .into_struct_value();
+        let callable = builder
+            .build_extract_value(context_value, 0, "http.handler.callable")
+            .expect("extract handler callable")
+            .into_struct_value();
+        let dispatch = builder
+            .build_extract_value(callable, CALLABLE_DISPATCH_FIELD, "http.handler.dispatch")
+            .expect("extract handler dispatch entry")
+            .into_pointer_value();
+        let captures = builder
+            .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http.handler.captures")
+            .expect("extract handler captures")
+            .into_pointer_value();
+        let arguments: Vec<BasicMetadataValueEnum> = vec![captures.into(), request_object.into()];
+        let signature = callable_dispatch_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let response = builder
+            .build_indirect_call(signature, dispatch, &arguments, "http.handler.call")
+            .expect("invoke Zirk HTTP handler")
+            .try_as_basic_value()
+            .basic()
+            .expect("HTTP handler returns response object")
+            .into_pointer_value();
+
+        // A cooperative cancellation (or another propagated exception) can
+        // make a Zirk handler return the null sentinel. This callback runs
+        // across a native ABI boundary, so reject that result before loading
+        // fields from the managed response object.
+        let response_is_null = builder
+            .build_is_null(response, "http.handler.response.is_null")
+            .expect("check HTTP handler response");
+        let has_pending_exception = builder
+            .build_call(
+                self.runtime.has_pending_exception,
+                &[],
+                "http.handler.has_pending_exception",
+            )
+            .expect("check HTTP handler exception")
+            .try_as_basic_value()
+            .basic()
+            .expect("pending exception predicate")
+            .into_int_value();
+        let failed = builder
+            .build_or(
+                response_is_null,
+                has_pending_exception,
+                "http.handler.failed",
+            )
+            .expect("combine HTTP handler failure checks");
+        let failure = self.context.append_basic_block(thunk, "handler_failed");
+        let succeeded = self.context.append_basic_block(thunk, "handler_succeeded");
+        builder
+            .build_conditional_branch(failed, failure, succeeded)
+            .expect("branch on HTTP handler failure");
+        builder.position_at_end(failure);
+        builder
+            .build_return(Some(&i32_type.const_int(1, false)))
+            .expect("return failed HTTP handler status");
+        builder.position_at_end(succeeded);
+
+        let response_layout = &self.module.objects[response_class_id as usize];
+        let response_type = object_struct(
+            self.context,
+            response_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let response_out_type = self.context.struct_type(
+            &[
+                i32_type.into(),
+                ptr.into(),
+                ptr.into(),
+                self.context.i64_type().into(),
+                i32_type.into(),
+            ],
+            false,
+        );
+        let response_out = thunk
+            .get_nth_param(1)
+            .expect("HTTP response output")
+            .into_pointer_value();
+        for (out_index, field_name) in [
+            (0u32, "status_code_value"),
+            (1, "header_data"),
+            (2, "body_value"),
+            (3, "server_producer_handle"),
+            (4, "server_sse_heartbeat_ms"),
+        ] {
+            let field_index = response_layout
+                .field_index(field_name)
+                .expect("HTTPResponse field exists");
+            let source = builder
+                .build_struct_gep(
+                    response_type,
+                    response,
+                    field_index as u32 + OBJECT_HEADER_FIELDS,
+                    "http.response.object.field",
+                )
+                .expect("address HTTPResponse field");
+            let value = builder
+                .build_load(
+                    self.llvm_type(response_layout.fields[field_index].ty)
+                        .expect("HTTPResponse field type"),
+                    source,
+                    "http.response.field",
+                )
+                .expect("load HTTPResponse field");
+            let destination = builder
+                .build_struct_gep(
+                    response_out_type,
+                    response_out,
+                    out_index,
+                    "http.response.out.field",
+                )
+                .expect("address C HTTP response field");
+            builder
+                .build_store(destination, value)
+                .expect("store C HTTP response field");
+        }
+        builder
+            .build_return(Some(&i32_type.const_zero()))
+            .expect("return from HTTP thunk");
+        thunk
+    }
+
+    fn http_websocket_server_handler_thunk(
+        &self,
+        layout_id: u32,
+        websocket_class_id: u32,
+    ) -> FunctionValue<'ctx> {
+        let name = format!("zirk.http.websocket.server.thunk.{layout_id}.{websocket_class_id}");
+        if let Some(existing) = self.llvm.get_function(&name) {
+            return existing;
+        }
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let i64_type = self.context.i64_type();
+        let thunk = self.llvm.add_function(
+            &name,
+            i32_type.fn_type(&[i64_type.into(), ptr.into()], false),
+            Some(Linkage::Internal),
+        );
+        set_uwtable(self.context, thunk);
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(thunk, "entry");
+        builder.position_at_end(entry);
+
+        let websocket_layout = &self.module.objects[websocket_class_id as usize];
+        let websocket_type = object_struct(
+            self.context,
+            websocket_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let websocket = builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    websocket_type.size_of().expect("HTTPWebSocket size").into(),
+                    websocket_type.get_alignment().into(),
+                ],
+                "http.websocket.server.object",
+            )
+            .expect("allocate HTTPWebSocket")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        builder
+            .build_store(websocket, self.descriptors[websocket_class_id as usize])
+            .expect("write HTTPWebSocket type descriptor");
+        let handle_index = websocket_layout
+            .fields
+            .iter()
+            .position(|field| field.name == "handle")
+            .expect("HTTPWebSocket exposes compiler-owned handle")
+            as u32;
+        let handle_field = builder
+            .build_struct_gep(
+                websocket_type,
+                websocket,
+                handle_index + OBJECT_HEADER_FIELDS,
+                "http.websocket.server.handle",
+            )
+            .expect("address HTTPWebSocket handle field");
+        builder
+            .build_store(
+                handle_field,
+                thunk.get_nth_param(0).expect("WebSocket handle"),
+            )
+            .expect("store HTTPWebSocket handle");
+
+        let context_type = self
+            .context
+            .struct_type(&[callable_struct(self.context).into()], false);
+        let context_ptr = thunk
+            .get_nth_param(1)
+            .expect("HTTP WebSocket handler context")
+            .into_pointer_value();
+        let context_value = builder
+            .build_load(context_type, context_ptr, "http.websocket.handler.context")
+            .expect("load WebSocket handler context")
+            .into_struct_value();
+        let callable = builder
+            .build_extract_value(context_value, 0, "http.websocket.handler.callable")
+            .expect("extract WebSocket handler callable")
+            .into_struct_value();
+        let dispatch = builder
+            .build_extract_value(
+                callable,
+                CALLABLE_DISPATCH_FIELD,
+                "http.websocket.handler.dispatch",
+            )
+            .expect("extract WebSocket handler dispatch")
+            .into_pointer_value();
+        let captures = builder
+            .build_extract_value(
+                callable,
+                CALLABLE_CAPTURE_FIELD,
+                "http.websocket.handler.captures",
+            )
+            .expect("extract WebSocket handler captures")
+            .into_pointer_value();
+        let signature = callable_dispatch_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        builder
+            .build_indirect_call(
+                signature,
+                dispatch,
+                &[captures.into(), websocket.into()],
+                "http.websocket.handler.call",
+            )
+            .expect("invoke Zirk HTTPWebSocket handler");
+        builder
+            .build_return(Some(&i32_type.const_zero()))
+            .expect("return from HTTP WebSocket thunk");
+        thunk
+    }
+
+    fn http_upload_producer_thunk(
+        &self,
+        layout_id: u32,
+        result_callback: bool,
+    ) -> FunctionValue<'ctx> {
+        let name = format!("zirk.http.upload.producer.thunk.{layout_id}.{result_callback}");
+        if let Some(existing) = self.llvm.get_function(&name) {
+            return existing;
+        }
+        let layout = &self.module.closures[layout_id as usize];
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let thunk = self.llvm.add_function(
+            &name,
+            i32_type.fn_type(
+                &[ptr.into(), self.context.i64_type().into(), ptr.into()],
+                false,
+            ),
+            Some(Linkage::Internal),
+        );
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(thunk, "entry");
+        builder.position_at_end(entry);
+
+        let context_type = self
+            .context
+            .struct_type(&[callable_struct(self.context).into()], false);
+        let context_ptr = thunk
+            .get_nth_param(0)
+            .expect("HTTP producer context")
+            .into_pointer_value();
+        let context_value = builder
+            .build_load(context_type, context_ptr, "http.producer.context")
+            .expect("load HTTP producer context")
+            .into_struct_value();
+        let callable = builder
+            .build_extract_value(context_value, 0, "http.producer.callable")
+            .expect("extract HTTP producer callable")
+            .into_struct_value();
+        let dispatch = builder
+            .build_extract_value(callable, CALLABLE_DISPATCH_FIELD, "http.producer.dispatch")
+            .expect("extract HTTP producer dispatch")
+            .into_pointer_value();
+        let captures = builder
+            .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http.producer.captures")
+            .expect("extract HTTP producer captures")
+            .into_pointer_value();
+        let signature = callable_dispatch_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let produced_value = builder
+            .build_indirect_call(
+                signature,
+                dispatch,
+                &[
+                    captures.into(),
+                    thunk
+                        .get_nth_param(1)
+                        .expect("HTTP producer chunk index")
+                        .into(),
+                ],
+                "http.producer.call",
+            )
+            .expect("invoke Zirk HTTP body producer")
+            .try_as_basic_value()
+            .basic()
+            .expect("HTTP producer returns its declared body value");
+        let output = thunk
+            .get_nth_param(2)
+            .expect("HTTP producer output")
+            .into_pointer_value();
+        if result_callback {
+            let ir::IrType::Enum(result_id) = layout.returns else {
+                unreachable!("typed HTTP producer returns Result<Array<Byte>, Error>")
+            };
+            let result_layout = &self.module.enums[result_id as usize];
+            let returned = produced_value.into_struct_value();
+            let tag = builder
+                .build_extract_value(returned, 0, "http.producer.result.tag")
+                .expect("extract HTTP producer result tag")
+                .into_int_value();
+            let is_ok = builder
+                .build_int_compare(
+                    IntPredicate::EQ,
+                    tag,
+                    i32_type.const_zero(),
+                    "http.producer.result.is_ok",
+                )
+                .expect("test HTTP producer result tag");
+            let ok_block = self.context.append_basic_block(thunk, "producer.ok");
+            let error_block = self.context.append_basic_block(thunk, "producer.error");
+            builder
+                .build_conditional_branch(is_ok, ok_block, error_block)
+                .expect("branch on HTTP producer result");
+
+            builder.position_at_end(ok_block);
+            let value_field = result_layout.variants[0][0] + ENUM_HEADER_FIELDS;
+            let produced_bytes = builder
+                .build_extract_value(returned, value_field, "http.producer.result.bytes")
+                .expect("extract HTTP producer bytes")
+                .into_pointer_value();
+            builder
+                .build_store(output, produced_bytes)
+                .expect("store HTTP producer bytes");
+            builder
+                .build_return(Some(&i32_type.const_zero()))
+                .expect("return successful HTTP producer result");
+
+            builder.position_at_end(error_block);
+            let error_field = result_layout.variants[1][0] + ENUM_HEADER_FIELDS;
+            let error_tag = builder
+                .build_extract_value(returned, error_field, "http.producer.result.error")
+                .expect("extract HTTP producer error")
+                .into_int_value();
+            let status = builder
+                .build_int_add(
+                    error_tag,
+                    i32_type.const_int(1, false),
+                    "http.producer.error.status",
+                )
+                .expect("encode HTTP producer error status");
+            builder
+                .build_return(Some(&status))
+                .expect("return HTTP producer error status");
+        } else {
+            let produced = produced_value.into_pointer_value();
+            builder
+                .build_store(output, produced)
+                .expect("store HTTP producer chunk");
+            builder
+                .build_return(Some(&i32_type.const_zero()))
+                .expect("return from HTTP producer thunk");
+        }
+        thunk
+    }
+
+    /// Adapts one concrete closure body to the uniform boxed-callable entry
+    /// ABI. Concrete target/capture fields stay available to scheduler and C
+    /// callback thunks that already know the closure layout.
+    fn build_callable_dispatch_adapter(
+        &self,
+        target_name: &str,
+        layout_id: u32,
+    ) -> FunctionValue<'ctx> {
+        let name = format!("zk.callable.dispatch.{layout_id}.{target_name}");
+        if let Some(existing) = self.llvm.get_function(&name) {
+            return existing;
+        }
+        let layout = &self.module.closures[layout_id as usize];
+        let signature = callable_dispatch_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let adapter = self
+            .llvm
+            .add_function(&name, signature, Some(Linkage::Internal));
+        adapter.set_call_conventions(0);
+        set_uwtable(self.context, adapter);
+        let builder = self.context.create_builder();
+        let entry = self.context.append_basic_block(adapter, "entry");
+        builder.position_at_end(entry);
+
+        let capture_block = adapter
+            .get_first_param()
+            .expect("uniform callable capture block")
+            .into_pointer_value();
+        let mut arguments: Vec<BasicMetadataValueEnum> =
+            Vec::with_capacity(layout.captures.len() + layout.params.len());
+        for (index, capture_ty) in layout.captures.iter().enumerate() {
+            let offset = self.closure_capture_offset(layout, index);
+            let address = unsafe {
+                builder.build_gep(
+                    self.context.i8_type(),
+                    capture_block,
+                    &[offset],
+                    "dispatch.capture.address",
+                )
+            }
+            .expect("dispatch capture address");
+            let ty = self.llvm_type(*capture_ty).expect("capture LLVM type");
+            arguments.push(
+                builder
+                    .build_load(ty, address, "dispatch.capture")
+                    .expect("load dispatch capture")
+                    .into(),
+            );
+        }
+        for index in 0..layout.params.len() {
+            arguments.push(
+                adapter
+                    .get_nth_param(index as u32 + 1)
+                    .expect("callable source parameter")
+                    .into(),
+            );
+        }
+
+        let target = self
+            .functions
+            .get(target_name)
+            .copied()
+            .expect("callable target was declared before code generation")
+            .as_global_value()
+            .as_pointer_value();
+        let target_signature = closure_signature(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let call = builder
+            .build_indirect_call(target_signature, target, &arguments, "dispatch.target")
+            .expect("call concrete closure target");
+        if layout.returns == ir::IrType::Void {
+            builder
+                .build_return(None)
+                .expect("return from void adapter");
+        } else {
+            let value = call
+                .try_as_basic_value()
+                .basic()
+                .expect("callable result value");
+            builder
+                .build_return(Some(&value))
+                .expect("return callable result");
+        }
+        adapter
     }
 
     /// Adapts a service callback to the runtime's stable `u64` thunk ABI.
@@ -4553,6 +5163,3268 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
             }
 
+            ir::InstKind::EnvironmentGet {
+                name,
+                enum_id,
+                secret,
+            } => {
+                let name_value = self.operand(*name);
+                let runtime = if *secret {
+                    self.runtime.environment_get_secret
+                } else {
+                    self.runtime.environment_get
+                };
+                let (kind, error, payload) = self.call_stdin_read(runtime, &[name_value]);
+                // `Result<String, EnvironmentError>` uses the same native
+                // out-parameter layout and declaration order as the runtime.
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
+            ir::InstKind::EnvironmentContains { name, enum_id } => {
+                let name_value = self.operand(*name);
+                let (kind, detail, _) =
+                    self.call_stdin_read(self.runtime.environment_contains, &[name_value]);
+                Some(self.build_boolean_tagged_outcome(*enum_id, kind, detail))
+            }
+
+            ir::InstKind::EnvironmentListNames { enum_id } => {
+                let (kind, error, payload) =
+                    self.call_stdin_read(self.runtime.environment_list_names, &[]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
+            ir::InstKind::NetworkTcpConnect { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, scalar, _) =
+                    self.call_network_out(self.runtime.network_tcp_connect, &[endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, scalar))
+            }
+
+            ir::InstKind::NetworkDnsResolve { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, _, payload) =
+                    self.call_network_out(self.runtime.network_dns_resolve, &[endpoint.into()]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
+            ir::InstKind::NetworkIpAddressParse { value, enum_id } => {
+                let value = self.operand(*value);
+                let (kind, error, _, payload) =
+                    self.call_network_out(self.runtime.network_ip_address_parse, &[value.into()]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
+            ir::InstKind::NetworkTcpOriginNormalize {
+                host,
+                port,
+                enum_id,
+            } => {
+                let host = self.operand(*host);
+                let port = self.operand(*port);
+                let (kind, error, _, payload) = self.call_network_out(
+                    self.runtime.network_tcp_origin_normalize,
+                    &[host.into(), port.into()],
+                );
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
+            ir::InstKind::NetworkTlsConnect { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, handle, _) =
+                    self.call_network_out(self.runtime.network_tls_connect, &[endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkTlsConnectWithRoots {
+                endpoint,
+                roots_der,
+                allow_tls12,
+                enum_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let roots_der = self.operand(*roots_der);
+                let allow_tls12 = self.operand(*allow_tls12);
+                let out_ty = self.network_out_struct();
+                let out = self.aligned_alloca(out_ty.into(), "network.tls.roots.out");
+                self.builder
+                    .build_call(
+                        self.runtime.network_tls_connect_with_roots,
+                        &[
+                            endpoint.into(),
+                            roots_der.into(),
+                            allow_tls12.into(),
+                            out.into(),
+                        ],
+                        "network.tls.roots",
+                    )
+                    .expect("call configured TLS connect");
+                let loaded = self
+                    .builder
+                    .build_load(out_ty, out, "network.tls.roots.load")
+                    .expect("load configured TLS connect result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(loaded, 0, "network.tls.roots.kind")
+                    .expect("extract configured TLS result kind")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(loaded, 1, "network.tls.roots.error")
+                    .expect("extract configured TLS error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(loaded, 2, "network.tls.roots.handle")
+                    .expect("extract configured TLS handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkTlsListen {
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                allow_tls12,
+                http_alpn,
+                enum_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let certificate_chain_der = self.operand(*certificate_chain_der);
+                let private_key_der = self.operand(*private_key_der);
+                let allow_tls12 = self.operand(*allow_tls12);
+                let bind = if *http_alpn {
+                    self.runtime.network_tls_listen_http
+                } else {
+                    self.runtime.network_tls_listen
+                };
+                let (kind, error, handle, _) = self.call_network_out(
+                    bind,
+                    &[
+                        endpoint.into(),
+                        certificate_chain_der.into(),
+                        private_key_der.into(),
+                        allow_tls12.into(),
+                    ],
+                );
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkTlsAccept {
+                handle,
+                enum_id,
+                stream_class_id,
+            } => {
+                let handle = self.operand(*handle);
+                let (kind, error, stream, _) =
+                    self.call_network_out(self.runtime.network_tls_accept, &[handle.into()]);
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *stream_class_id,
+                    kind,
+                    error,
+                    stream,
+                ))
+            }
+
+            ir::InstKind::NetworkTlsCloseListener { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) = self
+                    .call_network_out(self.runtime.network_tls_close_listener, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTlsListenerIsClosed { handle } => {
+                let handle = self.operand(*handle);
+                let value = self
+                    .builder
+                    .build_call(
+                        self.runtime.network_tls_listener_is_closed,
+                        &[handle.into()],
+                        "tls.listener_is_closed",
+                    )
+                    .expect("call TLS listener is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("TLS listener is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
+            ir::InstKind::NetworkTlsPeerAddress { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, address) =
+                    self.call_network_out(self.runtime.network_tls_peer_address, &[handle.into()]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, address, 0, 1))
+            }
+
+            ir::InstKind::NetworkTlsRead {
+                handle,
+                max_bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let max_bytes = self.operand(*max_bytes);
+                let (kind, error, _, payload) = self.call_network_out(
+                    self.runtime.network_tls_read,
+                    &[handle.into(), max_bytes.into()],
+                );
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::NetworkTlsWriteAll {
+                handle,
+                bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let (kind, error, _, _) = self.call_network_out(
+                    self.runtime.network_tls_write_all,
+                    &[handle.into(), bytes.into()],
+                );
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTlsShutdown { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_tls_shutdown, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTlsClose { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_tls_close, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTlsIsClosed { handle } => {
+                let handle = self.operand(*handle);
+                let value = self
+                    .builder
+                    .build_call(
+                        self.runtime.network_tls_is_closed,
+                        &[handle.into()],
+                        "tls.is_closed",
+                    )
+                    .expect("call TLS is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("TLS is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
+            ir::InstKind::NetworkTcpRead {
+                handle,
+                max_bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let max_bytes = self.operand(*max_bytes);
+                let (kind, error, _, payload) = self.call_network_out(
+                    self.runtime.network_tcp_read,
+                    &[handle.into(), max_bytes.into()],
+                );
+                // `TCPReadResult<T>` is Value(0), End(1), Error(2).
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::NetworkTcpWrite {
+                handle,
+                bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let (kind, error, scalar, _) = self.call_network_out(
+                    self.runtime.network_tcp_write,
+                    &[handle.into(), bytes.into()],
+                );
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, scalar))
+            }
+
+            ir::InstKind::NetworkTcpWriteAll {
+                handle,
+                bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let (kind, error, _, _) = self.call_network_out(
+                    self.runtime.network_tcp_write_all,
+                    &[handle.into(), bytes.into()],
+                );
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTcpShutdown { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_tcp_shutdown, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTcpClose { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_tcp_close, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTcpIsClosed { handle } => {
+                let handle = self.operand(*handle);
+                let value = self
+                    .builder
+                    .build_call(
+                        self.runtime.network_tcp_is_closed,
+                        &[handle.into()],
+                        "tcp.is_closed",
+                    )
+                    .expect("call TCP is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
+            ir::InstKind::NetworkTcpPeerAddress { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, address) =
+                    self.call_network_out(self.runtime.network_tcp_peer_address, &[handle.into()]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, address, 0, 1))
+            }
+
+            ir::InstKind::NetworkTcpListen { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, scalar, _) =
+                    self.call_network_out(self.runtime.network_tcp_listen, &[endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, scalar))
+            }
+
+            ir::InstKind::NetworkTcpAccept {
+                handle,
+                enum_id,
+                stream_class_id,
+            } => {
+                let handle = self.operand(*handle);
+                let (kind, error, scalar, _) =
+                    self.call_network_out(self.runtime.network_tcp_accept, &[handle.into()]);
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *stream_class_id,
+                    kind,
+                    error,
+                    scalar,
+                ))
+            }
+
+            ir::InstKind::NetworkTcpCloseListener { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) = self
+                    .call_network_out(self.runtime.network_tcp_close_listener, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkTcpListenerIsClosed { handle } => {
+                let handle = self.operand(*handle);
+                let value = self
+                    .builder
+                    .build_call(
+                        self.runtime.network_tcp_listener_is_closed,
+                        &[handle.into()],
+                        "tcp.listener_is_closed",
+                    )
+                    .expect("call TCP listener is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("listener is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
+            ir::InstKind::HttpGet {
+                url,
+                cached,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.get.out");
+                self.builder
+                    .build_call(
+                        if *cached {
+                            self.runtime.http_get_cached
+                        } else {
+                            self.runtime.http_get
+                        },
+                        &[url.into(), out.into()],
+                        "http.get",
+                    )
+                    .expect("call the HTTP GET runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.get.out.load")
+                    .expect("load HTTP GET outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.get.kind")
+                    .expect("extract HTTP result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.get.error")
+                    .expect("extract HTTP error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.get.status")
+                    .expect("extract HTTP status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.get.body")
+                    .expect("extract HTTP body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.get.headers")
+                    .expect("extract HTTP response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpRequest {
+                method,
+                url,
+                body,
+                headers,
+                validate_json,
+                cached,
+                enum_id,
+                response_class_id,
+            } => {
+                let method = self.operand(*method);
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let headers = self.operand(*headers);
+                let validate_json = self.operand(*validate_json);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.request.out");
+                let call_args = if *cached {
+                    vec![
+                        method.into(),
+                        url.into(),
+                        body.into(),
+                        headers.into(),
+                        out.into(),
+                    ]
+                } else {
+                    vec![
+                        method.into(),
+                        url.into(),
+                        body.into(),
+                        headers.into(),
+                        validate_json.into(),
+                        out.into(),
+                    ]
+                };
+                self.builder
+                    .build_call(
+                        if *cached {
+                            self.runtime.http_request_cached
+                        } else {
+                            self.runtime.http_request
+                        },
+                        &call_args,
+                        "http.request",
+                    )
+                    .expect("call the generic HTTP request runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.request.out.load")
+                    .expect("load generic HTTP request outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.request.kind")
+                    .expect("extract HTTP request tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.request.error")
+                    .expect("extract HTTP request error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.request.status")
+                    .expect("extract HTTP request status")
+                    .into_int_value();
+                let response_body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.request.body")
+                    .expect("extract HTTP request response body")
+                    .into_pointer_value();
+                let response_headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.request.headers")
+                    .expect("extract HTTP request response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (response_body, response_headers),
+                ))
+            }
+            ir::InstKind::HttpClientCreate {
+                max_origins,
+                enum_id,
+            } => {
+                let max_origins = self.operand(*max_origins).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.create.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_create,
+                        &[max_origins.into(), out.into()],
+                        "http.client.create",
+                    )
+                    .expect("call reusable HTTP client create adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.create.value")
+                    .expect("load HTTP client create result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.create.kind")
+                    .expect("extract HTTP client create tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.create.error")
+                    .expect("extract HTTP client create error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.create.handle")
+                    .expect("extract HTTP client handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpClientCreateWithOptions {
+                max_origins,
+                connect_timeout_ms,
+                response_headers_timeout_ms,
+                response_idle_timeout_ms,
+                enum_id,
+            } => {
+                let max_origins = self.operand(*max_origins).into_int_value();
+                let connect_timeout_ms = self.operand(*connect_timeout_ms).into_int_value();
+                let response_headers_timeout_ms =
+                    self.operand(*response_headers_timeout_ms).into_int_value();
+                let response_idle_timeout_ms =
+                    self.operand(*response_idle_timeout_ms).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.options.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_create_with_options,
+                        &[
+                            max_origins.into(),
+                            connect_timeout_ms.into(),
+                            response_headers_timeout_ms.into(),
+                            response_idle_timeout_ms.into(),
+                            out.into(),
+                        ],
+                        "http.client.options.create",
+                    )
+                    .expect("call HTTP client create with options adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.options.value")
+                    .expect("load HTTP client options result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.options.kind")
+                    .expect("extract HTTP client options tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.options.error")
+                    .expect("extract HTTP client options error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.options.handle")
+                    .expect("extract HTTP client options handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpClientCreateWithTrustRoots {
+                roots,
+                max_origins,
+                connect_timeout_ms,
+                response_headers_timeout_ms,
+                response_idle_timeout_ms,
+                enum_id,
+            } => {
+                let roots = self.operand(*roots);
+                let max_origins = self.operand(*max_origins).into_int_value();
+                let connect_timeout_ms = self.operand(*connect_timeout_ms).into_int_value();
+                let response_headers_timeout_ms =
+                    self.operand(*response_headers_timeout_ms).into_int_value();
+                let response_idle_timeout_ms =
+                    self.operand(*response_idle_timeout_ms).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.create.roots.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_create_with_trust_roots,
+                        &[
+                            max_origins.into(),
+                            roots.into(),
+                            connect_timeout_ms.into(),
+                            response_headers_timeout_ms.into(),
+                            response_idle_timeout_ms.into(),
+                            out.into(),
+                        ],
+                        "http.client.create.roots",
+                    )
+                    .expect("call HTTP client create with trust roots adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.create.roots.value")
+                    .expect("load HTTP client create with roots result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.create.roots.kind")
+                    .expect("extract HTTP client create with roots tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.create.roots.error")
+                    .expect("extract HTTP client create with roots error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.create.roots.handle")
+                    .expect("extract HTTP client handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpClientCreateWithProxy {
+                proxy_url,
+                proxy_credentials,
+                max_origins,
+                connect_timeout_ms,
+                response_headers_timeout_ms,
+                response_idle_timeout_ms,
+                enum_id,
+            } => {
+                let proxy_url = self.operand(*proxy_url);
+                let proxy_credentials = self.operand(*proxy_credentials);
+                let max_origins = self.operand(*max_origins).into_int_value();
+                let connect_timeout_ms = self.operand(*connect_timeout_ms).into_int_value();
+                let response_headers_timeout_ms =
+                    self.operand(*response_headers_timeout_ms).into_int_value();
+                let response_idle_timeout_ms =
+                    self.operand(*response_idle_timeout_ms).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.create.proxy.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_create_with_proxy,
+                        &[
+                            proxy_url.into(),
+                            proxy_credentials.into(),
+                            max_origins.into(),
+                            connect_timeout_ms.into(),
+                            response_headers_timeout_ms.into(),
+                            response_idle_timeout_ms.into(),
+                            out.into(),
+                        ],
+                        "http.client.create.proxy",
+                    )
+                    .expect("call HTTP client create with proxy adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.create.proxy.value")
+                    .expect("load HTTP client create with proxy result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.create.proxy.kind")
+                    .expect("extract HTTP client create with proxy tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.create.proxy.error")
+                    .expect("extract HTTP client create with proxy error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.create.proxy.handle")
+                    .expect("extract HTTP client handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpClientCreateWithProxyAndTrustRoots {
+                proxy_url,
+                proxy_credentials,
+                roots,
+                max_origins,
+                connect_timeout_ms,
+                response_headers_timeout_ms,
+                response_idle_timeout_ms,
+                enum_id,
+            } => {
+                let proxy_url = self.operand(*proxy_url);
+                let proxy_credentials = self.operand(*proxy_credentials);
+                let roots = self.operand(*roots);
+                let max_origins = self.operand(*max_origins).into_int_value();
+                let connect_timeout_ms = self.operand(*connect_timeout_ms).into_int_value();
+                let response_headers_timeout_ms =
+                    self.operand(*response_headers_timeout_ms).into_int_value();
+                let response_idle_timeout_ms =
+                    self.operand(*response_idle_timeout_ms).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.create.proxy.roots.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_create_with_proxy_and_trust_roots,
+                        &[
+                            proxy_url.into(),
+                            proxy_credentials.into(),
+                            max_origins.into(),
+                            roots.into(),
+                            connect_timeout_ms.into(),
+                            response_headers_timeout_ms.into(),
+                            response_idle_timeout_ms.into(),
+                            out.into(),
+                        ],
+                        "http.client.create.proxy.roots",
+                    )
+                    .expect("call HTTP client create with proxy and trust roots adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.create.proxy.roots.value")
+                    .expect("load HTTP client create with proxy and roots result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.create.proxy.roots.kind")
+                    .expect("extract HTTP client create result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.create.proxy.roots.error")
+                    .expect("extract HTTP client create error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.create.proxy.roots.handle")
+                    .expect("extract HTTP client handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpClientRequest {
+                handle,
+                method,
+                url,
+                body,
+                headers,
+                validate_json,
+                enum_id,
+                response_class_id,
+            } => {
+                let handle = self.operand(*handle).into_int_value();
+                let method = self.operand(*method);
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let headers = self.operand(*headers);
+                let validate_json = self.operand(*validate_json);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.request.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_request,
+                        &[
+                            handle.into(),
+                            method.into(),
+                            url.into(),
+                            body.into(),
+                            headers.into(),
+                            validate_json.into(),
+                            out.into(),
+                        ],
+                        "http.client.request",
+                    )
+                    .expect("call reusable HTTP client request adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.request.value")
+                    .expect("load HTTP client response outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.request.kind")
+                    .expect("extract HTTP client response tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.request.error")
+                    .expect("extract HTTP client response error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.request.status")
+                    .expect("extract HTTP client response status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.client.request.body")
+                    .expect("extract HTTP client response body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.client.request.headers")
+                    .expect("extract HTTP client response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpClientRequestStream {
+                handle,
+                method,
+                url,
+                headers,
+                callback,
+                callback_layout,
+                enum_id,
+                response_class_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let captures = self
+                    .builder
+                    .build_extract_value(
+                        callable,
+                        CALLABLE_CAPTURE_FIELD,
+                        "http.client.upload.captures",
+                    )
+                    .expect("extract reusable HTTP upload captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http.client.upload.capture.root")
+                    .expect("allocate reusable HTTP upload capture root");
+                self.builder
+                    .build_store(capture_root, captures)
+                    .expect("store reusable HTTP upload captures");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http.client.upload.roots")
+                    .expect("allocate reusable HTTP upload roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http.client.upload.root.entry",
+                    )
+                }
+                .expect("index reusable HTTP upload root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register reusable HTTP upload root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http.client.upload.push.roots",
+                    )
+                    .expect("root reusable HTTP upload captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http.client.upload.context")
+                    .expect("allocate reusable HTTP upload context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store reusable HTTP upload callback");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.upload.out");
+                let thunk = self.http_upload_producer_thunk(*callback_layout, false);
+                self.builder
+                    .build_call(
+                        self.runtime.http_client_request_stream,
+                        &[
+                            self.operand(*handle).into(),
+                            self.operand(*method).into(),
+                            self.operand(*url).into(),
+                            self.operand(*headers).into(),
+                            thunk.as_global_value().as_pointer_value().into(),
+                            context.into(),
+                            self.context.i32_type().const_zero().into(),
+                            out.into(),
+                        ],
+                        "http.client.upload.send",
+                    )
+                    .expect("send reusable HTTP streaming request");
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http.client.upload.pop.roots")
+                    .expect("release reusable HTTP upload captures");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.upload.value")
+                    .expect("load reusable HTTP upload result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.upload.kind")
+                    .expect("extract reusable HTTP result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.upload.error")
+                    .expect("extract reusable HTTP error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.client.upload.status")
+                    .expect("extract reusable HTTP status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.client.upload.body")
+                    .expect("extract reusable HTTP body")
+                    .into_pointer_value();
+                let response_headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.client.upload.headers")
+                    .expect("extract reusable HTTP headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, response_headers),
+                ))
+            }
+            ir::InstKind::HttpClientAction {
+                handle,
+                close,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle).into_int_value();
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.client.action.out");
+                let function = if *close {
+                    self.runtime.http_client_close
+                } else {
+                    self.runtime.http_client_enable_cookies
+                };
+                self.builder
+                    .build_call(function, &[handle.into(), out.into()], "http.client.action")
+                    .expect("call HTTP client action adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.client.action.value")
+                    .expect("load HTTP client action outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.client.action.kind")
+                    .expect("extract HTTP client action tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.client.action.error")
+                    .expect("extract HTTP client action error")
+                    .into_int_value();
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+            ir::InstKind::HttpWebSocketConnect {
+                url,
+                origin,
+                subprotocols,
+                enum_id,
+            } => {
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.connect.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_connect,
+                        &[
+                            self.operand(*url).into(),
+                            self.operand(*origin).into(),
+                            self.operand(*subprotocols).into(),
+                            out.into(),
+                        ],
+                        "http.websocket.connect",
+                    )
+                    .expect("connect a bounded HTTP WebSocket client");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.connect.load")
+                    .expect("load WebSocket client handle")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.kind")
+                    .unwrap()
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.error")
+                    .unwrap()
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.websocket.handle")
+                    .unwrap()
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpWebSocketConnectWithTrustRoots {
+                url,
+                origin,
+                subprotocols,
+                roots_der,
+                allow_tls12,
+                enum_id,
+            } => {
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.roots.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_connect_with_trust_roots,
+                        &[
+                            self.operand(*url).into(),
+                            self.operand(*origin).into(),
+                            self.operand(*subprotocols).into(),
+                            self.operand(*roots_der).into(),
+                            self.operand(*allow_tls12).into(),
+                            out.into(),
+                        ],
+                        "http.websocket.roots.connect",
+                    )
+                    .expect("connect WebSocket client with explicit trust roots");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.roots.load")
+                    .expect("load WebSocket client with roots result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.roots.kind")
+                    .unwrap()
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.roots.error")
+                    .unwrap()
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 2, "http.websocket.roots.handle")
+                    .unwrap()
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+            ir::InstKind::HttpWebSocketSend {
+                handle,
+                record,
+                enum_id,
+            } => {
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.send.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_send,
+                        &[
+                            self.operand(*handle).into(),
+                            self.operand(*record).into(),
+                            out.into(),
+                        ],
+                        "http.websocket.send",
+                    )
+                    .expect("send one bounded WebSocket message");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.send.load")
+                    .unwrap()
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.send.kind")
+                    .unwrap()
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.send.error")
+                    .unwrap()
+                    .into_int_value();
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+            ir::InstKind::HttpWebSocketReceive { handle, enum_id } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.receive.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_receive,
+                        &[self.operand(*handle).into(), out.into()],
+                        "http.websocket.receive",
+                    )
+                    .expect("receive one bounded WebSocket message");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.receive.load")
+                    .unwrap()
+                    .into_struct_value();
+                let raw_kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.receive.kind")
+                    .unwrap()
+                    .into_int_value();
+                let is_error = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        raw_kind,
+                        self.context.i32_type().const_int(2, false),
+                        "http.websocket.receive.is_error",
+                    )
+                    .unwrap();
+                let kind = self
+                    .builder
+                    .build_int_z_extend(
+                        is_error,
+                        self.context.i32_type(),
+                        "http.websocket.receive.result_kind",
+                    )
+                    .unwrap();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.receive.error")
+                    .unwrap()
+                    .into_int_value();
+                let record = self
+                    .builder
+                    .build_extract_value(value, 2, "http.websocket.receive.record")
+                    .unwrap()
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, record, 0, 1))
+            }
+            ir::InstKind::HttpWebSocketClose { handle, enum_id } => {
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.close.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_close,
+                        &[self.operand(*handle).into(), out.into()],
+                        "http.websocket.close",
+                    )
+                    .expect("close a task-owned WebSocket");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.close.load")
+                    .unwrap()
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.close.kind")
+                    .unwrap()
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.close.error")
+                    .unwrap()
+                    .into_int_value();
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+            ir::InstKind::HttpWebSocketCloseWith {
+                handle,
+                code,
+                reason,
+                enum_id,
+            } => {
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.close_with.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_websocket_close_with,
+                        &[
+                            self.operand(*handle).into(),
+                            self.operand(*code).into(),
+                            self.operand(*reason).into(),
+                            out.into(),
+                        ],
+                        "http.websocket.close_with",
+                    )
+                    .expect("close a task-owned WebSocket with a status");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.close_with.load")
+                    .unwrap()
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.close_with.kind")
+                    .unwrap()
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.close_with.error")
+                    .unwrap()
+                    .into_int_value();
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+            ir::InstKind::HttpRequestSecret {
+                method,
+                url,
+                body,
+                headers,
+                header_name,
+                secret_value,
+                enum_id,
+                response_class_id,
+            } => {
+                let method = self.operand(*method);
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let headers = self.operand(*headers);
+                let header_name = self.operand(*header_name);
+                let secret_value = self.operand(*secret_value);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.secret_request.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_request_secret,
+                        &[
+                            method.into(),
+                            url.into(),
+                            body.into(),
+                            headers.into(),
+                            header_name.into(),
+                            secret_value.into(),
+                            out.into(),
+                        ],
+                        "http.secret_request",
+                    )
+                    .expect("call the explicit HTTP secret sink adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.secret_request.out.load")
+                    .expect("load HTTP secret sink outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.secret_request.kind")
+                    .expect("extract HTTP secret sink tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.secret_request.error")
+                    .expect("extract HTTP secret sink error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.secret_request.status")
+                    .expect("extract HTTP secret sink status")
+                    .into_int_value();
+                let response_body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.secret_request.body")
+                    .expect("extract HTTP secret sink response body")
+                    .into_pointer_value();
+                let response_headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.secret_request.headers")
+                    .expect("extract HTTP secret sink response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (response_body, response_headers),
+                ))
+            }
+            ir::InstKind::HttpHead {
+                url,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.head.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_head,
+                        &[url.into(), out.into()],
+                        "http.head",
+                    )
+                    .expect("call the HTTP HEAD runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.head.out.load")
+                    .expect("load HTTP HEAD outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.head.kind")
+                    .expect("extract HTTP result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.head.error")
+                    .expect("extract HTTP error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.head.status")
+                    .expect("extract HTTP status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.head.body")
+                    .expect("extract HTTP body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.head.headers")
+                    .expect("extract HTTP response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpQuery {
+                url,
+                query,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let query = self.operand(*query);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.query.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_query,
+                        &[url.into(), query.into(), out.into()],
+                        "http.query",
+                    )
+                    .expect("call the HTTP QUERY runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.query.out.load")
+                    .expect("load HTTP QUERY outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.query.kind")
+                    .expect("extract HTTP QUERY result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.query.error")
+                    .expect("extract HTTP QUERY error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.query.status")
+                    .expect("extract HTTP QUERY status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.query.body")
+                    .expect("extract HTTP QUERY body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.query.headers")
+                    .expect("extract HTTP response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpQueryWithContentType {
+                url,
+                query,
+                content_type,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let query = self.operand(*query);
+                let content_type = self.operand(*content_type);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.query.custom.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_query_with_content_type,
+                        &[url.into(), query.into(), content_type.into(), out.into()],
+                        "http.query.custom",
+                    )
+                    .expect("call the HTTP QUERY media-type runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.query.custom.out.load")
+                    .expect("load custom HTTP QUERY outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.query.custom.kind")
+                    .expect("extract custom HTTP QUERY result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.query.custom.error")
+                    .expect("extract custom HTTP QUERY error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.query.custom.status")
+                    .expect("extract custom HTTP QUERY status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.query.custom.body")
+                    .expect("extract custom HTTP QUERY body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.query.custom.headers")
+                    .expect("extract custom HTTP QUERY response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpPost {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.post.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_post,
+                        &[url.into(), body.into(), out.into()],
+                        "http.post",
+                    )
+                    .expect("call the HTTP POST runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.post.out.load")
+                    .expect("load HTTP POST outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.post.kind")
+                    .expect("extract HTTP POST result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.post.error")
+                    .expect("extract HTTP POST error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.post.status")
+                    .expect("extract HTTP POST status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.post.body")
+                    .expect("extract HTTP POST body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.post.headers")
+                    .expect("extract HTTP response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpPostJson {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.post.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_post_json,
+                        &[url.into(), body.into(), out.into()],
+                        "http.post.json",
+                    )
+                    .expect("call the HTTP POST runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.post.out.load")
+                    .expect("load HTTP POST outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.post.kind")
+                    .expect("extract HTTP POST result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.post.error")
+                    .expect("extract HTTP POST error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.post.status")
+                    .expect("extract HTTP POST status")
+                    .into_int_value();
+                let body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.post.body")
+                    .expect("extract HTTP POST body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.post.headers")
+                    .expect("extract HTTP response headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (body, headers),
+                ))
+            }
+            ir::InstKind::HttpPostBytes {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let body = self.operand(*body);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.post.bytes.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_post_bytes,
+                        &[url.into(), body.into(), out.into()],
+                        "http.post.bytes",
+                    )
+                    .expect("call the HTTP byte POST runtime adapter");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.post.bytes.out.load")
+                    .expect("load HTTP byte POST outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.post.bytes.kind")
+                    .expect("extract HTTP byte POST result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.post.bytes.error")
+                    .expect("extract HTTP byte POST error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.post.bytes.status")
+                    .expect("extract HTTP byte POST status")
+                    .into_int_value();
+                let response_body = self
+                    .builder
+                    .build_extract_value(value, 3, "http.post.bytes.body")
+                    .expect("extract HTTP byte POST body")
+                    .into_pointer_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.post.bytes.headers")
+                    .expect("extract HTTP byte POST headers")
+                    .into_pointer_value();
+                Some(self.build_http_get_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    status,
+                    (response_body, headers),
+                ))
+            }
+            ir::InstKind::HttpGetStream {
+                url,
+                headers,
+                enum_id,
+                response_class_id,
+            } => {
+                let url = self.operand(*url);
+                let request_headers = self.operand(*headers);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.stream.open.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_get_stream,
+                        &[url.into(), request_headers.into(), out.into()],
+                        "http.stream.open",
+                    )
+                    .expect("open a streaming HTTP GET");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.stream.open.load")
+                    .expect("load streaming HTTP GET result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.stream.open.kind")
+                    .expect("extract stream-open result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.stream.open.error")
+                    .expect("extract stream-open error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.stream.open.status")
+                    .expect("extract stream status")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 3, "http.stream.open.handle")
+                    .expect("extract stream handle")
+                    .into_int_value();
+                let headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.stream.open.headers")
+                    .expect("extract stream headers")
+                    .into_pointer_value();
+                Some(self.build_http_stream_open_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    (status, handle),
+                    headers,
+                ))
+            }
+            ir::InstKind::HttpResponseToStream {
+                status,
+                body,
+                headers,
+                enum_id,
+                response_class_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.response.stream.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_response_to_stream,
+                        &[
+                            self.operand(*status).into(),
+                            self.operand(*body).into(),
+                            self.operand(*headers).into(),
+                            out.into(),
+                        ],
+                        "http.response.stream.open",
+                    )
+                    .expect("transfer buffered HTTP response body to stream");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.response.stream.load")
+                    .expect("load transferred HTTP response stream")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.response.stream.kind")
+                    .expect("extract response stream result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.response.stream.error")
+                    .expect("extract response stream error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.response.stream.status")
+                    .expect("extract response stream status")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 3, "http.response.stream.handle")
+                    .expect("extract response stream handle")
+                    .into_int_value();
+                let response_headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.response.stream.headers")
+                    .expect("extract response stream headers")
+                    .into_pointer_value();
+                Some(self.build_http_stream_open_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    (status, handle),
+                    response_headers,
+                ))
+            }
+            ir::InstKind::HttpRequestStream {
+                method,
+                url,
+                headers,
+                callback,
+                callback_layout,
+                result_callback,
+                enum_id,
+                response_class_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let captures = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http.upload.captures")
+                    .expect("extract HTTP upload captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http.upload.capture.root")
+                    .expect("allocate HTTP upload capture root");
+                self.builder
+                    .build_store(capture_root, captures)
+                    .expect("store HTTP upload capture root");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http.upload.roots")
+                    .expect("allocate HTTP upload roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http.upload.root.entry",
+                    )
+                }
+                .expect("index HTTP upload root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register HTTP upload capture root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http.upload.push.roots",
+                    )
+                    .expect("root HTTP upload captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http.upload.context")
+                    .expect("allocate HTTP upload callback context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store HTTP upload callback context");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.upload.out");
+                let thunk = self.http_upload_producer_thunk(*callback_layout, *result_callback);
+                self.builder
+                    .build_call(
+                        self.runtime.http_request_stream,
+                        &[
+                            self.operand(*method).into(),
+                            self.operand(*url).into(),
+                            self.operand(*headers).into(),
+                            thunk.as_global_value().as_pointer_value().into(),
+                            context.into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*result_callback), false)
+                                .into(),
+                            out.into(),
+                        ],
+                        "http.upload.open",
+                    )
+                    .expect("stream an HTTP request body");
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http.upload.pop.roots")
+                    .expect("release HTTP upload captures");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.upload.out.load")
+                    .expect("load HTTP upload result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.upload.kind")
+                    .expect("extract HTTP upload result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.upload.error")
+                    .expect("extract HTTP upload error")
+                    .into_int_value();
+                let status = self
+                    .builder
+                    .build_extract_value(value, 2, "http.upload.status")
+                    .expect("extract HTTP upload response status")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(value, 3, "http.upload.handle")
+                    .expect("extract HTTP upload response handle")
+                    .into_int_value();
+                let response_headers = self
+                    .builder
+                    .build_extract_value(value, 4, "http.upload.headers")
+                    .expect("extract HTTP upload response headers")
+                    .into_pointer_value();
+                Some(self.build_http_stream_open_result(
+                    *enum_id,
+                    *response_class_id,
+                    kind,
+                    error,
+                    (status, handle),
+                    response_headers,
+                ))
+            }
+            ir::InstKind::HttpRegisterServerResponseProducer {
+                callback,
+                callback_layout,
+            } => {
+                let callable = self.operand(*callback).into_struct_value();
+                let captures = self
+                    .builder
+                    .build_extract_value(
+                        callable,
+                        CALLABLE_CAPTURE_FIELD,
+                        "http.server.producer.captures",
+                    )
+                    .expect("extract HTTP server producer captures")
+                    .into_pointer_value();
+                let context_type = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_type, "http.server.producer.context")
+                    .expect("allocate HTTP server producer context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store HTTP server producer callable");
+                let thunk = self.http_upload_producer_thunk(*callback_layout, false);
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.http_server_producer_register,
+                            &[
+                                thunk.as_global_value().as_pointer_value().into(),
+                                context.into(),
+                                captures.into(),
+                            ],
+                            "http.server.producer.register",
+                        )
+                        .expect("register HTTP server response producer")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("producer registration returns a handle"),
+                )
+            }
+            ir::InstKind::HttpResponseReadChunk {
+                handle,
+                max_bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let max_bytes = self.operand(*max_bytes);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.stream.read.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_stream_read_chunk,
+                        &[handle.into(), max_bytes.into(), out.into()],
+                        "http.stream.read",
+                    )
+                    .expect("read an HTTP response chunk");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.stream.read.load")
+                    .expect("load HTTP response chunk")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.stream.read.kind")
+                    .expect("extract stream-read tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.stream.read.error")
+                    .expect("extract stream-read error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(value, 2, "http.stream.read.bytes")
+                    .expect("extract response chunk")
+                    .into_pointer_value();
+                Some(self.build_http_stream_chunk(*enum_id, kind, error, bytes))
+            }
+            ir::InstKind::HttpResponseReadAll { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.stream.read_all.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_stream_read_all,
+                        &[handle.into(), out.into()],
+                        "http.stream.read_all",
+                    )
+                    .expect("consume an HTTP response stream");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.stream.read_all.load")
+                    .expect("load consumed HTTP response body")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.stream.read_all.kind")
+                    .expect("extract stream read-all tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.stream.read_all.error")
+                    .expect("extract stream read-all error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(value, 2, "http.stream.read_all.bytes")
+                    .expect("extract consumed response bytes")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
+            }
+            ir::InstKind::HttpResponseReadSseEvent { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.sse.next.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_stream_sse_next,
+                        &[handle.into(), out.into()],
+                        "http.sse.next",
+                    )
+                    .expect("read the next HTTP server-sent event");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.sse.next.load")
+                    .expect("load HTTP SSE event fields")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.sse.next.kind")
+                    .expect("extract HTTP SSE result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.sse.next.error")
+                    .expect("extract HTTP SSE error")
+                    .into_int_value();
+                let fields = self
+                    .builder
+                    .build_extract_value(value, 2, "http.sse.next.fields")
+                    .expect("extract HTTP SSE event fields")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, fields, 0, 1))
+            }
+            ir::InstKind::HttpResponseSseHeartbeatCount { handle } => {
+                let handle = self.operand(*handle);
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.http_stream_sse_heartbeat_count,
+                            &[handle.into()],
+                            "http.sse.heartbeat_count",
+                        )
+                        .expect("read the SSE heartbeat count")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("SSE heartbeat count returns UInt64"),
+                )
+            }
+            ir::InstKind::HttpResponseStreamClose { handle } => {
+                let handle = self.operand(*handle);
+                let closed = self
+                    .builder
+                    .build_call(
+                        self.runtime.http_stream_close,
+                        &[handle.into()],
+                        "http.stream.close",
+                    )
+                    .expect("close an HTTP response stream")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("HTTP response close returns Boolean");
+                Some(closed)
+            }
+            ir::InstKind::HttpUrlNormalize { value, enum_id } => {
+                let value = self.operand(*value);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.url.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_url_normalize,
+                        &[value.into(), out.into()],
+                        "http.url.normalize",
+                    )
+                    .expect("call the HTTP URL normalizer");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.url.out.load")
+                    .expect("load normalized HTTP URL outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.url.kind")
+                    .expect("extract URL result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.url.error")
+                    .expect("extract URL error")
+                    .into_int_value();
+                let normalized = self
+                    .builder
+                    .build_extract_value(value, 2, "http.url.normalized")
+                    .expect("extract normalized URL")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, normalized, 0, 1))
+            }
+            ir::InstKind::HttpUrlResolve {
+                base,
+                reference,
+                enum_id,
+            } => {
+                let base = self.operand(*base);
+                let reference = self.operand(*reference);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.url.resolve.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_url_resolve,
+                        &[base.into(), reference.into(), out.into()],
+                        "http.url.resolve",
+                    )
+                    .expect("call the HTTP URL resolver");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.url.resolve.load")
+                    .expect("load resolved HTTP URL outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.url.resolve.kind")
+                    .expect("extract URL resolution tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.url.resolve.error")
+                    .expect("extract URL resolution error")
+                    .into_int_value();
+                let normalized = self
+                    .builder
+                    .build_extract_value(value, 2, "http.url.resolve.value")
+                    .expect("extract resolved URL")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, normalized, 0, 1))
+            }
+            ir::InstKind::HttpResponseText { body, enum_id } => {
+                let body = self.operand(*body);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.text.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_response_text,
+                        &[body.into(), out.into()],
+                        "http.response.text",
+                    )
+                    .expect("call the HTTP response text decoder");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.text.out.load")
+                    .expect("load HTTP response text result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.text.kind")
+                    .expect("extract HTTP text result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.text.error")
+                    .expect("extract HTTP text error")
+                    .into_int_value();
+                let text = self
+                    .builder
+                    .build_extract_value(value, 2, "http.text.value")
+                    .expect("extract HTTP response text")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, text, 0, 1))
+            }
+            ir::InstKind::HttpResponseHeaderValues {
+                headers,
+                name,
+                enum_id,
+            } => {
+                let headers = self.operand(*headers);
+                let name = self.operand(*name);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.header.values.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_response_header_values,
+                        &[headers.into(), name.into(), out.into()],
+                        "http.response.header_values",
+                    )
+                    .expect("call the HTTP response header lookup");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.header.values.out.load")
+                    .expect("load HTTP header lookup result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.header.values.kind")
+                    .expect("extract HTTP header result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.header.values.error")
+                    .expect("extract HTTP header error")
+                    .into_int_value();
+                let values = self
+                    .builder
+                    .build_extract_value(value, 2, "http.header.values.list")
+                    .expect("extract HTTP header values list")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, values, 0, 1))
+            }
+            ir::InstKind::HttpFormParse {
+                body,
+                content_type,
+                enum_id,
+            } => {
+                let body = self.operand(*body);
+                let content_type = self.operand(*content_type);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.form.parse.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_form_parse,
+                        &[body.into(), content_type.into(), out.into()],
+                        "http.form.parse",
+                    )
+                    .expect("parse HTTP form data");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.form.parse.out.load")
+                    .expect("load HTTP form parse outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.form.parse.kind")
+                    .expect("extract HTTP form result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.form.parse.error")
+                    .expect("extract HTTP form error")
+                    .into_int_value();
+                let fields = self
+                    .builder
+                    .build_extract_value(value, 2, "http.form.parse.fields")
+                    .expect("extract parsed HTTP form fields")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, fields, 0, 1))
+            }
+            ir::InstKind::HttpMultipartParse {
+                body,
+                content_type,
+                enum_id,
+                data_class_id,
+            } => {
+                let body = self.operand(*body);
+                let content_type = self.operand(*content_type);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.multipart.parse.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_multipart_parse,
+                        &[body.into(), content_type.into(), out.into()],
+                        "http.multipart.parse",
+                    )
+                    .expect("parse HTTP multipart data");
+                let result = self
+                    .builder
+                    .build_load(out_ty, out, "http.multipart.parse.out.load")
+                    .expect("load HTTP multipart outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(result, 0, "http.multipart.parse.kind")
+                    .expect("extract HTTP multipart result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(result, 1, "http.multipart.parse.error")
+                    .expect("extract HTTP multipart error")
+                    .into_int_value();
+                let names = self
+                    .builder
+                    .build_extract_value(result, 2, "http.multipart.parse.names")
+                    .expect("extract multipart names")
+                    .into_pointer_value();
+                let filenames = self
+                    .builder
+                    .build_extract_value(result, 3, "http.multipart.parse.filenames")
+                    .expect("extract multipart filenames")
+                    .into_pointer_value();
+                let filename_present = self
+                    .builder
+                    .build_extract_value(result, 4, "http.multipart.parse.filename_present")
+                    .expect("extract multipart filename-presence list")
+                    .into_pointer_value();
+                let content_types = self
+                    .builder
+                    .build_extract_value(result, 5, "http.multipart.parse.content_types")
+                    .expect("extract multipart content types")
+                    .into_pointer_value();
+                let content_type_present = self
+                    .builder
+                    .build_extract_value(result, 6, "http.multipart.parse.content_type_present")
+                    .expect("extract multipart content-type-presence list")
+                    .into_pointer_value();
+                let bodies = self
+                    .builder
+                    .build_extract_value(result, 7, "http.multipart.parse.bodies")
+                    .expect("extract multipart bodies")
+                    .into_pointer_value();
+                let upload_handles = self
+                    .builder
+                    .build_extract_value(result, 8, "http.multipart.parse.upload_handles")
+                    .expect("extract managed upload handles")
+                    .into_pointer_value();
+
+                let roots_type = self.context.struct_type(&[ptr.into(); 7], false);
+                let roots = self.aligned_alloca(roots_type.into(), "http.multipart.roots");
+                for (index, value) in [
+                    names,
+                    filenames,
+                    filename_present,
+                    content_types,
+                    content_type_present,
+                    bodies,
+                    upload_handles,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let slot = self
+                        .builder
+                        .build_struct_gep(
+                            roots_type,
+                            roots,
+                            index as u32,
+                            "http.multipart.root.slot",
+                        )
+                        .expect("address multipart managed root slot");
+                    self.builder
+                        .build_store(slot, value)
+                        .expect("root multipart managed list");
+                }
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(7, false).into(),
+                        ],
+                        "http.multipart.push.roots",
+                    )
+                    .expect("root multipart result lists");
+
+                let layout = &self.module.objects[*data_class_id as usize];
+                debug_assert_eq!(layout.fields.len(), 7);
+                let object_type = object_struct(
+                    self.context,
+                    layout,
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                );
+                let object = self
+                    .builder
+                    .build_call(
+                        self.runtime.alloc,
+                        &[
+                            object_type
+                                .size_of()
+                                .expect("multipart data object size")
+                                .into(),
+                            object_type.get_alignment().into(),
+                        ],
+                        "http.multipart.object",
+                    )
+                    .expect("allocate HTTPMultipartData")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("runtime allocator returns a pointer")
+                    .into_pointer_value();
+                self.builder
+                    .build_store(object, self.descriptors[*data_class_id as usize])
+                    .expect("write HTTPMultipartData descriptor");
+                for (index, value) in [
+                    names,
+                    filenames,
+                    filename_present,
+                    content_types,
+                    content_type_present,
+                    bodies,
+                    upload_handles,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let field = self
+                        .builder
+                        .build_struct_gep(
+                            object_type,
+                            object,
+                            OBJECT_HEADER_FIELDS + index as u32,
+                            "http.multipart.field",
+                        )
+                        .expect("address multipart data field");
+                    self.builder
+                        .build_store(field, value)
+                        .expect("store multipart data field");
+                }
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http.multipart.pop.roots")
+                    .expect("pop multipart managed roots");
+                Some(self.build_tagged_outcome(*enum_id, kind, error, object, 0, 1))
+            }
+            ir::InstKind::HttpUploadRead {
+                handle,
+                offset,
+                max_bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle).into_int_value();
+                let offset = self.operand(*offset).into_int_value();
+                let max_bytes = self.operand(*max_bytes).into_int_value();
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.upload.read.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_upload_read,
+                        &[handle.into(), offset.into(), max_bytes.into(), out.into()],
+                        "http.upload.read",
+                    )
+                    .expect("read a managed multipart upload range");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.upload.read.value")
+                    .expect("load multipart upload read result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.upload.read.kind")
+                    .expect("extract upload read tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.upload.read.error")
+                    .expect("extract upload read error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(value, 2, "http.upload.read.bytes")
+                    .expect("extract upload bytes")
+                    .into_pointer_value();
+                Some(self.build_http_stream_chunk(*enum_id, kind, error, bytes))
+            }
+            ir::InstKind::HttpUploadClose { handle } => {
+                let handle = self.operand(*handle).into_int_value();
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.http_upload_close,
+                            &[handle.into()],
+                            "http.upload.close",
+                        )
+                        .expect("close a managed multipart upload")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("HTTP upload close returns Boolean"),
+                )
+            }
+            ir::InstKind::HttpFormValues { fields, name } => {
+                let fields = self.operand(*fields);
+                let name = self.operand(*name);
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.http_form_values,
+                            &[fields.into(), name.into()],
+                            "http.form.values",
+                        )
+                        .expect("select HTTP form values")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("HTTP form values return a list"),
+                )
+            }
+            ir::InstKind::HttpFormEncode { fields, enum_id } => {
+                let fields = self.operand(*fields);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.form.encode.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_form_encode,
+                        &[fields.into(), out.into()],
+                        "http.form.encode",
+                    )
+                    .expect("encode HTTP form data");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.form.encode.out.load")
+                    .expect("load HTTP form encoding outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.form.encode.kind")
+                    .expect("extract HTTP form result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.form.encode.error")
+                    .expect("extract HTTP form error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(value, 2, "http.form.encode.bytes")
+                    .expect("extract encoded HTTP form bytes")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
+            }
+            ir::InstKind::HttpMultipartEncode {
+                metadata,
+                bodies,
+                boundary,
+                enum_id,
+            } => {
+                let metadata = self.operand(*metadata);
+                let bodies = self.operand(*bodies);
+                let boundary = self.operand(*boundary);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.multipart.encode.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_multipart_encode,
+                        &[metadata.into(), bodies.into(), boundary.into(), out.into()],
+                        "http.multipart.encode",
+                    )
+                    .expect("encode HTTP multipart data");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.multipart.encode.out.load")
+                    .expect("load HTTP multipart encoding outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.multipart.encode.kind")
+                    .expect("extract HTTP multipart result tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.multipart.encode.error")
+                    .expect("extract HTTP multipart error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(value, 2, "http.multipart.encode.bytes")
+                    .expect("extract encoded HTTP multipart bytes")
+                    .into_pointer_value();
+                Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
+            }
+            ir::InstKind::HttpRoutePatternValidate { pattern } => {
+                let pattern = self.operand(*pattern);
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.http_route_pattern_validate,
+                        &[pattern.into()],
+                        "http.route.pattern.validate",
+                    )
+                    .expect("validate HTTP route pattern")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("route validation returns status");
+                Some(status)
+            }
+            ir::InstKind::HttpRoutePatternConflict {
+                method,
+                first,
+                second,
+            } => {
+                let method = self.operand(*method);
+                let first = self.operand(*first);
+                let second = self.operand(*second);
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.http_route_pattern_conflict,
+                        &[method.into(), first.into(), second.into()],
+                        "http.route.pattern.conflict",
+                    )
+                    .expect("check HTTP route conflict")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("route conflict check returns status");
+                Some(status)
+            }
+            ir::InstKind::HttpRouteMatch { pattern, path } => {
+                let pattern = self.operand(*pattern);
+                let path = self.operand(*path);
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        ptr.into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.route.match.out");
+                self.builder
+                    .build_call(
+                        self.runtime.http_route_match,
+                        &[pattern.into(), path.into(), out.into()],
+                        "http.route.match",
+                    )
+                    .expect("match HTTP route pattern");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.route.match.out.load")
+                    .expect("load HTTP route match outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.route.match.kind")
+                    .expect("extract HTTP route match tag")
+                    .into_int_value();
+                let parameters = self
+                    .builder
+                    .build_extract_value(value, 2, "http.route.match.parameters")
+                    .expect("extract HTTP route parameters")
+                    .into_pointer_value();
+                let is_success = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        kind,
+                        self.context.i32_type().const_zero(),
+                        "http.route.match.succeeded",
+                    )
+                    .expect("compare HTTP route match outcome");
+                let empty = self
+                    .builder
+                    .build_call(
+                        self.runtime.list_new,
+                        &[
+                            self.context.i64_type().const_int(8, false).into(),
+                            self.context.i64_type().const_int(8, false).into(),
+                            self.context.bool_type().const_int(1, false).into(),
+                        ],
+                        "http.route.match.empty",
+                    )
+                    .expect("allocate empty HTTP route match list")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("list_new returns a list")
+                    .into_pointer_value();
+                Some(
+                    self.builder
+                        .build_select(is_success, parameters, empty, "http.route.match.result")
+                        .expect("select HTTP route match list"),
+                )
+            }
+            ir::InstKind::HttpRouteAllowHeader {
+                patterns,
+                methods,
+                path,
+            } => {
+                let patterns = self.operand(*patterns);
+                let methods = self.operand(*methods);
+                let path = self.operand(*path);
+                let encoded = self
+                    .builder
+                    .build_call(
+                        self.runtime.http_route_allow_header,
+                        &[patterns.into(), methods.into(), path.into()],
+                        "http.route.allow.header",
+                    )
+                    .expect("encode HTTP Allow response header")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("HTTP Allow encoder returns Array<Byte>");
+                Some(encoded)
+            }
+            ir::InstKind::HttpHeadersEncode { names, values } => {
+                let names = self.operand(*names);
+                let values = self.operand(*values);
+                let encoded = self
+                    .builder
+                    .build_call(
+                        self.runtime.http_headers_encode,
+                        &[names.into(), values.into()],
+                        "http.headers.encoded",
+                    )
+                    .expect("encode HTTP response headers")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("HTTP header encoder returns Array<Byte>");
+                Some(encoded)
+            }
+            ir::InstKind::HttpServerServeOnce {
+                stream_handle,
+                secure,
+                max_requests,
+                require_http2,
+                callback,
+                callback_layout,
+                request_class_id,
+                response_class_id,
+                enum_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let capture_value = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http.server.capture")
+                    .expect("extract HTTP handler captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http.server.capture.root")
+                    .expect("allocate capture root");
+                self.builder
+                    .build_store(capture_root, capture_value)
+                    .expect("store capture root");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http.server.roots")
+                    .expect("allocate server roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http.server.root.entry",
+                    )
+                }
+                .expect("index capture root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register capture root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http.server.push.roots",
+                    )
+                    .expect("root HTTP handler captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http.server.context")
+                    .expect("allocate HTTP callback context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store HTTP callback context");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.server.out");
+                let thunk = self.http_server_handler_thunk(
+                    *callback_layout,
+                    *request_class_id,
+                    *response_class_id,
+                );
+                let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.http_server_serve_once,
+                        &[
+                            self.operand(*stream_handle).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*secure), false)
+                                .into(),
+                            self.operand(*max_requests).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*require_http2), false)
+                                .into(),
+                            thunk_ptr.into(),
+                            context.into(),
+                            out.into(),
+                        ],
+                        "http.server.serve",
+                    )
+                    .expect("serve HTTP request");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.server.out.value")
+                    .expect("load HTTP server outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.server.kind")
+                    .expect("extract HTTP server tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.server.error")
+                    .expect("extract HTTP server error")
+                    .into_int_value();
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http.server.pop.roots")
+                    .expect("pop HTTP handler roots");
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+            ir::InstKind::HttpServerWebSocketServeOnce {
+                stream_handle,
+                secure,
+                path,
+                allowed_origins,
+                allow_missing_origin,
+                protocols,
+                max_messages,
+                callback,
+                callback_layout,
+                websocket_class_id,
+                enum_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let capture_value = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http.websocket.capture")
+                    .expect("extract WebSocket captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http.websocket.capture.root")
+                    .expect("allocate WebSocket capture root");
+                self.builder
+                    .build_store(capture_root, capture_value)
+                    .expect("store WebSocket capture root");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http.websocket.roots")
+                    .expect("allocate WebSocket roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http.websocket.root.entry",
+                    )
+                }
+                .expect("index WebSocket capture root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register WebSocket capture root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http.websocket.push.roots",
+                    )
+                    .expect("root WebSocket handler captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http.websocket.context")
+                    .expect("allocate WebSocket callback context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store WebSocket callback context");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http.websocket.server.out");
+                let thunk =
+                    self.http_websocket_server_handler_thunk(*callback_layout, *websocket_class_id);
+                let thunk_ptr = thunk.as_global_value().as_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.http_server_websocket_serve_once,
+                        &[
+                            self.operand(*stream_handle).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*secure), false)
+                                .into(),
+                            self.operand(*path).into(),
+                            self.operand(*allowed_origins).into(),
+                            self.builder
+                                .build_int_z_extend(
+                                    self.operand(*allow_missing_origin).into_int_value(),
+                                    self.context.i32_type(),
+                                    "http.websocket.allow.missing",
+                                )
+                                .expect("extend origin flag")
+                                .into(),
+                            self.operand(*protocols).into(),
+                            self.operand(*max_messages).into(),
+                            thunk_ptr.into(),
+                            context.into(),
+                            out.into(),
+                        ],
+                        "http.websocket.server.serve",
+                    )
+                    .expect("serve HTTP WebSocket session");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http.websocket.server.out.value")
+                    .expect("load WebSocket server outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http.websocket.server.kind")
+                    .expect("extract WebSocket server tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http.websocket.server.error")
+                    .expect("extract WebSocket server error")
+                    .into_int_value();
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http.websocket.pop.roots")
+                    .expect("pop WebSocket handler roots");
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
             // A nullable value is `{ i1 present, T value }`. The absent form's
             // payload slot is zeroed, not left undefined: ordinary Zirk-level
             // code never reads it without checking the flag first (the
@@ -5945,6 +9817,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .build_insert_value(cloned, new_capture, CALLABLE_CAPTURE_FIELD, "capture")
                         .expect("capture pointer")
                         .into_struct_value();
+                    let dispatch = self
+                        .builder
+                        .build_extract_value(source, CALLABLE_DISPATCH_FIELD, "dispatch")
+                        .expect("uniform callable dispatch entry");
+                    cloned = self
+                        .builder
+                        .build_insert_value(cloned, dispatch, CALLABLE_DISPATCH_FIELD, "dispatch")
+                        .expect("uniform callable dispatch entry")
+                        .into_struct_value();
                     Some(cloned.into())
                 }
                 _ => {
@@ -6053,10 +9934,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(transferred)
             }
 
-            // Phase 4d boxed callables: build a two-word `{ fn_ptr, capture_ptr
-            // }` value. The capture block is allocated through
-            // `zirk_rt_alloc_callable` and the captured values are copied into
-            // it; callers read them back out in `CallCallable`.
+            // Build a boxed callable with its concrete target, managed
+            // captures, and capture-layout-independent dispatch adapter.
             ir::InstKind::MakeCallable { target, captures } => {
                 let ir::IrType::Callable(id) = instruction.ty else {
                     panic!(
@@ -6111,6 +9990,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     block
                 };
 
+                let dispatch_fn = self.build_callable_dispatch_adapter(target.as_str(), id);
                 let struct_type = self
                     .llvm_type(instruction.ty)
                     .expect("callable type")
@@ -6130,16 +10010,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_insert_value(value, capture_ptr, CALLABLE_CAPTURE_FIELD, "capture")
                     .expect("capture pointer")
                     .into_struct_value();
+                value = self
+                    .builder
+                    .build_insert_value(
+                        value,
+                        dispatch_fn.as_global_value().as_pointer_value(),
+                        CALLABLE_DISPATCH_FIELD,
+                        "dispatch",
+                    )
+                    .expect("uniform callable dispatch entry")
+                    .into_struct_value();
 
                 Some(value.into())
             }
 
             ir::InstKind::CallCallable { callable, args } => {
                 let callable_value = self.operand(*callable).into_struct_value();
-                let fn_ptr = self
+                let dispatch_fn = self
                     .builder
-                    .build_extract_value(callable_value, CALLABLE_FUNCTION_FIELD, "fn")
-                    .expect("function pointer")
+                    .build_extract_value(callable_value, CALLABLE_DISPATCH_FIELD, "dispatch")
+                    .expect("uniform callable dispatch entry")
                     .into_pointer_value();
                 let capture_ptr = self
                     .builder
@@ -6153,33 +10043,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 };
                 let layout = &self.module.closures[id as usize];
 
-                let mut arguments: Vec<BasicMetadataValueEnum> = Vec::new();
-                for (index, capture_ty) in layout.captures.iter().enumerate() {
-                    let offset = self.closure_capture_offset(layout, index);
-                    let slot_ptr = unsafe {
-                        self.builder.build_gep(
-                            self.context.i8_type(),
-                            capture_ptr,
-                            &[offset],
-                            "capture_load",
-                        )
-                    }
-                    .expect("capture load gep");
-                    let capture_ty_llvm = self
-                        .llvm_type(*capture_ty)
-                        .expect("capture type has an LLVM representation");
-                    let loaded = self
-                        .builder
-                        .build_load(capture_ty_llvm, slot_ptr, "capture")
-                        .expect("load capture");
-                    arguments.push(loaded.into());
-                }
+                let mut arguments: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+                arguments.push(capture_ptr.into());
 
                 for arg in args {
                     arguments.push(self.operand(*arg).into());
                 }
 
-                let signature = closure_signature(
+                let signature = callable_dispatch_signature(
                     self.context,
                     layout,
                     &self.module.closures,
@@ -6188,7 +10059,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 );
                 let call = self
                     .builder
-                    .build_indirect_call(signature, fn_ptr, &arguments, "call")
+                    .build_indirect_call(signature, dispatch_fn, &arguments, "call")
                     .expect("indirect callable call");
 
                 call.try_as_basic_value().basic()
@@ -7218,6 +11089,701 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         (kind, error, payload)
     }
 
+    fn network_out_struct(&self) -> inkwell::types::StructType<'ctx> {
+        self.context.struct_type(
+            &[
+                self.context.i32_type().into(),
+                self.context.i32_type().into(),
+                self.context.i64_type().into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            false,
+        )
+    }
+
+    /// Calls one compiler-owned network leaf. The shared out record contains
+    /// `(kind, error, scalar, payload)` so pointer-backed arrays and integer
+    /// handles/counts use one stable C ABI layout.
+    fn call_network_out(
+        &mut self,
+        function: FunctionValue<'ctx>,
+        extra_args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> (
+        IntValue<'ctx>,
+        IntValue<'ctx>,
+        IntValue<'ctx>,
+        PointerValue<'ctx>,
+    ) {
+        let out_ty = self.network_out_struct();
+        let slot = self.aligned_alloca(out_ty.into(), "network.out");
+        let mut args = extra_args.to_vec();
+        args.push(slot.into());
+        self.builder
+            .build_call(function, &args, "network_call")
+            .expect("call to a network runtime operation");
+        let loaded = self
+            .builder
+            .build_load(out_ty, slot, "network.out.load")
+            .expect("load the network result record")
+            .into_struct_value();
+        let extract_int = |builder: &Builder<'ctx>, index, name| {
+            builder
+                .build_extract_value(loaded, index, name)
+                .expect("extract network result field")
+                .into_int_value()
+        };
+        let kind = extract_int(self.builder, 0, "network.kind");
+        let error = extract_int(self.builder, 1, "network.error");
+        let scalar = extract_int(self.builder, 2, "network.scalar");
+        let payload = self
+            .builder
+            .build_extract_value(loaded, 3, "network.payload")
+            .expect("extract network payload")
+            .into_pointer_value();
+        (kind, error, scalar, payload)
+    }
+
+    fn build_u64_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        scalar: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = self
+            .builder
+            .build_insert_value(struct_type.const_zero(), kind, 0, "network.result.kind")
+            .expect("insert network result tag")
+            .into_struct_value();
+        let value_field = layout.variants[0][0];
+        debug_assert_eq!(
+            layout.fields[value_field as usize].ty,
+            ir::IrType::Int(ir::IntWidth::U64),
+            "TCP handles and write counts use UInt64 result payloads"
+        );
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                scalar,
+                value_field + ENUM_HEADER_FIELDS,
+                "network.result.value",
+            )
+            .expect("insert network scalar result")
+            .into_struct_value();
+        let error_field = layout.variants[1][0];
+        debug_assert_eq!(
+            layout.fields[error_field as usize].ty,
+            ir::IrType::Int(ir::IntWidth::I32),
+            "TCPError is represented by its i32 discriminant"
+        );
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "network.result.error",
+            )
+            .expect("insert network error")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_u64_object_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        class_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        handle: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = &self.module.objects[class_id as usize];
+        debug_assert_eq!(layout.fields.len(), 1);
+        debug_assert_eq!(layout.fields[0].ty, ir::IrType::Int(ir::IntWidth::U64));
+        let object_type = object_struct(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let object = self
+            .builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    object_type.size_of().expect("TCPStream object size").into(),
+                    object_type.get_alignment().into(),
+                ],
+                "tcp.stream.object",
+            )
+            .expect("allocate accepted TCPStream")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        self.builder
+            .build_store(object, self.descriptors[class_id as usize])
+            .expect("write TCPStream type descriptor");
+        let field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS,
+                "tcp.stream.handle",
+            )
+            .expect("address TCPStream handle field");
+        self.builder
+            .build_store(field, handle)
+            .expect("store accepted TCPStream handle");
+
+        let result_layout = self.module.enums[enum_id as usize].clone();
+        let result_type = enum_struct(
+            self.context,
+            &result_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = self
+            .builder
+            .build_insert_value(result_type.const_zero(), kind, 0, "tcp.accept.kind")
+            .expect("insert TCP accept result discriminant")
+            .into_struct_value();
+        let value_field = result_layout.variants[0][0];
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                object,
+                value_field + ENUM_HEADER_FIELDS,
+                "tcp.accept.stream",
+            )
+            .expect("insert accepted TCPStream")
+            .into_struct_value();
+        let error_field = result_layout.variants[1][0];
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "tcp.accept.error",
+            )
+            .expect("insert TCP accept error")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_http_get_result(
+        &mut self,
+        enum_id: u32,
+        response_class_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        status: IntValue<'ctx>,
+        response_buffers: (PointerValue<'ctx>, PointerValue<'ctx>),
+    ) -> BasicValueEnum<'ctx> {
+        let (body, headers) = response_buffers;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+        // The response body was allocated by the runtime adapter. Root it
+        // across the response-object allocation, which may trigger a GC.
+        let rooted_body = self
+            .builder
+            .build_alloca(ptr_type, "http.get.body.root")
+            .expect("allocate HTTP body root slot");
+        self.builder
+            .build_store(rooted_body, body)
+            .expect("store HTTP body root");
+        let rooted_headers = self
+            .builder
+            .build_alloca(ptr_type, "http.get.headers.root")
+            .expect("allocate HTTP headers root slot");
+        self.builder
+            .build_store(rooted_headers, headers)
+            .expect("store HTTP headers root");
+        let roots_type = ptr_type.array_type(2);
+        let roots = self
+            .builder
+            .build_alloca(roots_type, "http.get.roots")
+            .expect("allocate HTTP root array");
+        let root_entry = unsafe {
+            self.builder.build_gep(
+                roots_type,
+                roots,
+                &[
+                    self.context.i32_type().const_zero(),
+                    self.context.i32_type().const_zero(),
+                ],
+                "http.get.root.entry",
+            )
+        }
+        .expect("index HTTP root array");
+        self.builder
+            .build_store(root_entry, rooted_body)
+            .expect("store HTTP root address");
+        let header_root_entry = unsafe {
+            self.builder.build_gep(
+                roots_type,
+                roots,
+                &[
+                    self.context.i32_type().const_zero(),
+                    self.context.i32_type().const_int(1, false),
+                ],
+                "http.get.headers.root.entry",
+            )
+        }
+        .expect("index HTTP headers root array");
+        self.builder
+            .build_store(header_root_entry, rooted_headers)
+            .expect("store HTTP headers root address");
+        self.builder
+            .build_call(
+                self.runtime.push_frame,
+                &[
+                    roots.into(),
+                    self.context.i64_type().const_int(2, false).into(),
+                ],
+                "http.get.push.roots",
+            )
+            .expect("push temporary HTTP response roots");
+
+        let layout = &self.module.objects[response_class_id as usize];
+        // HTTPResponse adds consumption, client stream, and server producer
+        // state plus optional SSE heartbeat metadata after buffered values.
+        debug_assert_eq!(layout.fields.len(), 7);
+        let object_type = object_struct(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let object = self
+            .builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    object_type
+                        .size_of()
+                        .expect("HTTP response object size")
+                        .into(),
+                    object_type.get_alignment().into(),
+                ],
+                "http.response.object",
+            )
+            .expect("allocate HTTPResponse")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        self.builder
+            .build_store(object, self.descriptors[response_class_id as usize])
+            .expect("write HTTPResponse type descriptor");
+        let status_field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS,
+                "http.response.status",
+            )
+            .expect("address HTTPResponse status field");
+        self.builder
+            .build_store(status_field, status)
+            .expect("store HTTPResponse status");
+        let body_field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS + 1,
+                "http.response.body",
+            )
+            .expect("address HTTPResponse body field");
+        let rooted_body_value = self
+            .builder
+            .build_load(ptr_type, rooted_body, "http.get.body.rooted")
+            .expect("reload rooted HTTP body");
+        self.builder
+            .build_store(body_field, rooted_body_value)
+            .expect("store HTTPResponse body");
+        let headers_field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS + 2,
+                "http.response.headers",
+            )
+            .expect("address HTTPResponse headers field");
+        let rooted_headers_value = self
+            .builder
+            .build_load(ptr_type, rooted_headers, "http.get.headers.rooted")
+            .expect("reload rooted HTTP headers");
+        self.builder
+            .build_store(headers_field, rooted_headers_value)
+            .expect("store HTTPResponse headers");
+        self.builder
+            .build_call(self.runtime.pop_frame, &[], "http.get.pop.roots")
+            .expect("pop temporary HTTP response roots");
+
+        let result_layout = self.module.enums[enum_id as usize].clone();
+        let result_type = enum_struct(
+            self.context,
+            &result_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = self
+            .builder
+            .build_insert_value(result_type.const_zero(), kind, 0, "http.result.kind")
+            .expect("insert HTTP Result discriminant")
+            .into_struct_value();
+        let response_field = result_layout.variants[0][0];
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                object,
+                response_field + ENUM_HEADER_FIELDS,
+                "http.result.response",
+            )
+            .expect("insert HTTP response object")
+            .into_struct_value();
+        let error_field = result_layout.variants[1][0];
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "http.result.error",
+            )
+            .expect("insert HTTP error discriminant")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_http_stream_chunk(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        bytes: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        debug_assert_eq!(layout.variants.len(), 3);
+        let built = self
+            .builder
+            .build_insert_value(struct_type.const_zero(), kind, 0, "http.chunk.kind")
+            .expect("insert HTTPStreamChunk variant")
+            .into_struct_value();
+        let bytes_field = layout.variants[0][0];
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                bytes,
+                bytes_field + ENUM_HEADER_FIELDS,
+                "http.chunk.bytes",
+            )
+            .expect("insert HTTPStreamChunk bytes")
+            .into_struct_value();
+        let error_field = layout.variants[2][0];
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "http.chunk.error",
+            )
+            .expect("insert HTTPStreamChunk error")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_http_stream_open_result(
+        &mut self,
+        enum_id: u32,
+        response_class_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        status_and_handle: (IntValue<'ctx>, IntValue<'ctx>),
+        headers: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let (status, handle) = status_and_handle;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let rooted_headers = self
+            .builder
+            .build_alloca(ptr_type, "http.stream.headers.root")
+            .expect("allocate streaming header root");
+        self.builder
+            .build_store(rooted_headers, headers)
+            .expect("root streaming response headers");
+        let roots_type = ptr_type.array_type(1);
+        let roots = self
+            .builder
+            .build_alloca(roots_type, "http.stream.roots")
+            .expect("allocate streaming response roots");
+        let root_entry = unsafe {
+            self.builder.build_gep(
+                roots_type,
+                roots,
+                &[
+                    self.context.i32_type().const_zero(),
+                    self.context.i32_type().const_zero(),
+                ],
+                "http.stream.root.entry",
+            )
+        }
+        .expect("index streaming response root array");
+        self.builder
+            .build_store(root_entry, rooted_headers)
+            .expect("store streaming header root address");
+        self.builder
+            .build_call(
+                self.runtime.push_frame,
+                &[
+                    roots.into(),
+                    self.context.i64_type().const_int(1, false).into(),
+                ],
+                "http.stream.push.roots",
+            )
+            .expect("push streaming response roots");
+
+        let layout = &self.module.objects[response_class_id as usize];
+        debug_assert!(
+            layout
+                .fields
+                .iter()
+                .any(|field| field.name == "status_code_value")
+        );
+        debug_assert!(layout.fields.iter().any(|field| field.name == "body_value"));
+        debug_assert!(
+            layout
+                .fields
+                .iter()
+                .any(|field| field.name == "header_data")
+        );
+        debug_assert!(
+            layout
+                .fields
+                .iter()
+                .any(|field| field.name == "body_consumed")
+        );
+        debug_assert!(
+            layout
+                .fields
+                .iter()
+                .any(|field| field.name == "stream_handle")
+        );
+        debug_assert!(
+            layout
+                .fields
+                .iter()
+                .any(|field| field.name == "server_producer_handle")
+        );
+        let object_type = object_struct(
+            self.context,
+            layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let object = self
+            .builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    object_type
+                        .size_of()
+                        .expect("HTTP stream response size")
+                        .into(),
+                    object_type.get_alignment().into(),
+                ],
+                "http.response.object",
+            )
+            .expect("allocate HTTPResponse")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        self.builder
+            .build_store(object, self.descriptors[response_class_id as usize])
+            .expect("write HTTPResponse type descriptor");
+
+        let store_field =
+            |this: &mut Self, field_name: &str, value: BasicValueEnum<'ctx>, label: &str| {
+                let index = layout
+                    .fields
+                    .iter()
+                    .position(|field| field.name == field_name)
+                    .expect("HTTPResponse layout contains expected field");
+                let field = this
+                    .builder
+                    .build_struct_gep(
+                        object_type,
+                        object,
+                        OBJECT_HEADER_FIELDS + index as u32,
+                        label,
+                    )
+                    .expect("address HTTPResponse field");
+                this.builder
+                    .build_store(field, value)
+                    .expect("store HTTPResponse field");
+            };
+        store_field(
+            self,
+            "status_code_value",
+            status.into(),
+            "http.response.status.field",
+        );
+        store_field(
+            self,
+            "body_value",
+            ptr_type.const_null().into(),
+            "http.response.body.field",
+        );
+        store_field(
+            self,
+            "body_consumed",
+            self.context.bool_type().const_zero().into(),
+            "http.response.consumed.field",
+        );
+        store_field(
+            self,
+            "stream_handle",
+            handle.into(),
+            "http.response.handle.field",
+        );
+        store_field(
+            self,
+            "server_producer_handle",
+            self.context.i64_type().const_zero().into(),
+            "http.response.producer.handle.field",
+        );
+        store_field(
+            self,
+            "server_sse_heartbeat_ms",
+            self.context.i32_type().const_zero().into(),
+            "http.response.sse.heartbeat.field",
+        );
+        let headers_index = layout
+            .fields
+            .iter()
+            .position(|field| field.name == "header_data")
+            .expect("HTTPResponse layout contains headers");
+        let headers_field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS + headers_index as u32,
+                "http.response.headers.field",
+            )
+            .expect("address HTTPResponse headers field");
+        let headers_value = self
+            .builder
+            .build_load(ptr_type, rooted_headers, "http.stream.headers.rooted")
+            .expect("reload rooted HTTP response headers");
+        self.builder
+            .build_store(headers_field, headers_value)
+            .expect("store HTTPResponse headers");
+        self.builder
+            .build_call(self.runtime.pop_frame, &[], "http.stream.pop.roots")
+            .expect("pop streaming response roots");
+
+        let result_layout = self.module.enums[enum_id as usize].clone();
+        let result_type = enum_struct(
+            self.context,
+            &result_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let mut built = self
+            .builder
+            .build_insert_value(result_type.const_zero(), kind, 0, "http.stream.result.kind")
+            .expect("insert HTTP stream Result discriminant")
+            .into_struct_value();
+        let response_field = result_layout.variants[0][0];
+        built = self
+            .builder
+            .build_insert_value(
+                built,
+                object,
+                response_field + ENUM_HEADER_FIELDS,
+                "http.stream.result.value",
+            )
+            .expect("insert HTTPResponse into Result")
+            .into_struct_value();
+        let error_field = result_layout.variants[1][0];
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "http.stream.result.error",
+            )
+            .expect("insert HTTP stream error")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_void_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = self
+            .builder
+            .build_insert_value(struct_type.const_zero(), kind, 0, "network.void.kind")
+            .expect("insert network void result tag")
+            .into_struct_value();
+        let error_field = layout.variants[1][0];
+        debug_assert_eq!(
+            layout.fields[error_field as usize].ty,
+            ir::IrType::Int(ir::IntWidth::I32),
+            "TCPError is represented by its i32 discriminant"
+        );
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "network.void.error",
+            )
+            .expect("insert network void error")
+            .into_struct_value()
+            .into()
+    }
+
     /// Builds a `Result<Void, IoError>` value from `stdout.flush`/
     /// `stderr.flush`'s own status code (`0` = `Ok`, `1` = `Error`, matching
     /// `register_native_result_enum`'s `Ok = 0, Error = 1` order) — the only
@@ -7326,6 +11892,53 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 "stdin.error",
             )
             .expect("insert the error field")
+            .into_struct_value();
+        built.into()
+    }
+
+    /// Builds `Result<Boolean, EnvironmentError>` from an environment
+    /// presence check. The native `detail` field is the boolean value for an
+    /// `Ok` result and the error discriminant for an `Error` result.
+    fn build_boolean_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        detail: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = struct_type.const_zero();
+        let built = self
+            .builder
+            .build_insert_value(built, kind, 0, "environment.contains.kind")
+            .expect("insert the result discriminant")
+            .into_struct_value();
+        let bool_value = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                detail,
+                self.context.i32_type().const_zero(),
+                "environment.contains.value",
+            )
+            .expect("compare presence value");
+        let value_field = layout.variants[0][0] + ENUM_HEADER_FIELDS;
+        let built = self
+            .builder
+            .build_insert_value(built, bool_value, value_field, "environment.contains.ok")
+            .expect("insert the Boolean result")
+            .into_struct_value();
+        let error_field = layout.variants[1][0] + ENUM_HEADER_FIELDS;
+        let built = self
+            .builder
+            .build_insert_value(built, detail, error_field, "environment.contains.error")
+            .expect("insert the environment error discriminant")
             .into_struct_value();
         built.into()
     }

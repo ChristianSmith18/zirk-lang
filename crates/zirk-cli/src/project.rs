@@ -37,6 +37,25 @@ pub struct ProjectManifest {
     pub entry: PathBuf,
     pub source_roots: Vec<PathBuf>,
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Environment requirements declared by this application or package.
+    /// Declarations describe requested authority only; they never grant it.
+    pub environment_permissions: EnvironmentPermissions,
+    /// Network requirements declared by this application or package. They
+    /// request authority but never grant it.
+    pub network_permissions: NetworkPermissions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvironmentPermissions {
+    pub read_names: std::collections::BTreeSet<String>,
+    pub secret_names: std::collections::BTreeSet<String>,
+    pub list_names: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NetworkPermissions {
+    pub connect_origins: std::collections::BTreeSet<String>,
+    pub listen_addresses: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,11 +175,44 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
     let mut entry = None;
     let mut source_roots = Vec::new();
     let mut dependencies = BTreeMap::new();
+    let mut environment_permissions = EnvironmentPermissions::default();
+    let mut network_permissions = NetworkPermissions::default();
+    let mut permission_block: Option<&str> = None;
+    let mut environment_block = false;
+    let mut network_block = false;
     for raw in text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
     {
+        if raw == "permissions {" {
+            if permission_block.is_some() {
+                return Err(ProjectError(
+                    "nested `permissions` blocks are not allowed".into(),
+                ));
+            }
+            permission_block = Some("permissions");
+            continue;
+        }
+        if permission_block.is_some() {
+            match raw {
+                "}" if environment_block => environment_block = false,
+                "}" if network_block => network_block = false,
+                "}" => permission_block = None,
+                "environment {" if !environment_block && !network_block => environment_block = true,
+                "network {" if !network_block && !environment_block => network_block = true,
+                _ if environment_block => {
+                    parse_environment_permission(raw, &mut environment_permissions)?;
+                }
+                _ if network_block => parse_network_permission(raw, &mut network_permissions)?,
+                _ => {
+                    return Err(ProjectError(format!(
+                        "unknown permissions declaration `{raw}`"
+                    )));
+                }
+            }
+            continue;
+        }
         let mut pieces = raw.split_whitespace();
         match pieces.next() {
             Some("project") => {
@@ -244,6 +296,9 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
             None => {}
         }
     }
+    if permission_block.is_some() || environment_block || network_block {
+        return Err(ProjectError("unclosed `.zkinit` permissions block".into()));
+    }
     let name = name.ok_or_else(|| ProjectError("manifest is missing `project`".into()))?;
     let kind = kind.ok_or_else(|| ProjectError("manifest is missing `kind`".into()))?;
     let entry = entry.unwrap_or_else(|| {
@@ -262,7 +317,136 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
         entry,
         source_roots,
         dependencies,
+        environment_permissions,
+        network_permissions,
     })
+}
+
+fn parse_network_permission(
+    line: &str,
+    permissions: &mut NetworkPermissions,
+) -> Result<(), ProjectError> {
+    let (kind, body) = line
+        .split_once(": {")
+        .ok_or_else(|| ProjectError(format!("invalid network permission `{line}`")))?;
+    let body = body
+        .strip_suffix('}')
+        .ok_or_else(|| ProjectError(format!("invalid network permission `{line}`")))?
+        .trim();
+    let scope = match kind {
+        "connect" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("origins: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        "listen" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("addresses: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        _ => return Err(ProjectError(format!("unknown network permission `{kind}`"))),
+    }
+    .ok_or_else(|| ProjectError(format!("invalid `{kind}` network permission scope")))?;
+
+    for value in scope
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = quoted(value)?;
+        match kind {
+            "connect" => {
+                zirk_runtime_core::network_policy::NetworkOrigin::parse(&value)
+                    .map_err(|_| ProjectError(format!("invalid network origin `{value}`")))?;
+                if !value.starts_with("http://")
+                    && !value.starts_with("https://")
+                    && !value.starts_with("tcp://")
+                {
+                    return Err(ProjectError(format!(
+                        "network origin `{value}` must be a canonical http, https, or tcp origin"
+                    )));
+                }
+                permissions.connect_origins.insert(value);
+            }
+            "listen" => {
+                value.parse::<std::net::SocketAddr>().map_err(|_| {
+                    ProjectError(format!("listen address `{value}` must be an IP:port pair"))
+                })?;
+                permissions.listen_addresses.insert(value);
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+fn parse_environment_permission(
+    line: &str,
+    permissions: &mut EnvironmentPermissions,
+) -> Result<(), ProjectError> {
+    let (kind, body) = line
+        .split_once(": {")
+        .ok_or_else(|| ProjectError(format!("invalid environment permission `{line}`")))?;
+    let body = body
+        .strip_suffix("}")
+        .ok_or_else(|| ProjectError(format!("invalid environment permission `{line}`")))?
+        .trim();
+    if !body.ends_with("during: runtime;") {
+        return Err(ProjectError(
+            "environment permissions must use `during: runtime`".into(),
+        ));
+    }
+    if kind == "list_names" {
+        if body != "during: runtime;" {
+            return Err(ProjectError(
+                "`list_names` only accepts `during: runtime`".into(),
+            ));
+        }
+        permissions.list_names = true;
+        return Ok(());
+    }
+    let names = body
+        .strip_suffix("during: runtime;")
+        .map(str::trim_end)
+        .and_then(|body| body.strip_suffix(';'))
+        .map(str::trim_end)
+        .and_then(|body| body.strip_prefix("names: ["))
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| ProjectError(format!("`{kind}` needs a `names` array")))?;
+    let target = match kind {
+        "read" => &mut permissions.read_names,
+        "secrets" => &mut permissions.secret_names,
+        _ => {
+            return Err(ProjectError(format!(
+                "unknown environment permission `{kind}`"
+            )));
+        }
+    };
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let name = quoted(name)?;
+        if name.is_empty()
+            || name.contains('=')
+            || name.contains('\0')
+            || name.to_ascii_uppercase().starts_with("ZIRK_RUNTIME_")
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(ProjectError(format!(
+                "invalid environment variable name `{name}`"
+            )));
+        }
+        target.insert(name);
+    }
+    Ok(())
 }
 
 pub fn parse_lockfile(text: &str) -> Result<Lockfile, ProjectError> {
@@ -568,6 +752,106 @@ mod tests {
         assert_eq!(manifest.kind, ProjectKind::Package);
         assert_eq!(manifest.entry, PathBuf::from("src/package.zrk"));
         assert!(manifest.dependencies.contains_key("acme.web"));
+        assert!(manifest.environment_permissions.read_names.is_empty());
+    }
+
+    #[test]
+    fn manifest_parses_exact_environment_requirements_without_granting_them() {
+        let manifest = parse_manifest(
+            r#"project "acme.cli"
+kind application
+permissions {
+environment {
+read: { names: ["APP_MODE", "LOG_LEVEL"]; during: runtime; }
+secrets: { names: ["DB_PASSWORD"]; during: runtime; }
+list_names: { during: runtime; }
+}
+}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.environment_permissions.read_names,
+            ["APP_MODE", "LOG_LEVEL"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.environment_permissions.secret_names,
+            ["DB_PASSWORD"].into_iter().map(str::to_owned).collect()
+        );
+        assert!(manifest.environment_permissions.list_names);
+    }
+
+    #[test]
+    fn manifest_cannot_request_runtime_internal_environment_names() {
+        let manifest = "project \"app\"\nkind application\npermissions {\nenvironment {\nread: { names: [\"zirk_runtime_permission_grant\"]; during: runtime; }\n}\n}\n";
+        assert!(parse_manifest(manifest).is_err());
+    }
+
+    #[test]
+    fn manifest_parses_exact_network_origins_and_listen_addresses() {
+        let manifest = parse_manifest(
+            r#"project "acme.server"
+kind application
+permissions {
+network {
+connect: { origins: ["https://api.example.com:443", "tcp://cache.example:9000"]; during: runtime; }
+listen: { addresses: ["127.0.0.1:8080", "[::1]:8443"]; during: runtime; }
+}
+}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.network_permissions.connect_origins,
+            ["https://api.example.com:443", "tcp://cache.example:9000"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.listen_addresses,
+            ["127.0.0.1:8080", "[::1]:8443"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_ambiguous_network_scopes() {
+        for declaration in [
+            r#"connect: { origins: ["https://api.example.com"]; during: runtime; }"#,
+            r#"connect: { origins: ["https://user:pass@example.com:443"]; during: runtime; }"#,
+            r#"connect: { origins: ["https://api.example.com:443/admin"]; during: runtime; }"#,
+            r#"connect: { origins: ["tcp://cache.example"]; during: runtime; }"#,
+            r#"listen: { addresses: ["localhost:8080"]; during: runtime; }"#,
+            r#"listen: { addresses: ["127.0.0.1:8080"]; during: build; }"#,
+        ] {
+            let text = format!(
+                "project \"app\"\nkind application\npermissions {{\nnetwork {{\n{declaration}\n}}\n}}"
+            );
+            assert!(parse_manifest(&text).is_err(), "accepted {declaration}");
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_unsafe_environment_permission_declarations() {
+        for declaration in [
+            r#"read: { names: ["*" ]; during: runtime; }"#,
+            r#"read: { names: ["APP_MODE"]; during: build; }"#,
+            r#"write: { names: ["APP_MODE"]; during: runtime; }"#,
+            r#"read: { names: ["APP_MODE"]; junk: true; during: runtime; }"#,
+        ] {
+            let text = format!(
+                "project \"app\"\nkind application\npermissions {{\nenvironment {{\n{declaration}\n}}\n}}"
+            );
+            assert!(parse_manifest(&text).is_err(), "accepted {declaration}");
+        }
+        assert!(
+            parse_manifest("project \"app\"\nkind application\npermissions {\nenvironment {")
+                .is_err()
+        );
     }
     #[test]
     fn malformed_lock_integrity_is_rejected_deterministically() {

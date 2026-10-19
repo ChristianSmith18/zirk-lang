@@ -1,0 +1,208 @@
+import { HostPortAddress, SocketAddress } from std.net::address;
+
+share enum TCPError {
+    InvalidAddress,
+    PermissionDenied,
+    AddressNotAllowed,
+    DnsFailure,
+    DnsResultLimit,
+    UnsupportedTransport,
+    BufferLimitExceeded,
+    Io,
+    Cancelled,
+    CapacityExceeded,
+    Timeout,
+    Closed,
+    WrongOwner,
+}
+
+share enum TCPReadResult<T> {
+    Value(value: T),
+    End,
+    Error(error: TCPError),
+}
+
+// The endpoint is a canonical `tcp://host:port` origin. Its exact scope must
+// be present in the application's approved `network.connect.origins` grant.
+share class TCPResourceError implements Error {
+    private inmut reason: TCPError;
+
+    construct(reason: TCPError) { this.reason = reason; }
+
+    message(): String { return this.reason.to_string(); }
+
+    code(): String { return "TCP_RESOURCE"; }
+
+    cause(): Error? { return null; }
+}
+
+share class TCPStream implements Resource<TCPResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static connect(endpoint: String): Result<TCPStream, TCPError> {
+        return match TCPStream.connect_native(endpoint) {
+            Ok(handle) => TCPStream.stream_ok(TCPStream(handle));
+            Error(error) => TCPStream.stream_error(error);
+        };
+    }
+
+    static connect_to(address: SocketAddress): Result<TCPStream, TCPError> {
+        return TCPStream.connect(address.as_tcp_origin());
+    }
+
+    // Resolves a validated hostname only after the exact canonical origin is
+    // authorized by the effective runtime grant.
+    static connect_to_host(address: HostPortAddress): Result<TCPStream, TCPError> {
+        return TCPStream.connect(address.as_tcp_origin());
+    }
+
+    read(max_bytes: UInt64): TCPReadResult<Array<Byte>> {
+        return TCPStream.read_native(this.handle, max_bytes);
+    }
+
+    write(bytes: Array<Byte>): Result<UInt64, TCPError> {
+        return TCPStream.write_native(this.handle, bytes);
+    }
+
+    write_all(bytes: Array<Byte>): Result<Void, TCPError> {
+        return TCPStream.write_all_native(this.handle, bytes);
+    }
+
+    peer_address(): Result<String, TCPError> {
+        return TCPStream.peer_address_native(this.handle);
+    }
+
+    shutdown(): Result<Void, TCPError> {
+        return TCPStream.shutdown_native(this.handle);
+    }
+
+    close(): Result<Void, TCPResourceError> {
+        return match TCPStream.close_native(this.handle) {
+            Ok(_) => TCPStream.close_ok();
+            Error(error) => TCPStream.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean {
+        return TCPStream.is_closed_native(this.handle);
+    }
+
+    private static connect_native(endpoint: String): Result<UInt64, TCPError> {
+        return Error(TCPError.PermissionDenied);
+    }
+
+    private static read_native(handle: UInt64, max_bytes: UInt64): TCPReadResult<Array<Byte>> {
+        return TCPReadResult.Error(TCPError.Closed);
+    }
+
+    private static write_native(handle: UInt64, bytes: Array<Byte>): Result<UInt64, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static write_all_native(handle: UInt64, bytes: Array<Byte>): Result<Void, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static peer_address_native(handle: UInt64): Result<String, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static shutdown_native(handle: UInt64): Result<Void, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static close_native(handle: UInt64): Result<Void, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static close_ok(): Result<Void, TCPResourceError> {
+        return Ok(TCPStream.unit());
+    }
+
+    private static unit(): Void {
+        return;
+    }
+
+    private static close_error(error: TCPError): Result<Void, TCPResourceError> {
+        return Error(TCPResourceError(error));
+    }
+
+    private static is_closed_native(handle: UInt64): Boolean {
+        return true;
+    }
+
+    private static stream_ok(stream: TCPStream): Result<TCPStream, TCPError> {
+        return Ok(stream);
+    }
+
+    private static stream_error(error: TCPError): Result<TCPStream, TCPError> {
+        return Error(error);
+    }
+}
+
+// A listener requires a separate exact address in the approved
+// `network.listen.addresses` scope. `accept` returns a stream owned by the
+// task that performs the accept.
+share class TCPListener implements Resource<TCPResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static bind(endpoint: String): Result<TCPListener, TCPError> {
+        return match TCPListener.bind_native(endpoint) {
+            Ok(handle) => TCPListener.listener_ok(TCPListener(handle));
+            Error(error) => TCPListener.listener_error(error);
+        };
+    }
+
+    static bind_to(address: SocketAddress): Result<TCPListener, TCPError> {
+        return TCPListener.bind(address.as_tcp_origin());
+    }
+
+    accept(): Result<TCPStream, TCPError> {
+        return TCPListener.accept_native(this.handle);
+    }
+
+    close(): Result<Void, TCPResourceError> {
+        return match TCPListener.close_listener_native(this.handle) {
+            Ok(_) => TCPListener.close_ok();
+            Error(error) => TCPListener.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean {
+        return TCPListener.is_listener_closed_native(this.handle);
+    }
+
+    private static bind_native(endpoint: String): Result<UInt64, TCPError> {
+        return Error(TCPError.PermissionDenied);
+    }
+
+    private static accept_native(handle: UInt64): Result<TCPStream, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static close_listener_native(handle: UInt64): Result<Void, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static is_listener_closed_native(handle: UInt64): Boolean { return true; }
+
+    private static listener_ok(value: TCPListener): Result<TCPListener, TCPError> {
+        return Ok(value);
+    }
+
+    private static listener_error(error: TCPError): Result<TCPListener, TCPError> {
+        return Error(error);
+    }
+
+    private static close_ok(): Result<Void, TCPResourceError> { return Ok(TCPListener.unit()); }
+
+    private static unit(): Void { return; }
+
+    private static close_error(error: TCPError): Result<Void, TCPResourceError> {
+        return Error(TCPResourceError(error));
+    }
+}

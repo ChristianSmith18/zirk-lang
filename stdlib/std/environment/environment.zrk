@@ -1,0 +1,179 @@
+// This bundled package publishes the source API over compiler-owned native
+// bindings. Environment access remains fail-closed until the trusted runtime
+// installs a verified effective grant for the current project.
+import { Stringifiable } from std.io;
+
+// Static conversion protocol used by Environment.get<T>. Primitive parsing
+// is compiler-provided; application types can implement the same contract.
+share interface EnvironmentParsable<T> {
+    static parse(text: String): Result<T, String>;
+}
+
+share enum EnvironmentError {
+    InvalidName,
+    Missing,
+    PermissionDenied,
+    InvalidEncoding,
+    ValueTooLarge,
+    Parse,
+    Platform,
+}
+
+share enum SecretError {
+    InvalidName,
+    Missing,
+    PermissionDenied,
+    InvalidEncoding,
+    ValueTooLarge,
+    Platform,
+}
+
+share class Environment {
+    static get<T from EnvironmentParsable<T> = String>(name: String): Result<T, EnvironmentError> {
+        return match Environment.get_string_native(name) {
+            Ok(text) => match T.parse(text) {
+                Ok(value) => Ok<T, EnvironmentError>(value);
+                Error(_) => Error<T, EnvironmentError>(EnvironmentError.Parse);
+            }
+            Error(error) => Error<T, EnvironmentError>(error);
+        };
+    }
+
+    private static get_string_native(name: String): Result<String, EnvironmentError> {
+        return Error(EnvironmentError.PermissionDenied);
+    }
+
+    // Named numeric readers are convenience wrappers for callers that prefer
+    // an explicit result type. They preserve the same authorization and
+    // missing-value errors as generic `get` and add Parse only for an
+    // authorized value that cannot be converted.
+    static get_int32(name: String): Result<Int32, EnvironmentError> {
+        return match Environment.get_string_native(name) {
+            Ok(value) => match Int32.parse(value) {
+                Ok(parsed) => Environment.int32_ok(parsed);
+                Error(_) => Environment.int32_error(EnvironmentError.Parse);
+            }
+            Error(error) => Environment.int32_error(error);
+        };
+    }
+
+    static get_float64(name: String): Result<Float64, EnvironmentError> {
+        return match Environment.get_string_native(name) {
+            Ok(value) => match Float64.parse(value) {
+                Ok(parsed) => Environment.float64_ok(parsed);
+                Error(_) => Environment.float64_error(EnvironmentError.Parse);
+            }
+            Error(error) => Environment.float64_error(error);
+        };
+    }
+
+    static get_or_null(name: String): Result<String?, EnvironmentError> {
+        return match Environment.get_string_native(name) {
+            Ok(value) => Environment.nullable_ok(value);
+            Error(error) => match error {
+                EnvironmentError.Missing => Environment.nullable_ok(null);
+                _ => Environment.nullable_error(error);
+            }
+        };
+    }
+
+    static get_or<T from EnvironmentParsable<T> = String>(
+        name: String,
+        fallback: T,
+    ): Result<T, EnvironmentError> {
+        return match Environment.get_string_native(name) {
+            Ok(text) => match T.parse(text) {
+                Ok(value) => Ok<T, EnvironmentError>(value);
+                Error(_) => Error<T, EnvironmentError>(EnvironmentError.Parse);
+            }
+            Error(error) => match error {
+                EnvironmentError.Missing => Ok<T, EnvironmentError>(fallback);
+                _ => Error<T, EnvironmentError>(error);
+            }
+        };
+    }
+
+    static require(name: String): Result<String, EnvironmentError> {
+        return Environment.get_string_native(name);
+    }
+
+    static contains(name: String): Result<Boolean, EnvironmentError> {
+        return Environment.contains_authorized(name);
+    }
+
+    private static contains_authorized(name: String): Result<Boolean, EnvironmentError> {
+        return Error(EnvironmentError.PermissionDenied);
+    }
+
+    static list_names(): Result<List<String>, EnvironmentError> {
+        return Error(EnvironmentError.PermissionDenied);
+    }
+
+    static get_secret(name: String): Result<SecretString, SecretError> {
+        return match Environment.get_secret_value(name) {
+            Ok(value) => Environment.secret_ok(SecretString(value));
+            Error(error) => match error {
+                EnvironmentError.InvalidName => Environment.secret_error(SecretError.InvalidName);
+                EnvironmentError.Missing => Environment.secret_error(SecretError.Missing);
+                EnvironmentError.PermissionDenied => Environment.secret_error(SecretError.PermissionDenied);
+                EnvironmentError.InvalidEncoding => Environment.secret_error(SecretError.InvalidEncoding);
+                EnvironmentError.ValueTooLarge => Environment.secret_error(SecretError.ValueTooLarge);
+                _ => Environment.secret_error(SecretError.Platform);
+            }
+        };
+    }
+
+    private static get_secret_value(name: String): Result<String, EnvironmentError> {
+        return Error(EnvironmentError.PermissionDenied);
+    }
+
+    private static nullable_ok(value: String?): Result<String?, EnvironmentError> {
+        return Ok(value);
+    }
+
+    private static int32_ok(value: Int32): Result<Int32, EnvironmentError> { return Ok(value); }
+    private static int32_error(error: EnvironmentError): Result<Int32, EnvironmentError> { return Error(
+            error,
+        ); }
+    private static float64_ok(value: Float64): Result<Float64, EnvironmentError> { return Ok(value); }
+    private static float64_error(error: EnvironmentError): Result<Float64, EnvironmentError> { return Error(
+            error,
+        ); }
+
+    private static nullable_error(error: EnvironmentError): Result<String?, EnvironmentError> {
+        return Error(error);
+    }
+
+    private static string_ok(value: String): Result<String, EnvironmentError> {
+        return Ok(value);
+    }
+
+    private static string_error(error: EnvironmentError): Result<String, EnvironmentError> {
+        return Error(error);
+    }
+
+    private static boolean_ok(value: Boolean): Result<Boolean, EnvironmentError> {
+        return Ok(value);
+    }
+
+    private static boolean_error(error: EnvironmentError): Result<Boolean, EnvironmentError> {
+        return Error(error);
+    }
+
+    private static secret_ok(value: SecretString): Result<SecretString, SecretError> {
+        return Ok(value);
+    }
+
+    private static secret_error(error: SecretError): Result<SecretString, SecretError> {
+        return Error(error);
+    }
+}
+
+// Redacted even in ordinary string formatting; no accessor reveals contents.
+share class SecretString {
+    construct(private inmut value: String) { }
+
+    #override to_string(): String { return "<redacted>"; }
+}
+
+share type Env = Environment;

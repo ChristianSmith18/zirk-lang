@@ -16,8 +16,9 @@ fn main(): Void {
     stdout.println((a8 + b8) as Int32);
 
     // Aritmética comprobada y comparación con enteros sin signo.
-    mut u8: UInt8 = 200 as UInt8;
+    mut u8: UInt8 = 200;
     mut v8: UInt8 = 50 as UInt8;
+    stdout.println("type:", u8.type);
     stdout.println(u8 < v8);
     stdout.println(v8 < u8);
 

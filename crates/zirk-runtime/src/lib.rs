@@ -53,7 +53,10 @@ mod combinators;
 mod context;
 mod decimal;
 mod duration;
+pub mod environment;
 mod exceptions;
+pub mod http_api;
+pub mod http_runtime;
 // The cooperative executor (`ADR-017`): `zirk_rt_run_main` drives it, and
 // `fase-5-structured-tasks` will add the `task` / `await` C-ABI surface.
 #[allow(dead_code)]
@@ -71,6 +74,11 @@ mod memory;
 #[allow(dead_code)]
 mod managed_blocking;
 mod native_slice;
+pub mod network_api;
+#[allow(dead_code)] // Runtime spike; public transport bindings are delivered in later tasks.
+mod network_future;
+pub mod network_transport;
+pub mod permissions;
 // The `parallel` CPU-region worker pool (`ADR-019`, `parallel-cpu-regions`).
 // Staged at pool size 1 until the stop-the-world safepoint collector lands;
 // the C-ABI surface (`zirk_rt_pool_submit` / `_join` / `zirk_rt_safepoint_poll`)
@@ -117,7 +125,9 @@ pub use background::{
 };
 pub use channel::*;
 pub use char::*;
-pub use collector::{zirk_rt_pop_frame, zirk_rt_push_frame};
+pub use collector::{
+    zirk_rt_global_root_add, zirk_rt_global_root_remove, zirk_rt_pop_frame, zirk_rt_push_frame,
+};
 pub use executor::{
     BACKGROUND_JOB_CAPACITY, BACKGROUND_SHUTDOWN_GRACE, background_diagnostics_current,
     spawn_background, spawn_background_with_capture_root,

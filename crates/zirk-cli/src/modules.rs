@@ -176,13 +176,19 @@ fn load_with_project(
 /// logical identity is fixed and their trusted host bindings remain governed
 /// by `zirk_sema::stdlib` rather than source syntax.
 fn standard_package_roots() -> HashMap<String, PathBuf> {
-    let entry = absolute_normalize(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io/package.zrk"),
-    );
-    HashMap::from([(
-        "std.io".into(),
-        std::fs::canonicalize(&entry).unwrap_or(entry),
-    )])
+    ["io", "environment", "http", "net"]
+        .into_iter()
+        .map(|package| {
+            let entry = absolute_normalize(
+                &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("../../stdlib/std/{package}/package.zrk")),
+            );
+            (
+                format!("std.{package}"),
+                std::fs::canonicalize(&entry).unwrap_or(entry),
+            )
+        })
+        .collect()
 }
 
 /// Bundled source stays available to the browser/WASM frontend without a
@@ -190,17 +196,30 @@ fn standard_package_roots() -> HashMap<String, PathBuf> {
 /// identical across targets.
 fn standard_source(path: &Path) -> Option<&'static str> {
     let directory =
-        absolute_normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/io"));
+        absolute_normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std"));
     match path
         .strip_prefix(&directory)
         .ok()?
         .to_string_lossy()
         .as_ref()
     {
-        "package.zrk" => Some(include_str!("../../../stdlib/std/io/package.zrk")),
-        "stdin.zrk" => Some(include_str!("../../../stdlib/std/io/stdin.zrk")),
-        "stdout.zrk" => Some(include_str!("../../../stdlib/std/io/stdout.zrk")),
-        "stderr.zrk" => Some(include_str!("../../../stdlib/std/io/stderr.zrk")),
+        "io/package.zrk" => Some(include_str!("../../../stdlib/std/io/package.zrk")),
+        "io/stdin.zrk" => Some(include_str!("../../../stdlib/std/io/stdin.zrk")),
+        "io/stdout.zrk" => Some(include_str!("../../../stdlib/std/io/stdout.zrk")),
+        "io/stderr.zrk" => Some(include_str!("../../../stdlib/std/io/stderr.zrk")),
+        "environment/package.zrk" => {
+            Some(include_str!("../../../stdlib/std/environment/package.zrk"))
+        }
+        "environment/environment.zrk" => Some(include_str!(
+            "../../../stdlib/std/environment/environment.zrk"
+        )),
+        "http/package.zrk" => Some(include_str!("../../../stdlib/std/http/package.zrk")),
+        "http/http.zrk" => Some(include_str!("../../../stdlib/std/http/http.zrk")),
+        "net/package.zrk" => Some(include_str!("../../../stdlib/std/net/package.zrk")),
+        "net/tcp.zrk" => Some(include_str!("../../../stdlib/std/net/tcp.zrk")),
+        "net/dns.zrk" => Some(include_str!("../../../stdlib/std/net/dns.zrk")),
+        "net/address.zrk" => Some(include_str!("../../../stdlib/std/net/address.zrk")),
+        "net/tls.zrk" => Some(include_str!("../../../stdlib/std/net/tls.zrk")),
         _ => None,
     }
 }
@@ -232,9 +251,7 @@ impl Loader<'_> {
         authorized_root: &Path,
     ) -> Option<()> {
         let path = absolute_normalize(path);
-        let Some((path, identity_path)) = self.authorize_path(&path, authorized_root, from) else {
-            return None;
-        };
+        let (path, identity_path) = self.authorize_path(&path, authorized_root, from)?;
 
         if self.by_path.contains_key(&identity_path) {
             return Some(());

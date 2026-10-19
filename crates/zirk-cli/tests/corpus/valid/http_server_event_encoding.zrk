@@ -1,0 +1,77 @@
+import { HTTPError, HTTPServerEvent } from std.http;
+import { stdout } from std.io;
+
+fn bytes_equal(left: Array<Byte>, right: List<UInt8>): Boolean {
+    if left.length != right.length { return false; }
+    mut index: UInt64 = 0;
+    while index < left.length {
+        if left[index] != right[index] { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn main(): Void {
+    match HTTPServerEvent.encode(
+        "first\nsecond",
+        event_type: "update",
+        id: "cursor-1",
+        retry_ms: 2500 as UInt64,
+    ) {
+        Ok(frame) => {
+            if bytes_equal(
+                frame,
+                "event:update\nid:cursor-1\nretry:2500\ndata: first\ndata: second\n\n".bytes(),
+            ) {
+                stdout.println("encoded");
+            } else {
+                stdout.println("wrong framing");
+            }
+        }
+        Error(_) => stdout.println("valid event rejected");
+    }
+
+    match HTTPServerEvent.encode("", id: "") {
+        Ok(frame) => {
+            if bytes_equal(frame, "id:\ndata:\n\n".bytes()) {
+                stdout.println("message reset");
+            } else {
+                stdout.println("wrong reset framing");
+            }
+        }
+        Error(_) => stdout.println("empty event rejected");
+    }
+
+    match HTTPServerEvent.encode("first\r\nsecond\rthird") {
+        Ok(frame) => {
+            if bytes_equal(frame, "data: first\ndata: second\ndata: third\n\n".bytes()) {
+                stdout.println("line endings normalized");
+            } else {
+                stdout.println("wrong line endings");
+            }
+        }
+        Error(_) => stdout.println("line endings rejected");
+    }
+
+    match HTTPServerEvent.encode("data", event_type: "bad\nevent") {
+        Error(error) => {
+            if error == HTTPError.Protocol {
+                stdout.println("event injection rejected");
+            } else {
+                stdout.println("wrong event error");
+            }
+        }
+        Ok(_) => stdout.println("event injection accepted");
+    }
+
+    match HTTPServerEvent.encode("data", id: "bad\0id") {
+        Error(error) => {
+            if error == HTTPError.Protocol {
+                stdout.println("id injection rejected");
+            } else {
+                stdout.println("wrong id error");
+            }
+        }
+        Ok(_) => stdout.println("id injection accepted");
+    }
+}

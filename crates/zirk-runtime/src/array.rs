@@ -333,6 +333,22 @@ pub(crate) fn alloc_byte_array(bytes: &[u8]) -> *mut c_void {
     object
 }
 
+/// Copies an `Array<Byte>` into runtime-owned storage for a host protocol
+/// boundary. The caller must keep the managed array rooted for the duration
+/// of this call.
+pub(crate) unsafe fn copy_byte_array(array: *mut c_void, max_bytes: usize) -> Option<Vec<u8>> {
+    if array.is_null() {
+        return None;
+    }
+    let length = unsafe { zirk_rt_array_length(array) };
+    if length > max_bytes {
+        return None;
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts((array as *const u8).add(DATA_OFFSET), length) };
+    Some(bytes.to_vec())
+}
+
 /// Returns a pointer to the element at `index`, or terminates on an out-of-bounds index.
 ///
 /// # Safety

@@ -1,61 +1,71 @@
 # Build an HTTP Service
 
-Build a loopback service with one typed route and an E2E health check.
-
-> **Status:** target Zirk 1.x `std.http`; server/runtime delivery remains phased.
+Build a bounded loopback HTTP/1.1 service with one typed route and a JSON
+response. The current server API serves a configured finite number of requests
+and then releases its listener.
 
 ```text
 permissions {
     network {
-        listen: { origins: ["http://127.0.0.1:8080"]; during: runtime; }
+        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
     }
 }
 ```
 
 ```zirk
-import { HTTPMethod, HTTPRequest, HTTPResponse, HTTPServer } from std.http;
-import { SocketAddress } from std.net;
+import { HTTPError, HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer } from std.http;
+import { stderr, stdout } from std.io;
 
-fn health(request: HTTPRequest): Result<HTTPResponse, HTTPError> {
-    return Ok(HTTPResponse.json({ "status": "ok" }));
+fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return HTTPResponse.from_json(200, "42");
 }
 
 fn main(): Void {
-    mut server = HTTPServer(
-        address: SocketAddress("127.0.0.1", 8080),
-        request_body_limit: 1MiB,
-        header_limit: 32KiB,
-    );
-    server.route(HTTPMethod.Get, "/health", health);
-    server.serve();
+    match HTTPServer.bind("tcp://127.0.0.1:8080") {
+        Ok(listener) => {
+            mut router: HTTPRouter = HTTPRouter();
+            match router.route(HTTPMethod.Get, "/health", health) {
+                Ok(_) => match router.serve_and_close(listener, 1) {
+                    Ok(count) => stdout.println(count);
+                    Error(error) => stderr.println(error);
+                };
+                Error(error) => stderr.println(error);
+            };
+        }
+        Error(error) => stderr.println(error);
+    }
 }
 ```
 
-Route registration rejects duplicates and ambiguous shapes. Each handler runs
-inside the server scope; disconnect cancels its work, streaming observes
-backpressure, and shutdown uses a bounded grace period before canceling
-remaining handlers. CPU-heavy transforms belong in `parallel`, not one native
-thread per request.
+`HTTPServer.bind` checks the exact listen permission before opening the socket.
+`HTTPRouter.route` validates route patterns and rejects duplicate or ambiguous
+routes. The server preview uses a finite request bound; this example accepts
+one request, sends its response, and closes the listener. For a longer-lived
+service, choose an explicit request bound and supervise the serving task.
 
-Add validation/authentication as ordinary middleware or decorators. Keep body,
-header, decompression, timeout, redirect, and connection limits explicit.
-Translate domain errors to an integer-backed `HTTPStatus` in one exhaustive
-function so handlers do not drift.
+Route handlers return `HTTPResponse`. `HTTPResponse.from_json` sets the JSON
+content type; its argument is already serialized JSON text. Use
+`HTTPResponse.from_stream` when a response should be produced incrementally.
+The producer runs on its owning Zirk task, and the transport applies bounded
+backpressure while sending chunks.
 
-Unit-test `health` directly. E2E-test the loopback response, unsupported method,
-malformed/b oversized requests, cancellation, graceful shutdown, missing
-permission, and bounded concurrent load with a runner-allocated port. See
-[`std.http`](../04-standard-library/12-std-http.md) and
-[Runtime Permissions](../03-projects/07-runtime-permissions.md).
+Exercise the service by starting it and sending one request to
+`http://127.0.0.1:8080/health`; the response status is 200 and its JSON body is
+`42`. The server and route APIs are a bounded preview; consult
+[`std.http`](../04-standard-library/12-std-http.md) for current protocol and
+lifecycle limitations.
 
 ## Completion contract
 
-- **Prerequisites:** tasks, resources, permissions, `std.net`, and `std.http`.
-- **Expected success:** `GET /health` returns bounded JSON with status 200.
-- **Failure recovery:** invalid configuration fails before serving; request
-  errors become typed responses and shutdown awaits handler cleanup.
-- **Next:** package reusable behavior as a [library](05-build-and-publish-a-library.md).
+- **Prerequisites:** a Zirk compiler with the bundled `std.net` and `std.http`
+  preview APIs.
+- **Expected success:** one `GET /health` returns JSON with status 200, after
+  which the finite server scope exits and releases its listener.
+- **Failure recovery:** bind, route, and serving errors are returned as typed
+  results; correct the address, permission, or route before retrying.
+- **Next:** package reusable behavior as a
+  [library](05-build-and-publish-a-library.md).
 
 ---
 
-**Previous:** [← Build a Concurrent Worker Pool](03-build-a-concurrent-worker-pool.md) · **Next:** [ Build and Publish a Library](05-build-and-publish-a-library.md)
+**Previous:** [← Build a Concurrent Worker Pool](03-build-a-concurrent-worker-pool.md) · **Next:** [Build and Publish a Library](05-build-and-publish-a-library.md)

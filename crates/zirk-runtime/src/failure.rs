@@ -17,7 +17,13 @@ use crate::io;
 const FATAL_EXIT_CODE: i32 = 70;
 
 pub(crate) fn fatal(reason: &str) -> ! {
-    eprintln!("fatal error: {reason}");
+    if std::env::var_os("ZIRK_RUNTIME_DIAGNOSTIC_JSON").is_some_and(|value| value == "1") {
+        let diagnostic =
+            zirk_diagnostics::Diagnostic::error(zirk_diagnostics::codes::RUNTIME_FAILURE, reason);
+        eprintln!("[{}]", diagnostic.render_json());
+    } else {
+        eprintln!("fatal error: {reason}");
+    }
     // The streams are flushed before terminating so the diagnostic is not lost
     // when output is buffered into a pipe.
     io::flush();

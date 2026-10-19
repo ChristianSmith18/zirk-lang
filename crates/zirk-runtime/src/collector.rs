@@ -51,6 +51,7 @@ use std::alloc::{Layout, dealloc};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[path = "gc_mutex.rs"]
@@ -231,6 +232,49 @@ pub(crate) struct Frame {
     /// object.
     pub(crate) roots: *mut *mut c_void,
     pub(crate) count: usize,
+}
+
+const MAX_GLOBAL_ROOTS: usize = 4_096;
+static NEXT_GLOBAL_ROOT: AtomicU64 = AtomicU64::new(1);
+static GLOBAL_ROOTS: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+
+fn global_roots() -> &'static Mutex<HashMap<u64, usize>> {
+    GLOBAL_ROOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Retains a managed object independently of the current generated stack
+/// frame. Long-lived native callbacks must release the returned handle on
+/// every completion and cancellation path.
+///
+/// # Safety
+/// `value` must be null or a pointer value previously issued by this runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_global_root_add(value: *mut c_void) -> u64 {
+    if value.is_null() {
+        return 0;
+    }
+    let mut roots = global_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if roots.len() >= MAX_GLOBAL_ROOTS {
+        return 0;
+    }
+    let handle = NEXT_GLOBAL_ROOT.fetch_add(1, Ordering::Relaxed);
+    if handle == 0 {
+        return 0;
+    }
+    roots.insert(handle, value as usize);
+    handle
+}
+
+/// Releases a root previously registered with [`zirk_rt_global_root_add`].
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_global_root_remove(handle: u64) -> bool {
+    global_roots()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&handle)
+        .is_some()
 }
 
 thread_local! {
@@ -1258,6 +1302,18 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
         }
     });
 
+    // Long-lived native callbacks have no live generated stack activation to
+    // own their captures. Their explicit handles are bounded and removed by
+    // the runtime when the callback completes or is canceled.
+    {
+        let roots = global_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for value in roots.values() {
+            enqueue(*value as *mut c_void);
+        }
+    }
+
     // Every registered non-coordinator mutator's chain. During stop-the-world
     // all are parked or inside an explicitly quiescent native call, and both
     // admission and unregistration remain closed.
@@ -1531,6 +1587,10 @@ pub(crate) mod test_support {
     pub(crate) fn reset_state_for_tests() {
         BOOTSTRAP_FRAMES.with(|f| f.borrow_mut().clear());
         ACTIVE_FRAMES.set(std::ptr::null_mut());
+        global_roots()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         heap_hard_reset();
         set_threshold_bytes(default_threshold());
     }
@@ -1579,6 +1639,24 @@ mod tests {
             result.is_ok(),
             "stale candidates must be skipped without dereferencing them"
         );
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn explicit_global_root_retains_a_managed_value_until_removed() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        let descriptor = descriptor_with_fields(&[]);
+        let object = unsafe { synthetic_object(descriptor.as_ptr().cast(), 0) };
+        let handle = unsafe { zirk_rt_global_root_add(object) };
+        assert_ne!(handle, 0);
+
+        collect();
+        assert!(test_support::is_live_for_tests(object));
+        assert!(zirk_rt_global_root_remove(handle));
+        assert!(!zirk_rt_global_root_remove(handle));
+        collect();
+        assert!(!test_support::is_live_for_tests(object));
         reset_state_for_tests();
     }
 

@@ -3660,12 +3660,167 @@ fn valid_generic_class_body_type_checks_against_its_own_type_parameter() {
 }
 
 #[test]
-fn invalid_generic_function_is_not_lowered_yet() {
-    // Task 11.1 specializes a generic *class*; a generic function's own type
-    // parameter is a separate mechanism (`enter_type_params`, shared with
-    // methods) that this pass does not build a specialization for.
-    let output = rejected("fn identity<T>(value: T): T { return value; }\nfn main(): Void { }");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+fn unused_generic_function_template_is_accepted() {
+    accepted("fn identity<T>(value: T): T { return value; }\nfn main(): Void { }");
+}
+
+#[test]
+fn explicit_generic_function_arguments_seed_type_inference() {
+    accepted(
+        "fn identity<T>(value: T): T { return value; }
+         fn main(): Void { mut value: Int32 = identity<Int32>(1); }",
+    );
+
+    let rejected_call = rejected(
+        "fn identity<T>(value: T): T { return value; }
+         fn main(): Void { mut value: String = identity<String>(1); }",
+    );
+    assert!(
+        rejected_call.contains(codes::TYPE_MISMATCH.as_str()),
+        "{rejected_call}"
+    );
+}
+
+#[test]
+fn generic_call_substitution_is_preserved_for_ir_specialization() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "generic-call.zrk",
+        "fn identity<T>(value: T): T { return value; }\n\
+         fn main(): Void { mut value: Int32 = identity<Int32>(1); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let call = match &program.functions[1].body.statements[0] {
+        Stmt::Let(statement) => match statement.init.as_ref().unwrap() {
+            Expr::Call(call) => call,
+            other => panic!("expected generic call, got {other:?}"),
+        },
+        other => panic!("expected let statement, got {other:?}"),
+    };
+    let checked = check(&sources, &program, &mut sink);
+    let generic = checked.functions.get("identity").unwrap();
+    assert_eq!(generic.type_params.len(), 1);
+    assert_eq!(
+        checked.generic_call_substitutions[&call.span].callable,
+        "identity"
+    );
+    assert_eq!(
+        checked.generic_call_substitutions[&call.span].substitutions[&generic.type_params[0]],
+        Type::INT32
+    );
+}
+
+#[test]
+fn nested_generic_function_signature_accepts_complete_substitution() {
+    accepted(
+        "fn wrap<T>(value: List<T>): List<T> { return value; }
+         fn exercise(value: List<Int32>): List<Int32> { return wrap(value); }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn generic_contract_static_requirements_match_static_class_members() {
+    accepted(
+        "interface EnvironmentParsable<T> { static parse_environment(text: String): T; }
+         class Port implements EnvironmentParsable<Port> {
+             static parse_environment(text: String): Port { return Port(); }
+         }
+         fn main(): Void { }",
+    );
+
+    let output = rejected(
+        "interface EnvironmentParsable<T> { static parse_environment(text: String): T; }
+         class Port implements EnvironmentParsable<Port> {
+             parse_environment(text: String): Port { return Port(); }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains("static/instance dispatch"), "{output}");
+}
+
+#[test]
+fn generic_parameter_calls_static_contract_method_from_its_constraint() {
+    accepted(
+        "interface EnvironmentParsable<T> { static parse(text: String): T; }
+         class Port implements EnvironmentParsable<Port> {
+             static parse(text: String): Port { return Port(); }
+         }
+         fn parse_value<T from EnvironmentParsable<T>>(text: String): T {
+             return T.parse(text);
+         }
+         fn main(): Void { mut port: Port = parse_value<Port>(\"loopback\"); }",
+    );
+}
+
+#[test]
+fn user_contract_named_environment_parsable_cannot_spoof_builtin_intrinsics() {
+    let output = rejected(
+        "interface EnvironmentParsable<T> { static parse(text: String): T; }
+         fn parse_value<T from EnvironmentParsable<T>>(text: String): T {
+             return T.parse(text);
+         }
+         fn main(): Void { mut value: Int32 = parse_value<Int32>(\"42\"); }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("EnvironmentParsable"), "{output}");
+}
+
+#[test]
+fn generic_method_substitution_is_preserved_for_ir_specialization() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "generic-method-call.zrk",
+        "class Parser { static parse<T>(text: String): String { return text; } }\n\
+         fn main(): Void { mut value: String = Parser.parse<Int32>(\"1\"); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let call = match &program.functions[0].body.statements[0] {
+        Stmt::Let(statement) => match statement.init.as_ref().unwrap() {
+            Expr::Call(call) => call,
+            other => panic!("expected generic method call, got {other:?}"),
+        },
+        other => panic!("expected let statement, got {other:?}"),
+    };
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        checked.generic_call_substitutions[&call.span]
+            .substitutions
+            .values()
+            .any(|ty| *ty == Type::INT32)
+    );
+    let resolved = &checked.generic_call_substitutions[&call.span];
+    assert!(resolved.is_static_method);
+    assert_eq!(
+        resolved.owner_class,
+        checked
+            .classes
+            .iter()
+            .position(|class| class.name == "Parser")
+            .map(|id| id as u32)
+    );
+}
+
+#[test]
+fn explicit_generic_method_arguments_seed_type_inference() {
+    accepted(
+        "class Parser { static parse<T>(text: String): String { return text; } }
+         fn main(): Void { mut value: String = Parser.parse<Int32>(\"1\"); }",
+    );
+    let wrong_arity = rejected(
+        "class Parser { static parse<T>(text: String): String { return text; } }
+         fn main(): Void { mut value: String = Parser.parse<Int32, String>(\"1\"); }",
+    );
+    assert!(
+        wrong_arity.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{wrong_arity}"
+    );
 }
 
 #[test]
@@ -3764,24 +3919,20 @@ fn invalid_declared_variance_in_a_mutable_field() {
 fn valid_method_call_through_a_type_parameters_contract_constraint() {
     // `value.greet()` resolves through `Greeter`, the one constraint `T`
     // declares — task 7.4 of the generics slice.
-    let output = rejected(
+    accepted(
         "interface Greeter {  greet(): String; }
          fn show<T from Greeter>(value: T): String { return value.greet(); }
          fn main(): Void { }",
     );
-    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
 fn valid_field_access_through_a_type_parameters_class_constraint() {
-    let output = rejected(
+    accepted(
         "class Named { name: String; construct(name: String) { this.name = name; } }
          fn show<T from Named>(value: T): String { return value.name; }
          fn main(): Void { }",
     );
-    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
@@ -3807,14 +3958,11 @@ fn invalid_member_access_on_an_unconstrained_type_parameter() {
 
 #[test]
 fn valid_call_infers_the_type_parameter_from_its_argument() {
-    // `identity(5)` infers `T = Int32` (roadmap task 7.6), so it type-checks
-    // as `Int32` with no argument-type or inference error — the class-level
-    // `NOT_LOWERED` from 7.1 is the only thing keeping this from compiling.
-    let output = rejected(
+    // `identity(5)` infers and lowers the concrete `T = Int32` instance.
+    accepted(
         "fn identity<T>(value: T): T { return value; }
          fn main(): Void { mut r: Int32 = identity(5); }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
@@ -3851,13 +3999,12 @@ fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
 
 #[test]
 fn valid_call_infers_a_type_that_satisfies_the_constraint() {
-    let output = rejected(
+    accepted(
         "interface Serializable {  serialize(): String; }
          class Doc implements Serializable { construct() { }  serialize(): String { return \"\"; } }
          fn store<T from Serializable>(value: T): Void { }
          fn main(): Void { store(Doc()); }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
@@ -5663,6 +5810,18 @@ fn valid_lambda_parameter_with_a_distinct_name_still_captures() {
 }
 
 #[test]
+fn valid_capturing_lambda_passed_directly_to_a_function_parameter() {
+    accepted(
+        "fn invoke(action: Fn() => Int32): Int32 { return action(); }
+         fn main(): Void {
+             inmut captured = 42;
+             inmut value = invoke((): Int32 => captured);
+             stdout.println(value);
+         }",
+    );
+}
+
+#[test]
 fn valid_lambda_parameter_matches_a_field_name() {
     // A field is never a bare name `Scopes` resolves — `this.name` is how
     // one is always read — so there is nothing for a same-named parameter
@@ -5750,17 +5909,11 @@ fn valid_generic_inference_from_a_closure_argument() {
     // name `Base::Function` as `T`'s solution — that refusal
     // (`invalid_generic_inference_from_a_closure_argument`) existed only
     // because D9 made a closure's type unwritable anywhere, generic
-    // arguments included. `store<T>` itself is still `NOT_LOWERED` (generic
-    // functions are not code-generated yet, roadmap task 7.6) — unrelated
-    // to closures, and the one diagnostic this now reports.
-    let output = rejected(
+    // arguments included. The instantiated function accepts the capture-less
+    // closure ABI and is lowered as a concrete function.
+    accepted(
         "fn store<T>(value: T): Void { }
          fn main(): Void { store((): Void => { }); }",
-    );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
-    assert!(
-        !output.contains("closure"),
-        "a closure argument should no longer be singled out:\n{output}"
     );
 }
 
@@ -6999,19 +7152,9 @@ fn invalid_class_with_a_non_clone_nested_field_names_the_transitive_path() {
     assert!(output.contains("p"), "{output}");
 }
 
-// A generic function's own `<T from ...>` unconditionally reports
-// `NOT_LOWERED` today (`Checker::enter_type_params`'s own doc comment: "the
-// grammar and the type rules for a generic body exist... but lowering does
-// not yet"), independent of Clone — the same reason
-// `valid_call_infers_a_type_that_satisfies_the_constraint` above already
-// uses `rejected()` rather than `accepted()` for an ordinary `from`
-// constraint. These two mirror that exact precedent: constraint
-// satisfaction is checked by asserting `TYPE_MISMATCH`'s absence/presence,
-// not by asserting zero errors overall.
-
 #[test]
 fn valid_generic_bound_t_from_clone_is_accepted_for_a_clone_type() {
-    let output = rejected(
+    accepted(
         "class Marker { mut id: Int32; construct(id: Int32) { this.id = id; } }
          fn dup<T from Clone>(value: T): Void { }
          fn main(): Void {
@@ -7019,7 +7162,6 @@ fn valid_generic_bound_t_from_clone_is_accepted_for_a_clone_type() {
              dup(m);
          }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]

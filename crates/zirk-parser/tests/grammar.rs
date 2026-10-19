@@ -1202,6 +1202,32 @@ fn valid_named_arguments() {
 }
 
 #[test]
+fn valid_explicit_generic_function_and_method_calls() {
+    let Expr::Call(function) = expression("identity<Int32>(1)") else {
+        panic!("expected an explicitly specialized function call");
+    };
+    assert_eq!(function.type_args.len(), 1);
+    assert_eq!(function.type_args[0].name, "Int32");
+    assert_eq!(function.args.len(), 1);
+
+    let Expr::Call(method) = expression("Env.get<Map<String, Int32>>(\"SETTINGS\")") else {
+        panic!("expected an explicitly specialized static method call");
+    };
+    assert_eq!(method.type_args.len(), 1);
+    assert_eq!(method.type_args[0].name, "Map");
+    assert_eq!(method.type_args[0].arguments.len(), 2);
+    assert_eq!(method.args.len(), 1);
+}
+
+#[test]
+fn less_than_expression_is_not_misparsed_as_generic_call() {
+    let Expr::Binary(binary) = expression("left < right") else {
+        panic!("expected a comparison expression");
+    };
+    assert_eq!(binary.op, BinaryOp::Lt);
+}
+
+#[test]
 fn named_argument_shorthand_desugars_to_the_identifier_path() {
     for source in ["f(value:)", "object.method(value:)", "Type(value:)"] {
         let Expr::Call(call) = expression(source) else {

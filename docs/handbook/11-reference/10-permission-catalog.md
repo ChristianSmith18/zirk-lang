@@ -9,6 +9,11 @@ uses `during: build`, `runtime`, or `both`, including decorator access. `unsafe`
 grants nothing. Secret names may be scoped, but values never belong in
 declarations, manifests, lockfiles, diagnostics or history.
 
+The current native `std.net` and `std.environment` preview uses the project's
+line-oriented `.zkinit` format: applications and packages both use a
+`permissions` block, but package entries are request-only. Approval resolves
+the locked dependency graph and binds consent to its manifests and lockfiles.
+
 | Family | Scope examples | Enforcement notes |
 |---|---|---|
 | filesystem | canonical path patterns, read/write | rejects traversal, symlink escape and check/use races |

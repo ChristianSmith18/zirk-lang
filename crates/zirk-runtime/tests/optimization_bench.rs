@@ -42,6 +42,17 @@ mod list;
 mod map;
 #[path = "../src/memory.rs"]
 mod memory;
+// This benchmark compiles selected runtime modules into a deliberately
+// minimal test crate. None of its measured task paths own network resources.
+mod network_api {
+    pub(crate) fn close_task_streams(_: crate::task::TaskId) {}
+}
+mod http_api {
+    pub(crate) fn close_task_streams(_: crate::task::TaskId) {}
+    pub(crate) fn close_task_server_producers(_: crate::task::TaskId) {}
+    pub(crate) fn close_task_uploads(_: crate::task::TaskId) {}
+    pub(crate) fn close_executor_clients(_: u64) {}
+}
 #[path = "../src/native_slice.rs"]
 mod native_slice;
 #[path = "../src/pool.rs"]

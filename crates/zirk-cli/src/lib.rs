@@ -5,6 +5,8 @@
 //! driver (lower, emit, link) is only compiled when the `backend` feature is
 //! enabled.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod approvals;
 pub mod codes;
 pub mod format;
 pub mod frontend;

@@ -1802,6 +1802,9 @@ pub struct CallExpr {
     /// An expression rather than a name, because a closure held in a variable
     /// is called the same way a function is.
     pub callee: Box<Expr>,
+    /// Explicit type arguments on a generic callable, when written as
+    /// `identity<Int32>(value)` or `Parser.parse<MyRecord>(text)`.
+    pub type_args: Vec<TypeRef>,
     pub args: Vec<Arg>,
     pub span: Span,
 }

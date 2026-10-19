@@ -1,0 +1,4110 @@
+// Stable HTTP wire-method names. QUERY is safe and idempotent while carrying
+// request content; its transport and client/server behavior live in std.http.
+share enum HTTPMethod {
+    Get,
+    Head,
+    Post,
+    Put,
+    Patch,
+    Delete,
+    Options,
+    Connect,
+    Trace,
+    Query,
+}
+
+share enum HTTPHeaderError {
+    InvalidName,
+    InvalidValue,
+    ForbiddenName,
+    TooManyFields,
+    HeadersTooLarge,
+}
+
+class HTTPHeaderField {
+    private inmut normalized_name: String;
+    private inmut field_value: String;
+
+    construct(name: String, value: String) {
+        this.normalized_name = name;
+        this.field_value = value;
+    }
+
+    name(): String { return this.normalized_name; }
+    value(): String { return this.field_value; }
+    size(): UInt64 { return this.normalized_name.bytes().length + this.field_value.bytes().length; }
+}
+
+// Mutable, bounded header collection. Field names are normalized to lowercase
+// for lookup while values retain insertion order and repeated-field semantics.
+share class HTTPHeaders {
+    private mut fields: List<HTTPHeaderField>;
+    private mut sensitive_names: List<String>;
+
+    private construct() {
+        mut empty: List<HTTPHeaderField> = List();
+        mut empty_sensitive: List<String> = List();
+        this.fields = empty;
+        this.sensitive_names = empty_sensitive;
+    }
+
+    static create(): HTTPHeaders { return HTTPHeaders(); }
+
+    add(name: String, value: String): Result<Void, HTTPHeaderError> {
+        return match HTTPHeaders.validate(name, value) {
+            Error(error) => Error<Void, HTTPHeaderError>(error);
+            Ok(_) => {
+                if this.fields.length >= 256 {
+                    HTTPHeaders.header_error(HTTPHeaderError.TooManyFields)
+                } else {
+                    mut normalized = name.to_lowercase();
+                    mut sizes = this.fields.map((field: HTTPHeaderField): UInt64 => field.size());
+                    mut total_bytes = sizes.sum() + normalized.bytes().length + value.bytes().length;
+                    if total_bytes > 65536 {
+                        HTTPHeaders.header_error(HTTPHeaderError.HeadersTooLarge)
+                    } else {
+                        this.fields.add(HTTPHeaderField(normalized, value));
+                        HTTPHeaders.header_ok()
+                    }
+                }
+            }
+        };
+    }
+
+    // Marks a custom credential header for native diagnostic redaction and
+    // removal before a cross-origin redirect.
+    add_sensitive(name: String, value: String): Result<Void, HTTPHeaderError> {
+        return match this.add(name, value) {
+            Error(error) => Error<Void, HTTPHeaderError>(error);
+            Ok(_) => {
+                mut normalized = name.to_lowercase();
+                this.sensitive_names = this.sensitive_names.filter((item: String): Boolean => item != normalized);
+                this.sensitive_names.add(normalized);
+                HTTPHeaders.header_ok()
+            }
+        };
+    }
+
+    set(name: String, value: String): Result<Void, HTTPHeaderError> {
+        return match HTTPHeaders.validate(name, value) {
+            Error(error) => Error<Void, HTTPHeaderError>(error);
+            Ok(_) => {
+                mut normalized = name.to_lowercase();
+                mut replacement = this.fields.filter((field: HTTPHeaderField): Boolean => field.name() != normalized);
+                if replacement.length >= 256 {
+                    return HTTPHeaders.header_error(HTTPHeaderError.TooManyFields);
+                }
+                mut sizes = replacement.map((field: HTTPHeaderField): UInt64 => field.size());
+                mut total_bytes = sizes.sum() + normalized.bytes().length + value.bytes().length;
+                if total_bytes > 65536 {
+                    return HTTPHeaders.header_error(HTTPHeaderError.HeadersTooLarge);
+                }
+                replacement.add(HTTPHeaderField(normalized, value));
+                this.fields = replacement;
+                HTTPHeaders.header_ok()
+            }
+        };
+    }
+
+    set_sensitive(name: String, value: String): Result<Void, HTTPHeaderError> {
+        return match this.set(name, value) {
+            Error(error) => Error<Void, HTTPHeaderError>(error);
+            Ok(_) => {
+                mut normalized = name.to_lowercase();
+                this.sensitive_names = this.sensitive_names.filter((item: String): Boolean => item != normalized);
+                this.sensitive_names.add(normalized);
+                HTTPHeaders.header_ok()
+            }
+        };
+    }
+
+    get(name: String): String? {
+        mut values = this.get_all(name);
+        if values.length == 0 { return null; }
+        return values[0];
+    }
+
+    get_all(name: String): List<String> {
+        mut normalized = name.to_lowercase();
+        mut matching = this.fields.filter(
+            (field: HTTPHeaderField): Boolean => field.name() == normalized,
+        );
+        return matching.map((field: HTTPHeaderField): String => field.value());
+    }
+
+    private is_sensitive_name(name: String): Boolean {
+        for sensitive_name in this.sensitive_names {
+            if sensitive_name == name { return true; }
+        }
+        return false;
+    }
+
+    // Returns headers safe to replay on a redirect. Cross-origin hops drop
+    // known or explicitly marked credential fields, while 303-style method
+    // changes drop content metadata because the request body is discarded.
+    redirect_copy(same_origin: Boolean, preserve_body: Boolean): HTTPHeaders {
+        mut copy = HTTPHeaders.create();
+        for field in this.fields {
+            mut name = field.name();
+            mut credentials = name == "authorization" || name == "proxy-authorization"
+            || name == "cookie" || name == "cookie2" || name == "set-cookie"
+            || name == "api-key" || name == "x-api-key" || name == "x-auth-token"
+            || name == "x-access-token" || name == "x-secret-key";
+            mut is_sensitive = this.is_sensitive_name(name);
+            credentials = credentials || is_sensitive;
+            mut content_metadata = name == "content-type" || name == "content-encoding"
+            || name == "content-language" || name == "content-location"
+            || name == "content-digest" || name == "repr-digest" || name == "digest";
+            if (same_origin || ! credentials) &&(preserve_body || ! content_metadata) {
+                if is_sensitive { _ = copy.add_sensitive(name, field.value()); }
+                else { _ = copy.add(name, field.value()); }
+            }
+        }
+        return copy;
+    }
+
+    // Encodes validated fields for the bounded native HTTP transport. The
+    // transport validates this block again before exposing it to a peer.
+    encode_for_transport(): Array<Byte> {
+        mut names = this.fields.map(
+            (field: HTTPHeaderField): String => {
+            mut name = field.name();
+            if this.is_sensitive_name(name) {
+                return "\t" + name;
+            }
+            return name;
+        },
+        );
+        mut values = this.fields.map((field: HTTPHeaderField): String => field.value());
+        return HTTPHeaders.encode_native(names, values);
+    }
+
+    private static encode_native(names: List<String>, values: List<String>): Array<Byte> {
+        return HTTPHeaders.encode_native_intrinsic(names, values);
+    }
+
+    private static encode_native_intrinsic(names: List<String>, values: List<String>): Array<Byte> {
+        return [];
+    }
+
+    private static validate(name: String, value: String): Result<Void, HTTPHeaderError> {
+        mut name_bytes = name.bytes();
+        if name_bytes.length == 0 { return HTTPHeaders.header_error(HTTPHeaderError.InvalidName); }
+        mut normalized_name = name.to_lowercase();
+        if normalized_name == "content-length" || normalized_name == "transfer-encoding"
+        || normalized_name == "connection" || normalized_name == "keep-alive"
+        || normalized_name == "proxy-connection" || normalized_name == "upgrade"
+        || normalized_name == "trailer" || normalized_name == "te"
+        || normalized_name == "host" {
+            return HTTPHeaders.header_error(HTTPHeaderError.ForbiddenName);
+        }
+        mut index: UInt64 = 0;
+        while index < name_bytes.length {
+            mut code = name_bytes[index];
+            mut alpha =(code >= 65 && code <= 90) ||(code >= 97 && code <= 122);
+            mut digit = code >= 48 && code <= 57;
+            mut punctuation = code == 33 || code == 35 || code == 36 || code == 37 || code == 38
+            || code == 39 || code == 42 || code == 43 || code == 45 || code == 46
+            || code == 94 || code == 95 || code == 96 || code == 124 || code == 126;
+            if ! alpha && ! digit && ! punctuation {
+                return HTTPHeaders.header_error(HTTPHeaderError.InvalidName);
+            }
+            index += 1;
+        }
+        mut value_bytes = value.bytes();
+        index = 0;
+        while index < value_bytes.length {
+            mut code = value_bytes[index];
+            if (code < 32 && code != 9) || code == 127 {
+                return HTTPHeaders.header_error(HTTPHeaderError.InvalidValue);
+            }
+            index += 1;
+        }
+        return HTTPHeaders.header_ok();
+    }
+
+    private static header_ok(): Result<Void, HTTPHeaderError> {
+        return Ok(HTTPHeaders.unit());
+    }
+
+    private static header_error(error: HTTPHeaderError): Result<Void, HTTPHeaderError> {
+        return Error<Void, HTTPHeaderError>(error);
+    }
+
+    private static unit(): Void { return; }
+}
+
+// Integer-backed status values keep protocol codes extensible: servers may
+// encounter valid status codes added after this toolchain was released.
+share enum HTTPStatus {
+    Continue -> 100,
+    SwitchingProtocols -> 101,
+    Processing -> 102,
+    EarlyHints -> 103,
+    UploadResumptionSupported -> 104,
+    Ok -> 200,
+    Created -> 201,
+    Accepted -> 202,
+    NonAuthoritativeInformation -> 203,
+    NoContent -> 204,
+    ResetContent -> 205,
+    PartialContent -> 206,
+    MultiStatus -> 207,
+    AlreadyReported -> 208,
+    IMUsed -> 226,
+    MultipleChoices -> 300,
+    MovedPermanently -> 301,
+    Found -> 302,
+    SeeOther -> 303,
+    NotModified -> 304,
+    UseProxy -> 305,
+    Unused306 -> 306,
+    TemporaryRedirect -> 307,
+    PermanentRedirect -> 308,
+    BadRequest -> 400,
+    Unauthorized -> 401,
+    PaymentRequired -> 402,
+    Forbidden -> 403,
+    NotFound -> 404,
+    MethodNotAllowed -> 405,
+    NotAcceptable -> 406,
+    ProxyAuthenticationRequired -> 407,
+    RequestTimeout -> 408,
+    Conflict -> 409,
+    Gone -> 410,
+    LengthRequired -> 411,
+    PreconditionFailed -> 412,
+    ContentTooLarge -> 413,
+    URITooLong -> 414,
+    UnsupportedMediaType -> 415,
+    RangeNotSatisfiable -> 416,
+    ExpectationFailed -> 417,
+    Unused418 -> 418,
+    MisdirectedRequest -> 421,
+    UnprocessableContent -> 422,
+    Locked -> 423,
+    FailedDependency -> 424,
+    TooEarly -> 425,
+    UpgradeRequired -> 426,
+    PreconditionRequired -> 428,
+    TooManyRequests -> 429,
+    RequestHeaderFieldsTooLarge -> 431,
+    UnavailableForLegalReasons -> 451,
+    InternalServerError -> 500,
+    NotImplemented -> 501,
+    BadGateway -> 502,
+    ServiceUnavailable -> 503,
+    GatewayTimeout -> 504,
+    HTTPVersionNotSupported -> 505,
+    VariantAlsoNegotiates -> 506,
+    InsufficientStorage -> 507,
+    LoopDetected -> 508,
+    NotExtended -> 510,
+    NetworkAuthenticationRequired -> 511,
+    Unknown(code: Int32)
+}
+
+share enum HTTPError {
+    InvalidUrl,
+    PermissionDenied,
+    Transport,
+    Protocol,
+    BodyTooLarge,
+    InvalidText,
+    Timeout,
+    Cancelled,
+    BodyConsumed,
+    InvalidJson,
+    RedirectLimit,
+    InvalidStatus,
+    TooManyFields,
+    TooManyParts,
+    UnsupportedMethod,
+    InvalidArgument,
+}
+
+share enum HTTPStreamChunk {
+    Bytes(bytes: Array<Byte>),
+    End,
+    Error(error: HTTPError),
+}
+
+share enum HTTPWebSocketMessage {
+    Text(value: String),
+    Binary(bytes: Array<Byte>),
+    Ping(bytes: Array<Byte>),
+    Pong(bytes: Array<Byte>),
+    Close(code: UInt16, reason: String),
+    End,
+}
+
+// A request body producer may end normally with an empty byte array or stop
+// with one of these explicit outcomes. Failure maps to Transport; Cancelled
+// remains distinguishable as HTTPError.Cancelled.
+share enum HTTPStreamProducerError {
+    Cancelled,
+    Failed,
+}
+
+// Application types opt into explicit response JSON decoding at compile time.
+// Implementations own schema validation and never rely on runtime reflection.
+share interface HTTPJsonParsable<T> {
+    static parse_json(document: String): Result<T, String>;
+}
+
+// Application types opt into JSON request serialization at compile time.
+// Implementations own field naming and escaping; the HTTP client still
+// validates the resulting document before opening a connection.
+share interface HTTPJsonSerializable<T> {
+    static to_json(value: T): Result<String, String>;
+}
+
+share class URL {
+    private inmut value: String;
+
+    private construct(value: String) { this.value = value; }
+
+    static parse(value: String): Result<URL, HTTPError> {
+        return match URL.parse_native(value) {
+            Ok(normalized) => URL.parse_ok(URL(normalized));
+            Error(error) => URL.parse_error(error);
+        };
+    }
+
+    // Resolves an RFC 3986 reference without performing DNS or network I/O.
+    // This is used for explicit follow-up of QUERY's indirect 303 result;
+    // each resulting HTTP request still passes through the normal permission
+    // check.
+    static resolve(base: URL, reference: String): Result<URL, HTTPError> {
+        return match URL.resolve_native(base.as_string(), reference) {
+            Ok(normalized) => URL.parse_ok(URL(normalized));
+            Error(error) => URL.parse_error(error);
+        };
+    }
+
+    as_string(): String { return this.value; }
+
+    private static parse_native(value: String): Result<String, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static resolve_native(base: String, reference: String): Result<String, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static parse_ok(value: URL): Result<URL, HTTPError> { return Ok(value); }
+
+    private static parse_error(error: HTTPError): Result<URL, HTTPError> { return Error(error); }
+}
+
+// A deliberately small first public response surface. The opaque response
+// body remains a managed Byte array and status_code preserves extension codes.
+share class HTTPResponse {
+    private inmut status_code_value: Int32;
+    private mut body_value: Array<Byte>;
+    private inmut header_data: Array<Byte>;
+    private mut body_consumed: Boolean;
+    // Nonzero only when this response body is produced by a registered
+    // owner-task callback for server-side streaming.
+    private mut server_producer_handle: UInt64;
+    // Optional interval used by the native transport to emit bounded SSE
+    // comment heartbeats while the owner-task producer is waiting for data.
+    private mut server_sse_heartbeat_ms: Int32;
+    // Nonzero only when the body is backed by the task-owned network stream
+    // registry. Buffered responses keep their bytes in body_value instead.
+    private inmut stream_handle: UInt64;
+
+    private construct(status_code: Int32, body: Array<Byte>, headers: Array<Byte>) {
+        this.status_code_value = status_code;
+        this.body_value = body;
+        this.header_data = headers;
+        this.body_consumed = false;
+        this.stream_handle = 0 as UInt64;
+        this.server_producer_handle = 0 as UInt64;
+        this.server_sse_heartbeat_ms = 0;
+    }
+
+    status_code(): Int32 { return this.status_code_value; }
+
+    // Stream-backed responses use the same public type as buffered responses.
+    // Call stream() first to move a buffered body into the bounded reader.
+    read_chunk(max_bytes: UInt64): HTTPStreamChunk {
+        if max_bytes == 0 || max_bytes > 65536 {
+            return HTTPStreamChunk.Error(HTTPError.InvalidArgument);
+        }
+        if this.stream_handle == 0 {
+            return HTTPStreamChunk.Error(HTTPError.BodyConsumed);
+        }
+        return HTTPResponse.read_chunk_native(this.stream_handle, max_bytes);
+    }
+
+    // Reads one complete event from a text/event-stream response. Success is
+    // flattened to four fields for the managed wrapper below; an empty list
+    // marks end-of-stream.
+    read_sse_event_fields(): Result<List<String>, HTTPError> {
+        if this.stream_handle == 0 {
+            return HTTPResponse.sse_fields_error(HTTPError.BodyConsumed);
+        }
+        return HTTPResponse.read_sse_native(this.stream_handle);
+    }
+
+    sse_heartbeat_count(): UInt64 {
+        if this.stream_handle == 0 { return 0 as UInt64; }
+        return HTTPResponse.sse_heartbeat_count_native(this.stream_handle);
+    }
+
+    close(): Boolean {
+        this.body_consumed = true;
+        if this.stream_handle == 0 { return true; }
+        return HTTPResponse.close_native(this.stream_handle);
+    }
+
+    private static read_chunk_native(handle: UInt64, max_bytes: UInt64): HTTPStreamChunk {
+        return HTTPStreamChunk.Error(HTTPError.Transport);
+    }
+
+    private static close_native(handle: UInt64): Boolean { return true; }
+
+    private static sse_heartbeat_count_native(handle: UInt64): UInt64 {
+        return 0 as UInt64;
+    }
+
+    // Buffered bytes and text share a single-consumption state, matching the
+    // streaming body contract. Headers and status remain readable afterward.
+    bytes(): Result<Array<Byte>, HTTPError> {
+        if this.body_consumed { return HTTPResponse.body_bytes_error(HTTPError.BodyConsumed); }
+        this.body_consumed = true;
+        if this.stream_handle != 0 {
+            return HTTPResponse.read_all_native(this.stream_handle);
+        }
+        return HTTPResponse.body_bytes_ok(this.body_value);
+    }
+
+    // Transfers the same one-shot body into the common task-owned streaming
+    // reader. The byte and stream paths cannot both consume one response.
+    stream(): Result<HTTPResponse, HTTPError> {
+        if this.body_consumed {
+            return HTTPResponse.stream_error(HTTPError.BodyConsumed);
+        }
+        if this.stream_handle != 0 {
+            this.body_consumed = true;
+            return HTTPResponse.stream_ok(this);
+        }
+        return match HTTPResponse.stream_buffered_native(
+            this.status_code_value,
+            this.body_value,
+            this.header_data,
+        ) {
+            Error(error) => HTTPResponse.stream_error(error);
+            Ok(stream) => {
+                this.body_consumed = true;
+                mut empty_body: Array<Byte> = Array(0);
+                this.body_value = empty_body;
+                HTTPResponse.stream_ok(stream);
+            }
+        };
+    }
+
+    private static stream_buffered_native(
+        status: Int32,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static stream_ok(value: HTTPResponse): Result<HTTPResponse, HTTPError> {
+        return Ok(value);
+    }
+
+    private static stream_error(error: HTTPError): Result<HTTPResponse, HTTPError> {
+        return Error(error);
+    }
+
+    private static read_all_native(handle: UInt64): Result<Array<Byte>, HTTPError> {
+        return HTTPResponse.body_bytes_error(HTTPError.Transport);
+    }
+
+    private static read_sse_native(handle: UInt64): Result<List<String>, HTTPError> {
+        return HTTPResponse.sse_fields_error(HTTPError.Protocol);
+    }
+
+    private static sse_fields_error(error: HTTPError): Result<List<String>, HTTPError> {
+        return Error(error);
+    }
+
+    private static sse_fields_ok(value: List<String>): Result<List<String>, HTTPError> {
+        return Ok(value);
+    }
+
+    // Constructs a response with an opaque bounded body and no extra fields.
+    static from_bytes(status_code: Int32, body: Array<Byte>): HTTPResponse {
+        mut headers: Array<Byte> = [0, 0, 0, 0];
+        return HTTPResponse(status_code, body, headers);
+    }
+
+    // Constructs a UTF-8 text response and advertises its representation.
+    static from_text(status_code: Int32, body: String): HTTPResponse {
+        mut headers: Array<Byte> = [1, 0, 0, 0, 12, 0, 25, 0, 0, 0,
+            99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101,
+            116, 101, 120, 116, 47, 112, 108, 97, 105, 110, 59, 32,
+            99, 104, 97, 114, 115, 101, 116, 61, 117, 116, 102, 45, 56];
+        return HTTPResponse(status_code, HTTPResponse.utf8_bytes(body), headers);
+    }
+
+    static try_from_text(status_code: Int32, body: String): Result<HTTPResponse, HTTPError> {
+        mut headers: Array<Byte> = [1, 0, 0, 0, 12, 0, 25, 0, 0, 0,
+            99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101,
+            116, 101, 120, 116, 47, 112, 108, 97, 105, 110, 59, 32,
+            99, 104, 97, 114, 115, 101, 116, 61, 117, 116, 102, 45, 56];
+        return HTTPResponse.checked(status_code, HTTPResponse.utf8_bytes(body), headers);
+    }
+
+    // Constructs a JSON response from an already serialized JSON document.
+    // Serialization stays explicit so values cannot be encoded ambiguously.
+    static from_json(status_code: Int32, body: String): HTTPResponse {
+        mut headers: Array<Byte> = [1, 0, 0, 0, 12, 0, 16, 0, 0, 0,
+            99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101,
+            97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 47,
+            106, 115, 111, 110];
+        return HTTPResponse(status_code, HTTPResponse.utf8_bytes(body), headers);
+    }
+
+    static try_from_json(status_code: Int32, body: String): Result<HTTPResponse, HTTPError> {
+        mut headers: Array<Byte> = [1, 0, 0, 0, 12, 0, 16, 0, 0, 0,
+            99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101,
+            97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 47,
+            106, 115, 111, 110];
+        return HTTPResponse.checked(status_code, HTTPResponse.utf8_bytes(body), headers);
+    }
+
+    private static utf8_bytes(value: String): Array<Byte> {
+        mut encoded = value.bytes();
+        mut bytes: Array<Byte> = Array(encoded.length);
+        mut index: Int32 = 0;
+        while index < encoded.length {
+            bytes[index] = encoded[index];
+            index = index + 1;
+        }
+        return bytes;
+    }
+
+    static method_not_allowed(
+        patterns: List<String>,
+        methods: List<String>,
+        path: String,
+    ): HTTPResponse {
+        mut body: Array<Byte> = [
+            109,
+            101,
+            116,
+            104,
+            111,
+            100,
+            32,
+            110,
+            111,
+            116,
+            32,
+            97,
+            108,
+            108,
+            111,
+            119,
+            101,
+            100,
+        ];
+        mut headers: Array<Byte> = HTTPRouteMatcher.allow_header(patterns, methods, path);
+        return HTTPResponse(405, body, headers);
+    }
+
+    // Validates the protocol status range before a response is handed to the
+    // server transport. `from_bytes` remains available for source compatibility.
+    static try_from_bytes(status_code: Int32, body: Array<Byte>): Result<HTTPResponse, HTTPError> {
+        mut headers: Array<Byte> = [0, 0, 0, 0];
+        return HTTPResponse.checked(status_code, body, headers);
+    }
+
+    // Builds a response using validated repeated headers. The server checks
+    // the encoded block again at the native transport boundary.
+    static try_with_headers(
+        status_code: Int32,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        return HTTPResponse.checked(status_code, body, headers.encode_for_transport());
+    }
+
+    // Creates a response whose body is generated one bounded chunk at a time
+    // on the server's owning Zirk task. An empty chunk ends the response.
+    static from_stream(
+        status_code: Int32,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        if status_code < 100 || status_code > 599 {
+            return HTTPResponse.invalid_status();
+        }
+        mut empty_body: Array<Byte> = Array(0);
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        inmut handle: UInt64 = HTTPResponse.register_server_producer_native(producer);
+        if handle == 0 { return HTTPResponse.stream_response_error(HTTPError.Transport); }
+        mut response: HTTPResponse = HTTPResponse(status_code, empty_body, encoded_headers);
+        response.server_producer_handle = handle;
+        return HTTPResponse.stream_response_ok(response);
+    }
+
+    // Creates a text/event-stream response. Heartbeats are disabled by
+    // default; configured intervals must be between one second and one hour.
+    // The transport emits comment frames without invoking the Zirk producer.
+    static from_sse_stream(
+        producer: Fn(UInt64) => Array<Byte>,
+        heartbeat_ms: Int32 = 0,
+    ): Result<HTTPResponse, HTTPError> {
+        if heartbeat_ms < 0 || heartbeat_ms > 3600000
+        ||(heartbeat_ms > 0 && heartbeat_ms < 1000) {
+            return HTTPResponse.stream_response_error(HTTPError.Protocol);
+        }
+        mut headers: HTTPHeaders = HTTPHeaders.create();
+        return match headers.set("Content-Type", "text/event-stream; charset=utf-8") {
+            Error(_) => HTTPResponse.stream_response_error(HTTPError.Protocol);
+            Ok(_) => match HTTPResponse.from_stream(200, headers, producer) {
+                Error(error) => HTTPResponse.stream_response_error(error);
+                Ok(response) => {
+                    response.server_sse_heartbeat_ms = heartbeat_ms;
+                    HTTPResponse.stream_response_ok(response);
+                }
+            };
+        };
+    }
+
+    private static register_server_producer_native(producer: Fn(UInt64) => Array<Byte>): UInt64 {
+        return 0 as UInt64;
+    }
+
+    private static stream_response_ok(value: HTTPResponse): Result<HTTPResponse, HTTPError> {
+        return Ok(value);
+    }
+
+    private static stream_response_error(error: HTTPError): Result<HTTPResponse, HTTPError> {
+        return Error(error);
+    }
+
+    private static checked(
+        status_code: Int32,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        if body.length > 16777216 {
+            return HTTPResponse.invalid_body();
+        }
+        if status_code < 100 || status_code > 599 {
+            return HTTPResponse.invalid_status();
+        }
+        return HTTPResponse.valid_response(HTTPResponse(status_code, body, headers));
+    }
+
+    private static valid_response(value: HTTPResponse): Result<HTTPResponse, HTTPError> {
+        return Ok<HTTPResponse, HTTPError>(value);
+    }
+
+    private static invalid_status(): Result<HTTPResponse, HTTPError> {
+        return Error<HTTPResponse, HTTPError>(HTTPError.InvalidStatus);
+    }
+
+    private static invalid_body(): Result<HTTPResponse, HTTPError> {
+        return Error<HTTPResponse, HTTPError>(HTTPError.BodyTooLarge);
+    }
+
+    private static body_bytes_ok(value: Array<Byte>): Result<Array<Byte>, HTTPError> {
+        return Ok<Array<Byte>, HTTPError>(value);
+    }
+
+    private static body_bytes_error(error: HTTPError): Result<Array<Byte>, HTTPError> {
+        return Error<Array<Byte>, HTTPError>(error);
+    }
+
+    // Header names are case-insensitive; the result keeps every repeated
+    // field value in wire order for that name.
+    header_values(name: String): Result<List<String>, HTTPError> {
+        return HTTPResponse.header_values_native(this.header_data, name);
+    }
+
+    // RFC 10008 uses 303 See Other to identify a GET-able indirect result.
+    // Returns null for direct responses; malformed/missing/ambiguous Location
+    // metadata is a protocol error. Following the returned URL is explicit.
+    indirect_result_url(base: URL): Result<URL?, HTTPError> {
+        if this.status_code_value != 303 { return HTTPResponse.indirect_url_ok(null); }
+        return match this.header_values("location") {
+            Ok(values) => {
+                if values.length != 1 {
+                    HTTPResponse.indirect_url_error(HTTPError.Protocol)
+                } else {
+                    match URL.resolve(base, values[0]) {
+                        Ok(url) => HTTPResponse.indirect_url_ok(url);
+                        Error(error) => HTTPResponse.indirect_url_error(error);
+                    }
+                }
+            }
+            Error(error) => HTTPResponse.indirect_url_error(error);
+        };
+    }
+
+    private static indirect_url_ok(value: URL?): Result<URL?, HTTPError> { return Ok(value); }
+    private static indirect_url_error(error: HTTPError): Result<URL?, HTTPError> { return Error(
+            error,
+        ); }
+
+    private static header_values_native(
+        headers: Array<Byte>,
+        name: String,
+    ): Result<List<String>, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    // Text consumes the same one-shot body as bytes(). Decoding is strict:
+    // invalid UTF-8 is an HTTPError, never lossy replacement text.
+    text(): Result<String, HTTPError> {
+        return match this.bytes() {
+            Error(error) => HTTPResponse.text_error(error);
+            Ok(body) => HTTPResponse.text_native(body);
+        };
+    }
+
+    private static text_error(error: HTTPError): Result<String, HTTPError> {
+        return Error<String, HTTPError>(error);
+    }
+
+    private static text_native(body: Array<Byte>): Result<String, HTTPError> {
+        return Error(HTTPError.InvalidText);
+    }
+}
+
+// An event emitted by a Server-Sent Events stream. `retry_ms` reflects the
+// latest valid retry field observed before this event, if one was provided.
+share class HTTPEvent {
+    private inmut event_type_value: String;
+    private inmut data_value: String;
+    private inmut last_event_id_value: String;
+    private inmut retry_ms_value: UInt64?;
+
+    private construct(event_type: String, data: String, last_event_id: String, retry_ms: UInt64?) {
+        this.event_type_value = event_type;
+        this.data_value = data;
+        this.last_event_id_value = last_event_id;
+        this.retry_ms_value = retry_ms;
+    }
+
+    event_type(): String { return this.event_type_value; }
+    data(): String { return this.data_value; }
+    last_event_id(): String { return this.last_event_id_value; }
+    retry_ms(): UInt64? { return this.retry_ms_value; }
+}
+
+// Bounded Server-Sent Events framing for values returned by an
+// HTTPResponse.from_stream producer. Empty event names use the default
+// "message" event; an empty event ID explicitly resets the reconnect cursor.
+share class HTTPServerEvent {
+    static encode(
+        data: String,
+        event_type?: String,
+        id?: String,
+        retry_ms?: UInt64,
+    ): Result<Array<Byte>, HTTPError> {
+        mut data_bytes = data.bytes();
+        if data_bytes.length > 65536 {
+            return HTTPServerEvent.encode_error(HTTPError.BodyTooLarge);
+        }
+        mut encoded_size: UInt64 = 1;
+        mut line_start: UInt64 = 0;
+        mut cursor: UInt64 = 0;
+        mut line_count: UInt64 = 0;
+        loop {
+            mut at_end = cursor == data_bytes.length;
+            mut separator = false;
+            if ! at_end {
+                separator = data_bytes[cursor] == 10 || data_bytes[cursor] == 13;
+            }
+            if at_end || separator {
+                line_count = line_count + 1;
+                if line_count > 256 {
+                    return HTTPServerEvent.encode_error(HTTPError.BodyTooLarge);
+                }
+                mut line_length = cursor - line_start;
+                mut line_prefix_size: UInt64 = 6;
+                mut framing_size: UInt64 = 7;
+                if line_length == 0 {
+                    line_prefix_size = 5;
+                    framing_size = 6;
+                }
+                if line_length + line_prefix_size > 16384 {
+                    return HTTPServerEvent.encode_error(HTTPError.BodyTooLarge);
+                }
+                encoded_size = encoded_size + line_length + framing_size;
+                if at_end { break; }
+                if data_bytes[cursor] == 13 && cursor + 1 < data_bytes.length
+                && data_bytes[cursor + 1] == 10 {
+                    cursor = cursor + 2;
+                } else {
+                    cursor = cursor + 1;
+                }
+                line_start = cursor;
+            } else {
+                cursor = cursor + 1;
+            }
+        }
+
+        match event_type {
+            null => { }
+            value => {
+                mut event_bytes = value.bytes();
+                if value.contains("\r") || value.contains("\n") || event_bytes.length + 7 > 16384 {
+                    return HTTPServerEvent.encode_error(HTTPError.Protocol);
+                }
+                if event_bytes.length > 0 { encoded_size = encoded_size + event_bytes.length + 7; }
+            }
+        }
+        match id {
+            null => { }
+            value => {
+                mut id_bytes = value.bytes();
+                if value.contains("\r") || value.contains("\n") || value.contains("\0")
+                || id_bytes.length + 4 > 16384 {
+                    return HTTPServerEvent.encode_error(HTTPError.Protocol);
+                }
+                encoded_size = encoded_size + id_bytes.length + 4;
+            }
+        }
+        match retry_ms {
+            null => { }
+            value => {
+                mut retry_text = value.to_string();
+                mut retry_bytes = retry_text.bytes();
+                encoded_size = encoded_size + retry_bytes.length + 7;
+            }
+        }
+        if encoded_size > 131072 {
+            return HTTPServerEvent.encode_error(HTTPError.BodyTooLarge);
+        }
+
+        mut frame: Array<Byte> = Array(encoded_size);
+        mut offset: UInt64 = 0;
+        match event_type {
+            null => { }
+            value => {
+                mut event_bytes = value.bytes();
+                if event_bytes.length > 0 {
+                    offset = HTTPServerEvent.append_text(frame, offset, "event:");
+                    offset = HTTPServerEvent.append_bytes(frame, offset, event_bytes);
+                    offset = HTTPServerEvent.append_text(frame, offset, "\n");
+                }
+            }
+        }
+        match id {
+            null => { }
+            value => {
+                offset = HTTPServerEvent.append_text(frame, offset, "id:");
+                offset = HTTPServerEvent.append_bytes(frame, offset, value.bytes());
+                offset = HTTPServerEvent.append_text(frame, offset, "\n");
+            }
+        }
+        match retry_ms {
+            null => { }
+            value => {
+                offset = HTTPServerEvent.append_text(frame, offset, "retry:");
+                offset = HTTPServerEvent.append_text(frame, offset, value.to_string());
+                offset = HTTPServerEvent.append_text(frame, offset, "\n");
+            }
+        }
+        offset = HTTPServerEvent.append_data_lines(frame, offset, data_bytes);
+        offset = HTTPServerEvent.append_text(frame, offset, "\n");
+        return HTTPServerEvent.encode_ok(frame);
+    }
+
+    private static append_text(frame: Array<Byte>, offset: UInt64, value: String): UInt64 {
+        return HTTPServerEvent.append_bytes(frame, offset, value.bytes());
+    }
+
+    private static append_bytes(frame: Array<Byte>, offset: UInt64, value: List<UInt8>): UInt64 {
+        mut index: UInt64 = 0;
+        while index < value.length {
+            frame[offset + index] = value[index];
+            index = index + 1;
+        }
+        return offset + value.length;
+    }
+
+    private static append_data_lines(frame: Array<Byte>, offset: UInt64, data: List<UInt8>): UInt64 {
+        mut cursor: UInt64 = 0;
+        mut line_start: UInt64 = 0;
+        mut output_offset = offset;
+        loop {
+            mut at_end = cursor == data.length;
+            mut separator = false;
+            if ! at_end { separator = data[cursor] == 10 || data[cursor] == 13; }
+            if at_end || separator {
+                output_offset = HTTPServerEvent.append_text(frame, output_offset, "data:");
+                if cursor > line_start {
+                    output_offset = HTTPServerEvent.append_text(frame, output_offset, " ");
+                    output_offset = HTTPServerEvent.append_slice(
+                        frame,
+                        output_offset,
+                        data,
+                        line_start,
+                        cursor,
+                    );
+                }
+                output_offset = HTTPServerEvent.append_text(frame, output_offset, "\n");
+                if at_end { break; }
+                if data[cursor] == 13 && cursor + 1 < data.length && data[cursor + 1] == 10 {
+                    cursor = cursor + 2;
+                } else {
+                    cursor = cursor + 1;
+                }
+                line_start = cursor;
+            } else {
+                cursor = cursor + 1;
+            }
+        }
+        return output_offset;
+    }
+
+    private static append_slice(
+        frame: Array<Byte>,
+        offset: UInt64,
+        value: List<UInt8>,
+        start: UInt64,
+        end: UInt64,
+    ): UInt64 {
+        mut index: UInt64 = start;
+        mut output_index = offset;
+        while index < end {
+            frame[output_index] = value[index];
+            output_index = output_index + 1;
+            index = index + 1;
+        }
+        return output_index;
+    }
+
+    private static encode_ok(value: Array<Byte>): Result<Array<Byte>, HTTPError> {
+        return Ok(value);
+    }
+
+    private static encode_error(error: HTTPError): Result<Array<Byte>, HTTPError> {
+        return Error(error);
+    }
+}
+
+// Demand-driven SSE client. It reads only until the next complete event and
+// closes the underlying response stream when canceled or explicitly closed.
+share class HTTPEventStream {
+    private mut response: HTTPResponse;
+    private mut ended: Boolean;
+    private mut source_url: URL;
+    private mut reconnect_enabled: Boolean;
+    private mut last_event_id: String;
+    private mut retry_delay_ms: UInt64;
+    private mut heartbeat_total: UInt64;
+    private mut heartbeat_observed: UInt64;
+
+    private construct(response: HTTPResponse, url: URL, reconnect_enabled: Boolean) {
+        this.response = response;
+        this.ended = false;
+        this.source_url = url;
+        this.reconnect_enabled = reconnect_enabled;
+        this.last_event_id = "";
+        this.retry_delay_ms = 3000 as UInt64;
+        this.heartbeat_total = 0 as UInt64;
+        this.heartbeat_observed = 0 as UInt64;
+    }
+
+    static connect(url: URL): Result<HTTPEventStream, HTTPError> {
+        return match HTTP.get_stream(url) {
+            Error(error) => HTTPEventStream.connect_error(error);
+            Ok(response) => HTTPEventStream.connect_ok(HTTPEventStream(response, url, false));
+        };
+    }
+
+    // Maintains the connection after a server closes it, following the SSE
+    // reconnection delay and Last-Event-ID rules. Call close() to stop retries.
+    static connect_with_reconnect(url: URL): Result<HTTPEventStream, HTTPError> {
+        while true {
+            match HTTP.get_stream(url) {
+                Error(error) => {
+                    if error == HTTPError.Transport || error == HTTPError.Timeout {
+                        Timer.sleep(3000ms);
+                    } else {
+                        return HTTPEventStream.connect_error(error);
+                    }
+                }
+                Ok(response) => {
+                    mut stream = HTTPEventStream(response, url, true);
+                    if response.status_code() == 204 {
+                        _ = stream.close();
+                    } else if response.status_code() != 200 {
+                        _ = stream.close();
+                        return HTTPEventStream.connect_error(HTTPError.InvalidStatus);
+                    }
+                    return HTTPEventStream.connect_ok(stream);
+                }
+            }
+        }
+        return HTTPEventStream.connect_error(HTTPError.Transport);
+    }
+
+    // Opens a new SSE request from a previously received event ID. The server
+    // can resume after that event according to the SSE Last-Event-ID contract.
+    static reconnect(url: URL, last_event_id: String): Result<HTTPEventStream, HTTPError> {
+        mut headers = HTTPHeaders.create();
+        return match headers.add("last-event-id", last_event_id) {
+            Error(_) => HTTPEventStream.connect_error(HTTPError.Protocol);
+            Ok(_) => match HTTP.get_stream_with_headers(url, headers) {
+                Error(error) => HTTPEventStream.connect_error(error);
+                Ok(response) => HTTPEventStream.connect_ok(HTTPEventStream(response, url, false));
+            };
+        };
+    }
+
+    next_event(): Result<HTTPEvent?, HTTPError> {
+        if this.ended { return HTTPEventStream.event_ok(null); }
+        while true {
+            match this.response.read_sse_event_fields() {
+                Error(error) => {
+                    this.record_heartbeats();
+                    _ = this.response.close();
+                    if this.reconnect_enabled &&(error == HTTPError.Transport || error == HTTPError.Timeout) {
+                        match this.reconnect_after_disconnect() {
+                            Error(reconnect_error) => { return HTTPEventStream.event_error(reconnect_error); }
+                            Ok(reconnected) => {
+                                if reconnected { continue; }
+                                return HTTPEventStream.event_ok(null);
+                            }
+                        }
+                    }
+                    this.ended = true;
+                    return HTTPEventStream.event_error(error);
+                }
+                Ok(fields) => {
+                    if fields.length == 0 {
+                        this.record_heartbeats();
+                        _ = this.response.close();
+                        if this.reconnect_enabled {
+                            match this.reconnect_after_disconnect() {
+                                Error(error) => { return HTTPEventStream.event_error(error); }
+                                Ok(reconnected) => {
+                                    if reconnected { continue; }
+                                    return HTTPEventStream.event_ok(null);
+                                }
+                            }
+                        }
+                        this.ended = true;
+                        return HTTPEventStream.event_ok(null);
+                    }
+                    if fields.length != 4 {
+                        this.ended = true;
+                        this.record_heartbeats();
+                        _ = this.response.close();
+                        return HTTPEventStream.event_error(HTTPError.Protocol);
+                    }
+                    mut retry_ms: UInt64? = null;
+                    if fields[3] != "" {
+                        match UInt64.parse(fields[3]) {
+                            Ok(value) => {
+                                retry_ms = value;
+                                // Bound conversion to the runtime's millisecond duration range.
+                                if value > 2147483647 as UInt64 {
+                                    this.retry_delay_ms = 2147483647 as UInt64;
+                                } else {
+                                    this.retry_delay_ms = value;
+                                }
+                            }
+                            Error(_) => { }
+                        }
+                    }
+                    this.last_event_id = fields[2];
+                    this.record_heartbeats();
+                    return HTTPEventStream.event_ok(HTTPEvent(
+                        fields[0], fields[1], fields[2], retry_ms,
+                    ));
+                }
+            }
+        }
+        return HTTPEventStream.event_ok(null);
+    }
+
+    close(): Boolean {
+        this.reconnect_enabled = false;
+        this.ended = true;
+        this.record_heartbeats();
+        return this.response.close();
+    }
+
+    private reconnect_after_disconnect(): Result<Boolean, HTTPError> {
+        while this.reconnect_enabled {
+            Timer.sleep(this.retry_delay_ms * 1ms);
+            mut headers = HTTPHeaders.create();
+            if this.last_event_id != "" {
+                match headers.add("last-event-id", this.last_event_id) {
+                    Error(_) => { this.ended = true; return HTTPEventStream.reconnect_error(HTTPError.Protocol); }
+                    Ok(_) => { }
+                }
+            }
+            match HTTP.get_stream_with_headers(this.source_url, headers) {
+                Ok(response) => {
+                    if response.status_code() == 204 {
+                        _ = response.close();
+                        this.ended = true;
+                        this.reconnect_enabled = false;
+                        return HTTPEventStream.reconnect_ok(false);
+                    }
+                    if response.status_code() != 200 {
+                        _ = response.close();
+                        this.ended = true;
+                        this.reconnect_enabled = false;
+                        return HTTPEventStream.reconnect_error(HTTPError.InvalidStatus);
+                    }
+                    this.heartbeat_observed = 0 as UInt64;
+                    this.response = response;
+                    return HTTPEventStream.reconnect_ok(true);
+                }
+                Error(error) => {
+                    if error == HTTPError.Transport || error == HTTPError.Timeout {
+                        // The next iteration waits before retrying the failed connection.
+                    } else {
+                        this.ended = true;
+                        this.reconnect_enabled = false;
+                        return HTTPEventStream.reconnect_error(error);
+                    }
+                }
+            }
+        }
+        this.ended = true;
+        return HTTPEventStream.reconnect_ok(false);
+    }
+
+    // Number of SSE comment lines observed while reading through the latest
+    // event. Comments are protocol heartbeats and do not produce events.
+    heartbeat_count(): UInt64 { return this.record_heartbeats(); }
+
+    private record_heartbeats(): UInt64 {
+        mut current: UInt64 = this.response.sse_heartbeat_count();
+        if current > this.heartbeat_observed {
+            this.heartbeat_total = this.heartbeat_total + current - this.heartbeat_observed;
+            this.heartbeat_observed = current;
+        }
+        return this.heartbeat_total;
+    }
+
+    private static connect_ok(value: HTTPEventStream): Result<HTTPEventStream, HTTPError> {
+        return Ok(value);
+    }
+
+    private static connect_error(error: HTTPError): Result<HTTPEventStream, HTTPError> {
+        return Error(error);
+    }
+
+    private static event_ok(value: HTTPEvent?): Result<HTTPEvent?, HTTPError> {
+        return Ok(value);
+    }
+
+    private static event_error(error: HTTPError): Result<HTTPEvent?, HTTPError> {
+        return Error(error);
+    }
+
+    private static reconnect_ok(value: Boolean): Result<Boolean, HTTPError> { return Ok(value); }
+
+    private static reconnect_error(error: HTTPError): Result<Boolean, HTTPError> { return Error(
+            error,
+        ); }
+}
+
+// Generic top-level decoding uses compile-time specialization, the current
+// compiler-supported boundary for user-defined generic operations.
+share fn decode_json<T from HTTPJsonParsable<T >>(response: HTTPResponse): Result<T, HTTPError> {
+    return match response.text() {
+        Error(error) => Error<T, HTTPError>(error);
+        Ok(document) => match T.parse_json(document) {
+            Ok(value) => Ok<T, HTTPError>(value);
+            Error(_) => Error<T, HTTPError>(HTTPError.InvalidJson);
+        };
+    };
+}
+
+share class HTTPRequest {
+    private inmut method_value: String;
+    private inmut target_value: String;
+    private inmut header_data: Array<Byte>;
+    private inmut body_value: Array<Byte>;
+
+    private construct(method: String, target: String, headers: Array<Byte>, body: Array<Byte>) {
+        this.method_value = method;
+        this.target_value = target;
+        this.header_data = headers;
+        this.body_value = body;
+    }
+
+    method(): String { return this.method_value; }
+    target(): String { return this.target_value; }
+    body(): Array<Byte> { return this.body_value; }
+
+    // The server routes on the origin-form path and keeps the query separate.
+    path(): String { return this.target_value.split("?")[0]; }
+
+    query(): String? {
+        mut parts = this.target_value.split("?");
+        if parts.length < 2 { return null; }
+        return parts[1];
+    }
+
+    header_values(name: String): Result<List<String>, HTTPError> {
+        return HTTPRequest.request_header_values_native(this.header_data, name);
+    }
+
+    private static request_header_values_native(
+        headers: Array<Byte>,
+        name: String,
+    ): Result<List<String>, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+}
+
+// Strictly decoded application/x-www-form-urlencoded fields. Duplicate
+// names and their order are preserved; body and field counts are bounded by
+// the native parser.
+share class HTTPFormData {
+    private mut fields: List<String>;
+    private mut encoded_input_bytes: UInt64;
+
+    private construct(fields: List<String>) {
+        this.fields = fields;
+        mut empty_bytes: UInt64 = 0;
+        this.encoded_input_bytes = empty_bytes;
+    }
+
+    static create(): HTTPFormData {
+        mut fields: List<String> = List();
+        return HTTPFormData(fields);
+    }
+
+    // Adds a repeated name/value pair in insertion order. The raw UTF-8 input
+    // is bounded before it is retained; encode_urlencoded also checks the
+    // larger percent-encoded representation against the 1 MiB wire limit.
+    add(name: String, value: String): Result<Void, HTTPError> {
+        if this.fields.length / 2 >= 256 {
+            return HTTPFormData.form_error(HTTPError.TooManyFields);
+        }
+        mut byte_limit: UInt64 = 1048576;
+        mut name_bytes = name.bytes().length;
+        mut value_bytes = value.bytes().length;
+        if name_bytes > byte_limit - this.encoded_input_bytes {
+            return HTTPFormData.form_error(HTTPError.BodyTooLarge);
+        }
+        mut after_name = this.encoded_input_bytes + name_bytes;
+        if value_bytes > byte_limit - after_name {
+            return HTTPFormData.form_error(HTTPError.BodyTooLarge);
+        }
+        mut new_input_bytes = after_name + value_bytes;
+        this.fields.add(name);
+        this.fields.add(value);
+        this.encoded_input_bytes = new_input_bytes;
+        return HTTPFormData.form_ok();
+    }
+
+    // Returns application/x-www-form-urlencoded bytes with UTF-8 percent
+    // encoding, '+' spaces, and stable repeated-field ordering.
+    encode_urlencoded(): Result<Array<Byte>, HTTPError> {
+        return HTTPFormData.encode_fields_native(this.fields);
+    }
+
+    static parse(request: HTTPRequest): Result<HTTPFormData, HTTPError> {
+        return match request.header_values("content-type") {
+            Error(error) => HTTPFormData.parse_error(error);
+            Ok(content_types) => {
+                if content_types.length != 1 {
+                    HTTPFormData.parse_error(HTTPError.Protocol)
+                } else {
+                    match HTTPFormData.decode_fields_native(request.body(), content_types[0]) {
+                        Ok(fields) => HTTPFormData.parse_ok(HTTPFormData(fields));
+                        Error(error) => HTTPFormData.parse_error(error);
+                    }
+                }
+            }
+        };
+    }
+
+    get(name: String): String? {
+        mut values = this.get_all(name);
+        if values.length == 0 { return null; }
+        return values[0];
+    }
+
+    get_all(name: String): List<String> {
+        return HTTPFormData.values_native(this.fields, name);
+    }
+
+    private static decode_fields_native(
+        body: Array<Byte>,
+        content_type: String,
+    ): Result<List<String>, HTTPError> {
+        return HTTPFormData.decode_fields_intrinsic(body, content_type);
+    }
+
+    private static decode_fields_intrinsic(
+        body: Array<Byte>,
+        content_type: String,
+    ): Result<List<String>, HTTPError> {
+        return HTTPFormData.parse_error_fields();
+    }
+
+    private static values_native(fields: List<String>, name: String): List<String> {
+        return HTTPFormData.values_intrinsic(fields, name);
+    }
+
+    private static values_intrinsic(fields: List<String>, name: String): List<String> {
+        return List();
+    }
+
+    private static encode_fields_native(fields: List<String>): Result<Array<Byte>, HTTPError> {
+        return HTTPFormData.encode_fields_intrinsic(fields);
+    }
+
+    private static encode_fields_intrinsic(fields: List<String>): Result<Array<Byte>, HTTPError> {
+        return HTTPFormData.encode_error(HTTPError.Protocol);
+    }
+
+    private static form_ok(): Result<Void, HTTPError> {
+        return Ok(HTTPFormData.unit());
+    }
+
+    private static form_error(error: HTTPError): Result<Void, HTTPError> {
+        return Error<Void, HTTPError>(error);
+    }
+
+    private static encode_error(error: HTTPError): Result<Array<Byte>, HTTPError> {
+        return Error<Array<Byte>, HTTPError>(error);
+    }
+
+    private static unit(): Void { return; }
+
+    private static parse_ok(value: HTTPFormData): Result<HTTPFormData, HTTPError> {
+        return Ok(value);
+    }
+
+    private static parse_error(error: HTTPError): Result<HTTPFormData, HTTPError> {
+        return Error(error);
+    }
+
+    private static parse_error_fields(): Result<List<String>, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+}
+
+// One binary-safe multipart part. `filename()` is untrusted peer metadata and
+// must never be treated as a filesystem path. Filename-bearing parts may also
+// expose an opaque, task-owned temporary upload resource.
+share class HTTPMultipartPart {
+    private inmut name_value: String;
+    private inmut filename_value: String?;
+    private inmut content_type_value: String?;
+    private inmut body_value: Array<Byte>;
+    private inmut upload_handle: UInt64;
+
+    private construct(
+        name: String,
+        filename: String?,
+        content_type: String?,
+        body: Array<Byte>,
+        upload_handle: UInt64,
+    ) {
+        this.name_value = name;
+        this.filename_value = filename;
+        this.content_type_value = content_type;
+        this.body_value = body;
+        this.upload_handle = upload_handle;
+    }
+
+    name(): String { return this.name_value; }
+    filename(): String? { return this.filename_value; }
+    content_type(): String? { return this.content_type_value; }
+    bytes(): Array<Byte> { return this.body_value; }
+
+    has_temporary_upload(): Boolean { return this.upload_handle != 0; }
+
+    // Reads a bounded range from the managed temporary upload. The offset is
+    // explicit, so repeated part wrappers cannot race a shared file cursor.
+    read_temporary_upload(offset: UInt64, max_bytes: UInt64): HTTPStreamChunk {
+        if this.upload_handle == 0 { return HTTPStreamChunk.Error(HTTPError.Protocol); }
+        return HTTPMultipartPart.read_upload_native(this.upload_handle, offset, max_bytes);
+    }
+
+    close_temporary_upload(): Boolean {
+        if this.upload_handle == 0 { return true; }
+        return HTTPMultipartPart.close_upload_native(this.upload_handle);
+    }
+
+    private static read_upload_native(
+        handle: UInt64,
+        offset: UInt64,
+        max_bytes: UInt64,
+    ): HTTPStreamChunk {
+        return HTTPStreamChunk.Error(HTTPError.Transport);
+    }
+
+    private static close_upload_native(handle: UInt64): Boolean { return true; }
+}
+
+// Strict, bounded multipart/form-data parts. The native parser caps the
+// request body at 1 MiB and the list at 256 parts; compatibility byte arrays
+// remain available while filename-bearing parts also own temporary resources.
+share class HTTPMultipartData {
+    private inmut names: List<String>;
+    private inmut filenames: List<String>;
+    private inmut filename_present: List<Boolean>;
+    private inmut content_types: List<String>;
+    private inmut content_type_present: List<Boolean>;
+    private inmut bodies: List<Array<Byte >>;
+    private inmut upload_handles: List<UInt64>;
+
+    private construct(
+        names: List<String>,
+        filenames: List<String>,
+        filename_present: List<Boolean>,
+        content_types: List<String>,
+        content_type_present: List<Boolean>,
+        bodies: List<Array<Byte >>,
+        upload_handles: List<UInt64>,
+    ) {
+        this.names = names;
+        this.filenames = filenames;
+        this.filename_present = filename_present;
+        this.content_types = content_types;
+        this.content_type_present = content_type_present;
+        this.bodies = bodies;
+        this.upload_handles = upload_handles;
+    }
+
+    static parse(request: HTTPRequest): Result<HTTPMultipartData, HTTPError> {
+        return match request.header_values("content-type") {
+            Error(error) => HTTPMultipartData.parse_error(error);
+            Ok(content_types) => {
+                if content_types.length != 1 {
+                    HTTPMultipartData.parse_error(HTTPError.Protocol)
+                } else {
+                    HTTPMultipartData.multipart_parse_native(request.body(), content_types[0])
+                }
+            }
+        };
+    }
+
+    part_count(): UInt64 { return this.names.length; }
+
+    part(index: Int32): HTTPMultipartPart? {
+        if index < 0 || index >= this.names.length { return null; }
+        return HTTPMultipartPart(
+            this.names[index],
+            HTTPMultipartData.optional_text(this.filename_present[index], this.filenames[index]),
+            HTTPMultipartData.optional_text(
+            this.content_type_present[index],
+            this.content_types[index],
+        ),
+            this.bodies[index],
+            this.upload_handles[index],
+        );
+    }
+
+    private static optional_text(present: Boolean, value: String): String? {
+        if present { return value; }
+        return null;
+    }
+
+    private static multipart_parse_native(
+        body: Array<Byte>,
+        content_type: String,
+    ): Result<HTTPMultipartData, HTTPError> {
+        return HTTPMultipartData.multipart_parse_intrinsic(body, content_type);
+    }
+
+    private static multipart_parse_intrinsic(
+        body: Array<Byte>,
+        content_type: String,
+    ): Result<HTTPMultipartData, HTTPError> {
+        return HTTPMultipartData.parse_error(HTTPError.Protocol);
+    }
+
+    private static parse_ok(value: HTTPMultipartData): Result<HTTPMultipartData, HTTPError> {
+        return Ok(value);
+    }
+
+    private static parse_error(error: HTTPError): Result<HTTPMultipartData, HTTPError> {
+        return Error(error);
+    }
+}
+
+// A bounded binary-safe multipart/form-data request builder. It retains
+// payload bytes in managed memory and never treats filenames as paths.
+share class HTTPMultipartBuilder {
+    private mut metadata: List<String>;
+    private mut bodies: List<Array<Byte >>;
+    private mut retained_bytes: UInt64;
+
+    private construct(metadata: List<String>, bodies: List<Array<Byte >>) {
+        this.metadata = metadata;
+        this.bodies = bodies;
+        mut empty: UInt64 = 0;
+        this.retained_bytes = empty;
+    }
+
+    static create(): HTTPMultipartBuilder {
+        mut metadata: List<String> = List();
+        mut bodies: List<Array<Byte >> = List();
+        return HTTPMultipartBuilder(metadata, bodies);
+    }
+
+    add(
+        name: String,
+        body: Array<Byte>,
+        filename: String? = null,
+        content_type: String? = null,
+    ): Result<Void, HTTPError> {
+        if this.bodies.length >= 256 {
+            return HTTPMultipartBuilder.error(HTTPError.TooManyParts);
+        }
+        mut limit: UInt64 = 1048576;
+        mut available = limit - this.retained_bytes;
+        mut name_size = name.bytes().length;
+        if name_size > available {
+            return HTTPMultipartBuilder.error(HTTPError.BodyTooLarge);
+        }
+        available -= name_size;
+        mut file_size = HTTPMultipartBuilder.optional_length(filename);
+        if file_size > available { return HTTPMultipartBuilder.error(HTTPError.BodyTooLarge); }
+        available -= file_size;
+        mut type_size = HTTPMultipartBuilder.optional_length(content_type);
+        if type_size > available { return HTTPMultipartBuilder.error(HTTPError.BodyTooLarge); }
+        available -= type_size;
+        mut body_size: UInt64 = body.length;
+        if body_size > available { return HTTPMultipartBuilder.error(HTTPError.BodyTooLarge); }
+        mut added_bytes = name_size + file_size + type_size + body_size;
+        this.metadata.add(name);
+        match filename {
+            null => { this.metadata.add(""); this.metadata.add("0"); }
+            value => { this.metadata.add(value); this.metadata.add("1"); }
+        };
+        match content_type {
+            null => { this.metadata.add(""); this.metadata.add("0"); }
+            value => { this.metadata.add(value); this.metadata.add("1"); }
+        };
+        this.bodies.add(body);
+        this.retained_bytes += added_bytes;
+        return HTTPMultipartBuilder.ok();
+    }
+
+    encode(boundary: String): Result<Array<Byte>, HTTPError> {
+        return HTTPMultipartBuilder.encode_native(this.metadata, this.bodies, boundary);
+    }
+
+    private static encode_native(
+        metadata: List<String>,
+        bodies: List<Array<Byte >>,
+        boundary: String,
+    ): Result<Array<Byte>, HTTPError> {
+        return HTTPMultipartBuilder.multipart_encode_intrinsic(metadata, bodies, boundary);
+    }
+
+    private static multipart_encode_intrinsic(
+        metadata: List<String>,
+        bodies: List<Array<Byte >>,
+        boundary: String,
+    ): Result<Array<Byte>, HTTPError> {
+        return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+    }
+
+    private static optional_length(value: String?): UInt64 {
+        return match value {
+            null => 0 as UInt64;
+            present => present.bytes().length;
+        };
+    }
+
+    private static ok(): Result<Void, HTTPError> { return Ok(HTTPMultipartBuilder.unit()); }
+    private static error(error: HTTPError): Result<Void, HTTPError> { return Error(error); }
+    private static encode_error(error: HTTPError): Result<Array<Byte>, HTTPError> { return Error(
+            error,
+        ); }
+    private static unit(): Void { return; }
+}
+
+import { TCPError, TCPListener, TCPStream } from std.net::tcp;
+import { TLSError, TLSListener, TLSStream } from std.net::tls;
+import { SecretString } from std.environment;
+
+share class HTTPServer {
+    // Binds through std.net's exact listen-grant check and maps transport
+    // failures into the stable HTTP error surface.
+    static bind(endpoint: String): Result<TCPListener, HTTPError> {
+        return match TCPListener.bind(endpoint) {
+            Ok(listener) => HTTPServer.bind_ok(listener);
+            Error(error) => HTTPServer.bind_error(HTTPServer.map_accept_error_value(error));
+        };
+    }
+
+    // Binds a TLS listener configured to advertise HTTP/2 and HTTP/1.1 via
+    // ALPN. The explicit DER identity and exact listen grant are validated by
+    // std.net::tls before the listener is returned.
+    static bind_tls(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        allow_tls12: Boolean = false,
+    ): Result<TLSListener, HTTPError> {
+        return match TLSListener.bind_for_http(
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            allow_tls12,
+        ) {
+            Ok(listener) => HTTPServer.bind_tls_ok(listener);
+            Error(error) => HTTPServer.bind_tls_error(error);
+        };
+    }
+
+    private static bind_tls_ok(listener: TLSListener): Result<TLSListener, HTTPError> {
+        return Ok(listener);
+    }
+
+    private static bind_tls_error(error: TLSError): Result<TLSListener, HTTPError> {
+        return match error {
+            TLSError.PermissionDenied => HTTPServer.bind_tls_error_code(HTTPError.PermissionDenied);
+            TLSError.AddressNotAllowed => HTTPServer.bind_tls_error_code(HTTPError.PermissionDenied);
+            TLSError.Timeout => HTTPServer.bind_tls_error_code(HTTPError.Timeout);
+            TLSError.Cancelled => HTTPServer.bind_tls_error_code(HTTPError.Cancelled);
+            _ => HTTPServer.bind_tls_error_code(HTTPError.Transport);
+        };
+    }
+
+    private static bind_tls_error_code(error: HTTPError): Result<TLSListener, HTTPError> {
+        return Error(error);
+    }
+
+    private static bind_ok(listener: TCPListener): Result<TCPListener, HTTPError> {
+        return Ok(listener);
+    }
+
+    private static bind_error(error: HTTPError): Result<TCPListener, HTTPError> {
+        return Error(error);
+    }
+
+    // Dispatches one bounded HTTP/1.1 request on an already accepted TCP
+    // stream. Applications normally call this in a loop over TCPListener.
+    static serve_once(
+        stream: TCPStream,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return HTTPServer.serve_once_native(
+            stream,
+            (request: HTTPRequest): HTTPResponse =>
+            HTTPServer.invoke_handler(handler, request),
+        );
+    }
+
+    private static serve_once_native(
+        stream: TCPStream,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    // Accepts one RFC 6455 upgrade on an already accepted TCP stream. Origins
+    // are exact normalized HTTP(S) origins; server preference orders selected
+    // subprotocols. The session is bounded by max_messages and owned by this
+    // task for the duration of the callback.
+    static serve_websocket_once(
+        stream: TCPStream,
+        path: String,
+        allowed_origins: List<String>,
+        protocols: List<String>,
+        max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+        allow_missing_origin: Boolean = false,
+    ): Result<Void, HTTPError> {
+        return HTTPServer.serve_websocket_once_native(
+            stream,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            handler,
+        );
+    }
+
+    static serve_tls_websocket_once(
+        stream: TLSStream,
+        path: String,
+        allowed_origins: List<String>,
+        protocols: List<String>,
+        max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+        allow_missing_origin: Boolean = false,
+    ): Result<Void, HTTPError> {
+        return HTTPServer.serve_tls_websocket_once_native(
+            stream,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            handler,
+        );
+    }
+
+    private static serve_websocket_once_native(
+        stream: TCPStream,
+        path: String,
+        allowed_origins: List<String>,
+        allow_missing_origin: Boolean,
+        protocols: List<String>,
+        max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static serve_tls_websocket_once_native(
+        stream: TLSStream,
+        path: String,
+        allowed_origins: List<String>,
+        allow_missing_origin: Boolean,
+        protocols: List<String>,
+        max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    // Dispatches one request over an accepted TLS stream. HTTP/2 is selected
+    // when TLS ALPN negotiated h2; otherwise the server uses HTTP/1.1.
+    static serve_tls_once(
+        stream: TLSStream,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return HTTPServer.serve_tls_once_native(
+            stream,
+            (request: HTTPRequest): HTTPResponse =>
+            HTTPServer.invoke_handler(handler, request),
+        );
+    }
+
+    private static serve_tls_once_native(
+        stream: TLSStream,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    // Serves up to max_requests streams on one accepted HTTP/2 TLS connection.
+    // The negotiated protocol must be h2; HTTP/1.1 remains available through
+    // serve_tls_once and HTTPRouter.serve_tls.
+    static serve_tls_many(
+        stream: TLSStream,
+        max_requests: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return HTTPServer.serve_tls_requests_native(
+            stream,
+            max_requests,
+            (request: HTTPRequest): HTTPResponse =>
+            HTTPServer.invoke_handler(handler, request),
+        );
+    }
+
+    private static invoke_handler(
+        handler: Fn(HTTPRequest) => HTTPResponse,
+        request: HTTPRequest,
+    ): HTTPResponse {
+        try {
+            return handler(request);
+        } catch Throwable(_) {
+            return HTTPResponse.from_text(500, "Internal Server Error");
+        }
+    }
+
+    private static serve_tls_requests_native(
+        stream: TLSStream,
+        max_requests: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    // Accepts the next authorized TCP connection and serves exactly one
+    // bounded HTTP/1.1 request on it. Call again to process another client.
+    static serve_next(
+        listener: TCPListener,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<Void, HTTPError> {
+        return match listener.accept() {
+            Ok(stream) => HTTPServer.serve_once(stream, handler);
+            Error(error) => match error {
+                TCPError.Cancelled => HTTPServer.serve_error(HTTPError.Cancelled);
+                TCPError.PermissionDenied => HTTPServer.serve_error(HTTPError.PermissionDenied);
+                TCPError.Timeout => HTTPServer.serve_error(HTTPError.Timeout);
+                _ => HTTPServer.serve_error(HTTPError.Transport);
+            };
+        };
+    }
+
+    // Serves a bounded number of accepted connections on one listener. A
+    // finite limit gives the caller an explicit completion point for scoped
+    // tasks and deterministic shutdown.
+    static serve_many(
+        listener: TCPListener,
+        max_requests: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        mut completed: UInt64 = 0;
+        mut failed: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while completed < max_requests && ! failed {
+            match listener.accept() {
+                Ok(stream) => match HTTPServer.serve_once(stream, handler) {
+                    Ok(_) => { completed += 1; true; }
+                    Error(error) => { failed = true; failure = error; true; }
+                };
+                Error(error) => { failed = true; failure = HTTPServer.map_accept_error_value(error); true; }
+            }
+        }
+        if failed { return HTTPServer.serve_many_error(failure); }
+        return Ok<UInt64, HTTPError>(completed);
+    }
+
+    // Finite server scope that closes the listening socket on both success
+    // and failure. Active requests are completed by serve_many before close.
+    static serve_many_and_close(
+        listener: TCPListener,
+        max_requests: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        mut outcome = HTTPServer.serve_many(listener, max_requests, handler);
+        mut close_outcome = listener.close();
+        return match outcome {
+            Error(error) => HTTPServer.serve_many_error(error);
+            Ok(completed) => match close_outcome {
+                Ok(_) => Ok<UInt64, HTTPError>(completed);
+                Error(_) => HTTPServer.serve_many_error(HTTPError.Transport);
+            };
+        };
+    }
+
+    // Long-lived sequential service loop. It admits one TCP connection at a
+    // time and runs until the owner task is cancelled or accept fails.
+    static serve_forever(
+        listener: TCPListener,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        mut completed: UInt64 = 0;
+        mut stopped: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while ! stopped {
+            match listener.accept() {
+                Ok(stream) => {
+                    match HTTPServer.serve_once(stream, handler) {
+                        Ok(_) => { completed += 1; true; }
+                        Error(error) => {
+                            if error == HTTPError.Cancelled {
+                                stopped = true;
+                                failure = error;
+                            } else {
+                                completed += 1;
+                            }
+                            true;
+                        }
+                    }
+                }
+                Error(error) => {
+                    stopped = true;
+                    failure = HTTPServer.map_accept_error_value(error);
+                    true;
+                }
+            }
+        }
+        return HTTPServer.serve_many_error(failure);
+    }
+
+    private static map_accept_error_value(error: TCPError): HTTPError {
+        return match error {
+            TCPError.Cancelled => HTTPError.Cancelled;
+            TCPError.PermissionDenied => HTTPError.PermissionDenied;
+            TCPError.Timeout => HTTPError.Timeout;
+            _ => HTTPError.Transport;
+        };
+    }
+
+    private static serve_many_error(error: HTTPError): Result<UInt64, HTTPError> {
+        return Error<UInt64, HTTPError>(error);
+    }
+
+    private static serve_error(error: HTTPError): Result<Void, HTTPError> {
+        return Error(error);
+    }
+}
+
+share enum HTTPRouteError {
+    InvalidPattern,
+    DuplicateRoute,
+    AmbiguousRoute,
+    RouteLimit,
+    MiddlewareLimit,
+}
+
+share class HTTPRouteParameters {
+    private inmut values: List<String>;
+
+    private construct(values: List<String>) { this.values = values; }
+
+    length(): UInt64 { return (this.values.length - 1) >> 1; }
+
+    name(index: UInt64): String { return this.values[index * 2 + 1]; }
+
+    value(index: UInt64): String { return this.values[index * 2 + 2]; }
+
+    get(name: String): String? {
+        mut index: UInt64 = 0;
+        while index < this.length() {
+            if this.name(index) == name { return this.value(index); }
+            index += 1;
+        }
+        return null;
+    }
+
+    static create(values: List<String>): HTTPRouteParameters {
+        return HTTPRouteParameters(values);
+    }
+}
+
+share class HTTPRouteHandler {
+    private inmut method_value: String;
+    private inmut pattern_value: String;
+    private inmut specificity_value: Int32;
+    private inmut callback: Fn(HTTPRequest, HTTPRouteParameters) => HTTPResponse;
+
+    private construct(
+        method: String,
+        pattern: String,
+        specificity: Int32,
+        callback: Fn(HTTPRequest, HTTPRouteParameters) => HTTPResponse,
+    ) {
+        this.method_value = method;
+        this.pattern_value = pattern;
+        this.specificity_value = specificity;
+        this.callback = callback;
+    }
+
+    method_name(): String { return this.method_value; }
+    pattern(): String { return this.pattern_value; }
+    specificity(): Int32 { return this.specificity_value; }
+
+    matches(path: String): List<String> {
+        return HTTPRouteMatcher.route_match(this.pattern_value, path);
+    }
+
+    invoke(request: HTTPRequest, values: List<String>): HTTPResponse {
+        mut handler: Fn(HTTPRequest, HTTPRouteParameters) => HTTPResponse = this.callback;
+        return handler(request, HTTPRouteParameters.create(values));
+    }
+
+    static create(
+        method: String,
+        pattern: String,
+        specificity: Int32,
+        callback: Fn(HTTPRequest, HTTPRouteParameters) => HTTPResponse,
+    ): HTTPRouteHandler {
+        return HTTPRouteHandler(method, pattern, specificity, callback);
+    }
+}
+
+// The continuation is scoped to one request. A second call never invokes the
+// downstream chain again, even if middleware ignores the returned response.
+share class HTTPNext {
+    private inmut callback: Fn(HTTPRequest) => HTTPResponse;
+    private mut called: Boolean;
+
+    private construct(callback: Fn(HTTPRequest) => HTTPResponse) {
+        this.callback = callback;
+        this.called = false;
+    }
+
+    proceed(request: HTTPRequest): HTTPResponse {
+        if this.called {
+            return HTTPResponse.from_text(500, "HTTP middleware continuation already used");
+        }
+        this.called = true;
+        mut downstream: Fn(HTTPRequest) => HTTPResponse = this.callback;
+        return downstream(request);
+    }
+
+    static create(callback: Fn(HTTPRequest) => HTTPResponse): HTTPNext {
+        return HTTPNext(callback);
+    }
+}
+
+share class HTTPMiddleware {
+    private inmut callback: Fn(HTTPRequest, HTTPNext) => HTTPResponse;
+
+    private construct(callback: Fn(HTTPRequest, HTTPNext) => HTTPResponse) {
+        this.callback = callback;
+    }
+
+    invoke(request: HTTPRequest, next: HTTPNext): HTTPResponse {
+        mut middleware: Fn(HTTPRequest, HTTPNext) => HTTPResponse = this.callback;
+        return middleware(request, next);
+    }
+
+    static create(callback: Fn(HTTPRequest, HTTPNext) => HTTPResponse): HTTPMiddleware {
+        return HTTPMiddleware(callback);
+    }
+}
+
+// Route declarations and their captured handlers remain managed Zirk values;
+// the native matcher supplies only validated conflicts and decoded segments.
+share class HTTPRouter {
+    private inmut routes: List<HTTPRouteHandler>;
+    private inmut route_patterns: List<String>;
+    private inmut route_methods: List<String>;
+    private inmut middleware: List<HTTPMiddleware>;
+
+    construct() {
+        mut empty: List<HTTPRouteHandler> = List();
+        mut patterns: List<String> = List();
+        mut methods: List<String> = List();
+        mut middleware: List<HTTPMiddleware> = List();
+        this.routes = empty;
+        this.route_patterns = patterns;
+        this.route_methods = methods;
+        this.middleware = middleware;
+    }
+
+    route(
+        method: HTTPMethod,
+        pattern: String,
+        handler: Fn(HTTPRequest, HTTPRouteParameters) => HTTPResponse,
+    ): Result<Void, HTTPRouteError> {
+        if this.routes.length >= 1024 { return HTTPRouter.route_limit_error(); }
+        mut method_name: String = HTTP.method_name(method);
+        mut pattern_status: Int32 = HTTPRouteMatcher.validate_pattern(pattern);
+        if pattern_status != 0 { return HTTPRouter.route_pattern_error(); }
+
+        mut index: UInt64 = 0;
+        while index < this.routes.length {
+            mut existing: HTTPRouteHandler = this.routes[index];
+            if existing.method_name() == method_name {
+                mut conflict: Int32 = HTTPRouteMatcher.conflict(
+                    method_name,
+                    existing.pattern(),
+                    pattern,
+                );
+                if conflict == 1 { return HTTPRouter.route_duplicate_error(); }
+                if conflict == 2 { return HTTPRouter.route_ambiguous_error(); }
+                if conflict != 0 { return HTTPRouter.route_pattern_error(); }
+            }
+            index += 1;
+        }
+
+        this.routes.add(
+            HTTPRouteHandler.create(
+            method_name,
+            pattern,
+            HTTPRouter.static_specificity(pattern),
+            handler,
+        ),
+        );
+        this.route_patterns.add(pattern);
+        this.route_methods.add(method_name);
+        return HTTPRouter.route_ok();
+    }
+
+    // Result-returning handlers map application errors to a generic 500. The
+    // error value is intentionally not exposed in the HTTP response.
+    route_result(
+        method: HTTPMethod,
+        pattern: String,
+        handler: Fn(HTTPRequest, HTTPRouteParameters) => Result<HTTPResponse, HTTPError>,
+    ): Result<Void, HTTPRouteError> {
+        return this.route(
+            method,
+            pattern,
+            (request: HTTPRequest, parameters: HTTPRouteParameters): HTTPResponse =>
+            match handler(request, parameters) {
+            Ok(response) => response;
+            Error(_) => HTTPResponse.from_text(500, "Internal Server Error");
+        },
+        );
+    }
+
+    dispatch(request: HTTPRequest): HTTPResponse {
+        return this.dispatch_with_middleware(0, request);
+    }
+
+    private dispatch_with_middleware(index: UInt64, request: HTTPRequest): HTTPResponse {
+        if index >= this.middleware.length { return this.dispatch_route(request); }
+        mut current: HTTPMiddleware = this.middleware[index];
+        mut router: HTTPRouter = this;
+        return current.invoke(
+            request,
+            HTTPNext.create(
+            (current_request: HTTPRequest): HTTPResponse =>
+            router.dispatch_with_middleware(index + 1, current_request),
+        ),
+        );
+    }
+
+    private dispatch_route(request: HTTPRequest): HTTPResponse {
+        mut selected_index: Int32 = -1;
+        mut selected_specificity: Int32 = -1;
+        mut selected_values: List<String> = List();
+        mut path_matched: Boolean = false;
+        mut request_path: String = request.path();
+        mut request_method: String = request.method();
+        mut index: UInt64 = 0;
+        while index < this.routes.length {
+            mut route: HTTPRouteHandler = this.routes[index];
+            mut values: List<String> = route.matches(request_path);
+            if values.length > 0 {
+                path_matched = true;
+                if route.method_name() == request_method &&
+                route.specificity() > selected_specificity {
+                    selected_index = index as Int32;
+                    selected_specificity = route.specificity();
+                    selected_values = values;
+                }
+            }
+            index += 1;
+        }
+
+        if selected_index < 0 {
+            if path_matched {
+                return HTTPResponse.method_not_allowed(
+                    this.route_patterns,
+                    this.route_methods,
+                    request_path,
+                );
+            }
+            return HTTPRouter.not_found();
+        }
+        mut selected: HTTPRouteHandler = this.routes[selected_index as UInt64];
+        return selected.invoke(request, selected_values);
+    }
+
+    add_middleware(callback: Fn(HTTPRequest, HTTPNext) => HTTPResponse): Result<Void, HTTPRouteError> {
+        if this.middleware.length >= 256 { return HTTPRouter.middleware_limit_error(); }
+        this.middleware.add(HTTPMiddleware.create(callback));
+        return HTTPRouter.route_ok();
+    }
+
+    // A failed middleware result terminates this request with a generic 500;
+    // the listener and unrelated requests remain active.
+    add_middleware_result(
+        callback: Fn(HTTPRequest, HTTPNext) => Result<HTTPResponse, HTTPError>,
+    ): Result<Void, HTTPRouteError> {
+        return this.add_middleware(
+            (request: HTTPRequest, next: HTTPNext): HTTPResponse =>
+            match callback(request, next) {
+            Ok(response) => response;
+            Error(_) => HTTPResponse.from_text(500, "Internal Server Error");
+        },
+        );
+    }
+
+    serve(listener: TCPListener, max_requests: UInt64): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_many(
+            listener,
+            max_requests,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
+    // Finite plain-HTTP service scope; releases the listening socket after
+    // the request bound or the first server error.
+    serve_and_close(listener: TCPListener, max_requests: UInt64): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_many_and_close(
+            listener,
+            max_requests,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
+    // Routes every accepted TCP connection until the serving task is
+    // cancelled. The loop admits one connection at a time.
+    serve_forever(listener: TCPListener): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_forever(
+            listener,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
+    // Serves a bounded number of accepted TLS connections through this route
+    // table. Each connection handles one request; TLS ALPN selects HTTP/2 or
+    // HTTP/1.1 while the listener remains owned by the caller.
+    serve_tls(listener: TLSListener, max_requests: UInt64): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        mut completed: UInt64 = 0;
+        mut failed: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while completed < max_requests && ! failed {
+            match listener.accept() {
+                Ok(stream) => match HTTPServer.serve_tls_once(
+                    stream,
+                    (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+                ) {
+                    Ok(_) => { completed += 1; true; }
+                    Error(error) => { failed = true; failure = error; true; }
+                };
+                Error(error) => { failed = true; failure = HTTPRouter.map_tls_error(error); true; }
+            }
+        }
+        if failed { return HTTPRouter.serve_tls_error(failure); }
+        return Ok<UInt64, HTTPError>(completed);
+    }
+
+    // Finite TLS service scope; closes the caller-provided listener after
+    // the accepted-connection bound or the first accept/connection error.
+    serve_tls_and_close(listener: TLSListener, max_requests: UInt64): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        mut outcome = this.serve_tls(listener, max_requests);
+        mut close_outcome = listener.close();
+        return match outcome {
+            Error(error) => HTTPRouter.serve_tls_error(error);
+            Ok(completed) => match close_outcome {
+                Ok(_) => Ok<UInt64, HTTPError>(completed);
+                Error(_) => HTTPRouter.serve_tls_error(HTTPError.Transport);
+            };
+        };
+    }
+
+    // Long-lived sequential TLS service loop. ALPN selects HTTP/2 or
+    // HTTP/1.1 for each accepted connection; the loop admits one connection
+    // at a time and stops when its owner task is cancelled or accept fails.
+    serve_tls_forever(listener: TLSListener): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        mut completed: UInt64 = 0;
+        mut stopped: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while ! stopped {
+            match listener.accept() {
+                Ok(stream) => match HTTPServer.serve_tls_once(
+                    stream,
+                    (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+                ) {
+                    Ok(_) => { completed += 1; true; }
+                    Error(error) => {
+                        if error == HTTPError.Cancelled {
+                            stopped = true;
+                            failure = error;
+                        } else {
+                            completed += 1;
+                        }
+                        true;
+                    }
+                };
+                Error(error) => {
+                    stopped = true;
+                    failure = HTTPRouter.map_tls_error(error);
+                    true;
+                }
+            }
+        }
+        return HTTPRouter.serve_tls_error(failure);
+    }
+
+    // Handles up to max_requests multiplexed HTTP/2 streams on one accepted
+    // TLS connection, invoking every route on the current Zirk task.
+    serve_tls_many(stream: TLSStream, max_requests: UInt64): Result<Void, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_tls_many(
+            stream,
+            max_requests,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
+    private static map_tls_error(error: TLSError): HTTPError {
+        return match error {
+            TLSError.PermissionDenied => HTTPError.PermissionDenied;
+            TLSError.AddressNotAllowed => HTTPError.PermissionDenied;
+            TLSError.Cancelled => HTTPError.Cancelled;
+            TLSError.Timeout => HTTPError.Timeout;
+            _ => HTTPError.Transport;
+        };
+    }
+
+    private static serve_tls_error(error: HTTPError): Result<UInt64, HTTPError> {
+        return Error(error);
+    }
+
+    private static middleware_limit_error(): Result<Void, HTTPRouteError> {
+        return Error(HTTPRouteError.MiddlewareLimit);
+    }
+
+    private static static_specificity(pattern: String): Int32 {
+        mut score: Int32 = 0;
+        for segment in pattern.split("/") {
+            if ! segment.starts_with(":") { score += 1; }
+        }
+        return score;
+    }
+
+    private static not_found(): HTTPResponse {
+        mut body: Array<Byte> = [110, 111, 116, 32, 102, 111, 117, 110, 100];
+        return HTTPResponse.from_bytes(404, body);
+    }
+
+    private static route_ok(): Result<Void, HTTPRouteError> { return Ok(HTTPRouter.unit()); }
+    private static route_pattern_error(): Result<Void, HTTPRouteError> { return Error(
+            HTTPRouteError.InvalidPattern,
+        ); }
+    private static route_duplicate_error(): Result<Void, HTTPRouteError> { return Error(
+            HTTPRouteError.DuplicateRoute,
+        ); }
+    private static route_ambiguous_error(): Result<Void, HTTPRouteError> { return Error(
+            HTTPRouteError.AmbiguousRoute,
+        ); }
+    private static route_limit_error(): Result<Void, HTTPRouteError> { return Error(
+            HTTPRouteError.RouteLimit,
+        ); }
+    private static unit(): Void { return; }
+}
+
+class HTTPRouteMatcher {
+    static validate_pattern(pattern: String): Int32 {
+        return HTTPRouteMatcher.route_pattern_validate_native(pattern);
+    }
+
+    static conflict(method: String, first: String, second: String): Int32 {
+        return HTTPRouteMatcher.route_pattern_conflict_native(method, first, second);
+    }
+
+    static route_match(pattern: String, path: String): List<String> {
+        return HTTPRouteMatcher.route_match_native(pattern, path);
+    }
+
+    static allow_header(patterns: List<String>, methods: List<String>, path: String): Array<Byte> {
+        return HTTPRouteMatcher.route_allow_header_native(patterns, methods, path);
+    }
+
+    private static route_pattern_validate_native(pattern: String): Int32 { return 1; }
+    private static route_pattern_conflict_native(method: String, first: String, second: String): Int32 { return 3; }
+    private static route_match_native(pattern: String, path: String): List<String> { return List(); }
+    private static route_allow_header_native(
+        patterns: List<String>,
+        methods: List<String>,
+        path: String,
+    ): Array<Byte> { return [0, 0, 0, 0]; }
+}
+
+// A single-consumption response body. The owning native task holds the
+// transport; closing early aborts the connection, and task completion also
+// closes any abandoned stream automatically.
+// Compatibility name; buffered and network-backed bodies share HTTPResponse.
+share type HTTPStreamResponse = HTTPResponse;
+
+// Explicit per-client HTTP(S) forward proxy. Basic credentials are supplied
+// separately as a SecretString and remote credentials require HTTPS transport.
+share class HTTPProxy {
+    private inmut proxy_url: URL;
+    private inmut credentials: SecretString;
+
+    private construct(proxy_url: URL, credentials: SecretString) {
+        this.proxy_url = proxy_url;
+        this.credentials = credentials;
+    }
+
+    static create(proxy_url: URL): Result<HTTPProxy, HTTPError> {
+        if ! proxy_url.as_string().starts_with("http://")
+        && ! proxy_url.as_string().starts_with("https://") {
+            return HTTPProxy.create_error(HTTPError.Protocol);
+        }
+        return HTTPProxy.create_ok(HTTPProxy(proxy_url, SecretString("")));
+    }
+
+    // The secret must contain `username:password`; the runtime rejects an
+    // empty username, username colons, and control bytes before networking.
+    static create_authenticated(
+        proxy_url: URL,
+        credentials: SecretString,
+    ): Result<HTTPProxy, HTTPError> {
+        if ! proxy_url.as_string().starts_with("http://")
+        && ! proxy_url.as_string().starts_with("https://") {
+            return HTTPProxy.create_error(HTTPError.Protocol);
+        }
+        return HTTPProxy.create_ok(HTTPProxy(proxy_url, credentials));
+    }
+
+    address(): URL { return this.proxy_url; }
+
+    private static create_ok(value: HTTPProxy): Result<HTTPProxy, HTTPError> {
+        return Ok(value);
+    }
+
+    private static create_error(error: HTTPError): Result<HTTPProxy, HTTPError> {
+        return Error(error);
+    }
+}
+
+share class HTTPWebSocket {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static connect(url: URL): Result<HTTPWebSocket, HTTPError> {
+        mut no_protocols: List<String> = List();
+        return HTTPWebSocket.connect_with_options(url, "", no_protocols);
+    }
+
+    // `origin` is empty when omitted. The runtime normalizes HTTP(S) origins,
+    // rejects malformed values before connecting, and validates the selected
+    // subprotocol against this bounded offer list.
+    static connect_with_options(
+        url: URL,
+        origin: String,
+        subprotocols: List<String>,
+    ): Result<HTTPWebSocket, HTTPError> {
+        return match HTTPWebSocket.websocket_connect_native(url.as_string(), origin, subprotocols) {
+            Ok(handle) => HTTPWebSocket.connect_ok(HTTPWebSocket(handle));
+            Error(error) => HTTPWebSocket.connect_error(error);
+        };
+    }
+
+    // Replaces platform trust roots with bounded DER certificates. The full
+    // options variant also supports Origin and subprotocol negotiation.
+    static connect_with_trust_roots(
+        url: URL,
+        roots_der: Array<Array<Byte >>,
+        allow_tls12: Boolean,
+    ): Result<HTTPWebSocket, HTTPError> {
+        mut no_protocols: List<String> = List();
+        return HTTPWebSocket.connect_with_options_and_trust_roots(
+            url,
+            "",
+            no_protocols,
+            roots_der,
+            allow_tls12,
+        );
+    }
+
+    static connect_with_options_and_trust_roots(
+        url: URL,
+        origin: String,
+        subprotocols: List<String>,
+        roots_der: Array<Array<Byte >>,
+        allow_tls12: Boolean,
+    ): Result<HTTPWebSocket, HTTPError> {
+        return match HTTPWebSocket.websocket_connect_with_trust_roots_native(
+            url.as_string(), origin, subprotocols, roots_der, allow_tls12,
+        ) {
+            Ok(handle) => HTTPWebSocket.connect_ok(HTTPWebSocket(handle));
+            Error(error) => HTTPWebSocket.connect_error(error);
+        };
+    }
+
+    private static websocket_connect_with_trust_roots_native(
+        url: String,
+        origin: String,
+        subprotocols: List<String>,
+        roots_der: Array<Array<Byte >>,
+        allow_tls12: Boolean,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    send(message: HTTPWebSocketMessage): Result<Void, HTTPError> {
+        return match message {
+            HTTPWebSocketMessage.Text(value) => HTTPWebSocket.websocket_send_native(this.handle, HTTPWebSocket.encode_payload(
+                0,
+                HTTPWebSocket.string_bytes(value),
+            ));
+            HTTPWebSocketMessage.Binary(bytes) => HTTPWebSocket.websocket_send_native(this.handle, HTTPWebSocket.encode_payload(
+                1,
+                bytes,
+            ));
+            HTTPWebSocketMessage.Ping(bytes) => HTTPWebSocket.websocket_send_native(this.handle, HTTPWebSocket.encode_payload(
+                2,
+                bytes,
+            ));
+            HTTPWebSocketMessage.Pong(bytes) => HTTPWebSocket.websocket_send_native(this.handle, HTTPWebSocket.encode_payload(
+                3,
+                bytes,
+            ));
+            HTTPWebSocketMessage.Close(_, _) => HTTPWebSocket.send_error(HTTPError.Protocol);
+            HTTPWebSocketMessage.End => HTTPWebSocket.send_error(HTTPError.Protocol);
+        };
+    }
+
+    receive(): Result<HTTPWebSocketMessage, HTTPError> {
+        return match HTTPWebSocket.websocket_receive_native(this.handle) {
+            Error(error) => HTTPWebSocket.message_error(error);
+            Ok(frame) => HTTPWebSocket.decode_message(frame);
+        };
+    }
+
+    close(): Result<Void, HTTPError> {
+        return HTTPWebSocket.websocket_close_native(this.handle);
+    }
+
+    close_with(code: UInt16, reason: String): Result<Void, HTTPError> {
+        return HTTPWebSocket.websocket_close_with_native(this.handle, code, reason);
+    }
+
+    private static encode_payload(kind: Byte, payload: Array<Byte>): Array<Byte> {
+        mut frame: Array<Byte> = Array(payload.length + 1);
+        frame[0] = kind;
+        mut index: Int32 = 0;
+        while index < payload.length {
+            frame[index + 1] = payload[index];
+            index += 1;
+        }
+        return frame;
+    }
+
+    private static string_bytes(value: String): Array<Byte> {
+        mut encoded = value.bytes();
+        mut bytes: Array<Byte> = Array(encoded.length);
+        mut index: Int32 = 0;
+        while index < encoded.length {
+            bytes[index] = encoded[index];
+            index += 1;
+        }
+        return bytes;
+    }
+
+    private static decode_message(frame: Array<Byte>): Result<HTTPWebSocketMessage, HTTPError> {
+        if frame.length == 0 { return HTTPWebSocket.message_error(HTTPError.Protocol); }
+        mut kind = frame[0] as Int32;
+        if kind == 5 { return HTTPWebSocket.message_ok(HTTPWebSocketMessage.End); }
+        if kind == 4 {
+            if frame.length < 3 { return HTTPWebSocket.message_error(HTTPError.Protocol); }
+            mut code: UInt16 =((frame[1] as UInt16) << 8) |(frame[2] as UInt16);
+            mut reason_bytes: Array<Byte> = Array(frame.length - 3);
+            mut index: Int32 = 3;
+            while index < frame.length {
+                reason_bytes[index - 3] = frame[index];
+                index += 1;
+            }
+            return match HTTPWebSocket.decode_text_native(reason_bytes) {
+                Error(error) => HTTPWebSocket.message_error(error);
+                Ok(reason) => HTTPWebSocket.message_ok(HTTPWebSocketMessage.Close(code, reason));
+            };
+        }
+        if kind < 0 || kind > 3 { return HTTPWebSocket.message_error(HTTPError.Protocol); }
+        mut payload: Array<Byte> = Array(frame.length - 1);
+        mut index: Int32 = 1;
+        while index < frame.length {
+            payload[index - 1] = frame[index];
+            index += 1;
+        }
+        if kind == 0 {
+            return match HTTPWebSocket.decode_text_native(payload) {
+                Error(error) => HTTPWebSocket.message_error(error);
+                Ok(value) => HTTPWebSocket.message_ok(HTTPWebSocketMessage.Text(value));
+            };
+        }
+        if kind == 1 { return HTTPWebSocket.message_ok(HTTPWebSocketMessage.Binary(payload)); }
+        if kind == 2 { return HTTPWebSocket.message_ok(HTTPWebSocketMessage.Ping(payload)); }
+        return HTTPWebSocket.message_ok(HTTPWebSocketMessage.Pong(payload));
+    }
+
+    private static connect_ok(value: HTTPWebSocket): Result<HTTPWebSocket, HTTPError> { return Ok(
+            value,
+        ); }
+    private static connect_error(error: HTTPError): Result<HTTPWebSocket, HTTPError> { return Error(
+            error,
+        ); }
+    private static message_ok(value: HTTPWebSocketMessage): Result<HTTPWebSocketMessage, HTTPError> { return Ok(
+            value,
+        ); }
+    private static message_error(error: HTTPError): Result<HTTPWebSocketMessage, HTTPError> { return Error(
+            error,
+        ); }
+    private static send_error(error: HTTPError): Result<Void, HTTPError> { return Error(error); }
+
+    private static websocket_connect_native(
+        url: String,
+        origin: String,
+        subprotocols: List<String>,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static websocket_send_native(handle: UInt64, frame: Array<Byte>): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static websocket_receive_native(handle: UInt64): Result<Array<Byte>, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static websocket_close_native(handle: UInt64): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static websocket_close_with_native(
+        handle: UInt64,
+        code: UInt16,
+        reason: String,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static decode_text_native(bytes: Array<Byte>): Result<String, HTTPError> {
+        return Error(HTTPError.InvalidText);
+    }
+}
+
+// Reusable HTTP policy. Durations use milliseconds and are independently
+// bounded to one hour.
+share enum HTTPBody {
+    Text(value: String),
+    Json(value: String),
+    Bytes(value: Array<Byte>),
+    Form(value: HTTPFormData),
+    Multipart(value: HTTPMultipartBuilder, boundary: String),
+    Stream(headers: HTTPHeaders, producer: Fn(UInt64) => Array<Byte>),
+}
+
+// Redirects are opt-in. `Follow` still requires an effective network grant
+// for every destination, and cross-origin credentials are stripped.
+share enum HTTPRedirectPolicy {
+    Never,
+    SameOrigin,
+    Follow,
+}
+
+share class HTTPClientOptions {
+    private inmut origins: Int32;
+    private inmut connect_ms: UInt64;
+    private inmut headers_ms: UInt64;
+    private inmut idle_ms: UInt64;
+
+    private construct(origins: Int32, connect_ms: UInt64, headers_ms: UInt64, idle_ms: UInt64) {
+        this.origins = origins;
+        this.connect_ms = connect_ms;
+        this.headers_ms = headers_ms;
+        this.idle_ms = idle_ms;
+    }
+
+    static create(
+        connect_timeout_ms: UInt64 = 10000,
+        response_headers_timeout_ms: UInt64 = 30000,
+        response_idle_timeout_ms: UInt64 = 30000,
+        max_origins: Int32 = 8,
+    ): Result<HTTPClientOptions, HTTPError> {
+        if max_origins < 1 || max_origins > 32 ||
+        connect_timeout_ms < 1 || connect_timeout_ms > 3600000 ||
+        response_headers_timeout_ms < 1 || response_headers_timeout_ms > 3600000 ||
+        response_idle_timeout_ms < 1 || response_idle_timeout_ms > 3600000 {
+            return HTTPClientOptions.create_error(HTTPError.Protocol);
+        }
+        return HTTPClientOptions.create_ok(
+            HTTPClientOptions(
+            max_origins, connect_timeout_ms, response_headers_timeout_ms,
+            response_idle_timeout_ms,
+        ),
+        );
+    }
+
+    private static create_ok(value: HTTPClientOptions): Result<HTTPClientOptions, HTTPError> {
+        return Ok(value);
+    }
+
+    private static create_error(error: HTTPError): Result<HTTPClientOptions, HTTPError> {
+        return Error(error);
+    }
+
+    max_origins(): Int32 { return this.origins; }
+    connect_timeout_ms(): UInt64 { return this.connect_ms; }
+    response_headers_timeout_ms(): UInt64 { return this.headers_ms; }
+    response_idle_timeout_ms(): UInt64 { return this.idle_ms; }
+}
+
+// Reusable client that may be shared between Zirk tasks. Runtime access is
+// coordinated cooperatively, and the opaque handle stays bound to the
+// approved project/manifest identity. Each instance retains at most one
+// connection per configured origin.
+share class HTTPClient {
+    private inmut handle: UInt64;
+
+    private static same_origin(left: URL, right: URL): Boolean {
+        mut left_parts = left.as_string().split("/");
+        mut right_parts = right.as_string().split("/");
+        if left_parts.length < 3 || right_parts.length < 3 { return false; }
+        return left_parts[0] == right_parts[0] && left_parts[2] == right_parts[2];
+    }
+
+    private static is_redirect_status(status: Int32): Boolean {
+        return status == 301 || status == 302 || status == 303
+        || status == 307 || status == 308;
+    }
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+    }
+
+    static create(max_origins: Int32 = 8): Result<HTTPClient, HTTPError> {
+        if max_origins < 1 || max_origins > 32 {
+            return HTTPClient.create_error(HTTPError.Protocol);
+        }
+        return match HTTPClient.create_native(max_origins) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    static create_with_options(options: HTTPClientOptions): Result<HTTPClient, HTTPError> {
+        mut max_origins = options.max_origins();
+        mut connect_timeout_ms = options.connect_timeout_ms();
+        mut response_headers_timeout_ms = options.response_headers_timeout_ms();
+        mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        return match HTTPClient.create_with_options_native(
+            max_origins,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    // Trust roots replace the platform store for this client and are copied
+    // into its TLS configuration at creation. Each certificate is bounded
+    // DER data; invalid or empty trust stores fail before any network access.
+    static create_with_trust_roots(
+        roots: Array<Array<Byte >>,
+        max_origins: Int32 = 8,
+    ): Result<HTTPClient, HTTPError> {
+        if max_origins < 1 || max_origins > 32 {
+            return HTTPClient.create_error(HTTPError.Protocol);
+        }
+        return match HTTPClient.create_with_trust_roots_native(
+            roots, max_origins, 10000, 30000, 30000,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    static create_with_options_and_trust_roots(
+        options: HTTPClientOptions,
+        roots: Array<Array<Byte >>,
+    ): Result<HTTPClient, HTTPError> {
+        mut max_origins = options.max_origins();
+        mut connect_timeout_ms = options.connect_timeout_ms();
+        mut response_headers_timeout_ms = options.response_headers_timeout_ms();
+        mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        return match HTTPClient.create_with_trust_roots_native(
+            roots, max_origins, connect_timeout_ms,
+            response_headers_timeout_ms, response_idle_timeout_ms,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    static create_with_proxy(proxy: HTTPProxy, max_origins: Int32 = 8): Result<HTTPClient, HTTPError> {
+        if max_origins < 1 || max_origins > 32 {
+            return HTTPClient.create_error(HTTPError.Protocol);
+        }
+        return match HTTPClient.create_with_proxy_native(
+            proxy, max_origins, 10000, 30000, 30000,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    static create_with_options_and_proxy(
+        options: HTTPClientOptions,
+        proxy: HTTPProxy,
+    ): Result<HTTPClient, HTTPError> {
+        mut max_origins = options.max_origins();
+        mut connect_timeout_ms = options.connect_timeout_ms();
+        mut response_headers_timeout_ms = options.response_headers_timeout_ms();
+        mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        return match HTTPClient.create_with_proxy_native(
+            proxy, max_origins, connect_timeout_ms,
+            response_headers_timeout_ms, response_idle_timeout_ms,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    // Combines a caller-supplied trust store with an explicit proxy. The roots
+    // authenticate HTTPS proxy and destination peers independently by host.
+    static create_with_proxy_and_trust_roots(
+        proxy: HTTPProxy,
+        roots: Array<Array<Byte >>,
+        max_origins: Int32 = 8,
+    ): Result<HTTPClient, HTTPError> {
+        if max_origins < 1 || max_origins > 32 {
+            return HTTPClient.create_error(HTTPError.Protocol);
+        }
+        return match HTTPClient.create_with_proxy_and_trust_roots_native(
+            proxy, roots, max_origins, 10000, 30000, 30000,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    static create_with_options_and_proxy_and_trust_roots(
+        options: HTTPClientOptions,
+        proxy: HTTPProxy,
+        roots: Array<Array<Byte >>,
+    ): Result<HTTPClient, HTTPError> {
+        mut max_origins = options.max_origins();
+        mut connect_timeout_ms = options.connect_timeout_ms();
+        mut response_headers_timeout_ms = options.response_headers_timeout_ms();
+        mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        return match HTTPClient.create_with_proxy_and_trust_roots_native(
+            proxy, roots, max_origins, connect_timeout_ms,
+            response_headers_timeout_ms, response_idle_timeout_ms,
+        ) {
+            Error(error) => HTTPClient.create_error(error);
+            Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
+        };
+    }
+
+    request(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        mut wire_method: String = HTTP.method_name(method);
+        mut wire_url = url.as_string();
+        mut encoded_headers = headers.encode_for_transport();
+        return HTTPClient.request_native(
+            this.handle,
+            wire_method,
+            wire_url,
+            body,
+            encoded_headers,
+            false,
+        );
+    }
+
+    // Supports registered extension methods after runtime token validation.
+    request_named(
+        method: String,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        mut wire_url = url.as_string();
+        mut encoded_headers = headers.encode_for_transport();
+        return HTTPClient.request_native(
+            this.handle,
+            method,
+            wire_url,
+            body,
+            encoded_headers,
+            false,
+        );
+    }
+
+    // Follows bounded redirects for a standard method and replayable byte
+    // body. Every hop re-enters the pooled request path, which rechecks the
+    // effective origin grant and TLS identity. A body-bearing redirect
+    // replays the same bytes; callers should use this only for methods whose
+    // application semantics permit replay.
+    request_following(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPResponse, HTTPError> {
+        if max_redirects < 0 || max_redirects > 20 {
+            return HTTPClient.response_error(HTTPError.RedirectLimit);
+        }
+        if policy == HTTPRedirectPolicy.Never {
+            return this.request(method, url, body, headers);
+        }
+
+        mut current_method = method;
+        mut current_url = url;
+        mut current_body = body;
+        mut current_headers = headers;
+        mut visited: String = "\n{url.as_string()}\n";
+        mut followed: Int32 = 0;
+        mut finished = false;
+        mut result = HTTPClient.response_error(HTTPError.Transport);
+        while ! finished {
+            match this.request(current_method, current_url, current_body, current_headers) {
+                Error(error) => {
+                    result = HTTPClient.response_error(error);
+                    finished = true;
+                }
+                Ok(response) => {
+                    mut status = response.status_code();
+                    if ! HTTPClient.is_redirect_status(status) {
+                        result = HTTPClient.response_ok(response);
+                        finished = true;
+                    } else if followed >= max_redirects {
+                        _ = response.close();
+                        result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                        finished = true;
+                    } else {
+                        match response.header_values("location") {
+                            Error(error) => {
+                                _ = response.close();
+                                result = HTTPClient.response_error(error);
+                                finished = true;
+                            }
+                            Ok(values) => {
+                                if values.length != 1 {
+                                    _ = response.close();
+                                    result = HTTPClient.response_error(HTTPError.Protocol);
+                                    finished = true;
+                                } else {
+                                    match URL.resolve(current_url, values[0]) {
+                                        Error(error) => {
+                                            _ = response.close();
+                                            result = HTTPClient.response_error(error);
+                                            finished = true;
+                                        }
+                                        Ok(next) => {
+                                            if policy == HTTPRedirectPolicy.SameOrigin
+                                            && ! HTTPClient.same_origin(current_url, next) {
+                                                result = HTTPClient.response_ok(response);
+                                                finished = true;
+                                            } else if HTTPClient.has_visited_url(
+                                                visited,
+                                                next.as_string(),
+                                            ) {
+                                                _ = response.close();
+                                                result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                                                finished = true;
+                                            } else {
+                                                _ = response.close();
+                                                current_headers = current_headers.redirect_copy(
+                                                    HTTPClient.same_origin(current_url, next), status != 303,
+                                                );
+                                                if status == 303 {
+                                                    if current_method != HTTPMethod.Head {
+                                                        current_method = HTTPMethod.Get;
+                                                    }
+                                                    mut empty: Array<Byte> = Array(0);
+                                                    current_body = empty;
+                                                }
+                                                current_url = next;
+                                                visited = "{visited}{next.as_string()}\n";
+                                                followed = followed + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    // Uses one closed body variant for buffered and producer-backed requests.
+    request_body(method: HTTPMethod, url: URL, body: HTTPBody): Result<HTTPResponse, HTTPError> {
+        return match method {
+            HTTPMethod.Get => this.request_named_body("GET", url, body);
+            HTTPMethod.Head => this.request_named_body("HEAD", url, body);
+            HTTPMethod.Post => this.request_named_body("POST", url, body);
+            HTTPMethod.Put => this.request_named_body("PUT", url, body);
+            HTTPMethod.Patch => this.request_named_body("PATCH", url, body);
+            HTTPMethod.Delete => this.request_named_body("DELETE", url, body);
+            HTTPMethod.Options => this.request_named_body("OPTIONS", url, body);
+            HTTPMethod.Connect => this.request_named_body("CONNECT", url, body);
+            HTTPMethod.Trace => this.request_named_body("TRACE", url, body);
+            HTTPMethod.Query => this.request_named_body("QUERY", url, body);
+        };
+    }
+
+    // Redirect-aware counterpart for every closed body representation. A
+    // streamed producer restarts at chunk zero on each replay, so producers
+    // used with this method must be deterministic for a given chunk index.
+    request_body_following(
+        method: HTTPMethod,
+        url: URL,
+        body: HTTPBody,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPResponse, HTTPError> {
+        if max_redirects < 0 || max_redirects > 20 {
+            return HTTPClient.response_error(HTTPError.RedirectLimit);
+        }
+        if policy == HTTPRedirectPolicy.Never {
+            return this.request_body(method, url, body);
+        }
+
+        mut current_method = method;
+        mut current_url = url;
+        mut current_body = body;
+        mut current_headers = HTTPHeaders.create();
+        mut empty_body: Array<Byte> = Array(0);
+        mut body_discarded = false;
+        mut visited: String = "\n{url.as_string()}\n";
+        mut followed: Int32 = 0;
+        mut finished = false;
+        mut result = HTTPClient.response_error(HTTPError.Transport);
+        while ! finished {
+            mut hop_result = HTTPClient.response_error(HTTPError.Transport);
+            if body_discarded {
+                hop_result = this.request(current_method, current_url, empty_body, current_headers);
+            } else {
+                hop_result = this.request_body(current_method, current_url, current_body);
+            }
+            match hop_result {
+                Error(error) => {
+                    result = HTTPClient.response_error(error);
+                    finished = true;
+                }
+                Ok(response) => {
+                    mut status = response.status_code();
+                    if ! HTTPClient.is_redirect_status(status) {
+                        result = HTTPClient.response_ok(response);
+                        finished = true;
+                    } else if followed >= max_redirects {
+                        _ = response.close();
+                        result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                        finished = true;
+                    } else {
+                        match response.header_values("location") {
+                            Error(error) => {
+                                _ = response.close();
+                                result = HTTPClient.response_error(error);
+                                finished = true;
+                            }
+                            Ok(values) => {
+                                if values.length != 1 {
+                                    _ = response.close();
+                                    result = HTTPClient.response_error(HTTPError.Protocol);
+                                    finished = true;
+                                } else {
+                                    match URL.resolve(current_url, values[0]) {
+                                        Error(error) => {
+                                            _ = response.close();
+                                            result = HTTPClient.response_error(error);
+                                            finished = true;
+                                        }
+                                        Ok(next) => {
+                                            if policy == HTTPRedirectPolicy.SameOrigin
+                                            && ! HTTPClient.same_origin(current_url, next) {
+                                                result = HTTPClient.response_ok(response);
+                                                finished = true;
+                                            } else if HTTPClient.has_visited_url(
+                                                visited, next.as_string(),
+                                            ) {
+                                                _ = response.close();
+                                                result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                                                finished = true;
+                                            } else {
+                                                current_body = HTTPClient.redirect_body_copy(
+                                                    current_body,
+                                                    HTTPClient.same_origin(current_url, next),
+                                                    status != 303,
+                                                );
+                                                if status == 303 {
+                                                    if current_method != HTTPMethod.Head {
+                                                        current_method = HTTPMethod.Get;
+                                                    }
+                                                    current_headers = HTTPClient.redirect_stream_headers(
+                                                        current_body,
+                                                        HTTPClient.same_origin(current_url, next),
+                                                        false,
+                                                    );
+                                                    body_discarded = true;
+                                                }
+                                                _ = response.close();
+                                                current_url = next;
+                                                visited = "{visited}{next.as_string()}\n";
+                                                followed = followed + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    // Extension-method counterpart. The native request validates the token.
+    request_named_body(method: String, url: URL, body: HTTPBody): Result<HTTPResponse, HTTPError> {
+        return match body {
+            HTTPBody.Text(value) => this.request_typed_body(
+                method, url, HTTPClient.string_body_bytes(value),
+                "text/plain; charset=utf-8", false,
+            );
+            HTTPBody.Json(value) => {
+                mut bytes = HTTPClient.string_body_bytes(value);
+                mut headers = HTTPHeaders.create();
+                mut wire_url = url.as_string();
+                match headers.add("content-type", "application/json") {
+                    Error(_) => HTTPClient.response_error(HTTPError.Protocol);
+                    Ok(_) => {
+                        mut encoded_headers = headers.encode_for_transport();
+                        HTTPClient.request_native(
+                            this.handle, method, wire_url, bytes,
+                            encoded_headers, true,
+                        );
+                    }
+                }
+            };
+            HTTPBody.Bytes(value) => this.request_typed_body(
+                method, url, value, "application/octet-stream", false,
+            );
+            HTTPBody.Form(value) => match value.encode_urlencoded() {
+                Error(error) => HTTPClient.response_error(error);
+                Ok(bytes) => this.request_typed_body(
+                    method, url, bytes, "application/x-www-form-urlencoded", false,
+                );
+            };
+            HTTPBody.Multipart(value, boundary) => match value.encode(boundary) {
+                Error(error) => HTTPClient.response_error(error);
+                Ok(bytes) => {
+                    mut content_type: String = "multipart/form-data; boundary=\"{boundary}\"";
+                    this.request_typed_body(method, url, bytes, content_type, false);
+                }
+            };
+            HTTPBody.Stream(headers, producer) => this.request_stream_named(
+                method,
+                url,
+                headers,
+                producer,
+            );
+        };
+    }
+
+    private request_stream_named(
+        method: String,
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        mut wire_url = url.as_string();
+        mut encoded_headers = headers.encode_for_transport();
+        return HTTPClient.request_stream_native(
+            this.handle,
+            method,
+            wire_url,
+            encoded_headers,
+            producer,
+        );
+    }
+
+    private request_typed_body(
+        method: String,
+        url: URL,
+        body: Array<Byte>,
+        content_type: String,
+        validate_json: Boolean,
+    ): Result<HTTPResponse, HTTPError> {
+        mut headers = HTTPHeaders.create();
+        mut wire_url = url.as_string();
+        return match headers.add("content-type", content_type) {
+            Error(_) => HTTPClient.response_error(HTTPError.Protocol);
+            Ok(_) => {
+                mut encoded_headers = headers.encode_for_transport();
+                HTTPClient.request_native(
+                    this.handle, method, wire_url, body,
+                    encoded_headers, validate_json,
+                );
+            }
+        };
+    }
+
+    private static string_body_bytes(value: String): Array<Byte> {
+        mut source = value.bytes();
+        mut bytes: Array<Byte> = Array(source.length);
+        mut index: Int32 = 0;
+        while index < source.length {
+            bytes[index] = source[index];
+            index = index + 1;
+        }
+        return bytes;
+    }
+
+    // Opt-in bounded retries for replayable buffered requests. Only safe,
+    // idempotent standard methods may retry, and only transport/timeout errors
+    // are transient. A client-handle phase spreads retries over exponentially
+    // growing windows capped at 400 ms; Timer.sleep remains cancellable.
+    request_with_retries(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+        max_retries: Int32 = 1,
+    ): Result<HTTPResponse, HTTPError> {
+        if max_retries < 0 || max_retries > 3 {
+            return HTTPClient.response_error(HTTPError.Protocol);
+        }
+        if max_retries > 0 && ! HTTPClient.is_retry_safe(method) {
+            return HTTPClient.response_error(HTTPError.Protocol);
+        }
+        mut retries_used = 0;
+        mut finished = false;
+        mut result = HTTPClient.response_error(HTTPError.Transport);
+        while ! finished {
+            match this.request(method, url, body, headers) {
+                Ok(response) => {
+                    result = HTTPClient.response_ok(response);
+                    finished = true;
+                }
+                Error(error) => {
+                    if retries_used < max_retries
+                    &&(error == HTTPError.Transport || error == HTTPError.Timeout) {
+                        mut jitter_window_ms: UInt64 = 100;
+                        if retries_used == 1 { jitter_window_ms = 200; }
+                        if retries_used >= 2 { jitter_window_ms = 400; }
+                        // The client handle decorrelates retry schedules for
+                        // clients in the same process without exposing entropy
+                        // or adding a random-number dependency to the runtime.
+                        inmut jitter_seed = this.handle +(retries_used as UInt64 * 7919 as UInt64);
+                        inmut jitter_ms = jitter_seed % jitter_window_ms;
+                        Timer.sleep(jitter_ms * 1ms);
+                        retries_used = retries_used + 1;
+                    } else {
+                        result = HTTPClient.response_error(error);
+                        finished = true;
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    // Retries safe standard methods with any closed HTTPBody representation.
+    // A stream producer is invoked again from chunk index zero on every
+    // attempt, so callers must keep it deterministic for the same index.
+    request_body_with_retries(
+        method: HTTPMethod,
+        url: URL,
+        body: HTTPBody,
+        max_retries: Int32 = 1,
+    ): Result<HTTPResponse, HTTPError> {
+        if max_retries < 0 || max_retries > 3 {
+            return HTTPClient.response_error(HTTPError.Protocol);
+        }
+        if max_retries > 0 && ! HTTPClient.is_retry_safe(method) {
+            return HTTPClient.response_error(HTTPError.Protocol);
+        }
+        mut retries_used = 0;
+        mut finished = false;
+        mut result = HTTPClient.response_error(HTTPError.Transport);
+        while ! finished {
+            match this.request_body(method, url, body) {
+                Ok(response) => {
+                    result = HTTPClient.response_ok(response);
+                    finished = true;
+                }
+                Error(error) => {
+                    if retries_used < max_retries
+                    &&(error == HTTPError.Transport || error == HTTPError.Timeout) {
+                        mut jitter_window_ms: UInt64 = 100;
+                        if retries_used == 1 { jitter_window_ms = 200; }
+                        if retries_used >= 2 { jitter_window_ms = 400; }
+                        inmut jitter_seed = this.handle +(retries_used as UInt64 * 7919 as UInt64);
+                        inmut jitter_ms = jitter_seed % jitter_window_ms;
+                        Timer.sleep(jitter_ms * 1ms);
+                        retries_used = retries_used + 1;
+                    } else {
+                        result = HTTPClient.response_error(error);
+                        finished = true;
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    private static is_retry_safe(method: HTTPMethod): Boolean {
+        return match method {
+            HTTPMethod.Get => true;
+            HTTPMethod.Head => true;
+            HTTPMethod.Options => true;
+            HTTPMethod.Trace => true;
+            HTTPMethod.Query => true;
+            _ => false;
+        };
+    }
+
+    private static has_visited_url(visited: String, candidate: String): Boolean {
+        return visited.contains("\n{candidate}\n");
+    }
+
+    private static redirect_body_copy(
+        body: HTTPBody,
+        same_origin: Boolean,
+        preserve_body: Boolean,
+    ): HTTPBody {
+        return match body {
+            HTTPBody.Text(value) => HTTPBody.Text(value);
+            HTTPBody.Json(value) => HTTPBody.Json(value);
+            HTTPBody.Bytes(value) => HTTPBody.Bytes(value);
+            HTTPBody.Form(value) => HTTPBody.Form(value);
+            HTTPBody.Multipart(value, boundary) => HTTPBody.Multipart(value, boundary);
+            HTTPBody.Stream(headers, producer) => HTTPBody.Stream(
+                headers.redirect_copy(same_origin, preserve_body), producer,
+            );
+        };
+    }
+
+    private static redirect_stream_headers(
+        body: HTTPBody,
+        same_origin: Boolean,
+        preserve_body: Boolean,
+    ): HTTPHeaders {
+        return match body {
+            HTTPBody.Stream(headers, _) => headers.redirect_copy(same_origin, preserve_body);
+            _ => HTTPHeaders.create();
+        };
+    }
+
+    // Explicitly follows only GET redirects. Every hop is sent through this
+    // client again, so the runtime rechecks the exact origin grant and keeps
+    // connection reuse scoped to that origin. The client API has no caller
+    // supplied headers here, so credentials cannot be carried to a new host.
+    // The redirect bound is capped to keep this opt-in operation finite and
+    // the loop avoids consuming the 128 KiB task stack per redirect.
+    get_following(url: URL, max_redirects: Int32 = 5): Result<HTTPResponse, HTTPError> {
+        if max_redirects < 0 || max_redirects > 20 {
+            return HTTPClient.response_error(HTTPError.RedirectLimit);
+        }
+        mut current_url = url;
+        mut redirects_left = max_redirects;
+        mut empty_body: Array<Byte> = Array(0);
+        mut empty_headers = HTTPHeaders.create();
+        mut finished = false;
+        mut result = HTTPClient.response_error(HTTPError.Transport);
+        while ! finished {
+            match this.request(HTTPMethod.Get, current_url, empty_body, empty_headers) {
+                Error(error) => {
+                    result = HTTPClient.response_error(error);
+                    finished = true;
+                }
+                Ok(response) => {
+                    mut status = response.status_code();
+                    if status != 301 && status != 302 && status != 303
+                    && status != 307 && status != 308 {
+                        result = HTTPClient.response_ok(response);
+                        finished = true;
+                    } else if redirects_left <= 0 {
+                        result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                        finished = true;
+                    } else {
+                        match response.header_values("location") {
+                            Error(error) => {
+                                result = HTTPClient.response_error(error);
+                                finished = true;
+                            }
+                            Ok(values) => {
+                                if values.length != 1 {
+                                    result = HTTPClient.response_error(HTTPError.Protocol);
+                                    finished = true;
+                                } else {
+                                    match URL.resolve(current_url, values[0]) {
+                                        Error(error) => {
+                                            result = HTTPClient.response_error(error);
+                                            finished = true;
+                                        }
+                                        Ok(next) => {
+                                            current_url = next;
+                                            redirects_left = redirects_left - 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    enable_cookies(): Result<Void, HTTPError> {
+        return HTTPClient.enable_cookies_native(this.handle);
+    }
+
+    close(): Result<Void, HTTPError> {
+        return match HTTPClient.close_native(this.handle) {
+            Error(error) => HTTPClient.action_error(error);
+            Ok(_) => HTTPClient.action_ok();
+        };
+    }
+
+    private static create_native(max_origins: Int32): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static create_with_options_native(
+        max_origins: Int32,
+        connect_timeout_ms: UInt64,
+        response_headers_timeout_ms: UInt64,
+        response_idle_timeout_ms: UInt64,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static create_with_trust_roots_native(
+        roots: Array<Array<Byte >>,
+        max_origins: Int32,
+        connect_timeout_ms: UInt64,
+        response_headers_timeout_ms: UInt64,
+        response_idle_timeout_ms: UInt64,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static create_with_proxy_native(
+        proxy: HTTPProxy,
+        max_origins: Int32,
+        connect_timeout_ms: UInt64,
+        response_headers_timeout_ms: UInt64,
+        response_idle_timeout_ms: UInt64,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static create_with_proxy_and_trust_roots_native(
+        proxy: HTTPProxy,
+        roots: Array<Array<Byte >>,
+        max_origins: Int32,
+        connect_timeout_ms: UInt64,
+        response_headers_timeout_ms: UInt64,
+        response_idle_timeout_ms: UInt64,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static request_native(
+        handle: UInt64,
+        method: String,
+        url: String,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+        validate_json: Boolean,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static request_stream_native(
+        handle: UInt64,
+        method: String,
+        url: String,
+        headers: Array<Byte>,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static enable_cookies_native(handle: UInt64): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static close_native(handle: UInt64): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static create_ok(value: HTTPClient): Result<HTTPClient, HTTPError> { return Ok(value); }
+    private static create_error(error: HTTPError): Result<HTTPClient, HTTPError> { return Error(
+            error,
+        ); }
+    private static response_error(error: HTTPError): Result<HTTPResponse, HTTPError> { return Error(
+            error,
+        ); }
+    private static response_ok(response: HTTPResponse): Result<HTTPResponse, HTTPError> { return Ok(
+            response,
+        ); }
+    private static action_ok(): Result<Void, HTTPError> { return Ok(HTTPClient.unit()); }
+    private static action_error(error: HTTPError): Result<Void, HTTPError> { return Error(error); }
+    private static unit(): Void { return; }
+}
+
+// A request body is exactly one tagged variant. Callers cannot accidentally
+// combine JSON, text, form, multipart, or streaming payload configuration.
+share class HTTP {
+    // Converts the source enum's stable variant names to HTTP wire tokens.
+    static method_name(method: HTTPMethod): String {
+        return match method {
+            HTTPMethod.Get => "GET";
+            HTTPMethod.Head => "HEAD";
+            HTTPMethod.Post => "POST";
+            HTTPMethod.Put => "PUT";
+            HTTPMethod.Patch => "PATCH";
+            HTTPMethod.Delete => "DELETE";
+            HTTPMethod.Options => "OPTIONS";
+            HTTPMethod.Connect => "CONNECT";
+            HTTPMethod.Trace => "TRACE";
+            HTTPMethod.Query => "QUERY";
+        };
+    }
+
+    // Sends an explicit method, bounded byte body, and validated headers.
+    // Query content still requires one consistent valid Content-Type.
+    static request(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        return HTTP.request_named(HTTP.method_name(method), url, body, headers);
+    }
+
+    // Explicit opt-in to the bounded response cache for safe cacheable methods.
+    static request_cached(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_cached_native(HTTP.method_name(method), wire_url, body, encoded_headers);
+    }
+
+    // Sends an RFC token method, including registered methods not represented
+    // by HTTPMethod. The runtime validates the token before opening a socket.
+    static request_named(
+        method: String,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_native(method, wire_url, body, encoded_headers, false);
+    }
+
+    // Selects exactly one body representation for any standard HTTP method.
+    static request_body(method: HTTPMethod, url: URL, body: HTTPBody): Result<HTTPResponse, HTTPError> {
+        return HTTP.request_named_body(HTTP.method_name(method), url, body);
+    }
+
+    // Extension-method counterpart; the runtime validates the token before
+    // opening a connection.
+    static request_named_body(
+        method: String,
+        url: URL,
+        body: HTTPBody,
+    ): Result<HTTPResponse, HTTPError> {
+        return match body {
+            HTTPBody.Text(value) => HTTP.request_with_body_headers(
+                method, url, HTTP.string_body_bytes(value),
+                "text/plain; charset=utf-8", false,
+            );
+            HTTPBody.Json(value) => HTTP.request_with_body_headers(
+                method, url, HTTP.string_body_bytes(value), "application/json", true,
+            );
+            HTTPBody.Bytes(value) => HTTP.request_with_body_headers(
+                method, url, value, "application/octet-stream", false,
+            );
+            HTTPBody.Form(value) => match value.encode_urlencoded() {
+                Error(error) => HTTP.response_error(error);
+                Ok(bytes) => HTTP.request_with_body_headers(
+                    method, url, bytes, "application/x-www-form-urlencoded", false,
+                );
+            };
+            HTTPBody.Multipart(value, boundary) => match value.encode(boundary) {
+                Error(error) => HTTP.response_error(error);
+                Ok(bytes) => {
+                    mut content_type: String = "multipart/form-data; boundary=\"{boundary}\"";
+                    HTTP.request_with_body_headers(method, url, bytes, content_type, false);
+                }
+            };
+            HTTPBody.Stream(headers, producer) => HTTP.request_stream_named(
+                method, url, headers, producer,
+            );
+        };
+    }
+
+    private static request_with_body_headers(
+        method: String,
+        url: URL,
+        body: Array<Byte>,
+        content_type: String,
+        validate_json: Boolean,
+    ): Result<HTTPResponse, HTTPError> {
+        mut headers = HTTPHeaders.create();
+        mut wire_url = url.as_string();
+        return match headers.add("content-type", content_type) {
+            Error(_) => HTTP.response_error(HTTPError.Protocol);
+            Ok(_) => {
+                mut encoded_headers = headers.encode_for_transport();
+                HTTP.request_native(method, wire_url, body, encoded_headers, validate_json);
+            }
+        };
+    }
+
+    private static string_body_bytes(value: String): Array<Byte> {
+        mut source = value.bytes();
+        mut bytes: Array<Byte> = Array(source.length);
+        mut index: Int32 = 0;
+        while index < source.length {
+            bytes[index] = source[index];
+            index = index + 1;
+        }
+        return bytes;
+    }
+
+    // Explicit HTTPS sink for credentials. The value is never returned to
+    // Zirk as a String; the runtime sends it only after checking the exact
+    // network origin grant and validating the header.
+    static request_with_secret_header(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+        header_name: String,
+        secret: SecretString,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_secret_native(
+            HTTP.method_name(method),
+            wire_url,
+            body,
+            encoded_headers,
+            header_name,
+            secret,
+        );
+    }
+
+    static get(url: URL): Result<HTTPResponse, HTTPError> {
+        return HTTP.get_native(url.as_string());
+    }
+
+    // Explicitly opts this request into the bounded process-local response cache.
+    static get_cached(url: URL): Result<HTTPResponse, HTTPError> {
+        return HTTP.get_cached_native(url.as_string());
+    }
+
+    // Follows only standard GET redirects, with a caller-controlled bound
+    // capped at 20 hops. Each hop calls HTTP.get again, so origin permission
+    // is revalidated without growing the Zirk task stack.
+    static get_following(url: URL, max_redirects: Int32 = 5): Result<HTTPResponse, HTTPError> {
+        if max_redirects < 0 || max_redirects > 20 {
+            return HTTP.response_error(HTTPError.RedirectLimit);
+        }
+        mut current_url = url;
+        mut redirects_left = max_redirects;
+        mut finished = false;
+        mut result = HTTP.response_error(HTTPError.Transport);
+        while ! finished {
+            match HTTP.get(current_url) {
+                Error(error) => {
+                    result = HTTP.response_error(error);
+                    finished = true;
+                }
+                Ok(response) => {
+                    mut status = response.status_code();
+                    if status != 301 && status != 302 && status != 303
+                    && status != 307 && status != 308 {
+                        result = HTTP.response_ok(response);
+                        finished = true;
+                    } else if redirects_left <= 0 {
+                        result = HTTP.response_error(HTTPError.RedirectLimit);
+                        finished = true;
+                    } else {
+                        match response.header_values("location") {
+                            Error(error) => {
+                                result = HTTP.response_error(error);
+                                finished = true;
+                            }
+                            Ok(values) => {
+                                if values.length != 1 {
+                                    result = HTTP.response_error(HTTPError.Protocol);
+                                    finished = true;
+                                } else {
+                                    match URL.resolve(current_url, values[0]) {
+                                        Error(error) => {
+                                            result = HTTP.response_error(error);
+                                            finished = true;
+                                        }
+                                        Ok(next) => {
+                                            current_url = next;
+                                            redirects_left = redirects_left - 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    private static response_ok(response: HTTPResponse): Result<HTTPResponse, HTTPError> {
+        return Ok(response);
+    }
+
+    private static response_error(error: HTTPError): Result<HTTPResponse, HTTPError> {
+        return Error(error);
+    }
+
+    static head(url: URL): Result<HTTPResponse, HTTPError> {
+        return HTTP.head_native(url.as_string());
+    }
+
+    // QUERY follows the safe query method contract: non-empty JSON query
+    // content is sent as application/json under the exact origin grant.
+    static query(url: URL, query: String): Result<HTTPResponse, HTTPError> {
+        return HTTP.query_native(url.as_string(), query);
+    }
+
+    // QUERY may use any valid query media type supported by the target; this
+    // overload leaves the request representation explicit and never sniffs it.
+    static query_with_content_type(
+        url: URL,
+        query: String,
+        content_type: String,
+    ): Result<HTTPResponse, HTTPError> {
+        return HTTP.query_with_content_type_native(url.as_string(), query, content_type);
+    }
+
+    // Explicitly follows RFC 10008 redirects for a QUERY. Permanent and
+    // temporary redirects preserve QUERY and its content; a 303 switches to
+    // GET because the server identifies an equivalent retrieval resource.
+    // Every hop goes through the normal permission-checked API.
+    static query_following(
+        url: URL,
+        query: String,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPResponse, HTTPError> {
+        return HTTP.query_following_with_content_type(
+            url,
+            query,
+            "application/json",
+            max_redirects,
+        );
+    }
+
+    static query_following_with_content_type(
+        url: URL,
+        query: String,
+        content_type: String,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPResponse, HTTPError> {
+        if max_redirects < 0 || max_redirects > 20 {
+            return HTTP.response_error(HTTPError.RedirectLimit);
+        }
+        mut current_url = url;
+        mut redirects_left = max_redirects;
+        mut use_get = false;
+        mut finished = false;
+        mut result = HTTP.response_error(HTTPError.Transport);
+        while ! finished {
+            mut response_result = match use_get {
+                true => HTTP.get(current_url);
+                false => HTTP.query_with_content_type(current_url, query, content_type);
+            };
+            match response_result {
+                Error(error) => {
+                    result = HTTP.response_error(error);
+                    finished = true;
+                }
+                Ok(response) => {
+                    mut status = response.status_code();
+                    if status != 301 && status != 302 && status != 303
+                    && status != 307 && status != 308 {
+                        result = HTTP.response_ok(response);
+                        finished = true;
+                    } else if redirects_left <= 0 {
+                        result = HTTP.response_error(HTTPError.RedirectLimit);
+                        finished = true;
+                    } else {
+                        match response.header_values("location") {
+                            Error(error) => {
+                                result = HTTP.response_error(error);
+                                finished = true;
+                            }
+                            Ok(values) => {
+                                if values.length != 1 {
+                                    result = HTTP.response_error(HTTPError.Protocol);
+                                    finished = true;
+                                } else {
+                                    match URL.resolve(current_url, values[0]) {
+                                        Error(error) => {
+                                            result = HTTP.response_error(error);
+                                            finished = true;
+                                        }
+                                        Ok(next) => {
+                                            current_url = next;
+                                            if status == 303 { use_get = true; }
+                                            redirects_left = redirects_left - 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+        }
+        return result;
+    }
+
+    static post(url: URL, body: String): Result<HTTPResponse, HTTPError> {
+        return HTTP.post_native(url.as_string(), body);
+    }
+
+    // Selects exactly one POST body representation through HTTPBody's closed
+    // variants, then delegates to the same validated, bounded helpers.
+    static post_body(url: URL, body: HTTPBody): Result<HTTPResponse, HTTPError> {
+        return HTTP.request_body(HTTPMethod.Post, url, body);
+    }
+
+    // Sends one bounded JSON document with an explicit application/json media
+    // type. Invalid JSON is rejected before the request reaches the network.
+    static post_json(url: URL, body: String): Result<HTTPResponse, HTTPError> {
+        return HTTP.post_json_native(url.as_string(), body);
+    }
+
+    // Serializes an application value through its static contract, then uses
+    // the same bounded JSON validation and transport path as post_json.
+    static post_json_value<T from HTTPJsonSerializable<T >>(
+        url: URL,
+        value: T,
+    ): Result<HTTPResponse, HTTPError> {
+        return match T.to_json(value) {
+            Ok(body) => HTTP.post_json(url, body);
+            Error(_) => HTTP.response_error(HTTPError.InvalidJson);
+        };
+    }
+
+    // Sends an opaque bounded byte payload without UTF-8 conversion.
+    static post_bytes(url: URL, body: Array<Byte>): Result<HTTPResponse, HTTPError> {
+        return HTTP.post_bytes_native(url.as_string(), body);
+    }
+
+    // Produces one copied chunk per monotonically increasing index. An empty
+    // array marks EOF; chunks are bounded by the runtime and apply backpressure.
+    static post_stream(
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return HTTP.request_stream(HTTPMethod.Post, url, headers, producer);
+    }
+
+    // Streams a one-pass request body for a standard method. The producer
+    // receives a zero-based chunk index and an empty array marks EOF.
+    static request_stream(
+        method: HTTPMethod,
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_stream_native(
+            HTTP.method_name(method),
+            wire_url,
+            encoded_headers,
+            producer,
+        );
+    }
+
+    // Typed producer outcome variant for sources that need to cancel or fail
+    // while producing a one-pass body. No further chunks are requested after
+    // either error, and the request transport is closed if transmission began.
+    static request_stream_result(
+        method: HTTPMethod,
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Result<Array<Byte>, HTTPStreamProducerError>,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_stream_result_native(
+            HTTP.method_name(method),
+            wire_url,
+            encoded_headers,
+            producer,
+        );
+    }
+
+    // Streams a one-pass request body using an RFC method token, including
+    // extension methods such as M-SEARCH or PURGE.
+    static request_stream_named(
+        method: String,
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_stream_native(method, wire_url, encoded_headers, producer);
+    }
+
+    static request_stream_named_result(
+        method: String,
+        url: URL,
+        headers: HTTPHeaders,
+        producer: Fn(UInt64) => Result<Array<Byte>, HTTPStreamProducerError>,
+    ): Result<HTTPResponse, HTTPError> {
+        inmut wire_url: String = url.as_string();
+        inmut encoded_headers: Array<Byte> = headers.encode_for_transport();
+        return HTTP.request_stream_result_native(method, wire_url, encoded_headers, producer);
+    }
+
+    // Encodes an immutable snapshot of a URL form and supplies its media type.
+    // The encoder preserves repeated fields and applies the bounded wire size.
+    static post_form(url: URL, form: HTTPFormData): Result<HTTPResponse, HTTPError> {
+        return match form.encode_urlencoded() {
+            Error(error) => HTTP.response_error(error);
+            Ok(body) => {
+                mut headers = HTTPHeaders.create();
+                match headers.add("content-type", "application/x-www-form-urlencoded") {
+                    Error(_) => HTTP.response_error(HTTPError.Protocol);
+                    Ok(_) => HTTP.request(HTTPMethod.Post, url, body, headers);
+                }
+            }
+        };
+    }
+
+    // Encodes multipart bytes and attaches their matching boundary media type
+    // before entering the same permission-checked one-shot request path.
+    static post_multipart(
+        url: URL,
+        form: HTTPMultipartBuilder,
+        boundary: String,
+    ): Result<HTTPResponse, HTTPError> {
+        return match form.encode(boundary) {
+            Error(error) => HTTP.response_error(error);
+            Ok(body) => {
+                mut headers = HTTPHeaders.create();
+                mut content_type: String = "multipart/form-data; boundary=\"{boundary}\"";
+                match headers.add("content-type", content_type) {
+                    Error(_) => HTTP.response_error(HTTPError.Protocol);
+                    Ok(_) => HTTP.request(HTTPMethod.Post, url, body, headers);
+                }
+            }
+        };
+    }
+
+    static get_stream(url: URL): Result<HTTPResponse, HTTPError> {
+        mut headers = HTTPHeaders.create();
+        mut url_string = url.as_string();
+        mut encoded_headers = headers.encode_for_transport();
+        return HTTP.get_stream_native(url_string, encoded_headers);
+    }
+
+    // Opens a streaming GET with validated caller headers. This supports
+    // protocol metadata such as the SSE Last-Event-ID reconnection header.
+    static get_stream_with_headers(url: URL, headers: HTTPHeaders): Result<HTTPResponse, HTTPError> {
+        mut url_string = url.as_string();
+        mut encoded_headers = headers.encode_for_transport();
+        return HTTP.get_stream_native(url_string, encoded_headers);
+    }
+
+    private static get_native(url: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static get_cached_native(url: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static request_native(
+        method: String,
+        url: String,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+        validate_json: Boolean,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static request_cached_native(
+        method: String,
+        url: String,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static request_secret_native(
+        method: String,
+        url: String,
+        body: Array<Byte>,
+        headers: Array<Byte>,
+        header_name: String,
+        secret: SecretString,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static head_native(url: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static query_native(url: String, query: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static query_with_content_type_native(
+        url: String,
+        query: String,
+        content_type: String,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static post_native(url: String, body: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static post_json_native(url: String, body: String): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static post_bytes_native(url: String, body: Array<Byte>): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static get_stream_native(
+        url: String,
+        headers: Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static request_stream_native(
+        method: String,
+        url: String,
+        headers: Array<Byte>,
+        producer: Fn(UInt64) => Array<Byte>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+
+    private static request_stream_result_native(
+        method: String,
+        url: String,
+        headers: Array<Byte>,
+        producer: Fn(UInt64) => Result<Array<Byte>, HTTPStreamProducerError>,
+    ): Result<HTTPResponse, HTTPError> {
+        return Error(HTTPError.InvalidUrl);
+    }
+}

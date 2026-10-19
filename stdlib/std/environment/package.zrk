@@ -1,0 +1,3 @@
+package std.environment;
+
+share mod environment from "./environment";

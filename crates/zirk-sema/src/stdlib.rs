@@ -44,12 +44,48 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
             package: "std.io",
             module: "stderr",
         }),
+        "std.environment" => Some(StandardModule {
+            package: "std.environment",
+            module: "environment",
+        }),
+        "std.environment::environment" => Some(StandardModule {
+            package: "std.environment",
+            module: "environment",
+        }),
+        "std.http" => Some(StandardModule {
+            package: "std.http",
+            module: "http",
+        }),
+        "std.http::http" => Some(StandardModule {
+            package: "std.http",
+            module: "http",
+        }),
+        "std.net" => Some(StandardModule {
+            package: "std.net",
+            module: "net",
+        }),
+        "std.net::tcp" => Some(StandardModule {
+            package: "std.net",
+            module: "tcp",
+        }),
+        "std.net::dns" => Some(StandardModule {
+            package: "std.net",
+            module: "dns",
+        }),
+        "std.net::address" => Some(StandardModule {
+            package: "std.net",
+            module: "address",
+        }),
+        "std.net::tls" => Some(StandardModule {
+            package: "std.net",
+            module: "tls",
+        }),
         _ => None,
     }
 }
 
 pub fn registry() -> Vec<StandardLibraryEntry> {
-    [
+    let mut entries: Vec<StandardLibraryEntry> = [
         ("stdout", "print", "fn print(...args: Stringifiable): Void"),
         (
             "stdout",
@@ -105,7 +141,26 @@ pub fn registry() -> Vec<StandardLibraryEntry> {
             _ => unreachable!("the registry table is closed"),
         },
     })
-    .collect()
+    .collect();
+    entries.push(StandardLibraryEntry {
+        key: StandardLibraryKey {
+            package: "std.environment".into(),
+            module: "environment".into(),
+            name: "get".into(),
+            signature: "static get<T from EnvironmentParsable<T> = String>(name: String): Result<T, EnvironmentError>".into(),
+        },
+        compiler_binding: "std.environment.Environment.get",
+    });
+    entries.push(StandardLibraryEntry {
+        key: StandardLibraryKey {
+            package: "std.environment".into(),
+            module: "environment".into(),
+            name: "list_names".into(),
+            signature: "static list_names(): Result<List<String>, EnvironmentError>".into(),
+        },
+        compiler_binding: "std.environment.Environment.list_names",
+    });
+    entries
 }
 
 /// Looks up only the compiler-owned standard surface. Callers must provide all
@@ -154,6 +209,155 @@ pub fn compiler_binding_for_member(module: &str, name: &str) -> Option<&'static 
         .map(|entry| entry.compiler_binding)
 }
 
+/// Private environment implementation leaf. It is only considered while
+/// checking the compiler-bundled source module; applications cannot import or
+/// call it as a public host API.
+pub fn compiler_binding_for_environment_member(module: &str, name: &str) -> Option<&'static str> {
+    if module != "environment" {
+        return None;
+    }
+    match name {
+        "get_string_native" => Some("std.environment.Environment.get"),
+        "get_secret_value" => Some("std.environment.Environment.get_secret_value"),
+        "contains_authorized" => Some("std.environment.Environment.contains_authorized"),
+        _ => None,
+    }
+}
+
+/// Private network implementation leaves. These names are bindable only
+/// while checking the compiler-bundled `std.net::tcp` source module.
+pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&'static str> {
+    if module == "dns" {
+        return match name {
+            "resolve_native" => Some("std.net.dns.resolve"),
+            _ => None,
+        };
+    }
+    if module == "address" {
+        return match name {
+            "parse_native" => Some("std.net.address.parse"),
+            "origin_parse_native" => Some("std.net.address.origin_parse"),
+            _ => None,
+        };
+    }
+    if module == "tls" {
+        return match name {
+            "connect_native" => Some("std.net.tls.connect"),
+            "connect_with_trust_roots_native" => Some("std.net.tls.connect_with_trust_roots"),
+            "bind_native" => Some("std.net.tls.listen"),
+            "bind_http_native" => Some("std.net.tls.listen_http"),
+            "accept_native" => Some("std.net.tls.accept"),
+            "close_listener_native" => Some("std.net.tls.close_listener"),
+            "is_listener_closed_native" => Some("std.net.tls.is_listener_closed"),
+            "read_native" => Some("std.net.tls.read"),
+            "write_all_native" => Some("std.net.tls.write_all"),
+            "shutdown_native" => Some("std.net.tls.shutdown"),
+            "close_native" => Some("std.net.tls.close"),
+            "is_closed_native" => Some("std.net.tls.is_closed"),
+            "peer_address_native" => Some("std.net.tls.peer_address"),
+            _ => None,
+        };
+    }
+    if module != "tcp" {
+        return None;
+    }
+    match name {
+        "connect_native" => Some("std.net.tcp.connect"),
+        "read_native" => Some("std.net.tcp.read"),
+        "write_native" => Some("std.net.tcp.write"),
+        "write_all_native" => Some("std.net.tcp.write_all"),
+        "peer_address_native" => Some("std.net.tcp.peer_address"),
+        "shutdown_native" => Some("std.net.tcp.shutdown"),
+        "close_native" => Some("std.net.tcp.close"),
+        "is_closed_native" => Some("std.net.tcp.is_closed"),
+        "bind_native" => Some("std.net.tcp.listen"),
+        "accept_native" => Some("std.net.tcp.accept"),
+        "close_listener_native" => Some("std.net.tcp.close_listener"),
+        "is_listener_closed_native" => Some("std.net.tcp.listener_is_closed"),
+        _ => None,
+    }
+}
+
+/// Private HTTP implementation leaves, bindable only from the compiler's
+/// bundled `std.http` source module.
+pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
+    match name {
+        "get_native" => Some("std.http.get"),
+        "get_cached_native" => Some("std.http.get_cached"),
+        "request_native" => Some("std.http.request"),
+        "request_cached_native" => Some("std.http.request_cached"),
+        "request_secret_native" => Some("std.http.request_secret"),
+        "head_native" => Some("std.http.head"),
+        "query_native" => Some("std.http.query"),
+        "query_with_content_type_native" => Some("std.http.query_with_content_type"),
+        "post_native" => Some("std.http.post"),
+        "post_json_native" => Some("std.http.post_json"),
+        "post_bytes_native" => Some("std.http.post_bytes"),
+        "request_stream_native" => Some("std.http.request_stream"),
+        "request_stream_result_native" => Some("std.http.request_stream_result"),
+        "request_stream_named_result_native" => Some("std.http.request_stream_named_result"),
+        "register_server_producer_native" => Some("std.http.server_response_stream_register"),
+        "stream_buffered_native" => Some("std.http.response_to_stream"),
+        "get_stream_native" => Some("std.http.get_stream"),
+        "read_chunk_native" => Some("std.http.response_read_chunk"),
+        "read_all_native" => Some("std.http.response_read_all"),
+        "read_sse_native" => Some("std.http.response_read_sse_event"),
+        "sse_heartbeat_count_native" => Some("std.http.response_sse_heartbeat_count"),
+        "close_native" => Some("std.http.response_stream_close"),
+        "parse_native" => Some("std.http.url_normalize"),
+        "resolve_native" => Some("std.http.url_resolve"),
+        "text_native" => Some("std.http.response_text"),
+        "header_values_native" => Some("std.http.response_header_values"),
+        "request_header_values_native" => Some("std.http.request_header_values"),
+        "route_pattern_validate_native" => Some("std.http.route_pattern_validate"),
+        "route_pattern_conflict_native" => Some("std.http.route_pattern_conflict"),
+        "route_match_native" => Some("std.http.route_match"),
+        "route_allow_header_native" => Some("std.http.route_allow_header"),
+        "encode_native_intrinsic" => Some("std.http.headers_encode"),
+        "decode_fields_intrinsic" => Some("std.http.form_parse"),
+        "multipart_parse_intrinsic" => Some("std.http.multipart_parse"),
+        "read_upload_native" => Some("std.http.upload_read"),
+        "close_upload_native" => Some("std.http.upload_close"),
+        "multipart_encode_intrinsic" => Some("std.http.multipart_encode"),
+        "values_intrinsic" => Some("std.http.form_values"),
+        "encode_fields_intrinsic" => Some("std.http.form_encode"),
+        "serve_once_native" => Some("std.http.server.serve_once"),
+        "serve_websocket_once_native" => Some("std.http.server.websocket_serve_once"),
+        "serve_tls_websocket_once_native" => Some("std.http.server.websocket_serve_tls_once"),
+        "serve_tls_once_native" => Some("std.http.server.serve_tls_once"),
+        "serve_tls_requests_native" => Some("std.http.server.serve_tls_requests"),
+        "websocket_connect_native" => Some("std.http.websocket.connect"),
+        "websocket_connect_with_trust_roots_native" => {
+            Some("std.http.websocket.connect_with_trust_roots")
+        }
+        "websocket_send_native" => Some("std.http.websocket.send"),
+        "websocket_receive_native" => Some("std.http.websocket.receive"),
+        "websocket_close_native" => Some("std.http.websocket.close"),
+        "websocket_close_with_native" => Some("std.http.websocket.close_with"),
+        "decode_text_native" => Some("std.http.response_text"),
+        _ => None,
+    }
+}
+
+/// Private reusable-client implementation leaves. These names are bindable
+/// only from the compiler-bundled `std.http` source module.
+pub fn compiler_binding_for_http_client_member(name: &str) -> Option<&'static str> {
+    match name {
+        "create_native" => Some("std.http.client_create"),
+        "create_with_options_native" => Some("std.http.client_create_with_options"),
+        "create_with_trust_roots_native" => Some("std.http.client_create_with_trust_roots"),
+        "create_with_proxy_native" => Some("std.http.client_create_with_proxy"),
+        "create_with_proxy_and_trust_roots_native" => {
+            Some("std.http.client_create_with_proxy_and_trust_roots")
+        }
+        "request_native" => Some("std.http.client_request"),
+        "request_stream_native" => Some("std.http.client_request_stream"),
+        "enable_cookies_native" => Some("std.http.client_enable_cookies"),
+        "close_native" => Some("std.http.client_close"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +370,7 @@ mod tests {
                 && entry.key.name == "println"
         }));
         assert_eq!(standard_module("std.io::stdin").unwrap().module, "stdin");
+        assert_eq!(standard_module("std.http").unwrap().module, "http");
         assert!(standard_module("std.unknown").is_none());
     }
 

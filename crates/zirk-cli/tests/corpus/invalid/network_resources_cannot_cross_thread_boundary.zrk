@@ -1,0 +1,12 @@
+import { TCPStream } from std.net::tcp;
+import { TLSStream } from std.net::tls;
+
+fn inspect_tcp(stream: TCPStream): Boolean {
+    return Thread.run((): Boolean => stream.is_closed());
+}
+
+fn inspect_tls(stream: TLSStream): Boolean {
+    return Thread.run((): Boolean => stream.is_closed());
+}
+
+fn main(): Void { }

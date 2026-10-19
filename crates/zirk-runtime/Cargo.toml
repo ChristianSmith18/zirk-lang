@@ -15,7 +15,25 @@ unicode-segmentation.workspace = true
 regex = { workspace = true }
 unicode-normalization.workspace = true
 zirk-runtime-core.workspace = true
+zirk-diagnostics.workspace = true
+sha2.workspace = true
 libc = "0.2"
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+async-compression = { version = "0.4.51", default-features = false, features = ["tokio", "brotli", "gzip", "zlib"] }
+tokio-rustls.workspace = true
+rustls-native-certs.workspace = true
+bytes = "1"
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+http-body-util = "0.1"
+http.workspace = true
+mime.workspace = true
+hyper = { version = "1", default-features = false, features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 
@@ -27,4 +45,4 @@ libc = "0.2"
 corosensei = "0.3"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_Environment"] }

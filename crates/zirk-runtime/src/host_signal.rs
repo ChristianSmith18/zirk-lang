@@ -85,7 +85,7 @@ pub(crate) fn set_shutdown_grace_nanos(nanos: u64) {
 /// the guard adds and removes a console-control callback for Ctrl-C/Break.
 #[cfg(unix)]
 pub struct CliSignalHandlers {
-    previous: Vec<(libc::c_int, libc::sigaction)>,
+    previous: Vec<(libc::c_int, libc::sigaction, usize)>,
 }
 
 #[cfg(windows)]
@@ -128,7 +128,29 @@ pub fn install_cli_signal_handlers() -> CliSignalHandlers {
         unsafe { libc::sigemptyset(&mut action.sa_mask) };
         // SAFETY: action points to a valid C signal handler and initialized mask.
         if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } == 0 {
-            previous.push((signal, old));
+            previous.push((signal, old, os_signal_handler as *const () as usize));
+        }
+    }
+
+    // Generated Zirk executables do not run Rust's process-startup signal
+    // setup. Ignore SIGPIPE while the CLI runtime is active so a disconnected
+    // HTTP peer (or closed output pipe) becomes an ordinary EPIPE result.
+    let signal = libc::SIGPIPE;
+    // SAFETY: querying the process disposition for a valid signal.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaction(signal, std::ptr::null(), &mut old) } == 0
+        && old.sa_sigaction == libc::SIG_DFL
+    {
+        // SAFETY: zero is valid initial storage and sigemptyset initializes
+        // the mask before installing the process-wide ignore disposition.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = libc::SIG_IGN;
+        action.sa_flags = 0;
+        // SAFETY: action is initialized for the SIGPIPE disposition.
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        // SAFETY: action contains a valid SIG_IGN disposition.
+        if unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) } == 0 {
+            previous.push((signal, old, libc::SIG_IGN));
         }
     }
     CliSignalHandlers { previous }
@@ -175,13 +197,13 @@ pub fn install_cli_signal_handlers() -> CliSignalHandlers {
 #[cfg(unix)]
 impl Drop for CliSignalHandlers {
     fn drop(&mut self) {
-        for (signal, old) in self.previous.drain(..) {
+        for (signal, old, installed) in self.previous.drain(..) {
             // SAFETY: querying the current action for a valid signal.
             let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
             if unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) } != 0 {
                 continue;
             }
-            if current.sa_sigaction != os_signal_handler as *const () as usize {
+            if current.sa_sigaction != installed {
                 continue;
             }
             // SAFETY: `old` was returned by sigaction and remains a valid

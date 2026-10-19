@@ -24,9 +24,27 @@ zirk-lexer.workspace = true
 zirk-ast.workspace = true
 zirk-parser.workspace = true
 zirk-sema.workspace = true
+zirk-runtime-core.workspace = true
 zirk-format.workspace = true
 zirk-ir = { workspace = true, optional = true }
 sha2.workspace = true
+hmac.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+bytes = "1"
+futures-util.workspace = true
+http-body-util = "0.1"
+http.workspace = true
+hyper = { version = "1", default-features = false, features = ["client", "server", "http1", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "net", "rt", "time"] }
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

@@ -59,6 +59,69 @@ fn compile_concurrent_each(source_text: &str) -> Module {
     compile_with_options(source_text)
 }
 
+#[test]
+fn scalar_array_literals_lower_to_straight_line_stores() {
+    let compile_literal = |values: &str| {
+        compile(&format!(
+            "fn main(): Void {{\n\
+               inmut values: Array<Int32> = [{values}];\n\
+             }}"
+        ))
+    };
+    let small = compile_literal("1, 2, 3");
+    let large = compile_literal("1, 2, 3, 4, 5, 6");
+    let hundreds = (0..600)
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let byte_sized = compile_literal(&hundreds);
+    let branch_count = |module: &Module| {
+        module
+            .function("main")
+            .expect("main lowered")
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.terminator, Some(Terminator::Branch { .. })))
+            .count()
+    };
+    assert_eq!(
+        branch_count(&small),
+        branch_count(&large),
+        "literal length must not add runtime overflow branches"
+    );
+    assert_eq!(
+        branch_count(&small),
+        branch_count(&byte_sized),
+        "hundreds of scalar bytes still lower without per-element overflow CFG"
+    );
+    let module = compile(
+        "fn main(): Void {\n\
+           inmut values: Array<Int32> = [1, 2, 3];\n\
+         }",
+    );
+    let main = module.function("main").expect("main lowered");
+    let instructions: Vec<_> = main
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .map(|instruction| &instruction.kind)
+        .collect();
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::ArrayListStore { .. }))
+            .count(),
+        3
+    );
+    assert!(!instructions.iter().any(|kind| matches!(
+        kind,
+        InstKind::Binary {
+            op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul,
+            ..
+        }
+    )));
+}
+
 fn compile_with_options(source_text: &str) -> Module {
     let needs_streams = ["stdout.", "stderr.", "stdin."]
         .iter()

@@ -266,6 +266,8 @@ pub mod codes {
 
     /// The report was truncated for exceeding the limit.
     pub const TOO_MANY_DIAGNOSTICS: Code = Code::new("E0101");
+    /// A generated program terminated because of an unrecoverable runtime error.
+    pub const RUNTIME_FAILURE: Code = Code::new("E0601");
 }
 
 /// How many diagnostics one compilation reports.

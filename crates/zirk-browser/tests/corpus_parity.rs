@@ -155,6 +155,11 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Programs that import a standard package absent from the browser target.
+/// These must fail during checking, before interpreter execution, with a
+/// diagnostic naming the native-only API they require.
+const COMPILE_TIME_EXCLUDED: &[(&str, &str)] = &[("http_server_event_encoding", "HTTPServerEvent")];
+
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../zirk-cli/tests/corpus/valid")
 }
@@ -171,6 +176,7 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
     let mut problems = Vec::new();
     let mut passed = 0usize;
     let mut excluded_seen = 0usize;
+    let mut compile_excluded_seen = 0usize;
     for path in programs {
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         let expected_path = path.with_extension("out");
@@ -191,8 +197,11 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
             .map(|event| event.text.as_str())
             .collect();
         let excluded = EXCLUDED.iter().find(|(excluded, _)| *excluded == name);
-        match (excluded, &response.failure) {
-            (None, None) => {
+        let compile_excluded = COMPILE_TIME_EXCLUDED
+            .iter()
+            .find(|(excluded, _)| *excluded == name);
+        match (excluded, compile_excluded, &response.failure) {
+            (None, None, None) => {
                 if response.completion != Some(Completion::Completed) || output != expected {
                     problems.push(format!(
                         "{name}: browser output differs from native\nexpected: {expected:?}\nactual:   {output:?}\ncompletion: {:?}\ndiagnostics: {:?}",
@@ -203,11 +212,11 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
                     passed += 1;
                 }
             }
-            (None, Some(failure)) => problems.push(format!(
+            (None, None, Some(failure)) => problems.push(format!(
                 "{name}: unlisted browser failure {:?} {}: {}",
                 failure.kind, failure.code, failure.message
             )),
-            (Some((_, label)), Some(failure)) => {
+            (Some((_, label)), None, Some(failure)) => {
                 if failure.kind != FailureKind::Capability || !failure.message.contains(label) {
                     problems.push(format!(
                         "{name}: expected a capability failure naming `{label}`, got {:?} {}: {}",
@@ -221,14 +230,43 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
                     excluded_seen += 1;
                 }
             }
-            (Some(_), None) => problems.push(format!(
+            (Some(_), None, None) => problems.push(format!(
                 "{name}: now runs in the browser; remove it from EXCLUDED"
+            )),
+            (None, Some((_, label)), None) => {
+                if response.completion.is_some()
+                    || !output.is_empty()
+                    || !response
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.message.contains(label))
+                {
+                    problems.push(format!(
+                        "{name}: expected a compile-time exclusion naming `{label}`, got completion {:?}, output {output:?}, diagnostics {:?}",
+                        response.completion,
+                        response
+                            .diagnostics
+                            .iter()
+                            .map(|diagnostic| (&diagnostic.code, &diagnostic.message))
+                            .collect::<Vec<_>>()
+                    ));
+                } else {
+                    compile_excluded_seen += 1;
+                }
+            }
+            (None, Some((_, label)), Some(failure)) => problems.push(format!(
+                "{name}: expected compile-time exclusion `{label}`, got {:?} {}: {}",
+                failure.kind, failure.code, failure.message
+            )),
+            (Some(_), Some(_), _) => problems.push(format!(
+                "{name}: listed in both runtime and compile-time exclusion sets"
             )),
         }
     }
 
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
     assert_eq!(excluded_seen, EXCLUDED.len());
+    assert_eq!(compile_excluded_seen, COMPILE_TIME_EXCLUDED.len());
     assert!(passed > 150, "unexpectedly small corpus: {passed}");
 }
 

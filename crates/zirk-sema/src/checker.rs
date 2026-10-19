@@ -54,6 +54,24 @@ fn without_borrowed_scope(ty: Type) -> Type {
     }
 }
 
+/// Resolved generic call-site information, consumed by compiler
+/// specialization without re-resolving the source expression.
+#[derive(Debug, Clone)]
+pub struct GenericCallInfo {
+    /// Resolved callable name. Methods retain their checker-resolved method
+    /// name so later specialization does not have to infer provenance from
+    /// source spelling.
+    pub callable: String,
+    /// Declaring class for a generic method call. Free functions have no
+    /// owner; static and instance methods retain their declaration owner so
+    /// lowering can select the correct body without guessing from spelling.
+    pub owner_class: Option<u32>,
+    /// Whether the resolved method call has no receiver.
+    pub is_static_method: bool,
+    /// Concrete or enclosing-generic type arguments by type-parameter id.
+    pub substitutions: HashMap<u32, Type>,
+}
+
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
@@ -106,6 +124,17 @@ pub struct CheckedProgram {
     /// provenance, not name matching: lowering must never infer a host effect
     /// from a user package's similarly named declaration.
     pub standard_stream_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.environment` static calls resolved from the
+    /// bundled class declaration and exact signature.
+    pub standard_environment_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.net` calls resolved from bundled declarations.
+    pub standard_network_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.http` calls resolved from bundled declarations.
+    pub standard_http_calls: HashMap<Span, String>,
+    /// Concrete type-parameter substitutions inferred for direct generic
+    /// calls, keyed by call span. IR specialization consumes this metadata so
+    /// generic dispatch stays compile-time and never needs runtime reflection.
+    pub generic_call_substitutions: HashMap<Span, GenericCallInfo>,
     /// The resolved type of each `match` scrutinee, keyed by the match's span.
     ///
     /// Lowering compares against a discriminant for enums and against the value
@@ -124,6 +153,13 @@ pub struct CheckedProgram {
     /// type, not a value — lowering emits the constant or the static call
     /// without ever evaluating the path.
     pub scalar_static_accesses: std::collections::HashSet<Span>,
+    /// User-class static receivers, including transparent type aliases,
+    /// resolved to their concrete class declaration for IR lowering.
+    pub static_class_accesses: HashMap<Span, u32>,
+    /// Static calls made through a constrained type parameter. Monomorphized
+    /// lowering substitutes this parameter with its concrete type before
+    /// selecting the class method or scalar parser implementation.
+    pub static_type_param_accesses: HashMap<Span, u32>,
     /// Member accesses and calls on an enum *type name* that resolved to a
     /// built-in static member rather than a variant (`enum-static-members`):
     /// `Direction.count`, `Direction.keys()`, `Direction.values()`,
@@ -1153,6 +1189,8 @@ struct Checker<'a> {
     matches: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
     scalar_static_accesses: std::collections::HashSet<Span>,
+    static_class_accesses: HashMap<Span, u32>,
+    static_type_param_accesses: HashMap<Span, u32>,
     /// See [`CheckedProgram::enum_static_accesses`].
     enum_static_accesses: std::collections::HashSet<Span>,
     /// See [`CheckedProgram::temporal_constructions`].
@@ -1180,6 +1218,11 @@ struct Checker<'a> {
     native_stringifiable: Option<u32>,
     /// Provenance selected for each checked stream call.
     standard_stream_calls: HashMap<Span, String>,
+    standard_environment_calls: HashMap<Span, String>,
+    standard_network_calls: HashMap<Span, String>,
+    standard_http_calls: HashMap<Span, String>,
+    /// See [`CheckedProgram::generic_call_substitutions`].
+    generic_call_substitutions: HashMap<Span, GenericCallInfo>,
     /// Bare names opened by more than one imported module. They deliberately
     /// have no source-order winner; callers must use `module.member`.
     ambiguous_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
@@ -1210,6 +1253,9 @@ struct Checker<'a> {
     expected_type: Option<Type>,
     /// The class whose body is being checked, if any. It is what `this` names.
     this_type: Option<Type>,
+    /// Declaring class for the current member body, including `static` methods
+    /// where `this_type` is intentionally absent.
+    current_class_body: Option<u32>,
     /// Whether the body being checked is a constructor, which is the one place
     /// an `inmut` field may be written.
     in_constructor: bool,
@@ -1273,6 +1319,10 @@ struct Checker<'a> {
     /// Declared generic type parameters, indexed by the id their
     /// [`Base::Param`] carries.
     type_params: Vec<TypeParamInfo>,
+    /// Set only while declaring/checking top-level generic functions, whose
+    /// bodies are lowered from concrete call-site instantiations. Generic
+    /// methods remain gated until method specialization is implemented.
+    allow_generic_function_params: bool,
     /// Type-parameter names in scope, innermost last: a class's own frame,
     /// then a generic method's or function's on top of it.
     type_param_scope: Vec<HashMap<String, u32>>,
@@ -1624,6 +1674,8 @@ impl<'a> Checker<'a> {
             matches: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
+            static_class_accesses: HashMap::new(),
+            static_type_param_accesses: HashMap::new(),
             enum_static_accesses: std::collections::HashSet::new(),
             temporal_constructions: std::collections::HashSet::new(),
             parallel_adapter_accesses: std::collections::HashSet::new(),
@@ -1633,12 +1685,17 @@ impl<'a> Checker<'a> {
             standard_stream_source_modules: HashMap::new(),
             native_stringifiable: None,
             standard_stream_calls: HashMap::new(),
+            standard_environment_calls: HashMap::new(),
+            standard_network_calls: HashMap::new(),
+            standard_http_calls: HashMap::new(),
+            generic_call_substitutions: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
             aliases: HashMap::new(),
             current_return: Type::VOID,
             expected_type: None,
             this_type: None,
+            current_class_body: None,
             in_constructor: false,
             loop_depth: 0,
             lambda_depth: 0,
@@ -1653,6 +1710,7 @@ impl<'a> Checker<'a> {
             pending_throws: Vec::new(),
             catch_type: None,
             type_params: Vec::new(),
+            allow_generic_function_params: false,
             type_param_scope: Vec::new(),
             type_param_ids: HashMap::new(),
             generic_instances: Vec::new(),
@@ -1893,6 +1951,43 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Records scheduler and host effects for compiler-owned standard-library
+    /// leaves. These effects seed the same transitive summaries as source
+    /// calls, so a wrapper such as `HTTP.get` cannot hide network suspension
+    /// from callback restrictions (`Mutex.with`, `Parallel.each`, cleanup).
+    fn mark_standard_library_binding_effect(&mut self, binding: &str) {
+        match binding {
+            "std.environment.Environment.get"
+            | "std.environment.Environment.get_secret_value"
+            | "std.environment.Environment.contains_authorized"
+            | "std.environment.Environment.list_names"
+            | "std.net.tcp.listen" => self.mark_may_block(),
+            "std.net.tcp.connect"
+            | "std.net.tcp.read"
+            | "std.net.tcp.write"
+            | "std.net.tcp.write_all"
+            | "std.net.tcp.accept"
+            | "std.http.get"
+            | "std.http.get_cached"
+            | "std.http.request"
+            | "std.http.request_cached"
+            | "std.http.client_request"
+            | "std.http.head"
+            | "std.http.query"
+            | "std.http.query_with_content_type"
+            | "std.http.post"
+            | "std.http.post_json"
+            | "std.http.post_bytes"
+            | "std.http.request_stream"
+            | "std.http.get_stream"
+            | "std.http.response_read_chunk" => self.mark_may_suspend(),
+            "std.http.multipart_parse" | "std.http.upload_read" | "std.http.upload_close" => {
+                self.mark_may_block()
+            }
+            _ => {}
+        }
+    }
+
     fn mark_uses_channel(&mut self) {
         if let Some(function) = self.current_function {
             let summary = self
@@ -1996,10 +2091,27 @@ impl<'a> Checker<'a> {
     }
 
     fn build_suspend_summaries(&self, program: &Program) -> HashMap<Span, EffectSummary> {
+        fn class_method_spans(class: &zirk_ast::ClassDecl, spans: &mut Vec<Span>) {
+            spans.extend(
+                class
+                    .methods
+                    .iter()
+                    .filter(|method| method.body.is_some())
+                    .map(|method| method.span),
+            );
+            for nested in &class.nested {
+                class_method_spans(nested, spans);
+            }
+        }
+        let mut method_spans = Vec::new();
+        for class in &program.classes {
+            class_method_spans(class, &mut method_spans);
+        }
         let callable_spans: HashSet<Span> = program
             .functions
             .iter()
             .map(|function| function.name.span)
+            .chain(method_spans)
             .chain(self.callable_spans.iter().copied())
             .collect();
         let mut summaries: HashMap<Span, EffectSummary> = callable_spans
@@ -2246,11 +2358,17 @@ impl<'a> Checker<'a> {
             matches: self.matches,
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
+            static_class_accesses: self.static_class_accesses,
+            static_type_param_accesses: self.static_type_param_accesses,
             enum_static_accesses: self.enum_static_accesses,
             temporal_constructions: self.temporal_constructions,
             parallel_adapter_accesses: self.parallel_adapter_accesses,
             aliases: self.aliases,
             standard_stream_calls: self.standard_stream_calls,
+            standard_environment_calls: self.standard_environment_calls,
+            standard_network_calls: self.standard_network_calls,
+            standard_http_calls: self.standard_http_calls,
+            generic_call_substitutions: self.generic_call_substitutions,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
             contract_instances: self.contract_instances,
@@ -2865,6 +2983,17 @@ impl<'a> Checker<'a> {
         {
             return;
         }
+        // These declarations are language prelude types backed by the
+        // compiler, not exports owned by a user's entry file. Imported
+        // source modules need to implement `Error`/`Resource` without an
+        // impossible import path back into that entry file (required by
+        // compiler-provided `std.net` resources).
+        if (matches!(what, "class" | "abstract class")
+            && matches!(used.name.as_str(), "Error" | "Throwable" | "RuntimeError"))
+            || (what == "contract" && used.name == "Resource")
+        {
+            return;
+        }
         let owner_name = self.sources.file(owner.file).name();
         let used_name = self.sources.file(used.span.file).name();
         if is_standard_io_source(owner_name) && is_standard_io_source(used_name) {
@@ -3027,6 +3156,7 @@ impl<'a> Checker<'a> {
                 has_default: false,
                 index: 0,
                 throws: Vec::new(),
+                is_static: false,
             });
 
         // `next(): Iteration<T>`
@@ -3044,6 +3174,7 @@ impl<'a> Checker<'a> {
                 has_default: false,
                 index: 0,
                 throws: Vec::new(),
+                is_static: false,
             });
 
         self.native_iteration = Some(NativeIteration {
@@ -3381,6 +3512,7 @@ impl<'a> Checker<'a> {
         let error_methods = vec![
             MethodInfo {
                 name: "message".into(),
+                type_params: Vec::new(),
                 params: Vec::new(),
                 returns: Type::STRING,
                 visibility: Visibility::Public,
@@ -3396,6 +3528,7 @@ impl<'a> Checker<'a> {
             },
             MethodInfo {
                 name: "code".into(),
+                type_params: Vec::new(),
                 params: Vec::new(),
                 returns: Type::STRING,
                 visibility: Visibility::Public,
@@ -3411,6 +3544,7 @@ impl<'a> Checker<'a> {
             },
             MethodInfo {
                 name: "cause".into(),
+                type_params: Vec::new(),
                 params: Vec::new(),
                 returns: Type::of(Base::Class(error)).as_nullable(),
                 visibility: Visibility::Public,
@@ -3447,6 +3581,7 @@ impl<'a> Checker<'a> {
         let mut throwable_methods = error_methods;
         throwable_methods.push(MethodInfo {
             name: "stack_trace".into(),
+            type_params: Vec::new(),
             params: Vec::new(),
             returns: Type::of(Base::Class(stack_trace)),
             visibility: Visibility::Public,
@@ -3513,6 +3648,7 @@ impl<'a> Checker<'a> {
             vec![
                 MethodInfo {
                     name: "message".into(),
+                    type_params: Vec::new(),
                     params: Vec::new(),
                     returns: Type::STRING,
                     visibility: Visibility::Public,
@@ -3528,6 +3664,7 @@ impl<'a> Checker<'a> {
                 },
                 MethodInfo {
                     name: "code".into(),
+                    type_params: Vec::new(),
                     params: Vec::new(),
                     returns: Type::STRING,
                     visibility: Visibility::Public,
@@ -3543,6 +3680,7 @@ impl<'a> Checker<'a> {
                 },
                 MethodInfo {
                     name: "cause".into(),
+                    type_params: Vec::new(),
                     params: Vec::new(),
                     returns: Type::of(Base::Class(error)).as_nullable(),
                     visibility: Visibility::Public,
@@ -3558,6 +3696,7 @@ impl<'a> Checker<'a> {
                 },
                 MethodInfo {
                     name: "stack_trace".into(),
+                    type_params: Vec::new(),
                     params: Vec::new(),
                     returns: Type::of(Base::Class(stack_trace)),
                     visibility: Visibility::Public,
@@ -3776,6 +3915,7 @@ impl<'a> Checker<'a> {
                 has_default: false,
                 index: 0,
                 throws: Vec::new(),
+                is_static: false,
             });
 
         // `is_closed(): Boolean`
@@ -3789,6 +3929,7 @@ impl<'a> Checker<'a> {
                 has_default: false,
                 index: 1,
                 throws: Vec::new(),
+                is_static: false,
             });
 
         self.native_resource = Some(NativeResource { resource, e });
@@ -3929,7 +4070,8 @@ impl<'a> Checker<'a> {
                 .collect(),
         );
         let mut methods: Vec<ContractMethod> = Vec::new();
-        for (index, method) in decl.methods.iter().enumerate() {
+        let mut instance_method_index = 0usize;
+        for method in &decl.methods {
             if let Some(previous) = methods.iter().find(|m| m.name == method.name.name) {
                 let where_ = self.declared_at(previous.span, method.name.span);
                 self.error(
@@ -3951,6 +4093,7 @@ impl<'a> Checker<'a> {
                 .map(|r| self.resolve_type(r))
                 .unwrap_or(Type::UNKNOWN);
             let throws = self.resolve_throws_clause(&method.throws);
+            let index = instance_method_index;
             methods.push(ContractMethod {
                 name: method.name.name.clone(),
                 params: method
@@ -3963,7 +4106,11 @@ impl<'a> Checker<'a> {
                 has_default: method.body.is_some(),
                 index,
                 throws,
+                is_static: method.is_static,
             });
+            if !method.is_static {
+                instance_method_index += 1;
+            }
         }
 
         let (contract_inputs, contract_outputs): (Vec<Type>, Vec<Type>) =
@@ -4687,6 +4834,7 @@ impl<'a> Checker<'a> {
             has_default: method.has_default,
             index: method.index,
             throws: method.throws.clone(),
+            is_static: method.is_static,
         }
     }
 
@@ -4794,6 +4942,7 @@ impl<'a> Checker<'a> {
         let index = self.classes[class as usize].methods.len();
         self.classes[class as usize].methods.push(MethodInfo {
             name: method.name.clone(),
+            type_params: Vec::new(),
             params: method.params.clone(),
             returns: method.returns,
             visibility: Visibility::Public,
@@ -4832,7 +4981,7 @@ impl<'a> Checker<'a> {
             || required.returns.is_unknown()
             || supplied.returns == required.returns;
 
-        if same_params && same_returns {
+        if supplied.is_static == required.is_static && same_params && same_returns {
             if supplied.visibility != Visibility::Public {
                 let name = supplied.name.clone();
                 self.error(
@@ -4848,12 +4997,21 @@ impl<'a> Checker<'a> {
 
         let name = supplied.name.clone();
         let line = self.sources.location(required.span).line;
+        let static_mismatch = supplied.is_static != required.is_static;
         self.error(
             codes::TYPE_MISMATCH,
             supplied.span,
             format!("`{name}` does not match what `{contract}` requires"),
-            format!("the signature it declares is on line {line}"),
-            Some("keep the parameters and the return type the contract asked for".into()),
+            if static_mismatch {
+                format!("the contract method on line {line} has different static/instance dispatch")
+            } else {
+                format!("the signature it declares is on line {line}")
+            },
+            Some(if static_mismatch {
+                "declare it with the same `static` modifier as the contract".into()
+            } else {
+                "keep the parameters and the return type the contract asked for".into()
+            }),
         );
         let _ = at;
     }
@@ -5355,6 +5513,23 @@ impl<'a> Checker<'a> {
             }
         }
         None
+    }
+
+    /// Resolves a class name used as a static receiver, including a public
+    /// type alias. Type aliases are transparent in type position; preserving
+    /// that transparency here also lets preferred standard-library aliases
+    /// expose the same static API as their canonical class name.
+    fn static_class_id(&mut self, name: &str, at: Span) -> Option<u32> {
+        let resolved = self.resolved_name(name, at);
+        self.class_id(&resolved).or_else(|| {
+            self.type_aliases
+                .contains_key(&resolved)
+                .then(|| self.resolve_type_alias(&resolved, at))
+                .and_then(|ty| match ty.base {
+                    Base::Class(id) => Some(id),
+                    _ => None,
+                })
+        })
     }
 
     /// The id a `ClassDecl` registered under, whether its registered name is
@@ -5898,7 +6073,15 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            self.enter_type_params(&method.type_params);
+            // Static generic methods have no receiver ABI and can use the
+            // same direct-position monomorphization as generic free
+            // functions. Other generic declarations remain gated here.
+            let allow_static_method_specialization = self.allow_generic_function_params;
+            if method.is_static {
+                self.allow_generic_function_params = true;
+            }
+            let type_params = self.enter_type_params(&method.type_params);
+            self.allow_generic_function_params = allow_static_method_specialization;
             // `None` marks the signature for `infer_return_types` — the
             // parser only allows the omission on a method with a body.
             let returns = method
@@ -5909,6 +6092,7 @@ impl<'a> Checker<'a> {
             let throws = self.resolve_throws_clause(&method.throws);
             let resolved = MethodInfo {
                 name: method.name.name.clone(),
+                type_params,
                 params: method
                     .params
                     .iter()
@@ -6483,6 +6667,7 @@ impl<'a> Checker<'a> {
                 &constructor.params,
                 Type::VOID,
                 true,
+                constructor.span,
                 |checker| {
                     checker.check_block(&constructor.body);
                 },
@@ -6523,6 +6708,7 @@ impl<'a> Checker<'a> {
                 &method.params,
                 returns,
                 !method.is_static,
+                method.span,
                 |checker| {
                     let always_returns = checker.check_block(body);
                     if returns != Type::VOID && !returns.is_unknown() && !always_returns {
@@ -6551,12 +6737,19 @@ impl<'a> Checker<'a> {
         params: &[Param],
         returns: Type,
         bind_this: bool,
+        callable_span: Span,
         check: impl FnOnce(&mut Self),
     ) {
+        let previous_function = self.current_function.replace(callable_span);
         let previous_return = self.current_return;
         let previous_this = self.this_type;
+        let previous_class_body = self.current_class_body;
         self.current_return = returns;
         self.this_type = if bind_this { Some(class_type) } else { None };
+        self.current_class_body = match class_type.base {
+            Base::Class(id) => Some(id),
+            _ => None,
+        };
 
         self.scopes.push_function();
         if bind_this {
@@ -6595,8 +6788,10 @@ impl<'a> Checker<'a> {
         check(self);
 
         self.scopes.pop();
+        self.current_function = previous_function;
         self.current_return = previous_return;
         self.this_type = previous_this;
+        self.current_class_body = previous_class_body;
     }
 
     /// Every field without a default must be written by the constructor.
@@ -6952,7 +7147,9 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_function(&mut self, f: &FnDecl) {
+        let previous_mode = std::mem::replace(&mut self.allow_generic_function_params, true);
         let type_params = self.enter_type_params(&f.type_params);
+        self.allow_generic_function_params = previous_mode;
         let params = f
             .params
             .iter()
@@ -7161,13 +7358,14 @@ impl<'a> Checker<'a> {
         // A non-empty `newly_created` means this is the first time this
         // exact declaration is entered (the declaring pass, ahead of the
         // later checking pass that reuses these same ids), which is the one
-        // place to report it once: the grammar and the type rules for a
-        // generic body exist from here on, but lowering does not yet.
-        if !newly_created.is_empty() {
+        // place to report it once. Direct-signature top-level functions opt
+        // out above because the IR emits their concrete instantiations;
+        // methods and other generic declarations remain gated here.
+        if !newly_created.is_empty() && !self.allow_generic_function_params {
             self.not_lowered(
                 params[0].span,
-                "a generic type parameter",
-                "declare it without `<...>` for now, or instantiate it manually per concrete type",
+                "a generic type parameter outside a specialized top-level function",
+                "use a concrete type or a directly specialized top-level function",
             );
         }
 
@@ -8552,6 +8750,36 @@ impl<'a> Checker<'a> {
     /// without every `Clone`-eligible class needing to spell out
     /// `implements Clone` by hand.
     fn satisfies_constraint(&mut self, arg: Type, constraint: Type) -> bool {
+        // Primitive parsers are compiler intrinsics and cannot declare a
+        // source-level implementation of this static parsing protocol.
+        if let Base::ContractInstance(instance_id) = constraint.base
+            && let Some(instance) = self.contract_instances.get(instance_id as usize)
+            && self
+                .contracts
+                .get(instance.contract as usize)
+                .is_some_and(|contract| {
+                    contract.name == "EnvironmentParsable"
+                        && self
+                            .sources
+                            .file(contract.span.file)
+                            .identity()
+                            .is_some_and(|identity| identity.package == "std.environment")
+                })
+            && instance.args.as_slice() == [arg]
+            && matches!(
+                arg.base,
+                Base::String
+                    | Base::Int(_)
+                    | Base::Float(_)
+                    | Base::Decimal
+                    | Base::Date
+                    | Base::Time
+                    | Base::DateTime
+                    | Base::Regex
+            )
+        {
+            return true;
+        }
         if let Some(clone_id) = self.native_clone
             && constraint == Type::of(Base::Contract(clone_id))
         {
@@ -8880,7 +9108,9 @@ impl<'a> Checker<'a> {
     /// always-diverging `Never` body apart from an ordinary `Void` one.
     fn check_function(&mut self, f: &FnDecl) -> bool {
         let enclosing_function = self.current_function.replace(f.name.span);
+        let previous_mode = std::mem::replace(&mut self.allow_generic_function_params, true);
         self.enter_type_params(&f.type_params);
+        self.allow_generic_function_params = previous_mode;
         let signature = self.functions.get(&f.name.name).cloned();
         self.current_return = signature
             .as_ref()
@@ -8947,6 +9177,49 @@ impl<'a> Checker<'a> {
         let always_returns = self.check_block(&f.body);
         if f.is_unsafe {
             self.unsafe_depth -= 1;
+        }
+
+        if !f.type_params.is_empty() {
+            let parameter_ids = self
+                .functions
+                .get(&f.name.name)
+                .map(|signature| signature.type_params.clone())
+                .unwrap_or_default();
+            let expression_types: Vec<_> = self
+                .expr_types
+                .iter()
+                .filter(|(span, _)| {
+                    span.file == f.span.file && span.start >= f.span.start && span.end <= f.span.end
+                })
+                .map(|(&span, &ty)| (span, ty))
+                .collect();
+            let unresolved_generic_call =
+                self.generic_call_substitutions.iter().any(|(span, call)| {
+                    span.file == f.span.file
+                        && span.start >= f.span.start
+                        && span.end <= f.span.end
+                        // `Ok<T,E>(...)` and `Error<T,E>(...)` are enum
+                        // constructors, not nested generic function calls.
+                        // Lowering resolves their concrete Result layout from
+                        // the enclosing monomorphization's substitution.
+                        && !matches!(call.callable.as_str(), "Ok" | "Error")
+                        && call
+                            .substitutions
+                            .values()
+                            .any(|ty| self.type_references_any_param(*ty, &parameter_ids))
+                });
+            if unresolved_generic_call {
+                let span = expression_types
+                    .iter()
+                    .find(|(_, ty)| self.type_references_any_param(*ty, &parameter_ids))
+                    .map(|(span, _)| *span)
+                    .unwrap_or(f.name.span);
+                self.not_lowered(
+                    span,
+                    "a generic function body requiring nested specialization",
+                    "keep calls inside generic bodies independent of unresolved outer type parameters until recursive specialization is supported",
+                );
+            }
         }
         self.scopes.pop();
 
@@ -9736,6 +10009,7 @@ impl<'a> Checker<'a> {
                 &decl.params,
                 Type::UNKNOWN,
                 !decl.is_static,
+                decl.span,
                 |checker| {
                     always_returns = checker.check_block(body);
                 },
@@ -15485,7 +15759,7 @@ impl<'a> Checker<'a> {
             let resolved = self.resolved_name(&base.name, base.span);
 
             // `ClassName.field` for a `static` class field.
-            if let Some(class_id) = self.class_id(&resolved) {
+            if let Some(class_id) = self.static_class_id(&base.name, base.span) {
                 let class = self.classes[class_id as usize].clone();
                 if let Some(field) = class.field(&expr.name.name).cloned() {
                     if !field.is_static {
@@ -15508,6 +15782,7 @@ impl<'a> Checker<'a> {
                             field.span,
                         );
                     }
+                    self.static_class_accesses.insert(expr.span, class_id);
                     self.scalar_static_accesses.insert(expr.span);
                     return field.ty;
                 }
@@ -15878,6 +16153,49 @@ impl<'a> Checker<'a> {
                 }
                 return Type::INT32;
             }
+            Base::Enum(id)
+                if self.enums[id as usize].name == "HTTPStatus"
+                    && matches!(
+                        member.name.as_str(),
+                        "code"
+                            | "is_informational"
+                            | "is_success"
+                            | "is_redirect"
+                            | "is_client_error"
+                            | "is_server_error"
+                    ) =>
+            {
+                return if member.name == "code" {
+                    Type::INT32
+                } else {
+                    Type::BOOLEAN
+                };
+            }
+            Base::EnumInstance(id)
+                if self.enums[self.enum_instances[id as usize].enum_id as usize].name
+                    == "HTTPStatus"
+                    && matches!(
+                        member.name.as_str(),
+                        "code"
+                            | "is_informational"
+                            | "is_success"
+                            | "is_redirect"
+                            | "is_client_error"
+                            | "is_server_error"
+                    ) =>
+            {
+                return if member.name == "code" {
+                    Type::INT32
+                } else {
+                    Type::BOOLEAN
+                };
+            }
+            Base::Enum(id)
+                if self.enums[id as usize].name == "HTTPMethod"
+                    && matches!(member.name.as_str(), "is_safe" | "is_idempotent") =>
+            {
+                return Type::BOOLEAN;
+            }
             _ => {}
         }
 
@@ -16055,6 +16373,70 @@ impl<'a> Checker<'a> {
         Type::UNKNOWN
     }
 
+    /// Resolves `T.method(...)` through a static method promised by `T`'s
+    /// compile-time contract constraints. Lowering substitutes `T` at each
+    /// monomorphized call site, so this never creates runtime reflection or
+    /// a virtual static-method table.
+    fn check_param_static_call(&mut self, expr: &CallExpr, field: &FieldExpr, id: u32) -> Type {
+        let constraints = self.type_params[id as usize].constraints.clone();
+        for constraint in constraints {
+            let (contract_id, subst) = match constraint.base {
+                Base::Contract(contract) => (contract, Vec::new()),
+                Base::ContractInstance(instance) => {
+                    let instance = self.contract_instances[instance as usize].clone();
+                    let subst = self.contracts[instance.contract as usize]
+                        .type_params
+                        .iter()
+                        .copied()
+                        .zip(instance.args)
+                        .collect::<Vec<_>>();
+                    (instance.contract, subst)
+                }
+                _ => continue,
+            };
+            let Some(method) = self.contracts[contract_id as usize]
+                .method(&field.name.name)
+                .cloned()
+                .filter(|method| method.is_static)
+            else {
+                continue;
+            };
+            let signature = Signature {
+                name: method.name.clone(),
+                params: method
+                    .params
+                    .iter()
+                    .map(|parameter| ParamInfo {
+                        ty: self.substitute_type(parameter.ty, &subst),
+                        ..parameter.clone()
+                    })
+                    .collect(),
+                returns: self.substitute_type(method.returns, &subst),
+                shared: true,
+                span: method.span,
+                type_params: Vec::new(),
+                throws: method.throws,
+            };
+            self.static_type_param_accesses.insert(field.span, id);
+            self.scalar_static_accesses.insert(field.span);
+            return self.check_direct_call(expr, &signature);
+        }
+
+        let param_name = self.type_params[id as usize].name.clone();
+        let constraint_help = self.constraint_help(&self.type_params[id as usize].constraints);
+        self.error(
+            codes::UNKNOWN_MEMBER,
+            field.name.span,
+            format!("`{param_name}` has no static method `{}`", field.name.name),
+            constraint_help,
+            Some("add a static contract constraint that declares this method".into()),
+        );
+        for arg in &expr.args {
+            self.check_expr(&arg.value);
+        }
+        Type::UNKNOWN
+    }
+
     /// The `= help:` line naming what a type parameter's constraints are, for
     /// a member that none of them turned out to promise.
     fn constraint_help(&self, constraints: &[Type]) -> String {
@@ -16106,12 +16488,12 @@ impl<'a> Checker<'a> {
             return true;
         }
 
-        let Some(Type {
-            base: Base::Class(current),
-            ..
-        }) = self.this_type
-        else {
-            return false;
+        let current = match self.this_type.map(|ty| ty.base) {
+            Some(Base::Class(current)) => current,
+            _ => match self.current_class_body {
+                Some(current) => current,
+                None => return false,
+            },
         };
 
         if current == owner {
@@ -17090,6 +17472,20 @@ impl<'a> Checker<'a> {
             .cloned()
             .unwrap_or(method);
 
+        if method.is_static {
+            self.error(
+                codes::TYPE_MISMATCH,
+                field.name.span,
+                format!("`{}` is a static contract method", method.name),
+                "static contract requirements are implemented through a concrete type",
+                Some("call the implementing type's static method".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
+
         let signature = Signature {
             name: method.name.clone(),
             params: method.params.clone(),
@@ -17157,6 +17553,20 @@ impl<'a> Checker<'a> {
             .method(&method.name)
             .cloned()
             .unwrap_or(method);
+
+        if method.is_static {
+            self.error(
+                codes::TYPE_MISMATCH,
+                field.name.span,
+                format!("`{}` is a static contract method", method.name),
+                "static contract requirements are implemented through a concrete type",
+                Some("call the implementing type's static method".into()),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+            return Type::UNKNOWN;
+        }
 
         let signature = Signature {
             name: method.name.clone(),
@@ -17776,7 +18186,7 @@ impl<'a> Checker<'a> {
             returns,
             shared: true,
             span: method.span,
-            type_params: Vec::new(),
+            type_params: method.type_params.clone(),
             throws: method.throws.clone(),
         };
         let visibility = method.visibility;
@@ -17784,7 +18194,8 @@ impl<'a> Checker<'a> {
 
         // Same rule as for a field: inside its own class everything is
         // reachable.
-        let from_inside = self.this_type == Some(Type::of(Base::Class(id)));
+        let from_inside = self.this_type == Some(Type::of(Base::Class(id)))
+            || self.current_class_body == Some(id);
         if visibility != Visibility::Public && !from_inside {
             let line = self.sources.location(declared).line;
             self.error(
@@ -17799,7 +18210,40 @@ impl<'a> Checker<'a> {
             );
         }
 
-        self.check_direct_call(expr, &signature)
+        // The receiver's static class does not necessarily identify the
+        // implementation that runs: a subclass can override this method.
+        // Seed the call graph with every in-program implementation reachable
+        // below that static class, so wrapper effects remain conservative.
+        let targets = self
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(candidate_id, candidate)| {
+                let mut ancestor = Some(candidate_id as u32);
+                while let Some(ancestor_id) = ancestor {
+                    if ancestor_id == id {
+                        return candidate
+                            .method(&method.name)
+                            .map(|implementation| implementation.span);
+                    }
+                    ancestor = self
+                        .classes
+                        .get(ancestor_id as usize)
+                        .and_then(|entry| entry.base);
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+        for target in targets {
+            self.record_direct_function_call(target, expr.span);
+        }
+
+        let result = self.check_direct_call(expr, &signature);
+        if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
+            call.owner_class = Some(method.owner);
+            call.is_static_method = false;
+        }
+        result
     }
 
     /// `User(...)`, which builds an instance.
@@ -17831,6 +18275,33 @@ impl<'a> Checker<'a> {
 
         if constructors.is_empty() {
             if expr.args.is_empty() {
+                if !type_params.is_empty() {
+                    let signature = Signature {
+                        name: class_name.clone(),
+                        params: Vec::new(),
+                        returns: Type::of(Base::Class(id)),
+                        shared,
+                        span,
+                        type_params: type_params.clone(),
+                        throws: Vec::new(),
+                    };
+                    let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
+                    let args: Vec<Type> = type_params
+                        .iter()
+                        .map(|parameter| {
+                            substitution
+                                .get(parameter)
+                                .copied()
+                                .unwrap_or(Type::UNKNOWN)
+                        })
+                        .collect();
+                    if args.iter().any(|argument| argument.is_unknown()) {
+                        return Type::of(Base::Class(id));
+                    }
+                    let instance = self.intern_instance(GenericInstance { class: id, args });
+                    self.generic_constructions.insert(expr.span, instance);
+                    return Type::of(Base::Instance(instance));
+                }
                 // A class with no written `construct` has the language's
                 // implicit zero-argument constructor.  It remains absent
                 // from the AST and tooling tables.
@@ -21139,6 +21610,7 @@ impl<'a> Checker<'a> {
         {
             let redirected = CallExpr {
                 callee: Box::new(Expr::Path(name)),
+                type_args: expr.type_args.clone(),
                 args: expr.args.clone(),
                 span: expr.span,
             };
@@ -21734,64 +22206,147 @@ impl<'a> Checker<'a> {
         // `ClassName.method()` for a `static` method.
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
+            && self.scopes.lookup(&base.name).is_none()
+            && let Some(type_param) = self.lookup_type_param(&base.name)
         {
-            let resolved = self.resolved_name(&base.name, base.span);
-            if let Some(class_id) = self.class_id(&resolved) {
-                let class = self.classes[class_id as usize].clone();
-                if let Some(method) = class.method(&field.name.name).cloned() {
-                    // `return-type-inference`: resolve the callee on demand
-                    // — then re-read, since inference may have just written
-                    // the return type into the `MethodInfo`.
-                    self.ensure_inferred(&Self::call_infer_key(&method), field.name.span);
-                    let method = self.classes[class_id as usize]
-                        .method(&field.name.name)
-                        .cloned()
-                        .unwrap_or(method);
-                    if !method.is_static {
+            return self.check_param_static_call(expr, field, type_param);
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && let Some(class_id) = self.static_class_id(&base.name, base.span)
+        {
+            let class = self.classes[class_id as usize].clone();
+            self.require_visible(class.span, class.shared, base, "class");
+            if let Some(method) = class.method(&field.name.name).cloned() {
+                // `return-type-inference`: resolve the callee on demand
+                // — then re-read, since inference may have just written
+                // the return type into the `MethodInfo`.
+                self.ensure_inferred(&Self::call_infer_key(&method), field.name.span);
+                let method = self.classes[class_id as usize]
+                    .method(&field.name.name)
+                    .cloned()
+                    .unwrap_or(method);
+                if !method.is_static {
+                    let class_name = class.name.clone();
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        format!("`{}` is not a static method", field.name.name),
+                        format!("it is an instance method of `{class_name}`"),
+                        Some("call it on a value, or declare it `static`".into()),
+                    );
+                } else {
+                    self.static_class_accesses.insert(field.span, class_id);
+                    self.scalar_static_accesses.insert(field.span);
+                    let is_bundled_environment = self
+                        .sources
+                        .file(class.span.file)
+                        .identity()
+                        .is_some_and(|identity| identity.package == "std.environment");
+                    if is_bundled_environment {
+                        let params = method
+                            .params
+                            .iter()
+                            .map(|param| format!("{}: {}", param.name, self.name(param.ty)))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let signature = format!(
+                            "static {}({params}): {}",
+                            method.name,
+                            self.name(method.returns)
+                        );
+                        let binding = if matches!(
+                            method.name.as_str(),
+                            "get_secret_value" | "contains_authorized" | "get_string_native"
+                        ) {
+                            crate::stdlib::compiler_binding_for_environment_member(
+                                "environment",
+                                &method.name,
+                            )
+                        } else {
+                            crate::stdlib::compiler_binding(
+                                "std.environment",
+                                "environment",
+                                &method.name,
+                                &signature,
+                            )
+                        };
+                        if let Some(binding) = binding {
+                            self.mark_standard_library_binding_effect(binding);
+                            self.standard_environment_calls
+                                .insert(expr.span, binding.into());
+                        }
+                    }
+                    let network_module = self
+                        .sources
+                        .file(class.span.file)
+                        .identity()
+                        .filter(|identity| identity.package == "std.net")
+                        .and_then(|identity| identity.canonical_module_path.rsplit('.').next())
+                        .map(str::to_owned);
+                    if let Some(binding) = network_module.as_deref().and_then(|module| {
+                        crate::stdlib::compiler_binding_for_network_member(module, &method.name)
+                    }) {
+                        self.mark_standard_library_binding_effect(binding);
+                        self.standard_network_calls
+                            .insert(expr.span, binding.into());
+                    }
+                    let is_bundled_http = self
+                        .sources
+                        .file(class.span.file)
+                        .identity()
+                        .is_some_and(|identity| identity.package == "std.http");
+                    if is_bundled_http
+                        && let Some(binding) = if class.name == "HTTPClient" {
+                            crate::stdlib::compiler_binding_for_http_client_member(&method.name)
+                        } else {
+                            crate::stdlib::compiler_binding_for_http_member(&method.name)
+                        }
+                    {
+                        self.mark_standard_library_binding_effect(binding);
+                        self.standard_http_calls.insert(expr.span, binding.into());
+                    }
+                    let from_inside = self.this_type == Some(Type::of(Base::Class(class_id)))
+                        || self.current_class_body == Some(class_id);
+                    if method.visibility != Visibility::Public && !from_inside {
+                        let line = self.sources.location(method.span).line;
                         let class_name = class.name.clone();
                         self.error(
-                            codes::TYPE_MISMATCH,
+                            codes::INACCESSIBLE_MEMBER,
                             field.name.span,
-                            format!("`{}` is not a static method", field.name.name),
-                            format!("it is an instance method of `{class_name}`"),
-                            Some("call it on a value, or declare it `static`".into()),
+                            format!("`{}` is not accessible here", field.name.name),
+                            format!(
+                                "it is declared `{}` in `{class_name}`, on line {line}",
+                                method.visibility.as_str()
+                            ),
+                            Some(
+                                "only `public` members are reachable from outside the class".into(),
+                            ),
                         );
-                    } else {
-                        let from_inside = self.this_type == Some(Type::of(Base::Class(class_id)));
-                        if method.visibility != Visibility::Public && !from_inside {
-                            let line = self.sources.location(method.span).line;
-                            let class_name = class.name.clone();
-                            self.error(
-                                codes::INACCESSIBLE_MEMBER,
-                                field.name.span,
-                                format!("`{}` is not accessible here", field.name.name),
-                                format!(
-                                    "it is declared `{}` in `{class_name}`, on line {line}",
-                                    method.visibility.as_str()
-                                ),
-                                Some(
-                                    "only `public` members are reachable from outside the class"
-                                        .into(),
-                                ),
-                            );
-                        }
-                        let signature = Signature {
-                            name: method.name.clone(),
-                            params: method.params.clone(),
-                            returns: method.returns,
-                            shared: class.shared,
-                            span: method.span,
-                            type_params: Vec::new(),
-                            throws: method.throws.clone(),
-                        };
-                        self.scalar_static_accesses.insert(field.span);
-                        return self.check_direct_call(expr, &signature);
                     }
-                    for arg in &expr.args {
-                        self.check_expr(&arg.value);
+                    self.record_direct_function_call(method.span, expr.span);
+                    let signature = Signature {
+                        name: method.name.clone(),
+                        params: method.params.clone(),
+                        returns: method.returns,
+                        shared: class.shared,
+                        span: method.span,
+                        type_params: method.type_params.clone(),
+                        throws: method.throws.clone(),
+                    };
+                    self.scalar_static_accesses.insert(field.span);
+                    let result = self.check_direct_call(expr, &signature);
+                    if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
+                        call.owner_class = Some(method.owner);
+                        call.is_static_method = true;
                     }
-                    return Type::UNKNOWN;
+                    return result;
                 }
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                return Type::UNKNOWN;
             }
         }
 
@@ -23300,11 +23855,50 @@ impl<'a> Checker<'a> {
         &mut self,
         expr: &CallExpr,
         signature: &Signature,
-        seed: HashMap<u32, Type>,
+        mut seed: HashMap<u32, Type>,
     ) -> (Type, HashMap<u32, Type>) {
         let name = signature.name.clone();
         let slots = self.match_arguments(expr, signature);
+
+        if !expr.type_args.is_empty() {
+            if signature.type_params.is_empty() {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span,
+                    format!("`{name}` is not generic"),
+                    "explicit type arguments can only be supplied to a generic callable",
+                    None,
+                );
+            } else if expr.type_args.len() != signature.type_params.len() {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    format!(
+                        "`{name}` expects {} type argument(s)",
+                        signature.type_params.len()
+                    ),
+                    format!("received {}", expr.type_args.len()),
+                    None,
+                );
+            }
+            for (&type_param, type_arg) in signature.type_params.iter().zip(expr.type_args.iter()) {
+                let resolved = self.resolve_type(type_arg);
+                seed.insert(type_param, resolved);
+            }
+        }
+
         let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed);
+        if !signature.type_params.is_empty() {
+            self.generic_call_substitutions.insert(
+                expr.span,
+                GenericCallInfo {
+                    callable: signature.name.clone(),
+                    owner_class: None,
+                    is_static_method: false,
+                    substitutions: substitution.clone(),
+                },
+            );
+        }
 
         // A call to a `throws` function/method propagates its declared
         // types into whatever this point in the program can itself throw
@@ -23322,6 +23916,27 @@ impl<'a> Checker<'a> {
             match slot {
                 ArgSlot::Given { ty, span } => {
                     if self.reject_dependent_escape(param_ty, *ty, *span, &param.name) {
+                        continue;
+                    }
+                    // Passing a concrete capturing lambda directly to a
+                    // function parameter is safe: the callable ABI carries
+                    // both its lifted function pointer and its own
+                    // descriptor-backed capture block. The callee cannot
+                    // replace the closure stored in the caller, and GC roots
+                    // the capture block through the uniform Callable slot.
+                    // Keep indirect values and stored closures subject to
+                    // the existing D13/D14 restriction.
+                    let direct_capturing_lambda = matches!(
+                        (param_ty.base, ty.base),
+                        (Base::Function(_), Base::Function(actual_id))
+                            if self.callable_assignable(param_ty, *ty)
+                                && self.capturing_lambda_span(actual_id).is_some_and(|lambda_span| {
+                                    expr.args.iter().any(|argument| {
+                                        matches!(&argument.value, Expr::Lambda(lambda) if lambda.span == lambda_span)
+                                    })
+                                })
+                    );
+                    if direct_capturing_lambda {
                         continue;
                     }
                     self.expect_assignable(
@@ -23436,6 +24051,121 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Base::Function(decl_fn) => {
+                if let Base::Function(actual_fn) = actual.without_null().base {
+                    let declared = self.fn_types[decl_fn as usize].clone();
+                    let actual = self.fn_types[actual_fn as usize].clone();
+                    if declared.params.len() == actual.params.len() {
+                        let declared_returns = declared.returns;
+                        let actual_returns = actual.returns;
+                        for (declared, actual) in declared.params.into_iter().zip(actual.params) {
+                            self.unify_declared_with_actual(
+                                declared,
+                                actual,
+                                substitution,
+                                call_span,
+                                name,
+                            );
+                        }
+                        self.unify_declared_with_actual(
+                            declared_returns,
+                            actual_returns,
+                            substitution,
+                            call_span,
+                            name,
+                        );
+                    }
+                }
+            }
+            Base::Array(declared) => {
+                if let Base::Array(actual) = actual.without_null().base {
+                    let declared = self.array_types[declared as usize];
+                    let actual = self.array_types[actual as usize];
+                    self.unify_declared_with_actual(
+                        declared,
+                        actual,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                }
+            }
+            Base::List(declared) => {
+                if let Base::List(actual) = actual.without_null().base {
+                    let declared = self.list_types[declared as usize];
+                    let actual = self.list_types[actual as usize];
+                    self.unify_declared_with_actual(
+                        declared,
+                        actual,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                }
+            }
+            Base::Set(declared) => {
+                if let Base::Set(actual) = actual.without_null().base {
+                    let declared = self.set_types[declared as usize];
+                    let actual = self.set_types[actual as usize];
+                    self.unify_declared_with_actual(
+                        declared,
+                        actual,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                }
+            }
+            Base::Range(declared) => {
+                if let Base::Range(actual) = actual.without_null().base {
+                    let declared = self.range_types[declared as usize];
+                    let actual = self.range_types[actual as usize];
+                    self.unify_declared_with_actual(
+                        declared,
+                        actual,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                }
+            }
+            Base::Map(declared) => {
+                if let Base::Map(actual) = actual.without_null().base {
+                    let declared = self.map_types[declared as usize].clone();
+                    let actual = self.map_types[actual as usize].clone();
+                    self.unify_declared_with_actual(
+                        declared.key,
+                        actual.key,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                    self.unify_declared_with_actual(
+                        declared.value,
+                        actual.value,
+                        substitution,
+                        call_span,
+                        name,
+                    );
+                }
+            }
+            Base::Tuple(declared) => {
+                if let Base::Tuple(actual) = actual.without_null().base {
+                    let declared = self.tuple_types[declared as usize].elements.clone();
+                    let actual = self.tuple_types[actual as usize].elements.clone();
+                    if declared.len() == actual.len() {
+                        for (declared, actual) in declared.into_iter().zip(actual) {
+                            self.unify_declared_with_actual(
+                                declared,
+                                actual,
+                                substitution,
+                                call_span,
+                                name,
+                            );
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -23495,7 +24225,7 @@ impl<'a> Checker<'a> {
                     codes::TYPE_MISMATCH,
                     call_span,
                     format!("`{name}` cannot infer `{param_name}`"),
-                    "no argument or expected type determines it, and an explicit type argument is not consulted yet",
+                    "no argument or expected type determines it, and no explicit type argument was supplied",
                     None,
                 );
                 continue;
@@ -23503,12 +24233,13 @@ impl<'a> Checker<'a> {
 
             let constraints = self.type_params[id as usize].constraints.clone();
             for constraint in &constraints {
-                if self.satisfies_constraint(solved, *constraint) {
+                let constraint = self.substitute(*constraint, &substitution);
+                if self.satisfies_constraint(solved, constraint) {
                     continue;
                 }
                 let param_name = self.type_params[id as usize].name.clone();
                 let solved_name = self.name(solved);
-                let constraint_name = self.name(*constraint);
+                let constraint_name = self.name(constraint);
                 self.error(
                     codes::TYPE_MISMATCH,
                     call_span,
@@ -23583,6 +24314,102 @@ impl<'a> Checker<'a> {
                     class: instance.class,
                     args,
                 }))
+            }
+            Base::Function(id) => {
+                let function = self.fn_types[id as usize].clone();
+                let params = function
+                    .params
+                    .into_iter()
+                    .map(|ty| self.substitute(ty, substitution))
+                    .collect();
+                let returns = self.substitute(function.returns, substitution);
+                Base::Function(self.intern_fn_type(FnType { params, returns }))
+            }
+            Base::Job(id) => {
+                let result = self.substitute(self.job_types[id as usize], substitution);
+                Base::Job(self.intern_job_type(result))
+            }
+            Base::Channel(id) => {
+                let element = self.substitute(self.channel_types[id as usize], substitution);
+                Base::Channel(self.intern_channel_type(element))
+            }
+            Base::Atomic(id) => {
+                let element = self.substitute(self.atomic_types[id as usize], substitution);
+                Base::Atomic(self.intern_atomic_type(element))
+            }
+            Base::Mutex(id) => {
+                let payload = self.substitute(self.mutex_types[id as usize], substitution);
+                Base::Mutex(self.intern_mutex_type(payload))
+            }
+            Base::Pointer(id) => {
+                let pointee = self.substitute(self.pointer_types[id as usize], substitution);
+                Base::Pointer(self.intern_pointer_type(pointee))
+            }
+            Base::Weak(id) => {
+                let referent = self.substitute(self.weak_types[id as usize], substitution);
+                Base::Weak(self.intern_weak_type(referent))
+            }
+            Base::NativeSlice(id) => {
+                let element = self.substitute(self.native_slice_types[id as usize], substitution);
+                Base::NativeSlice(self.intern_native_slice_type(element))
+            }
+            Base::NativeSliceMut(id) => {
+                let element =
+                    self.substitute(self.native_slice_mut_types[id as usize], substitution);
+                Base::NativeSliceMut(self.intern_native_slice_mut_type(element))
+            }
+            Base::Dependent(id) => {
+                let element = self.substitute(self.dependent_types[id as usize], substitution);
+                Base::Dependent(self.intern_dependent_type(element))
+            }
+            Base::Pin(id) => {
+                let referent = self.substitute(self.pin_types[id as usize], substitution);
+                Base::Pin(self.intern_pin_type(referent))
+            }
+            Base::Range(id) => {
+                let element = self.substitute(self.range_types[id as usize], substitution);
+                Base::Range(self.intern_range_type(element))
+            }
+            Base::Array(id) => {
+                let element = self.substitute(self.array_types[id as usize], substitution);
+                Base::Array(self.intern_array_type(element))
+            }
+            Base::List(id) => {
+                let element = self.substitute(self.list_types[id as usize], substitution);
+                Base::List(self.intern_list_type(element))
+            }
+            Base::Map(id) => {
+                let map = self.map_types[id as usize].clone();
+                let key = self.substitute(map.key, substitution);
+                let value = self.substitute(map.value, substitution);
+                Base::Map(self.intern_map_type(key, value))
+            }
+            Base::Set(id) => {
+                let element = self.substitute(self.set_types[id as usize], substitution);
+                Base::Set(self.intern_set_type(element))
+            }
+            Base::Tuple(id) => {
+                let elements = self.tuple_types[id as usize]
+                    .elements
+                    .clone()
+                    .into_iter()
+                    .map(|ty| self.substitute(ty, substitution))
+                    .collect();
+                Base::Tuple(self.intern_tuple_type(TupleType { elements }))
+            }
+            Base::Union(id) => {
+                let alternatives = self.unions[id as usize].clone();
+                let mut substituted: Vec<Base> = alternatives
+                    .into_iter()
+                    .map(|base| self.substitute(Type::of(base), substitution).base)
+                    .collect();
+                Self::sort_bases(&mut substituted);
+                substituted.dedup();
+                match substituted.len() {
+                    0 => Base::Null,
+                    1 => substituted[0],
+                    _ => Base::Union(self.intern_union(substituted)),
+                }
             }
             _ => return ty,
         };

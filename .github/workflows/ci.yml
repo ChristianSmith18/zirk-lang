@@ -163,6 +163,12 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
+      - name: Check dependency licenses
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          cargo install --locked --version 0.20.2 cargo-deny
+          cargo-deny check licenses
+
       # --- Build y verificacion --------------------------------------------
       - name: Formato
         run: cargo fmt --all --check

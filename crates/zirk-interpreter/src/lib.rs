@@ -2701,7 +2701,11 @@ impl<'module> Interpreter<'module> {
                         .map(|field| (field.name.clone(), field.ty.as_str().to_string()));
                     if let (Some((field, ty)), Some(object)) = (described, self.trace_object_id(id))
                     {
-                        let (value, truncated) = self.trace_render(&value);
+                        let (value, truncated) = if self.is_secret_trace_field(layout, *index as usize) {
+                            ("<redacted>".to_owned(), false)
+                        } else {
+                            self.trace_render(&value)
+                        };
                         self.trace_record(TraceEventKind::FieldWrite {
                             object,
                             field,
@@ -4716,6 +4720,29 @@ impl<'module> Interpreter<'module> {
         Some(*state.object_ids.entry(id).or_insert(next))
     }
 
+    /// SecretString's private payload must not appear in an execution trace.
+    /// Check the ancestor layouts too, because a derived class retains the
+    /// base field's index and can otherwise expose it through FieldWrite.
+    fn is_secret_trace_field(&self, layout: u32, field_index: usize) -> bool {
+        self.module
+            .objects
+            .get(layout as usize)
+            .is_some_and(|object| {
+                object.ancestors.iter().any(|ancestor| {
+                    self.module
+                        .objects
+                        .get(*ancestor as usize)
+                        .is_some_and(|base| {
+                            base.name == "SecretString"
+                                && base
+                                    .fields
+                                    .get(field_index)
+                                    .is_some_and(|field| field.name == "value")
+                        })
+                })
+            })
+    }
+
     fn trace_record(&mut self, kind: TraceEventKind) {
         let Some(state) = self.trace.as_mut() else {
             return;
@@ -5695,6 +5722,89 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::StdinReadChar { .. }
         | InstKind::StdinReadBytes { .. }
         | InstKind::StdinReadExact { .. } => BrowserSupport::Excluded,
+        // Environment access and native sockets require process/OS authority
+        // and the native runtime. Browser execution rejects them in preflight
+        // instead of attempting to emulate host permissions or networking.
+        InstKind::EnvironmentGet { .. }
+        | InstKind::EnvironmentContains { .. }
+        | InstKind::EnvironmentListNames { .. }
+        | InstKind::NetworkDnsResolve { .. }
+        | InstKind::NetworkIpAddressParse { .. }
+        | InstKind::NetworkTlsConnect { .. }
+        | InstKind::NetworkTlsConnectWithRoots { .. }
+        | InstKind::NetworkTlsListen { .. }
+        | InstKind::NetworkTlsAccept { .. }
+        | InstKind::NetworkTlsCloseListener { .. }
+        | InstKind::NetworkTlsListenerIsClosed { .. }
+        | InstKind::NetworkTlsPeerAddress { .. }
+        | InstKind::NetworkTlsRead { .. }
+        | InstKind::NetworkTlsWriteAll { .. }
+        | InstKind::NetworkTlsShutdown { .. }
+        | InstKind::NetworkTlsClose { .. }
+        | InstKind::NetworkTlsIsClosed { .. }
+        | InstKind::NetworkTcpConnect { .. }
+        | InstKind::NetworkTcpPeerAddress { .. }
+        | InstKind::NetworkTcpRead { .. }
+        | InstKind::NetworkTcpWrite { .. }
+        | InstKind::NetworkTcpWriteAll { .. }
+        | InstKind::NetworkTcpShutdown { .. }
+        | InstKind::NetworkTcpClose { .. }
+        | InstKind::NetworkTcpIsClosed { .. }
+        | InstKind::NetworkTcpListen { .. }
+        | InstKind::NetworkTcpAccept { .. }
+        | InstKind::NetworkTcpCloseListener { .. }
+        | InstKind::NetworkTcpListenerIsClosed { .. }
+        | InstKind::NetworkTcpOriginNormalize { .. }
+        | InstKind::HttpGet { .. }
+        | InstKind::HttpRequest { .. }
+        | InstKind::HttpClientCreate { .. }
+        | InstKind::HttpClientCreateWithOptions { .. }
+        | InstKind::HttpClientCreateWithTrustRoots { .. }
+        | InstKind::HttpClientCreateWithProxy { .. }
+        | InstKind::HttpClientCreateWithProxyAndTrustRoots { .. }
+        | InstKind::HttpClientRequest { .. }
+        | InstKind::HttpClientRequestStream { .. }
+        | InstKind::HttpClientAction { .. }
+        | InstKind::HttpWebSocketConnect { .. }
+        | InstKind::HttpWebSocketConnectWithTrustRoots { .. }
+        | InstKind::HttpWebSocketSend { .. }
+        | InstKind::HttpWebSocketReceive { .. }
+        | InstKind::HttpWebSocketClose { .. }
+        | InstKind::HttpWebSocketCloseWith { .. }
+        | InstKind::HttpRequestSecret { .. }
+        | InstKind::HttpHead { .. }
+        | InstKind::HttpQuery { .. }
+        | InstKind::HttpQueryWithContentType { .. }
+        | InstKind::HttpPost { .. }
+        | InstKind::HttpPostJson { .. }
+        | InstKind::HttpPostBytes { .. }
+        | InstKind::HttpGetStream { .. }
+        | InstKind::HttpResponseToStream { .. }
+        | InstKind::HttpRequestStream { .. }
+        | InstKind::HttpRegisterServerResponseProducer { .. }
+        | InstKind::HttpResponseReadChunk { .. }
+        | InstKind::HttpResponseReadAll { .. }
+        | InstKind::HttpResponseReadSseEvent { .. }
+        | InstKind::HttpResponseSseHeartbeatCount { .. }
+        | InstKind::HttpResponseStreamClose { .. }
+        | InstKind::HttpUrlNormalize { .. }
+        | InstKind::HttpUrlResolve { .. }
+        | InstKind::HttpResponseText { .. }
+        | InstKind::HttpResponseHeaderValues { .. }
+        | InstKind::HttpHeadersEncode { .. }
+        | InstKind::HttpFormParse { .. }
+        | InstKind::HttpMultipartParse { .. }
+        | InstKind::HttpFormValues { .. }
+        | InstKind::HttpFormEncode { .. }
+        | InstKind::HttpMultipartEncode { .. }
+        | InstKind::HttpUploadRead { .. }
+        | InstKind::HttpUploadClose { .. }
+        | InstKind::HttpRoutePatternValidate { .. }
+        | InstKind::HttpRoutePatternConflict { .. }
+        | InstKind::HttpRouteMatch { .. }
+        | InstKind::HttpRouteAllowHeader { .. } => BrowserSupport::Excluded,
+        InstKind::HttpServerServeOnce { .. } => BrowserSupport::Excluded,
+        InstKind::HttpServerWebSocketServeOnce { .. } => BrowserSupport::Excluded,
         InstKind::ConstString(_)
         | InstKind::ConstChar(_)
         | InstKind::StringGraphemeOffset { .. }
@@ -5843,6 +5953,87 @@ mod tests {
 
     fn int(width: IntWidth, value: i128) -> Value {
         Value::Int(IntegerValue::from_literal(value, width).unwrap())
+    }
+
+    #[test]
+    fn execution_trace_redacts_secret_string_payload_fields_in_derived_layouts() {
+        use zirk_ir::{ObjectField, ObjectLayout, StringId};
+        let span = Span::empty(0);
+        let main = Function {
+            name: "main".into(),
+            params: Vec::new(),
+            return_type: IrType::Void,
+            slots: Vec::new(),
+            entry: BlockId(0),
+            span,
+            gc_roots: Vec::new(),
+            blocks: vec![Block {
+                id: BlockId(0),
+                instructions: vec![
+                    Instruction {
+                        result: Some(ValueId(0)),
+                        kind: InstKind::Alloc(0),
+                        ty: IrType::Object(0),
+                        span,
+                    },
+                    Instruction {
+                        result: Some(ValueId(1)),
+                        kind: InstKind::ConstString(StringId(0)),
+                        ty: IrType::String,
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::StoreField {
+                            object: Operand(ValueId(0)),
+                            index: 0,
+                            value: Operand(ValueId(1)),
+                        },
+                        ty: IrType::Void,
+                        span,
+                    },
+                ],
+                terminator: Some(Terminator::Return(None)),
+            }],
+        };
+
+        let layout = |name: &str, ancestors: Vec<u32>| ObjectLayout {
+            name: name.into(),
+            fields: vec![ObjectField {
+                name: "value".into(),
+                ty: IrType::String,
+            }],
+            contracts: Vec::new(),
+            methods: Vec::new(),
+            ancestors,
+        };
+        let module = Module {
+            functions: vec![main],
+            strings: vec!["do-not-record-this-secret".into()],
+            objects: vec![
+                layout("SecretString", vec![0]),
+                layout("DerivedSecret", vec![1, 0]),
+                layout("OrdinaryValue", vec![2]),
+            ],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+
+        assert!(interpreter.is_secret_trace_field(0, 0));
+        assert!(interpreter.is_secret_trace_field(1, 0));
+        assert!(!interpreter.is_secret_trace_field(2, 0));
+
+        interpreter.enable_trace(TraceLimits::DEFAULT);
+        assert!(matches!(
+            interpreter.run_main(),
+            ExecutionResult::Completed { .. }
+        ));
+        let trace = interpreter.take_trace();
+        assert!(trace.events.iter().any(|event| matches!(
+            &event.kind,
+            TraceEventKind::FieldWrite { value, .. } if value == "<redacted>"
+        )));
+        assert!(!format!("{trace:?}").contains("do-not-record-this-secret"));
     }
 
     #[test]
@@ -6594,6 +6785,133 @@ mod tests {
             assert!(failures.iter().any(|failure| {
                 failure.code == "ZB004" && failure.span == Some(Span::empty(start))
             }));
+        }
+    }
+
+    #[test]
+    fn native_environment_and_http_instructions_are_excluded_from_browser() {
+        use zirk_ir::{InstKind, Operand};
+
+        let value = Operand(ValueId(0));
+        let instructions = [
+            InstKind::EnvironmentGet {
+                name: value,
+                enum_id: 0,
+                secret: false,
+            },
+            InstKind::EnvironmentContains {
+                name: value,
+                enum_id: 0,
+            },
+            InstKind::EnvironmentListNames { enum_id: 0 },
+            InstKind::NetworkTcpConnect {
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkDnsResolve {
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkIpAddressParse { value, enum_id: 0 },
+            InstKind::NetworkTlsConnect {
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkTlsConnectWithRoots {
+                endpoint: value,
+                roots_der: value,
+                allow_tls12: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkTlsListen {
+                endpoint: value,
+                certificate_chain_der: value,
+                private_key_der: value,
+                allow_tls12: value,
+                http_alpn: false,
+                enum_id: 0,
+            },
+            InstKind::NetworkTlsAccept {
+                handle: value,
+                enum_id: 0,
+                stream_class_id: 0,
+            },
+            InstKind::NetworkTlsCloseListener {
+                handle: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkTlsListenerIsClosed { handle: value },
+            InstKind::NetworkTlsPeerAddress {
+                handle: value,
+                enum_id: 0,
+            },
+            InstKind::HttpHead {
+                url: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpRequest {
+                method: value,
+                url: value,
+                body: value,
+                headers: value,
+                validate_json: value,
+                cached: false,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpRequestSecret {
+                method: value,
+                url: value,
+                body: value,
+                headers: value,
+                header_name: value,
+                secret_value: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpHeadersEncode {
+                names: value,
+                values: value,
+            },
+            InstKind::HttpFormParse {
+                body: value,
+                content_type: value,
+                enum_id: 0,
+            },
+            InstKind::HttpMultipartParse {
+                body: value,
+                content_type: value,
+                enum_id: 0,
+                data_class_id: 0,
+            },
+            InstKind::HttpFormValues {
+                fields: value,
+                name: value,
+            },
+            InstKind::HttpFormEncode {
+                fields: value,
+                enum_id: 0,
+            },
+            InstKind::HttpMultipartEncode {
+                metadata: value,
+                bodies: value,
+                boundary: value,
+                enum_id: 0,
+            },
+            InstKind::HttpResponseText {
+                body: value,
+                enum_id: 0,
+            },
+            InstKind::HttpUrlResolve {
+                base: value,
+                reference: value,
+                enum_id: 0,
+            },
+        ];
+
+        for instruction in instructions {
+            assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
         }
     }
 

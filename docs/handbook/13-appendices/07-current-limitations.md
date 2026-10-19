@@ -21,6 +21,17 @@ native/interpreter parity coverage includes the documented overflow edges.
 
 Current high-impact delivery limits include:
 
+- `std.environment`, `std.net`, and `std.http` are bundled native previews,
+  not a completed cross-platform standard-library release. Environment reads
+  use explicit permissions; the current network preview covers DNS, TCP,
+  authenticated TLS, HTTP/1.1, bounded HTTP/2, QUERY, and the documented
+  streaming/client/server features listed in the feature-status catalog.
+  Native Linux x86_64 and Windows execution gates remain open. UDP, local
+  sockets, interface enumeration, HTTP/3/QUIC, and browser networking are
+  outside this delivery scope. See the [standard-library status
+  catalog](../../init/ZIRK_FEATURE_STATUS.md) and [module
+  index](../04-standard-library/19-standard-library-indexes.md).
+
 - Package roots, local/vendored dependency traversal, `share mod`, logical
   package imports and lock metadata validation are delivered. Registry/Git
   acquisition, cryptographic archive verification, package publishing and

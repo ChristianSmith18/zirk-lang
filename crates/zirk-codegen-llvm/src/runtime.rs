@@ -213,6 +213,98 @@ pub mod symbols {
     /// Reads exactly `count` bytes from standard input into a
     /// `zirk_io::StdinReadOut` out parameter.
     pub const IO_STDIN_READ_EXACT: &str = "zirk_io_stdin_read_exact";
+    /// Permission-gated standard environment string lookup.
+    pub const ENVIRONMENT_GET: &str = "zirk_environment_get";
+    /// `zirk_environment_get_secret(name, out)`.
+    pub const ENVIRONMENT_GET_SECRET: &str = "zirk_environment_get_secret";
+    /// `zirk_environment_contains(name, out)`.
+    pub const ENVIRONMENT_CONTAINS: &str = "zirk_environment_contains";
+    /// `zirk_environment_list_names(out)`.
+    pub const ENVIRONMENT_LIST_NAMES: &str = "zirk_environment_list_names";
+    pub const NETWORK_TCP_CONNECT: &str = "zirk_network_tcp_connect";
+    pub const NETWORK_DNS_RESOLVE: &str = "zirk_network_dns_resolve";
+    pub const NETWORK_IP_ADDRESS_PARSE: &str = "zirk_network_ip_address_parse";
+    pub const NETWORK_TCP_ORIGIN_NORMALIZE: &str = "zirk_network_tcp_origin_normalize";
+    pub const NETWORK_TLS_CONNECT: &str = "zirk_network_tls_connect";
+    pub const NETWORK_TLS_CONNECT_WITH_ROOTS: &str = "zirk_network_tls_connect_with_roots";
+    pub const NETWORK_TLS_LISTEN: &str = "zirk_network_tls_listen";
+    pub const NETWORK_TLS_LISTEN_HTTP: &str = "zirk_network_tls_listen_http";
+    pub const NETWORK_TLS_ACCEPT: &str = "zirk_network_tls_accept";
+    pub const NETWORK_TLS_CLOSE_LISTENER: &str = "zirk_network_tls_close_listener";
+    pub const NETWORK_TLS_LISTENER_IS_CLOSED: &str = "zirk_network_tls_listener_is_closed";
+    pub const NETWORK_TLS_PEER_ADDRESS: &str = "zirk_network_tls_peer_address";
+    pub const NETWORK_TLS_READ: &str = "zirk_network_tls_read";
+    pub const NETWORK_TLS_WRITE_ALL: &str = "zirk_network_tls_write_all";
+    pub const NETWORK_TLS_SHUTDOWN: &str = "zirk_network_tls_shutdown";
+    pub const NETWORK_TLS_CLOSE: &str = "zirk_network_tls_close";
+    pub const NETWORK_TLS_IS_CLOSED: &str = "zirk_network_tls_is_closed";
+    pub const NETWORK_TCP_READ: &str = "zirk_network_tcp_read";
+    pub const NETWORK_TCP_WRITE: &str = "zirk_network_tcp_write";
+    pub const NETWORK_TCP_WRITE_ALL: &str = "zirk_network_tcp_write_all";
+    pub const NETWORK_TCP_SHUTDOWN: &str = "zirk_network_tcp_shutdown";
+    pub const NETWORK_TCP_CLOSE: &str = "zirk_network_tcp_close";
+    pub const NETWORK_TCP_IS_CLOSED: &str = "zirk_network_tcp_is_closed";
+    pub const NETWORK_TCP_PEER_ADDRESS: &str = "zirk_network_tcp_peer_address";
+    pub const NETWORK_TCP_LISTEN: &str = "zirk_network_tcp_listen";
+    pub const NETWORK_TCP_ACCEPT: &str = "zirk_network_tcp_accept";
+    pub const NETWORK_TCP_CLOSE_LISTENER: &str = "zirk_network_tcp_close_listener";
+    pub const NETWORK_TCP_LISTENER_IS_CLOSED: &str = "zirk_network_tcp_listener_is_closed";
+    pub const HTTP_GET: &str = "zirk_http_get";
+    pub const HTTP_GET_CACHED: &str = "zirk_http_get_cached";
+    pub const HTTP_REQUEST: &str = "zirk_http_request";
+    pub const HTTP_CLIENT_CREATE: &str = "zirk_http_client_create";
+    pub const HTTP_CLIENT_CREATE_WITH_OPTIONS: &str = "zirk_http_client_create_with_options";
+    pub const HTTP_CLIENT_CREATE_WITH_TRUST_ROOTS: &str =
+        "zirk_http_client_create_with_trust_roots";
+    pub const HTTP_CLIENT_CREATE_WITH_PROXY: &str = "zirk_http_client_create_with_proxy";
+    pub const HTTP_CLIENT_CREATE_WITH_PROXY_AND_TRUST_ROOTS: &str =
+        "zirk_http_client_create_with_proxy_and_trust_roots";
+    pub const HTTP_CLIENT_ENABLE_COOKIES: &str = "zirk_http_client_enable_cookies";
+    pub const HTTP_CLIENT_REQUEST: &str = "zirk_http_client_request";
+    pub const HTTP_CLIENT_REQUEST_STREAM: &str = "zirk_http_client_request_stream";
+    pub const HTTP_CLIENT_CLOSE: &str = "zirk_http_client_close";
+    pub const HTTP_WEBSOCKET_CONNECT: &str = "zirk_http_websocket_connect";
+    pub const HTTP_WEBSOCKET_CONNECT_WITH_TRUST_ROOTS: &str =
+        "zirk_http_websocket_connect_with_trust_roots";
+    pub const HTTP_WEBSOCKET_SEND: &str = "zirk_http_websocket_send";
+    pub const HTTP_WEBSOCKET_RECEIVE: &str = "zirk_http_websocket_receive";
+    pub const HTTP_WEBSOCKET_CLOSE: &str = "zirk_http_websocket_close";
+    pub const HTTP_WEBSOCKET_CLOSE_WITH: &str = "zirk_http_websocket_close_with";
+    pub const HTTP_REQUEST_CACHED: &str = "zirk_http_request_cached";
+    pub const HTTP_REQUEST_SECRET: &str = "zirk_http_request_secret";
+    pub const HTTP_HEAD: &str = "zirk_http_head";
+    pub const HTTP_QUERY: &str = "zirk_http_query";
+    pub const HTTP_QUERY_WITH_CONTENT_TYPE: &str = "zirk_http_query_with_content_type";
+    pub const HTTP_POST: &str = "zirk_http_post";
+    pub const HTTP_POST_JSON: &str = "zirk_http_post_json";
+    pub const HTTP_POST_BYTES: &str = "zirk_http_post_bytes";
+    pub const HTTP_GET_STREAM: &str = "zirk_http_get_stream";
+    pub const HTTP_RESPONSE_TO_STREAM: &str = "zirk_http_response_to_stream";
+    pub const HTTP_REQUEST_STREAM: &str = "zirk_http_request_stream";
+    pub const HTTP_SERVER_PRODUCER_REGISTER: &str = "zirk_http_server_producer_register";
+    pub const HTTP_STREAM_READ_CHUNK: &str = "zirk_http_stream_read_chunk";
+    pub const HTTP_STREAM_READ_ALL: &str = "zirk_http_stream_read_all";
+    pub const HTTP_STREAM_SSE_NEXT: &str = "zirk_http_stream_sse_next";
+    pub const HTTP_STREAM_SSE_HEARTBEAT_COUNT: &str = "zirk_http_stream_sse_heartbeat_count";
+    pub const HTTP_STREAM_CLOSE: &str = "zirk_http_stream_close";
+    pub const HTTP_URL_NORMALIZE: &str = "zirk_http_url_normalize";
+    pub const HTTP_URL_RESOLVE: &str = "zirk_http_url_resolve";
+    pub const HTTP_RESPONSE_TEXT: &str = "zirk_http_response_text";
+    pub const HTTP_RESPONSE_HEADER_VALUES: &str = "zirk_http_response_header_values";
+    pub const HTTP_ROUTE_PATTERN_VALIDATE: &str = "zirk_http_route_pattern_validate";
+    pub const HTTP_ROUTE_PATTERN_CONFLICT: &str = "zirk_http_route_pattern_conflict";
+    pub const HTTP_ROUTE_MATCH: &str = "zirk_http_route_match";
+    pub const HTTP_ROUTE_ALLOW_HEADER: &str = "zirk_http_route_allow_header";
+    pub const HTTP_HEADERS_ENCODE: &str = "zirk_http_headers_encode";
+    pub const HTTP_FORM_PARSE: &str = "zirk_http_form_parse";
+    pub const HTTP_MULTIPART_PARSE: &str = "zirk_http_multipart_parse";
+    pub const HTTP_UPLOAD_READ: &str = "zirk_http_upload_read";
+    pub const HTTP_UPLOAD_CLOSE: &str = "zirk_http_upload_close";
+    pub const HTTP_FORM_VALUES: &str = "zirk_http_form_values";
+    pub const HTTP_FORM_ENCODE: &str = "zirk_http_form_encode";
+    pub const HTTP_MULTIPART_ENCODE: &str = "zirk_http_multipart_encode";
+    pub const HTTP_SERVER_SERVE_ONCE: &str = "zirk_http_server_serve_once";
+    pub const HTTP_SERVER_WEBSOCKET_SERVE_ONCE: &str = "zirk_http_server_websocket_serve_once";
     /// Reports a division by zero and terminates.
     pub const DIVISION_BY_ZERO: &str = "zirk_rt_division_by_zero";
     /// Obtains storage for an object. The strategy behind it is the runtime's
@@ -543,6 +635,91 @@ pub struct Runtime<'ctx> {
     pub io_stdin_read_char: FunctionValue<'ctx>,
     pub io_stdin_read_bytes: FunctionValue<'ctx>,
     pub io_stdin_read_exact: FunctionValue<'ctx>,
+    pub environment_get: FunctionValue<'ctx>,
+    pub environment_get_secret: FunctionValue<'ctx>,
+    pub environment_contains: FunctionValue<'ctx>,
+    pub environment_list_names: FunctionValue<'ctx>,
+    pub network_tcp_connect: FunctionValue<'ctx>,
+    pub network_dns_resolve: FunctionValue<'ctx>,
+    pub network_ip_address_parse: FunctionValue<'ctx>,
+    pub network_tcp_origin_normalize: FunctionValue<'ctx>,
+    pub network_tls_connect: FunctionValue<'ctx>,
+    pub network_tls_connect_with_roots: FunctionValue<'ctx>,
+    pub network_tls_listen: FunctionValue<'ctx>,
+    pub network_tls_listen_http: FunctionValue<'ctx>,
+    pub network_tls_accept: FunctionValue<'ctx>,
+    pub network_tls_close_listener: FunctionValue<'ctx>,
+    pub network_tls_listener_is_closed: FunctionValue<'ctx>,
+    pub network_tls_peer_address: FunctionValue<'ctx>,
+    pub network_tls_read: FunctionValue<'ctx>,
+    pub network_tls_write_all: FunctionValue<'ctx>,
+    pub network_tls_shutdown: FunctionValue<'ctx>,
+    pub network_tls_close: FunctionValue<'ctx>,
+    pub network_tls_is_closed: FunctionValue<'ctx>,
+    pub network_tcp_read: FunctionValue<'ctx>,
+    pub network_tcp_write: FunctionValue<'ctx>,
+    pub network_tcp_write_all: FunctionValue<'ctx>,
+    pub network_tcp_shutdown: FunctionValue<'ctx>,
+    pub network_tcp_close: FunctionValue<'ctx>,
+    pub network_tcp_is_closed: FunctionValue<'ctx>,
+    pub network_tcp_peer_address: FunctionValue<'ctx>,
+    pub network_tcp_listen: FunctionValue<'ctx>,
+    pub network_tcp_accept: FunctionValue<'ctx>,
+    pub network_tcp_close_listener: FunctionValue<'ctx>,
+    pub network_tcp_listener_is_closed: FunctionValue<'ctx>,
+    pub http_get: FunctionValue<'ctx>,
+    pub http_get_cached: FunctionValue<'ctx>,
+    pub http_request: FunctionValue<'ctx>,
+    pub http_client_create: FunctionValue<'ctx>,
+    pub http_client_create_with_options: FunctionValue<'ctx>,
+    pub http_client_create_with_trust_roots: FunctionValue<'ctx>,
+    pub http_client_create_with_proxy: FunctionValue<'ctx>,
+    pub http_client_create_with_proxy_and_trust_roots: FunctionValue<'ctx>,
+    pub http_client_enable_cookies: FunctionValue<'ctx>,
+    pub http_client_request: FunctionValue<'ctx>,
+    pub http_client_request_stream: FunctionValue<'ctx>,
+    pub http_client_close: FunctionValue<'ctx>,
+    pub http_websocket_connect: FunctionValue<'ctx>,
+    pub http_websocket_connect_with_trust_roots: FunctionValue<'ctx>,
+    pub http_websocket_send: FunctionValue<'ctx>,
+    pub http_websocket_receive: FunctionValue<'ctx>,
+    pub http_websocket_close: FunctionValue<'ctx>,
+    pub http_websocket_close_with: FunctionValue<'ctx>,
+    pub http_request_cached: FunctionValue<'ctx>,
+    pub http_request_secret: FunctionValue<'ctx>,
+    pub http_head: FunctionValue<'ctx>,
+    pub http_query: FunctionValue<'ctx>,
+    pub http_query_with_content_type: FunctionValue<'ctx>,
+    pub http_post: FunctionValue<'ctx>,
+    pub http_post_json: FunctionValue<'ctx>,
+    pub http_post_bytes: FunctionValue<'ctx>,
+    pub http_get_stream: FunctionValue<'ctx>,
+    pub http_response_to_stream: FunctionValue<'ctx>,
+    pub http_request_stream: FunctionValue<'ctx>,
+    pub http_server_producer_register: FunctionValue<'ctx>,
+    pub http_stream_read_chunk: FunctionValue<'ctx>,
+    pub http_stream_read_all: FunctionValue<'ctx>,
+    pub http_stream_sse_next: FunctionValue<'ctx>,
+    pub http_stream_sse_heartbeat_count: FunctionValue<'ctx>,
+    pub http_stream_close: FunctionValue<'ctx>,
+    pub http_url_normalize: FunctionValue<'ctx>,
+    pub http_url_resolve: FunctionValue<'ctx>,
+    pub http_response_text: FunctionValue<'ctx>,
+    pub http_response_header_values: FunctionValue<'ctx>,
+    pub http_route_pattern_validate: FunctionValue<'ctx>,
+    pub http_route_pattern_conflict: FunctionValue<'ctx>,
+    pub http_route_match: FunctionValue<'ctx>,
+    pub http_route_allow_header: FunctionValue<'ctx>,
+    pub http_headers_encode: FunctionValue<'ctx>,
+    pub http_form_parse: FunctionValue<'ctx>,
+    pub http_multipart_parse: FunctionValue<'ctx>,
+    pub http_upload_read: FunctionValue<'ctx>,
+    pub http_upload_close: FunctionValue<'ctx>,
+    pub http_form_values: FunctionValue<'ctx>,
+    pub http_form_encode: FunctionValue<'ctx>,
+    pub http_multipart_encode: FunctionValue<'ctx>,
+    pub http_server_serve_once: FunctionValue<'ctx>,
+    pub http_server_websocket_serve_once: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
@@ -1200,6 +1377,620 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let io_stdin_read_exact = module.add_function(
         symbols::IO_STDIN_READ_EXACT,
         void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let environment_get = module.add_function(
+        symbols::ENVIRONMENT_GET,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let environment_get_secret = module.add_function(
+        symbols::ENVIRONMENT_GET_SECRET,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let environment_contains = module.add_function(
+        symbols::ENVIRONMENT_CONTAINS,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let environment_list_names = module.add_function(
+        symbols::ENVIRONMENT_LIST_NAMES,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let network_tcp_connect = module.add_function(
+        symbols::NETWORK_TCP_CONNECT,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_dns_resolve = module.add_function(
+        symbols::NETWORK_DNS_RESOLVE,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_ip_address_parse = module.add_function(
+        symbols::NETWORK_IP_ADDRESS_PARSE,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_origin_normalize = module.add_function(
+        symbols::NETWORK_TCP_ORIGIN_NORMALIZE,
+        void.fn_type(&[ptr.into(), context.i16_type().into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_connect = module.add_function(
+        symbols::NETWORK_TLS_CONNECT,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_connect_with_roots = module.add_function(
+        symbols::NETWORK_TLS_CONNECT_WITH_ROOTS,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let network_tls_listen = module.add_function(
+        symbols::NETWORK_TLS_LISTEN,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let network_tls_listen_http = module.add_function(
+        symbols::NETWORK_TLS_LISTEN_HTTP,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let network_tls_accept = module.add_function(
+        symbols::NETWORK_TLS_ACCEPT,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_close_listener = module.add_function(
+        symbols::NETWORK_TLS_CLOSE_LISTENER,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_listener_is_closed = module.add_function(
+        symbols::NETWORK_TLS_LISTENER_IS_CLOSED,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let network_tls_peer_address = module.add_function(
+        symbols::NETWORK_TLS_PEER_ADDRESS,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_read = module.add_function(
+        symbols::NETWORK_TLS_READ,
+        void.fn_type(&[i64.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_write_all = module.add_function(
+        symbols::NETWORK_TLS_WRITE_ALL,
+        void.fn_type(&[i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_shutdown = module.add_function(
+        symbols::NETWORK_TLS_SHUTDOWN,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_close = module.add_function(
+        symbols::NETWORK_TLS_CLOSE,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tls_is_closed = module.add_function(
+        symbols::NETWORK_TLS_IS_CLOSED,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let network_tcp_read = module.add_function(
+        symbols::NETWORK_TCP_READ,
+        void.fn_type(&[i64.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_write = module.add_function(
+        symbols::NETWORK_TCP_WRITE,
+        void.fn_type(&[i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_write_all = module.add_function(
+        symbols::NETWORK_TCP_WRITE_ALL,
+        void.fn_type(&[i64.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_shutdown = module.add_function(
+        symbols::NETWORK_TCP_SHUTDOWN,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_close = module.add_function(
+        symbols::NETWORK_TCP_CLOSE,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_is_closed = module.add_function(
+        symbols::NETWORK_TCP_IS_CLOSED,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let network_tcp_peer_address = module.add_function(
+        symbols::NETWORK_TCP_PEER_ADDRESS,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_listen = module.add_function(
+        symbols::NETWORK_TCP_LISTEN,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_accept = module.add_function(
+        symbols::NETWORK_TCP_ACCEPT,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_close_listener = module.add_function(
+        symbols::NETWORK_TCP_CLOSE_LISTENER,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_listener_is_closed = module.add_function(
+        symbols::NETWORK_TCP_LISTENER_IS_CLOSED,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let http_get = module.add_function(
+        symbols::HTTP_GET,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_get_cached = module.add_function(
+        symbols::HTTP_GET_CACHED,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_request = module.add_function(
+        symbols::HTTP_REQUEST,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_create = module.add_function(
+        symbols::HTTP_CLIENT_CREATE,
+        void.fn_type(&[context.i32_type().into(), ptr.into()], false),
+        external,
+    );
+    let http_client_create_with_options = module.add_function(
+        symbols::HTTP_CLIENT_CREATE_WITH_OPTIONS,
+        void.fn_type(
+            &[
+                context.i32_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_create_with_trust_roots = module.add_function(
+        symbols::HTTP_CLIENT_CREATE_WITH_TRUST_ROOTS,
+        void.fn_type(
+            &[
+                context.i32_type().into(),
+                ptr.into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_create_with_proxy = module.add_function(
+        symbols::HTTP_CLIENT_CREATE_WITH_PROXY,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_create_with_proxy_and_trust_roots = module.add_function(
+        symbols::HTTP_CLIENT_CREATE_WITH_PROXY_AND_TRUST_ROOTS,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_enable_cookies = module.add_function(
+        symbols::HTTP_CLIENT_ENABLE_COOKIES,
+        void.fn_type(&[context.i64_type().into(), ptr.into()], false),
+        external,
+    );
+    let http_client_request = module.add_function(
+        symbols::HTTP_CLIENT_REQUEST,
+        void.fn_type(
+            &[
+                context.i64_type().into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_request_stream = module.add_function(
+        symbols::HTTP_CLIENT_REQUEST_STREAM,
+        void.fn_type(
+            &[
+                context.i64_type().into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_client_close = module.add_function(
+        symbols::HTTP_CLIENT_CLOSE,
+        void.fn_type(&[context.i64_type().into(), ptr.into()], false),
+        external,
+    );
+    let http_websocket_connect = module.add_function(
+        symbols::HTTP_WEBSOCKET_CONNECT,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_websocket_connect_with_trust_roots = module.add_function(
+        symbols::HTTP_WEBSOCKET_CONNECT_WITH_TRUST_ROOTS,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.bool_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_websocket_send = module.add_function(
+        symbols::HTTP_WEBSOCKET_SEND,
+        void.fn_type(&[context.i64_type().into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_websocket_receive = module.add_function(
+        symbols::HTTP_WEBSOCKET_RECEIVE,
+        void.fn_type(&[context.i64_type().into(), ptr.into()], false),
+        external,
+    );
+    let http_websocket_close = module.add_function(
+        symbols::HTTP_WEBSOCKET_CLOSE,
+        void.fn_type(&[context.i64_type().into(), ptr.into()], false),
+        external,
+    );
+    let http_websocket_close_with = module.add_function(
+        symbols::HTTP_WEBSOCKET_CLOSE_WITH,
+        void.fn_type(
+            &[
+                context.i64_type().into(),
+                context.i16_type().into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_request_cached = module.add_function(
+        symbols::HTTP_REQUEST_CACHED,
+        void.fn_type(
+            &[ptr.into(), ptr.into(), ptr.into(), ptr.into(), ptr.into()],
+            false,
+        ),
+        external,
+    );
+    let http_request_secret = module.add_function(
+        symbols::HTTP_REQUEST_SECRET,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_head = module.add_function(
+        symbols::HTTP_HEAD,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_query = module.add_function(
+        symbols::HTTP_QUERY,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_query_with_content_type = module.add_function(
+        symbols::HTTP_QUERY_WITH_CONTENT_TYPE,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_post = module.add_function(
+        symbols::HTTP_POST,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_post_json = module.add_function(
+        symbols::HTTP_POST_JSON,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_post_bytes = module.add_function(
+        symbols::HTTP_POST_BYTES,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_get_stream = module.add_function(
+        symbols::HTTP_GET_STREAM,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_response_to_stream = module.add_function(
+        symbols::HTTP_RESPONSE_TO_STREAM,
+        void.fn_type(
+            &[
+                context.i32_type().into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_request_stream = module.add_function(
+        symbols::HTTP_REQUEST_STREAM,
+        void.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_server_producer_register = module.add_function(
+        symbols::HTTP_SERVER_PRODUCER_REGISTER,
+        i64.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_stream_read_chunk = module.add_function(
+        symbols::HTTP_STREAM_READ_CHUNK,
+        void.fn_type(&[i64.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let http_stream_read_all = module.add_function(
+        symbols::HTTP_STREAM_READ_ALL,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let http_stream_sse_next = module.add_function(
+        symbols::HTTP_STREAM_SSE_NEXT,
+        void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let http_stream_sse_heartbeat_count = module.add_function(
+        symbols::HTTP_STREAM_SSE_HEARTBEAT_COUNT,
+        i64.fn_type(&[i64.into()], false),
+        external,
+    );
+    let http_stream_close = module.add_function(
+        symbols::HTTP_STREAM_CLOSE,
+        context.bool_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let http_url_normalize = module.add_function(
+        symbols::HTTP_URL_NORMALIZE,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_url_resolve = module.add_function(
+        symbols::HTTP_URL_RESOLVE,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_response_text = module.add_function(
+        symbols::HTTP_RESPONSE_TEXT,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_response_header_values = module.add_function(
+        symbols::HTTP_RESPONSE_HEADER_VALUES,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_route_pattern_validate = module.add_function(
+        symbols::HTTP_ROUTE_PATTERN_VALIDATE,
+        context.i32_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let http_route_pattern_conflict = module.add_function(
+        symbols::HTTP_ROUTE_PATTERN_CONFLICT,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_route_match = module.add_function(
+        symbols::HTTP_ROUTE_MATCH,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_route_allow_header = module.add_function(
+        symbols::HTTP_ROUTE_ALLOW_HEADER,
+        ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_headers_encode = module.add_function(
+        symbols::HTTP_HEADERS_ENCODE,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_form_parse = module.add_function(
+        symbols::HTTP_FORM_PARSE,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_multipart_parse = module.add_function(
+        symbols::HTTP_MULTIPART_PARSE,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_upload_read = module.add_function(
+        symbols::HTTP_UPLOAD_READ,
+        void.fn_type(
+            &[
+                context.i64_type().into(),
+                context.i64_type().into(),
+                context.i64_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_upload_close = module.add_function(
+        symbols::HTTP_UPLOAD_CLOSE,
+        context
+            .bool_type()
+            .fn_type(&[context.i64_type().into()], false),
+        external,
+    );
+    let http_form_values = module.add_function(
+        symbols::HTTP_FORM_VALUES,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_form_encode = module.add_function(
+        symbols::HTTP_FORM_ENCODE,
+        void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_multipart_encode = module.add_function(
+        symbols::HTTP_MULTIPART_ENCODE,
+        void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let http_server_serve_once = module.add_function(
+        symbols::HTTP_SERVER_SERVE_ONCE,
+        void.fn_type(
+            &[
+                i64.into(),
+                i32.into(),
+                i64.into(),
+                i32.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let http_server_websocket_serve_once = module.add_function(
+        symbols::HTTP_SERVER_WEBSOCKET_SERVE_ONCE,
+        void.fn_type(
+            &[
+                i64.into(),
+                i32.into(),
+                ptr.into(),
+                ptr.into(),
+                i32.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
         external,
     );
 
@@ -1917,6 +2708,91 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         io_stdin_read_char,
         io_stdin_read_bytes,
         io_stdin_read_exact,
+        environment_get,
+        environment_get_secret,
+        environment_contains,
+        environment_list_names,
+        network_tcp_connect,
+        network_dns_resolve,
+        network_ip_address_parse,
+        network_tcp_origin_normalize,
+        network_tls_connect,
+        network_tls_connect_with_roots,
+        network_tls_listen,
+        network_tls_listen_http,
+        network_tls_accept,
+        network_tls_close_listener,
+        network_tls_listener_is_closed,
+        network_tls_peer_address,
+        network_tls_read,
+        network_tls_write_all,
+        network_tls_shutdown,
+        network_tls_close,
+        network_tls_is_closed,
+        network_tcp_read,
+        network_tcp_write,
+        network_tcp_write_all,
+        network_tcp_shutdown,
+        network_tcp_close,
+        network_tcp_is_closed,
+        network_tcp_peer_address,
+        network_tcp_listen,
+        network_tcp_accept,
+        network_tcp_close_listener,
+        network_tcp_listener_is_closed,
+        http_get,
+        http_get_cached,
+        http_request,
+        http_client_create,
+        http_client_create_with_options,
+        http_client_create_with_trust_roots,
+        http_client_create_with_proxy,
+        http_client_create_with_proxy_and_trust_roots,
+        http_client_enable_cookies,
+        http_client_request,
+        http_client_request_stream,
+        http_client_close,
+        http_websocket_connect,
+        http_websocket_connect_with_trust_roots,
+        http_websocket_send,
+        http_websocket_receive,
+        http_websocket_close,
+        http_websocket_close_with,
+        http_request_cached,
+        http_request_secret,
+        http_head,
+        http_query,
+        http_query_with_content_type,
+        http_post,
+        http_post_json,
+        http_post_bytes,
+        http_get_stream,
+        http_response_to_stream,
+        http_request_stream,
+        http_server_producer_register,
+        http_stream_read_chunk,
+        http_stream_read_all,
+        http_stream_sse_next,
+        http_stream_sse_heartbeat_count,
+        http_stream_close,
+        http_url_normalize,
+        http_url_resolve,
+        http_response_text,
+        http_response_header_values,
+        http_route_pattern_validate,
+        http_route_pattern_conflict,
+        http_route_match,
+        http_route_allow_header,
+        http_headers_encode,
+        http_form_parse,
+        http_multipart_parse,
+        http_upload_read,
+        http_upload_close,
+        http_form_values,
+        http_form_encode,
+        http_multipart_encode,
+        http_server_serve_once,
+        http_server_websocket_serve_once,
         alloc,
         contract_table,
         str_concat,

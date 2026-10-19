@@ -132,13 +132,14 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
         .arg(&runtime)
         .args(system_libraries())
         .arg(dead_strip_flag())
+        .args(strip_debug_info_args())
         .arg("-o")
         .arg(executable)
         .output()
         .map_err(|error| {
             Diagnostic::error(codes::LINK_FAILED, "could not invoke the linker")
                 .with_cause(format!("`{}`: {error}", driver.display()))
-                .with_help("check the LLVM installation; see docs/TOOLCHAIN.md")
+                .with_help(linker_help())
                 .boxed()
         })?;
 
@@ -152,14 +153,25 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
             detail.push('\n');
             detail.push_str(out.trim());
         }
+        if detail.is_empty() {
+            detail = format!("clang exited with {} and produced no output", output.status);
+        }
 
         return Err(Diagnostic::error(codes::LINK_FAILED, "linking failed")
             .with_cause(detail)
-            .with_help("check the LLVM installation; see docs/TOOLCHAIN.md")
+            .with_help(linker_help())
             .boxed());
     }
 
     Ok(())
+}
+
+fn linker_help() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "install Xcode or the Command Line Tools to provide Apple clang and the macOS SDK; see docs/TOOLCHAIN.md"
+    } else {
+        "check the native linker toolchain; see docs/TOOLCHAIN.md"
+    }
 }
 
 /// Requests dead-code elimination at link time, per container format.
@@ -171,6 +183,20 @@ fn dead_strip_flag() -> &'static str {
         "-Wl,/OPT:REF"
     } else {
         "-Wl,--gc-sections"
+    }
+}
+
+/// Rust's Linux static runtime archive carries DWARF sections in development
+/// builds. GNU ld's `--gc-sections` does not discard those non-allocatable
+/// sections, so a tiny Zirk executable can otherwise inherit tens of MiB of
+/// runtime debug information. Zirk does not yet emit source-level DWARF; keep
+/// the ordinary symbol table and unwind metadata while excluding only debug
+/// sections from the linked application.
+fn strip_debug_info_args() -> &'static [&'static str] {
+    if cfg!(target_os = "linux") {
+        &["-Wl,--strip-debug"]
+    } else {
+        &[]
     }
 }
 
@@ -209,6 +235,16 @@ fn system_libraries() -> Vec<String> {
         return vec!["-lm".to_string(), "-lpthread".to_string()];
     }
 
+    if cfg!(target_os = "macos") {
+        // HTTPS certificate loading uses rustls-native-certs, whose Security
+        // and CoreFoundation references are not carried transitively when
+        // Zirk links its runtime archive directly through clang.
+        return ["-framework", "Security", "-framework", "CoreFoundation"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+
     Vec::new()
 }
 
@@ -220,7 +256,13 @@ fn locate_runtime() -> Result<PathBuf, Box<Diagnostic>> {
         "libzirk_runtime.a"
     };
 
-    let exe = std::env::current_exe().ok();
+    // `current_exe` can preserve the invoked symlink path. Resolve it before
+    // searching beside the compiler so version-manager style launchers (for
+    // example ~/.local/bin/zirk -> ~/.local/share/zirk/current/bin/zirk)
+    // keep the compiler paired with its own runtime archive.
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|path| path.canonicalize().unwrap_or(path));
     let candidates = exe
         .as_ref()
         .and_then(|e| e.parent())
@@ -270,6 +312,27 @@ fn exe_name(stem: &str) -> String {
 /// there yet.
 pub fn run(executable: &Path) -> Result<i32, Box<Diagnostic>> {
     let mut command = Command::new(executable);
+    command.env_remove("ZIRK_RUNTIME_PERMISSION_GRANT");
+    run_command(&mut command, executable)
+}
+
+/// Runs a generated program with an authenticated approval token. Removing
+/// any inherited token first prevents the invoking shell from accidentally
+/// lending another project's grant to this executable.
+pub fn run_with_runtime_grant(
+    executable: &Path,
+    token: Option<&str>,
+    json_diagnostics: bool,
+) -> Result<i32, Box<Diagnostic>> {
+    let mut command = Command::new(executable);
+    command.env_remove("ZIRK_RUNTIME_PERMISSION_GRANT");
+    command.env_remove("ZIRK_RUNTIME_DIAGNOSTIC_JSON");
+    if let Some(token) = token {
+        command.env("ZIRK_RUNTIME_PERMISSION_GRANT", token);
+    }
+    if json_diagnostics {
+        command.env("ZIRK_RUNTIME_DIAGNOSTIC_JSON", "1");
+    }
     run_command(&mut command, executable)
 }
 
@@ -285,9 +348,21 @@ fn run_command(command: &mut Command, executable: &Path) -> Result<i32, Box<Diag
         .status()
         .map_err(|error| execution_error(executable, error))?;
 
-    // A process killed by a signal has no code. 130 is the convention for
-    // SIGINT and keeps the caller from reading it as success.
-    Ok(status.code().unwrap_or(130))
+    if let Some(code) = status.code() {
+        return Ok(code);
+    }
+
+    // Preserve the conventional 128 + signal status and make the cause
+    // visible to callers that capture stderr (for example, end-to-end tests).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            eprintln!("zirk: child process terminated by signal {signal}");
+            return Ok(128 + signal);
+        }
+    }
+    Ok(130)
 }
 
 fn execution_error(executable: &Path, error: std::io::Error) -> Box<Diagnostic> {

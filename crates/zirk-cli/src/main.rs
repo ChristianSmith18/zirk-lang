@@ -36,6 +36,8 @@ fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
         Some("format") => format(&args[1..]),
+        #[cfg(not(target_arch = "wasm32"))]
+        Some("permissions") => permissions(&args[1..]),
 
         #[cfg(feature = "backend")]
         Some("build") => compile(&args[1..], Action::Build),
@@ -254,13 +256,22 @@ fn compile(args: &[String], action: Action) -> i32 {
             println!("{}", executable.display());
             0
         }
-        Action::Run => match driver::run(&executable) {
-            Ok(code) => code,
-            Err(diagnostic) => {
-                eprint!("{}", diagnostic.render_colored(color));
-                1
+        Action::Run => {
+            let grant = match zirk_cli::approvals::runtime_token_for_path(&path) {
+                Ok(grant) => grant,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    return 1;
+                }
+            };
+            match driver::run_with_runtime_grant(&executable, grant.as_deref(), json) {
+                Ok(code) => code,
+                Err(diagnostic) => {
+                    eprint!("{}", diagnostic.render_colored(color));
+                    1
+                }
             }
-        },
+        }
     }
 }
 
@@ -294,6 +305,33 @@ fn fail(code: zirk_diagnostics::Code, message: &str, cause: &str, help: Option<&
     1
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn permissions(args: &[String]) -> i32 {
+    match args {
+        [command, project] if command == "approve" || command == "revoke" => {
+            let project = std::path::Path::new(project);
+            let result = if command == "approve" {
+                zirk_cli::approvals::approve(project)
+            } else {
+                zirk_cli::approvals::revoke(project)
+            };
+            match result {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    1
+                }
+            }
+        }
+        _ => fail(
+            codes::INVALID_USAGE,
+            "invalid permissions command",
+            "permission grants are approved or revoked explicitly for a project manifest",
+            Some("write `zirk permissions approve|revoke <project-directory-or-.zkinit>`"),
+        ),
+    }
+}
+
 fn help() {
     println!("zirk {VERSION}");
     println!();
@@ -302,6 +340,8 @@ fn help() {
     println!("Subcommands:");
     println!("  check <file>       validate the frontend only");
     println!("  format [--check] [--diff] <target>...  canonicalize Zirk source files");
+    #[cfg(not(target_arch = "wasm32"))]
+    println!("  permissions approve|revoke <project>  manage exact .zkinit runtime scopes");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");

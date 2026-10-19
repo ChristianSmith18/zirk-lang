@@ -7,6 +7,11 @@ A package is not a preauthorized executable bundle. Libraries declare
 external to both package and lockfile. Native artifacts and build-time code are
 visible supply-chain boundaries reviewed by `zirk prepare`.
 
+In the current native `std.net` and `std.environment` preview, package
+`.zkinit` files express runtime permission requirements with a `permissions`
+block. This is declaration only; the application approval command collects the
+locked dependency graph's requirements and requests explicit consent.
+
 Read this unit in order when publishing. Consumers normally use `zirk add` and
 commit both manifest and lockfile changes after reviewing version, integrity,
 requirements, targets, and requester paths.

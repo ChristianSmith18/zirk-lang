@@ -47,6 +47,7 @@ pub const BACKGROUND_JOB_CAPACITY: usize = 256;
 /// Cooperative shutdown grace for detached work after the root task finishes.
 pub const BACKGROUND_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 static LAST_HOST_SHUTDOWN_SIGNAL: AtomicUsize = AtomicUsize::new(0);
+static NEXT_EXECUTOR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) fn last_host_shutdown_signal() -> Option<i32> {
     let signal = LAST_HOST_SHUTDOWN_SIGNAL.load(Ordering::Acquire);
@@ -88,6 +89,58 @@ static POOL_EVENT: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 static POOL_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static POOL_TASK_WAITERS: Mutex<Vec<TaskId>> = Mutex::new(Vec::new());
 static POOL_TASK_WAKEUPS: Mutex<Vec<TaskId>> = Mutex::new(Vec::new());
+const NETWORK_WAITER_CAPACITY: usize = crate::task::MAX_ACTIVE_TASKS;
+
+#[derive(Default)]
+struct NetworkWaiters {
+    waiting: Vec<(u64, TaskId)>,
+    wakeups: Vec<(u64, TaskId)>,
+}
+
+impl NetworkWaiters {
+    fn register(&mut self, target: (u64, TaskId), capacity: usize) -> Result<(), ()> {
+        if self.waiting.contains(&target) {
+            return Ok(());
+        }
+        if self.waiting.len() >= capacity {
+            return Err(());
+        }
+        self.waiting.push(target);
+        Ok(())
+    }
+
+    fn notify(&mut self, target: (u64, TaskId), capacity: usize) {
+        if let Some(index) = self.waiting.iter().position(|waiter| *waiter == target) {
+            self.waiting.swap_remove(index);
+            debug_assert!(self.wakeups.len() < capacity);
+            if self.wakeups.len() < capacity {
+                self.wakeups.push(target);
+            }
+        }
+    }
+
+    fn unregister(&mut self, target: (u64, TaskId)) {
+        self.waiting.retain(|waiter| *waiter != target);
+        self.wakeups.retain(|wakeup| *wakeup != target);
+    }
+
+    fn take_wakeups(&mut self) -> Vec<(u64, TaskId)> {
+        std::mem::take(&mut self.wakeups)
+    }
+}
+
+static NETWORK_WAITERS: Mutex<NetworkWaiters> = Mutex::new(NetworkWaiters {
+    waiting: Vec::new(),
+    wakeups: Vec::new(),
+});
+static NETWORK_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static EXTERNAL_CANCEL_REQUESTS: Mutex<Vec<(u64, TaskId)>> = Mutex::new(Vec::new());
+
+pub(crate) enum NetworkPark {
+    EventOccurred,
+    Parked,
+    CapacityExceeded,
+}
 
 /// Only one executor heap may be published at a time. This is process-global
 /// rather than local to `run_with_root` so collector tests can coordinate with
@@ -119,8 +172,53 @@ pub fn notify_pool_event() {
     cv.notify_all();
 }
 
+pub(crate) fn current_executor_id() -> u64 {
+    let ptr = EXEC.get();
+    assert!(!ptr.is_null(), "network operation outside an executor");
+    // SAFETY: executor identity is immutable while its run is active.
+    unsafe { (*ptr).id }
+}
+
+pub(crate) fn notify_network_task(executor_id: u64, task: TaskId) {
+    NETWORK_EVENT_EPOCH.fetch_add(1, Ordering::AcqRel);
+    NETWORK_WAITERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .notify((executor_id, task), NETWORK_WAITER_CAPACITY);
+    let (flag, cv) = &POOL_EVENT;
+    *flag.lock().unwrap_or_else(|error| error.into_inner()) = true;
+    cv.notify_all();
+}
+
+/// Requests cancellation from a native reactor thread. The executor remains
+/// the sole writer of task state; this bounded queue transfers the request to
+/// its next scheduling turn and wakes it if it is parked on native I/O.
+pub(crate) fn request_external_cancel(executor_id: u64, task: TaskId) -> bool {
+    {
+        let mut requests = EXTERNAL_CANCEL_REQUESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let request = (executor_id, task);
+        if requests.contains(&request) {
+            return true;
+        }
+        if requests.len() >= NETWORK_WAITER_CAPACITY {
+            return false;
+        }
+        requests.push(request);
+    }
+    let (flag, cv) = &POOL_EVENT;
+    *flag.lock().unwrap_or_else(|error| error.into_inner()) = true;
+    cv.notify_all();
+    true
+}
+
 pub(crate) fn pool_event_epoch() -> usize {
     POOL_EVENT_EPOCH.load(Ordering::Acquire)
+}
+
+pub(crate) fn network_event_epoch() -> usize {
+    NETWORK_EVENT_EPOCH.load(Ordering::Acquire)
 }
 
 /// Registers the running caller before parking. The epoch check closes the
@@ -140,12 +238,74 @@ pub(crate) fn park_current_for_pool_event_if_unchanged(epoch: usize) -> bool {
     true
 }
 
+/// Registers a network waiter before parking. The shared event epoch closes
+/// the wake-before-registration race without waking unrelated I/O tasks.
+pub(crate) fn park_current_for_network_event_if_unchanged(epoch: usize) -> NetworkPark {
+    let task = CURRENT_TASK.get().expect("network wait outside a task");
+    let executor_id = current_executor_id();
+    let mut waiters = NETWORK_WAITERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if NETWORK_EVENT_EPOCH.load(Ordering::Acquire) != epoch {
+        return NetworkPark::EventOccurred;
+    }
+    let target = (executor_id, task);
+    if waiters.register(target, NETWORK_WAITER_CAPACITY).is_err() {
+        return NetworkPark::CapacityExceeded;
+    }
+    drop(waiters);
+    suspend_current(WaitReason::Network);
+    NetworkPark::Parked
+}
+
 fn drain_pool_task_wakeups() {
     let wakeups = std::mem::take(&mut *POOL_TASK_WAKEUPS.lock().unwrap_or_else(|e| e.into_inner()));
     if !wakeups.is_empty() {
         with_exec(|exec| {
             for task in wakeups {
                 exec.make_ready(task);
+            }
+        });
+    }
+}
+
+fn drain_network_task_wakeups() {
+    let wakeups = NETWORK_WAITERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take_wakeups();
+    if !wakeups.is_empty() {
+        with_exec(|exec| {
+            for (executor_id, task) in wakeups {
+                if executor_id == exec.id {
+                    exec.make_ready(task);
+                }
+            }
+        });
+    }
+}
+
+fn drain_external_cancel_requests() {
+    let executor_id = with_exec(|exec| exec.id);
+    let requests = {
+        let mut pending = EXTERNAL_CANCEL_REQUESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut local = Vec::new();
+        pending.retain(|(id, task)| {
+            if *id == executor_id {
+                local.push(*task);
+                false
+            } else {
+                true
+            }
+        });
+        local
+    };
+    if !requests.is_empty() {
+        with_exec(|exec| {
+            for task in requests {
+                exec.request_cancel(task);
             }
         });
     }
@@ -165,6 +325,7 @@ fn wait_pool_event(timeout: Duration) {
 
 /// The cooperative executor.
 pub struct Executor {
+    id: u64,
     registry: TaskRegistry,
     scopes: ScopeRegistry,
     ready: VecDeque<TaskId>,
@@ -291,6 +452,7 @@ impl Executor {
         on_error: impl Fn(&crate::background::BackgroundFailure) + Send + Sync + 'static,
     ) -> Self {
         Executor {
+            id: NEXT_EXECUTOR_ID.fetch_add(1, Ordering::Relaxed),
             registry: TaskRegistry::new(),
             scopes: ScopeRegistry::new(),
             ready: VecDeque::new(),
@@ -417,28 +579,29 @@ impl Executor {
     /// resuming it early would expose incomplete result slots and could let
     /// the caller tear down state still used by those workers.
     pub fn request_cancel(&mut self, task: TaskId) {
-        let (wake, waiting_any, waiting_parallel, waiting_timer, waiting_pool) = match self
-            .registry
-            .get_mut(task)
-        {
-            Some(tcb) if !tcb.state.is_terminal() => {
-                if tcb.cancel_requested {
-                    return;
+        let (wake, waiting_any, waiting_parallel, waiting_timer, waiting_pool, waiting_network) =
+            match self.registry.get_mut(task) {
+                Some(tcb) if !tcb.state.is_terminal() => {
+                    if tcb.cancel_requested {
+                        return;
+                    }
+                    tcb.cancel_requested = true;
+                    (
+                        tcb.state == TaskState::Suspended,
+                        tcb.wait == WaitReason::AwaitingAny,
+                        tcb.wait == WaitReason::Parallel,
+                        match tcb.wait {
+                            WaitReason::Timer(timer) => {
+                                Some(crate::timer::TimerId::from_bits(timer))
+                            }
+                            _ => None,
+                        },
+                        tcb.wait == WaitReason::PoolEvent,
+                        tcb.wait == WaitReason::Network,
+                    )
                 }
-                tcb.cancel_requested = true;
-                (
-                    tcb.state == TaskState::Suspended,
-                    tcb.wait == WaitReason::AwaitingAny,
-                    tcb.wait == WaitReason::Parallel,
-                    match tcb.wait {
-                        WaitReason::Timer(timer) => Some(crate::timer::TimerId::from_bits(timer)),
-                        _ => None,
-                    },
-                    tcb.wait == WaitReason::PoolEvent,
-                )
-            }
-            _ => (false, false, false, None, false),
-        };
+                _ => (false, false, false, None, false, false),
+            };
         if let Some(timer) = waiting_timer {
             self.timers.disarm(timer);
         }
@@ -448,6 +611,12 @@ impl Executor {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .retain(|waiter| *waiter != task);
+            }
+            if waiting_network {
+                NETWORK_WAITERS
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .unregister((self.id, task));
             }
             if waiting_any {
                 self.remove_any_waiter(task);
@@ -645,6 +814,7 @@ impl Executor {
         crate::collector::set_task_root_walker(Some(walk_all_task_roots));
         let restore = Restore(previous);
         drive(terminate_on_deadline);
+        crate::http_api::close_executor_clients(self.id);
         // The scheduler has joined every service callback (including
         // cancellation cleanup); now release captures of registrations that
         // never started as well as any residual lifecycle metadata, before
@@ -693,6 +863,13 @@ impl Executor {
     /// try to reclaim.
     fn complete(&mut self, task: TaskId, outcome: TaskOutcome, state: TaskState) {
         debug_assert!(state.is_terminal());
+        // Native network resources are scoped to their creating task. Close
+        // any handles the program did not explicitly release before making
+        // the task's terminal outcome observable to joiners.
+        crate::network_api::close_task_streams(task);
+        crate::http_api::close_task_streams(task);
+        crate::http_api::close_task_uploads(task);
+        crate::http_api::close_task_server_producers(task);
         self.service_task_completed(task, state, &outcome);
         let was_nonterminal = self
             .registry
@@ -1274,6 +1451,14 @@ impl Executor {
         })
     }
 
+    fn has_network_waiters(&self) -> bool {
+        self.registry.live_ids().any(|id| {
+            self.registry.get(id).is_some_and(|tcb| {
+                tcb.state == TaskState::Suspended && tcb.wait == WaitReason::Network
+            })
+        })
+    }
+
     /// Free the slot (and stack) of every terminal task whose result has been
     /// consumed. A terminal task with an un-woken waiter, or a completed task
     /// nobody has awaited yet, stays until it is consumed (or until the
@@ -1356,6 +1541,8 @@ fn drive(terminate_on_deadline: bool) {
         // (`ADR-019` D4, `parallel-cpu-regions` task 3.2).
         crate::collector::safepoint_poll();
         drain_pool_task_wakeups();
+        drain_network_task_wakeups();
+        drain_external_cancel_requests();
         while Executor::dispatch_pending_background_failure() {}
         let pool_shutdown_started = managed_pool_shutdown.is_some();
         let pool_shutdown_finished = managed_pool_shutdown
@@ -1426,6 +1613,15 @@ fn drive(terminate_on_deadline: bool) {
                                 .min(Duration::from_secs(60))
                         }),
                 ),
+                None if exec.has_network_waiters() => NextStep::WaitNetwork(
+                    exec.timers
+                        .peek_deadline()
+                        .map_or(Duration::from_secs(60), |deadline| {
+                            deadline
+                                .saturating_duration_since(Instant::now())
+                                .min(Duration::from_secs(60))
+                        }),
+                ),
                 None => {
                     let timer_deadline = exec.timers.peek_deadline();
                     let deadline = match (timer_deadline, exec.background_shutdown_deadline) {
@@ -1478,6 +1674,7 @@ fn drive(terminate_on_deadline: bool) {
             // branch is ready. Wait for a chunk to join (or a GC request);
             // the 1 ms is only a backstop, `notify_pool_event` wakes us.
             NextStep::WaitPool(timeout) => wait_pool_event(timeout),
+            NextStep::WaitNetwork(timeout) => wait_pool_event(timeout),
             NextStep::SleepUntil(deadline) => {
                 let now = Instant::now();
                 if deadline > now {
@@ -1517,6 +1714,7 @@ enum NextStep {
     StartManagedPoolShutdown,
     DrainExpired(DrainExpiredReport),
     WaitPool(Duration),
+    WaitNetwork(Duration),
     SleepUntil(Instant),
     Unresolvable,
 }
@@ -2873,6 +3071,57 @@ pub(crate) fn task_was_cancelled(target: TaskId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_waiter_registry_is_bounded_and_deduplicates_registration() {
+        let mut waiters = NetworkWaiters::default();
+        let first = (7, TaskId::from_bits(1));
+        let second = (7, TaskId::from_bits(2));
+        assert_eq!(waiters.register(first, 1), Ok(()));
+        assert_eq!(waiters.register(first, 1), Ok(()));
+        assert_eq!(waiters.register(second, 1), Err(()));
+        waiters.notify(first, 1);
+        waiters.notify(first, 1);
+        assert_eq!(waiters.take_wakeups(), vec![first]);
+        assert_eq!(waiters.register(second, 1), Ok(()));
+    }
+
+    #[test]
+    fn network_waiter_cancellation_removes_pending_and_queued_wakeups() {
+        let mut waiters = NetworkWaiters::default();
+        let target = (3, TaskId::from_bits(9));
+        waiters.register(target, 1).unwrap();
+        waiters.notify(target, 1);
+        waiters.unregister(target);
+        assert!(waiters.waiting.is_empty());
+        assert!(waiters.take_wakeups().is_empty());
+    }
+
+    #[test]
+    fn reactor_cancellation_wakes_only_the_requested_executor_task() {
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child_observed = Arc::clone(&observed);
+        run(move || {
+            let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+            let child = spawn(move || {
+                parked_tx.send(()).unwrap();
+                sleep(10_000_000_000);
+                child_observed.store(current_task_cancel_requested(), Ordering::Release);
+                0
+            });
+            let executor_id = current_executor_id();
+            let canceller = std::thread::spawn(move || {
+                parked_rx.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+                assert!(request_external_cancel(executor_id, child));
+            });
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| await_task(child)));
+            canceller.join().unwrap();
+            assert!(outcome.is_err(), "cancelled task must not return a value");
+            assert!(observed.load(Ordering::Acquire));
+            0
+        });
+    }
 
     #[test]
     fn equal_completion_sequences_choose_the_lowest_input_index() {

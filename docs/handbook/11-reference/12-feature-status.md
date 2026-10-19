@@ -67,10 +67,12 @@ data-race freedom are also final definitions even where delivery is pending.
 | decorators | defined | normative semantics and OpenSpec complete | Phase 10 compiler/tooling implementation |
 | packaging and developer tooling | defined at architecture level | bootstrap CLI/editor pieces exist | Phases 8–9 and remaining deep documentation |
 
-The table describes the repository state audited on **20 August 2026**. The
-archived phase change and its tests are the evidence for a completed delivery
-slice. A later implementation change must update this table when it changes a
-row; documentation design alone must not promote delivery status.
+The table's language and compiler rows were audited on **20 August 2026**;
+standard-library delivery evidence is refreshed on **18 October 2026** in the
+[feature status catalog](../../init/ZIRK_FEATURE_STATUS.md). The archived
+phase change and its tests are evidence for a completed delivery slice. A
+later implementation change must update the relevant status owner when it
+changes a row; documentation design alone must not promote delivery status.
 
 Explicit Zirk 1.x exclusions include browser/WebAssembly, public runtime directives, standalone `worker`, `async fn`, public event loop, textual inline assembly, general `comptime`, general `defer`, multiple class inheritance, traditional function overloading, `Result` propagation `?`, and public ownership/RC semantics.
 

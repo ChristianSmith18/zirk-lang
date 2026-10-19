@@ -43,6 +43,22 @@ extern "C-unwind" fn ignored_root() {
     signal_file(CLEANUP_FILE);
 }
 
+extern "C-unwind" fn sigpipe_root() {
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current) };
+    assert_eq!(result, 0);
+    let disposition = if current.sa_sigaction == libc::SIG_IGN {
+        "ignored"
+    } else {
+        "unexpected"
+    };
+    fs::write(
+        std::env::var_os(READY_FILE).expect("signal-test file path"),
+        disposition,
+    )
+    .expect("write SIGPIPE disposition");
+}
+
 fn test_paths(label: &str) -> (PathBuf, PathBuf) {
     let base =
         std::env::temp_dir().join(format!("zirk-cli-signals-{}-{label}", std::process::id()));
@@ -250,4 +266,39 @@ fn cli_preserves_inherited_ignored_sigint() {
     );
     let _ = fs::remove_file(ready);
     let _ = fs::remove_file(done);
+}
+
+#[test]
+fn cli_ignores_default_sigpipe_while_running_and_restores_it() {
+    if std::env::var_os(CHILD_MODE).as_deref() == Some(std::ffi::OsStr::new("pipe")) {
+        // Rust test binaries ignore SIGPIPE at startup; generated native
+        // programs start with the default disposition, so recreate that state.
+        assert_ne!(
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) },
+            libc::SIG_ERR
+        );
+        unsafe { zirk_rt_init() };
+        unsafe { zirk_rt_run_main_cli(sigpipe_root) };
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut current) },
+            0
+        );
+        assert_eq!(current.sa_sigaction, libc::SIG_DFL);
+        return;
+    }
+
+    let (ready, done) = test_paths("pipe");
+    let _ = fs::remove_file(&ready);
+    let mut child = spawn_child(
+        "cli_ignores_default_sigpipe_while_running_and_restores_it",
+        "pipe",
+        &ready,
+        &done,
+    );
+    wait_for_file(&ready);
+    let (status, stderr) = wait_for_child(&mut child);
+    assert_eq!(status, 0, "stderr: {stderr}");
+    assert_eq!(fs::read_to_string(&ready).unwrap(), "ignored");
+    let _ = fs::remove_file(ready);
 }

@@ -1028,6 +1028,7 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
             let member_start = self.peek_span();
             let visibility = self.parse_visibility();
+            let is_static = self.eat_keyword(Keyword::Static);
 
             // Contract methods carry no `fn` either. The old form still
             // parses so the diagnostic can name the migration instead of
@@ -1059,6 +1060,7 @@ impl<'a> Parser<'a> {
             let Some(method) = self.parse_contract_method(
                 kind,
                 visibility.unwrap_or(Visibility::Public),
+                is_static,
                 member_start,
             ) else {
                 self.synchronize_member();
@@ -1086,6 +1088,7 @@ impl<'a> Parser<'a> {
         &mut self,
         kind: ContractKind,
         visibility: Visibility,
+        is_static: bool,
         start: Span,
     ) -> Option<MethodDecl> {
         let name = self.expect_identifier("as the name of a method")?;
@@ -1102,6 +1105,18 @@ impl<'a> Parser<'a> {
         let throws = self.parse_throws_clause();
 
         let has_body = matches!(self.peek(), TokenKind::LBrace);
+
+        if is_static && has_body {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "a static contract method declares a requirement, not a body",
+                "static contract requirements are implemented by a class-level method",
+                Some("remove the body and keep the return type declaration".into()),
+            );
+            return None;
+        }
 
         if !has_body && return_type.is_none() && !had_colon {
             let span = self.peek_span();
@@ -1144,7 +1159,7 @@ impl<'a> Parser<'a> {
             type_params,
             is_override: false,
             is_final: false,
-            is_static: false,
+            is_static,
             params,
             return_type,
             throws,
@@ -4485,6 +4500,7 @@ impl<'a> Parser<'a> {
             let call = Expr::Call(CallExpr {
                 span: ident.span.to(end),
                 callee: Box::new(Expr::Path(ident)),
+                type_args: Vec::new(),
                 args,
             });
             if type_named {
@@ -4576,6 +4592,19 @@ impl<'a> Parser<'a> {
                         access,
                     });
                 }
+                TokenKind::Lt if self.generic_call_ahead() => {
+                    let type_args = self.parse_type_args()?;
+                    let args = self.parse_args()?;
+                    let end = self.peek_span();
+                    self.expect(&TokenKind::RParen, "to close the argument list");
+
+                    object = Expr::Call(CallExpr {
+                        span: object.span().to(end),
+                        callee: Box::new(object),
+                        type_args,
+                        args,
+                    });
+                }
                 TokenKind::LParen => {
                     let args = self.parse_args()?;
                     let end = self.peek_span();
@@ -4584,6 +4613,7 @@ impl<'a> Parser<'a> {
                     object = Expr::Call(CallExpr {
                         span: object.span().to(end),
                         callee: Box::new(object),
+                        type_args: Vec::new(),
                         args,
                     });
                 }
@@ -4689,6 +4719,29 @@ impl<'a> Parser<'a> {
                 _ => return Some(object),
             }
         }
+    }
+
+    /// A postfix `<...>(...)` is an explicit generic call only when its
+    /// balanced type-argument list is immediately followed by `(`. This
+    /// leaves ordinary comparisons such as `left < right` in the expression
+    /// parser, while allowing nested forms such as `decode<Map<String, Int32>>`.
+    fn generic_call_ahead(&self) -> bool {
+        if !matches!(self.peek(), TokenKind::Lt) {
+            return false;
+        }
+        let mut depth = 1_i32;
+        let mut offset = 1;
+        while depth > 0 {
+            match self.peek_at(offset) {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => depth -= 1,
+                TokenKind::Shr => depth -= 2,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+        depth == 0 && matches!(self.peek_at(offset), TokenKind::LParen)
     }
 
     /// The `end` and `step` of a slice after the first `:` was consumed:
@@ -4839,6 +4892,7 @@ fn pow_call(base: Expr, exponent: Expr, op_span: Span) -> Expr {
             access: FieldAccess::Dot,
             span,
         })),
+        type_args: Vec::new(),
         args: vec![Arg {
             name: None,
             value: exponent,

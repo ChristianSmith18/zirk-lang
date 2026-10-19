@@ -1,0 +1,28 @@
+package std.net.dns;
+
+share enum DNSError {
+    InvalidAddress,
+    PermissionDenied,
+    AddressNotAllowed,
+    DnsFailure,
+    DnsResultLimit,
+    UnsupportedTransport,
+    BufferLimitExceeded,
+    Io,
+    Cancelled,
+    CapacityExceeded,
+    Timeout,
+}
+
+// Resolution is scoped to an exact approved origin, so a DNS query cannot be
+// used to inspect arbitrary host state. Every returned address is validated
+// against the same grant used for a later connection.
+share class DNS {
+    static resolve(origin: String): Result<List<String>, DNSError> {
+        return DNS.resolve_native(origin);
+    }
+
+    private static resolve_native(origin: String): Result<List<String>, DNSError> {
+        return Error(DNSError.PermissionDenied);
+    }
+}
