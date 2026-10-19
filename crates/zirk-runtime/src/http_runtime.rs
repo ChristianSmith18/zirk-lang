@@ -10145,14 +10145,38 @@ mod tests {
                             compressed,
                             "HTTP/2 response coding must match the slow-consumer case"
                         );
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        let stalled_count = PRODUCER_CALLS.load(Ordering::Acquire);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        let later_count = PRODUCER_CALLS.load(Ordering::Acquire);
+                        // HTTP/2 grants a bounded receive window that Hyper may
+                        // fill before the application starts reading the body.
+                        // Wait for that window to saturate instead of assuming
+                        // backpressure must happen within one arbitrary delay.
+                        let stalled_count = tokio::time::timeout(
+                            Duration::from_secs(5),
+                            async {
+                                let mut previous = PRODUCER_CALLS.load(Ordering::Acquire);
+                                let mut stable_intervals = 0;
+                                loop {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let current = PRODUCER_CALLS.load(Ordering::Acquire);
+                                    if current == previous {
+                                        stable_intervals += 1;
+                                        if stable_intervals == 3 {
+                                            break current;
+                                        }
+                                    } else {
+                                        previous = current;
+                                        stable_intervals = 0;
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        .expect("the unread HTTP/2 response should eventually exhaust its flow-control window");
                         assert!(stalled_count > 0, "the server never started the producer");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         assert_eq!(
-                            later_count, stalled_count,
-                            "the Zirk producer advanced while the HTTP/2 peer stopped reading"
+                            PRODUCER_CALLS.load(Ordering::Acquire),
+                            stalled_count,
+                            "the Zirk producer advanced after the HTTP/2 flow-control window filled"
                         );
                         drop(response);
                         driver.abort();

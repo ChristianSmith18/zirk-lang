@@ -703,7 +703,8 @@ fn a_user_defined_http_type_does_not_acquire_bundled_native_bindings() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "user:ordinary\n");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, "user:ordinary\n");
 }
 
 #[test]
