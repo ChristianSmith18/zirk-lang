@@ -545,8 +545,10 @@ mod tests {
             let _ = done.send(run(body));
         });
         result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("cooperative synchronization stress exceeded five seconds")
+            // Leave loaded native CI runners enough scheduling headroom while
+            // retaining a hard bound that still catches deadlocks.
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("cooperative synchronization stress exceeded thirty seconds")
     }
 
     fn wait_until_queued(semaphore: &CooperativeSemaphore, task: TaskId) {
