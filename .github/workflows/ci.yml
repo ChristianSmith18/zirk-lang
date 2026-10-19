@@ -182,7 +182,7 @@ jobs:
       # The full workspace suite below also runs them, but this focused step
       # makes failures attributable and visible before the broader test run.
       - name: GC y managed threads (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && inputs.test_filter == ''
         shell: bash
         run: |
           cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture

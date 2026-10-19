@@ -1791,7 +1791,7 @@ fn standard_http_headers_enforce_the_field_count_bound() {
         .collect::<Vec<_>>()
         .join(", ");
     let mut source = format!(
-        "import {{ HTTPHeaders }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmut headers = HTTPHeaders.create();\nmut names: Array<String> = [{names}];\nmut index: UInt64 = 0;\nwhile index < names.length {{ _ = headers.add(names[index], \"v\"); index += 1; }}\n"
+        "import {{ HTTPHeaders }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmut headers = HTTPHeaders.create();\nmut names: Array<String> = [{names}];\nmut index: UInt64 = 0;\nwhile index < names.length {{ _ = headers.add(names[index], \"v\"); if index == 0 || index == 16 || index == 32 || index == 48 || index == 64 || index == 80 || index == 96 || index == 112 || index == 128 || index == 144 || index == 160 || index == 176 || index == 192 || index == 208 || index == 224 || index == 240 {{ stdout.println(index); }} index += 1; }}\n"
     );
     source.push_str(
         "match headers.add(\"x-overflow\", \"v\") { Ok(_) => stdout.println(\"overflow accepted\"); Error(error) => stdout.println(error.to_string()); }\nmatch headers.set(\"x-0\", \"replaced\") { Ok(_) => stdout.println(\"replacement accepted\"); Error(error) => stdout.println(error.to_string()); }\nmatch headers.set(\"x-new\", \"v\") { Ok(_) => stdout.println(\"new field accepted\"); Error(error) => stdout.println(error.to_string()); }\n}\n",
@@ -1805,7 +1805,7 @@ fn standard_http_headers_enforce_the_field_count_bound() {
     );
     assert_eq!(
         normalize(&output.stdout),
-        "TooManyFields\nreplacement accepted\nTooManyFields\n"
+        "0\n16\n32\n48\n64\n80\n96\n112\n128\n144\n160\n176\n192\n208\n224\n240\nTooManyFields\nreplacement accepted\nTooManyFields\n"
     );
 }
 
