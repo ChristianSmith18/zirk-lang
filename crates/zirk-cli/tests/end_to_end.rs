@@ -7478,7 +7478,10 @@ fn main(): Void {{
         );
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // The runtime may use its full five-second cooperative shutdown grace
+    // after the handler has observed cancellation. Keep the process-level
+    // assertion outside that bound, with room for native Windows scheduling.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         if child.try_wait().unwrap().is_some() {
             break;
