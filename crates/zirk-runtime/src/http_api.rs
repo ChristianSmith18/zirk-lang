@@ -37,6 +37,20 @@ struct OwnedHttpClient {
     closed: AtomicBool,
 }
 
+enum PreparedHttpClientRequest {
+    Complete(HttpResponseValues),
+    Http2(
+        crate::http_runtime::Http2RequestSender,
+        crate::http_runtime::HttpTimeouts,
+    ),
+    #[cfg(feature = "http3")]
+    Http3(
+        Arc<crate::http3_transport::Http3ClientSession>,
+        crate::http_runtime::HttpTimeouts,
+        HttpRequestValues,
+    ),
+}
+
 /// Rolls back the admission flag when cooperative cancellation interrupts
 /// close before active requests drain and the pool/handle are released.
 struct ClientCloseAttempt<'a> {
@@ -1095,7 +1109,7 @@ pub type HttpUploadProducerCallback = unsafe extern "C" fn(
 ) -> i32;
 
 const MAX_HTTP_SERVER_PRODUCERS: usize = 1_024;
-const MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Stable two-word generated closure representation copied at registration.
 /// The capture pointer is also retained through the collector root handle.
@@ -1304,6 +1318,13 @@ pub struct HttpServerServeOut {
     pub error: i32,
 }
 
+#[repr(C)]
+pub struct HttpServerServeHttp3Out {
+    pub kind: i32,
+    pub error: i32,
+    pub count: u64,
+}
+
 /// Serves one HTTP/1.1 request on an owner-task TCP stream.
 ///
 /// # Safety
@@ -1363,6 +1384,225 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_once(
     };
     if !out.is_null() {
         unsafe { out.write(outcome) };
+    }
+}
+
+/// Binds and serves a finite HTTP/3 endpoint through the official Zirk router
+/// callback. The effective UDP bind grant is checked before Quinn opens the
+/// socket, and callback execution remains on the owning Zirk task.
+///
+/// # Safety
+/// `endpoint`, certificate/key arrays, callback/context, and `out` must satisfy
+/// their declared Zirk ABI layouts for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
+    endpoint: *const c_void,
+    certificate_chain_der: *mut c_void,
+    private_key_der: *mut c_void,
+    max_requests: u64,
+    max_connections: u64,
+    callback: Option<HttpServerCallback>,
+    context: *mut c_void,
+    out: *mut HttpServerServeHttp3Out,
+) {
+    let result: Result<usize, crate::http_runtime::HttpRuntimeError> = (|| {
+        #[cfg(not(feature = "http3"))]
+        {
+            let _ = (
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                max_requests,
+                max_connections,
+                callback,
+                context,
+            );
+            return Err(crate::http_runtime::HttpRuntimeError::Protocol);
+        }
+        #[cfg(feature = "http3")]
+        {
+            let endpoint = unsafe { crate::string::borrow(endpoint.cast_mut()) }
+                .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let address = crate::network_api::parse_udp_endpoint(unsafe { endpoint.as_str() })
+                .map_err(|error| match error {
+                    crate::network_transport::NetworkTransportError::PermissionDenied => {
+                        crate::http_runtime::HttpRuntimeError::PermissionDenied
+                    }
+                    _ => crate::http_runtime::HttpRuntimeError::InvalidRequest,
+                })?;
+            let certificates = unsafe { copy_http_trust_roots(certificate_chain_der) }
+                .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let private_key = unsafe { crate::array::copy_byte_array(private_key_der, 64 * 1024) }
+                .filter(|key| !key.is_empty())
+                .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let max_requests = usize::try_from(max_requests)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let max_connections = usize::try_from(max_connections)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let callback = callback.ok_or(crate::http_runtime::HttpRuntimeError::Protocol)?;
+            let grant = crate::permissions::current_network_grant()
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::PermissionDenied)?;
+            let server_config = crate::network_transport::TlsServerConfig::from_der(
+                certificates,
+                private_key,
+                false,
+            )
+            .and_then(crate::network_transport::TlsServerConfig::into_http3_quic_config)
+            .map_err(|_| crate::http_runtime::HttpRuntimeError::Protocol)?;
+            let (endpoint, _) =
+                crate::http3_transport::bind_server_endpoint(address, &grant, server_config)?;
+            let context = context as usize;
+            crate::http3_transport::serve_endpoint(
+                endpoint,
+                max_requests,
+                max_connections,
+                move |request| {
+                    let request = match http3_request_values(request) {
+                        Ok(request) => request,
+                        Err(_) => return http3_error_response(400, b"invalid request"),
+                    };
+                    let response =
+                        invoke_http_server_callback(request, callback, context as *mut c_void);
+                    http3_response(response)
+                },
+            )
+        }
+    })();
+    let outcome = match result {
+        Ok(count) => HttpServerServeHttp3Out {
+            kind: 0,
+            error: 0,
+            count: count as u64,
+        },
+        Err(error) => HttpServerServeHttp3Out {
+            kind: 1,
+            error: http_server_error_code(error),
+            count: 0,
+        },
+    };
+    if !out.is_null() {
+        unsafe { out.write(outcome) };
+    }
+}
+
+#[cfg(feature = "http3")]
+fn http3_request_values(
+    request: http::Request<Vec<u8>>,
+) -> Result<HttpRequestValues, crate::http_runtime::HttpRuntimeError> {
+    let method_token = request.method().as_str().to_owned();
+    let method = match method_token.as_str() {
+        "GET" => HttpMethod::Get,
+        "HEAD" => HttpMethod::Head,
+        "POST" => HttpMethod::Post,
+        "PUT" => HttpMethod::Put,
+        "DELETE" => HttpMethod::Delete,
+        "CONNECT" => HttpMethod::Connect,
+        "OPTIONS" => HttpMethod::Options,
+        "TRACE" => HttpMethod::Trace,
+        "PATCH" => HttpMethod::Patch,
+        "QUERY" => HttpMethod::Query,
+        _ => HttpMethod::Other,
+    };
+    let uri = request.uri();
+    let scheme = uri
+        .scheme_str()
+        .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+    if scheme != "https" {
+        return Err(crate::http_runtime::HttpRuntimeError::Protocol);
+    }
+    let authority = uri
+        .authority()
+        .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+    let path = uri.path_and_query().map_or("/", |path| path.as_str());
+    let url = Url::parse(&format!("https://{authority}{path}"))
+        .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+    let mut values = HttpRequestValues::new(method, url);
+    values.method_token = method_token;
+    for (name, _) in request.headers().iter() {
+        for value in request.headers().get_all(name).iter() {
+            values
+                .headers
+                .append(name.as_str(), value.as_bytes())
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+        }
+    }
+    values
+        .set_body(request.into_body())
+        .map_err(|_| crate::http_runtime::HttpRuntimeError::BodyTooLarge)?;
+    Ok(values)
+}
+
+#[cfg(feature = "http3")]
+fn http3_response(
+    mut response: crate::http_runtime::HttpResponseValues,
+) -> crate::http3_transport::Http3ServerResponse {
+    if response.body_stream.is_some() && response.body_producer.is_some() {
+        return http3_error_response(500, b"invalid streaming response");
+    }
+    let producer = if let Some(producer) = response.body_producer.take() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        response.body_stream = Some(receiver);
+        Some((producer, sender))
+    } else {
+        None
+    };
+    let body = match response.body_stream.take() {
+        Some(receiver) => crate::http3_transport::Http3ResponseBody::Stream(receiver),
+        None => {
+            crate::http3_transport::Http3ResponseBody::Buffered(std::mem::take(&mut response.body))
+        }
+    };
+    let mut builder = http::Response::builder().status(response.status.as_u16());
+    for (name, _) in response.headers.iter() {
+        if name.as_str() == "connection"
+            || name.as_str() == "transfer-encoding"
+            || name.as_str() == "upgrade"
+            || name.as_str() == "keep-alive"
+            || name.as_str() == "proxy-connection"
+        {
+            continue;
+        }
+        for value in response
+            .headers
+            .get_all(name.as_str())
+            .into_iter()
+            .flatten()
+        {
+            builder = builder.header(name.as_str(), value.as_bytes());
+        }
+    }
+    match builder.body(body) {
+        Ok(response) => crate::http3_transport::Http3ServerResponse { response, producer },
+        Err(_) => http3_error_response(500, b"invalid response"),
+    }
+}
+
+#[cfg(feature = "http3")]
+fn http3_error_response(status: u16, body: &[u8]) -> crate::http3_transport::Http3ServerResponse {
+    crate::http3_transport::Http3ServerResponse {
+        response: http::Response::builder()
+            .status(status)
+            .body(crate::http3_transport::Http3ResponseBody::Buffered(
+                body.to_vec(),
+            ))
+            .expect("fixed HTTP error response is valid"),
+        producer: None,
+    }
+}
+
+fn http_server_error_code(error: crate::http_runtime::HttpRuntimeError) -> i32 {
+    match error {
+        crate::http_runtime::HttpRuntimeError::InvalidRequest => 0,
+        crate::http_runtime::HttpRuntimeError::UnsupportedMethod => 14,
+        crate::http_runtime::HttpRuntimeError::PermissionDenied => 1,
+        crate::http_runtime::HttpRuntimeError::Transport => 2,
+        crate::http_runtime::HttpRuntimeError::Protocol => 3,
+        crate::http_runtime::HttpRuntimeError::BodyTooLarge => 4,
+        crate::http_runtime::HttpRuntimeError::InvalidText => 5,
+        crate::http_runtime::HttpRuntimeError::Timeout => 6,
+        crate::http_runtime::HttpRuntimeError::Cancelled => 7,
+        crate::http_runtime::HttpRuntimeError::BodyConsumed => 8,
+        crate::http_runtime::HttpRuntimeError::InvalidJson => 9,
     }
 }
 
@@ -1478,6 +1718,172 @@ pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_once(
             },
         )
         .map_err(error_code)
+    })();
+    let result = match outcome {
+        Ok(()) => HttpServerServeOut { kind: 0, error: 0 },
+        Err(error) => HttpServerServeOut { kind: 1, error },
+    };
+    unsafe { out.write(result) };
+}
+
+/// Binds one permission-checked HTTP/3 WebSocket endpoint and invokes its
+/// generated Zirk callback on the owning task after an RFC 9220 handshake.
+///
+/// # Safety
+/// Managed strings/lists, callback/context, and `out` must satisfy their Zirk
+/// ABI layouts and remain live for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_http3_once(
+    endpoint: *const c_void,
+    certificate_chain_der: *mut c_void,
+    private_key_der: *mut c_void,
+    path: *mut c_void,
+    allowed_origins: *mut c_void,
+    allow_missing_origin: i32,
+    protocols: *mut c_void,
+    max_messages: u64,
+    idle_timeout_ms: u64,
+    callback: Option<HttpWebSocketServerCallback>,
+    context: *mut c_void,
+    out: *mut HttpServerServeOut,
+) {
+    if out.is_null() {
+        return;
+    }
+    let outcome = (|| {
+        #[cfg(not(feature = "http3"))]
+        {
+            let _ = (
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                path,
+                allowed_origins,
+                allow_missing_origin,
+                protocols,
+                max_messages,
+                idle_timeout_ms,
+                callback,
+                context,
+            );
+            return Err(3);
+        }
+        #[cfg(feature = "http3")]
+        {
+            let callback = callback.ok_or(2)?;
+            let endpoint_value = unsafe { crate::string::borrow(endpoint.cast_mut()) }.ok_or(0)?;
+            let address =
+                crate::network_api::parse_udp_endpoint(unsafe { endpoint_value.as_str() })
+                    .map_err(|error| match error {
+                        crate::network_transport::NetworkTransportError::PermissionDenied => 1,
+                        _ => 0,
+                    })?;
+            let path_value = unsafe { crate::string::borrow(path) }.ok_or(0)?;
+            let path = unsafe { path_value.as_str() }.to_owned();
+            if path.is_empty()
+                || !path.starts_with('/')
+                || path.contains(['?', '#', '\r', '\n'])
+                || max_messages == 0
+                || max_messages > 1_024
+                || idle_timeout_ms == 0
+                || idle_timeout_ms > 600_000
+            {
+                return Err(0);
+            }
+            let copy_list = |list: *mut c_void| -> Result<Vec<String>, i32> {
+                if list.is_null() {
+                    return Err(0);
+                }
+                let count = unsafe { crate::list::zirk_rt_list_length(list) };
+                if count > 64 {
+                    return Err(0);
+                }
+                let mut values = Vec::with_capacity(count);
+                for index in 0..count {
+                    let slot = unsafe {
+                        crate::list::zirk_rt_list_element(
+                            list,
+                            index as i64,
+                            std::mem::size_of::<*mut c_void>(),
+                        )
+                    };
+                    if slot.is_null() {
+                        return Err(0);
+                    }
+                    let item = unsafe { *slot.cast::<*mut c_void>() };
+                    let item = unsafe { crate::string::borrow(item) }.ok_or(0)?;
+                    values.push(unsafe { item.as_str() }.to_owned());
+                }
+                Ok(values)
+            };
+            let origins = copy_list(allowed_origins)?;
+            let protocols = copy_list(protocols)?;
+            let origin_refs = origins.iter().map(String::as_str).collect::<Vec<_>>();
+            let protocol_refs = protocols.iter().map(String::as_str).collect::<Vec<_>>();
+            let policy = zirk_runtime_core::http_websocket::WebSocketAcceptPolicy::new(
+                &origin_refs,
+                allow_missing_origin != 0,
+                &protocol_refs,
+            )
+            .map_err(|_| 0)?;
+            let certificates = unsafe { copy_http_trust_roots(certificate_chain_der) }.ok_or(0)?;
+            let private_key = unsafe { crate::array::copy_byte_array(private_key_der, 64 * 1024) }
+                .filter(|key| !key.is_empty())
+                .ok_or(0)?;
+            let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+            let server_config = crate::network_transport::TlsServerConfig::from_der(
+                certificates,
+                private_key,
+                false,
+            )
+            .and_then(crate::network_transport::TlsServerConfig::into_http3_quic_config)
+            .map_err(|_| 3)?;
+            let (endpoint, _) =
+                crate::http3_transport::bind_server_endpoint(address, &grant, server_config)
+                    .map_err(error_code)?;
+            let (io, selected, driver, close_drain) =
+                crate::http3_transport::accept_websocket_endpoint(endpoint, path, policy)
+                    .map_err(error_code)?;
+            let socket = crate::http_runtime::HttpWebSocket::from_http3_server_stream(
+                io,
+                selected,
+                std::time::Duration::from_millis(idle_timeout_ms),
+                max_messages as usize,
+                driver,
+                close_drain,
+            )
+            .map_err(error_code)?;
+            let owner = crate::executor::current_task();
+            let handle = {
+                let mut sockets = http_websockets()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if sockets.len() >= MAX_HTTP_WEBSOCKETS {
+                    return Err(2);
+                }
+                let mut handle = NEXT_CLIENT_HANDLE.fetch_add(1, Ordering::Relaxed).max(1);
+                while sockets.contains_key(&handle) {
+                    handle = NEXT_CLIENT_HANDLE.fetch_add(1, Ordering::Relaxed).max(1);
+                }
+                sockets.insert(handle, OwnedHttpWebSocket { owner, socket });
+                handle
+            };
+            let callback_result = unsafe { callback(handle, context) };
+            let socket = http_websockets()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&handle);
+            if let Some(mut socket) = socket {
+                if socket.owner != owner {
+                    return Err(1);
+                }
+                socket.socket.close().map_err(error_code)?;
+            }
+            if callback_result != 0 {
+                return Err(3);
+            }
+            Ok(())
+        }
     })();
     let result = match outcome {
         Ok(()) => HttpServerServeOut { kind: 0, error: 0 },
@@ -1669,6 +2075,18 @@ pub struct HttpGetOut {
     pub body: *mut c_void,
     /// Managed length-delimited response header block on success.
     pub headers: *mut c_void,
+    /// Negotiated protocol version; zero means unknown or not applicable.
+    pub protocol: i32,
+}
+
+#[repr(C)]
+pub struct HttpClientRequestOut {
+    pub kind: i32,
+    pub error: i32,
+    pub status: i32,
+    pub body: *mut c_void,
+    pub headers: *mut c_void,
+    pub protocol: i32,
 }
 
 #[repr(C)]
@@ -1706,7 +2124,36 @@ fn failure(code: i32) -> HttpGetOut {
         status: 0,
         body: std::ptr::null_mut(),
         headers: std::ptr::null_mut(),
+        protocol: crate::http_runtime::HttpProtocolVersion::Unknown as i32,
     }
+}
+
+fn client_failure(code: i32) -> HttpClientRequestOut {
+    HttpClientRequestOut {
+        kind: 1,
+        error: code,
+        status: 0,
+        body: std::ptr::null_mut(),
+        headers: std::ptr::null_mut(),
+        protocol: crate::http_runtime::HttpProtocolVersion::Unknown as i32,
+    }
+}
+
+fn successful_client_response(
+    status: u16,
+    headers: &Headers,
+    body: &[u8],
+    protocol: crate::http_runtime::HttpProtocolVersion,
+) -> Result<HttpClientRequestOut, i32> {
+    let response = successful_response(status, headers, body, protocol)?;
+    Ok(HttpClientRequestOut {
+        kind: response.kind,
+        error: response.error,
+        status: response.status,
+        body: response.body,
+        headers: response.headers,
+        protocol: protocol as i32,
+    })
 }
 
 fn serialize_response_headers(headers: &Headers) -> Result<Vec<u8>, i32> {
@@ -1768,7 +2215,12 @@ fn serialize_headers(headers: &Headers) -> Result<Vec<u8>, i32> {
     Ok(encoded)
 }
 
-fn successful_response(status: u16, headers: &Headers, body: &[u8]) -> Result<HttpGetOut, i32> {
+fn successful_response(
+    status: u16,
+    headers: &Headers,
+    body: &[u8],
+    protocol: crate::http_runtime::HttpProtocolVersion,
+) -> Result<HttpGetOut, i32> {
     let encoded_headers = serialize_response_headers(headers)?;
     let body = crate::array::alloc_byte_array(body);
     let mut rooted_body = body;
@@ -1782,6 +2234,7 @@ fn successful_response(status: u16, headers: &Headers, body: &[u8]) -> Result<Ht
         status: i32::from(status),
         body: rooted_body,
         headers,
+        protocol: protocol as i32,
     })
 }
 
@@ -1924,6 +2377,7 @@ fn invoke_http_server_callback(
         body,
         body_stream: None,
         body_producer,
+        protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
     }
 }
 
@@ -1935,6 +2389,7 @@ fn server_error_response() -> crate::http_runtime::HttpResponseValues {
         body: b"invalid handler response".to_vec(),
         body_stream: None,
         body_producer: None,
+        protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
     }
 }
 
@@ -1946,6 +2401,7 @@ fn internal_server_error_response() -> crate::http_runtime::HttpResponseValues {
         body: b"Internal Server Error".to_vec(),
         body_stream: None,
         body_producer: None,
+        protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
     }
 }
 
@@ -2188,6 +2644,43 @@ pub unsafe extern "C" fn zirk_http_client_create_with_options(
     unsafe { out.write(client_create_out(outcome)) };
 }
 
+/// Creates a reusable HTTP client with timeouts and an explicit protocol
+/// preference. The legacy options entrypoint remains available to already
+/// compiled callers and continues to select `Auto`.
+///
+/// # Safety
+/// `out` must be null or point to writable `HttpClientCreateOut` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_http_client_create_with_protocol_options(
+    max_origins: i32,
+    connect_timeout_ms: u64,
+    response_headers_timeout_ms: u64,
+    response_idle_timeout_ms: u64,
+    protocol_code: i32,
+    out: *mut HttpClientCreateOut,
+) {
+    if out.is_null() {
+        return;
+    }
+    let outcome = (|| {
+        let protocol = crate::http_runtime::HttpProtocolPreference::try_from(protocol_code)
+            .map_err(error_code)?;
+        let timeouts = http_timeouts_from_millis(
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+        )?;
+        create_http_client_config_with_timeouts_and_protocol(
+            max_origins,
+            None,
+            None,
+            timeouts,
+            protocol,
+        )
+    })();
+    unsafe { out.write(client_create_out(outcome)) };
+}
+
 fn http_timeouts_from_millis(
     connect_timeout_ms: u64,
     response_headers_timeout_ms: u64,
@@ -2219,6 +2712,7 @@ pub unsafe extern "C" fn zirk_http_client_create_with_trust_roots(
     connect_timeout_ms: u64,
     response_headers_timeout_ms: u64,
     response_idle_timeout_ms: u64,
+    protocol_code: i32,
     out: *mut HttpClientCreateOut,
 ) {
     if out.is_null() {
@@ -2233,7 +2727,15 @@ pub unsafe extern "C" fn zirk_http_client_create_with_trust_roots(
             response_headers_timeout_ms,
             response_idle_timeout_ms,
         )?;
-        create_http_client_config_with_timeouts(max_origins, Some(config), None, timeouts)
+        let protocol = crate::http_runtime::HttpProtocolPreference::try_from(protocol_code)
+            .map_err(error_code)?;
+        create_http_client_config_with_timeouts_and_protocol(
+            max_origins,
+            Some(config),
+            None,
+            timeouts,
+            protocol,
+        )
     })();
     unsafe { out.write(client_create_out(outcome)) };
 }
@@ -2250,6 +2752,7 @@ pub unsafe extern "C" fn zirk_http_client_create_with_proxy(
     connect_timeout_ms: u64,
     response_headers_timeout_ms: u64,
     response_idle_timeout_ms: u64,
+    protocol_code: i32,
     out: *mut HttpClientCreateOut,
 ) {
     if out.is_null() {
@@ -2271,7 +2774,15 @@ pub unsafe extern "C" fn zirk_http_client_create_with_proxy(
             response_headers_timeout_ms,
             response_idle_timeout_ms,
         )?;
-        create_http_client_config_with_timeouts(max_origins, None, Some(proxy), timeouts)
+        let protocol = crate::http_runtime::HttpProtocolPreference::try_from(protocol_code)
+            .map_err(error_code)?;
+        create_http_client_config_with_timeouts_and_protocol(
+            max_origins,
+            None,
+            Some(proxy),
+            timeouts,
+            protocol,
+        )
     })();
     unsafe { out.write(client_create_out(outcome)) };
 }
@@ -2293,6 +2804,7 @@ pub unsafe extern "C" fn zirk_http_client_create_with_proxy_and_trust_roots(
     connect_timeout_ms: u64,
     response_headers_timeout_ms: u64,
     response_idle_timeout_ms: u64,
+    protocol_code: i32,
     out: *mut HttpClientCreateOut,
 ) {
     if out.is_null() {
@@ -2317,7 +2829,15 @@ pub unsafe extern "C" fn zirk_http_client_create_with_proxy_and_trust_roots(
             response_headers_timeout_ms,
             response_idle_timeout_ms,
         )?;
-        create_http_client_config_with_timeouts(max_origins, Some(config), Some(proxy), timeouts)
+        let protocol = crate::http_runtime::HttpProtocolPreference::try_from(protocol_code)
+            .map_err(error_code)?;
+        create_http_client_config_with_timeouts_and_protocol(
+            max_origins,
+            Some(config),
+            Some(proxy),
+            timeouts,
+            protocol,
+        )
     })();
     unsafe { out.write(client_create_out(outcome)) };
 }
@@ -2348,32 +2868,32 @@ fn create_http_client_config_with_timeouts(
     proxy: Option<zirk_runtime_core::http_proxy::HttpProxy>,
     timeouts: crate::http_runtime::HttpTimeouts,
 ) -> Result<u64, i32> {
+    create_http_client_config_with_timeouts_and_protocol(
+        max_origins,
+        tls_config,
+        proxy,
+        timeouts,
+        crate::http_runtime::HttpProtocolPreference::Auto,
+    )
+}
+
+fn create_http_client_config_with_timeouts_and_protocol(
+    max_origins: i32,
+    tls_config: Option<Arc<crate::network_transport::RustlsClientConfig>>,
+    proxy: Option<zirk_runtime_core::http_proxy::HttpProxy>,
+    timeouts: crate::http_runtime::HttpTimeouts,
+    protocol: crate::http_runtime::HttpProtocolPreference,
+) -> Result<u64, i32> {
     (|| {
         let verified = crate::permissions::verified_grant().ok_or(1)?;
         let max_origins = usize::try_from(max_origins).map_err(|_| 0)?;
-        let pool = match (tls_config, proxy) {
-            (Some(config), Some(proxy)) => {
-                crate::http_runtime::HttpClientPool::new_shared_with_tls_config_and_proxy(
-                    max_origins,
-                    timeouts,
-                    config,
-                    proxy,
-                )
-            }
-            (Some(config), None) => {
-                crate::http_runtime::HttpClientPool::new_shared_with_tls_config(
-                    max_origins,
-                    timeouts,
-                    config,
-                )
-            }
-            (None, Some(proxy)) => crate::http_runtime::HttpClientPool::new_shared_with_proxy(
-                max_origins,
-                timeouts,
-                proxy,
-            ),
-            (None, None) => crate::http_runtime::HttpClientPool::new_shared(max_origins, timeouts),
-        }
+        let pool = crate::http_runtime::HttpClientPool::new_shared_with_protocol(
+            max_origins,
+            timeouts,
+            protocol,
+            tls_config,
+            proxy,
+        )
         .map_err(error_code)?;
         let gate = crate::sync_primitives::CooperativeSemaphore::new(1, 1).map_err(|_| 2)?;
         let request_slots =
@@ -2494,6 +3014,49 @@ pub unsafe extern "C" fn zirk_http_client_enable_cookies(
     unsafe { out.write(outcome) };
 }
 
+/// Clears the client's private in-memory cookie jar and zeroizes removed values.
+///
+/// # Safety
+/// `out` must be null or point to writable `HttpClientActionOut` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_http_client_clear_cookies(
+    handle: u64,
+    out: *mut HttpClientActionOut,
+) {
+    if out.is_null() {
+        return;
+    }
+    let outcome = client_by_handle(handle).ok_or(0).and_then(|client| {
+        if !client_identity_matches(&client) {
+            return Err(1);
+        }
+        let _request_slot = client
+            .request_slots
+            .acquire()
+            .map_err(|error| match error {
+                crate::sync_primitives::SemaphoreError::Cancelled => 7,
+                _ => 0,
+            })?;
+        if client.closed.load(Ordering::Acquire) {
+            return Err(0);
+        }
+        let _permit = client.gate.acquire().map_err(|error| match error {
+            crate::sync_primitives::SemaphoreError::Cancelled => 7,
+            _ => 0,
+        })?;
+        if client.closed.load(Ordering::Acquire) {
+            return Err(0);
+        }
+        client
+            .pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_cookies();
+        Ok(())
+    });
+    unsafe { out.write(action_outcome(outcome)) };
+}
+
 /// Sends a bounded request through an owner-task reusable client.
 ///
 /// # Safety
@@ -2507,7 +3070,7 @@ pub unsafe extern "C" fn zirk_http_client_request(
     body: *const c_void,
     headers: *const c_void,
     validate_json: bool,
-    out: *mut HttpGetOut,
+    out: *mut HttpClientRequestOut,
 ) {
     let outcome = (|| {
         let client = client_by_handle(handle).ok_or(0)?;
@@ -2578,54 +3141,103 @@ pub unsafe extern "C" fn zirk_http_client_request(
                 .pool
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pool.ensure_shared_connection(&request, Arc::clone(&grant))
-                .map_err(error_code)?;
-            match pool
-                .prepare_shared_http2(&mut request, &grant)
+            #[cfg(feature = "http3")]
+            if let Some(session) = pool
+                .prepare_shared_http3(&mut request, &grant)
                 .map_err(error_code)?
             {
-                Some(sender) => Some((sender, pool.timeouts())),
-                None => {
-                    let response = pool
-                        .request(request, Arc::clone(&grant))
-                        .map_err(error_code)?;
-                    invalidate_cached_uris_after_write(
-                        &request_for_invalidation,
-                        response.status,
-                        &response.headers,
-                    );
-                    return successful_response(
-                        response.status.as_u16(),
-                        &response.headers,
-                        &response.body,
-                    );
+                PreparedHttpClientRequest::Http3(session, pool.timeouts(), request.clone())
+            } else {
+                pool.ensure_shared_connection(&request, Arc::clone(&grant))
+                    .map_err(error_code)?;
+                match pool
+                    .prepare_shared_http2(&mut request, &grant)
+                    .map_err(error_code)?
+                {
+                    Some(sender) => PreparedHttpClientRequest::Http2(sender, pool.timeouts()),
+                    None => PreparedHttpClientRequest::Complete(
+                        pool.request(request.clone(), Arc::clone(&grant))
+                            .map_err(error_code)?,
+                    ),
+                }
+            }
+            #[cfg(not(feature = "http3"))]
+            {
+                pool.ensure_shared_connection(&request, Arc::clone(&grant))
+                    .map_err(error_code)?;
+                match pool
+                    .prepare_shared_http2(&mut request, &grant)
+                    .map_err(error_code)?
+                {
+                    Some(sender) => PreparedHttpClientRequest::Http2(sender, pool.timeouts()),
+                    None => PreparedHttpClientRequest::Complete(
+                        pool.request(request.clone(), Arc::clone(&grant))
+                            .map_err(error_code)?,
+                    ),
                 }
             }
         };
-        let (sender, timeouts) = prepared.expect("shared HTTP/2 preparation has a sender");
-        let response = sender.send(request, &grant, timeouts);
-        let _pool_permit = client.gate.acquire().map_err(|error| match error {
-            crate::sync_primitives::SemaphoreError::Cancelled => 7,
-            _ => 0,
-        })?;
-        let mut pool = client
-            .pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let response = match response {
-            Ok(response) => {
-                pool.finish_shared_http2(&origin, &request_url, &response);
-                response
-            }
-            Err(error) => {
-                if matches!(
-                    error,
-                    crate::http_runtime::HttpRuntimeError::Transport
-                        | crate::http_runtime::HttpRuntimeError::Protocol
-                ) {
-                    pool.discard_shared_http2(&origin);
+        let response = match prepared {
+            PreparedHttpClientRequest::Complete(response) => response,
+            PreparedHttpClientRequest::Http2(sender, timeouts) => {
+                let response = sender.send(request, &grant, timeouts);
+                let _pool_permit = client.gate.acquire().map_err(|error| match error {
+                    crate::sync_primitives::SemaphoreError::Cancelled => 7,
+                    _ => 0,
+                })?;
+                let mut pool = client
+                    .pool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match response {
+                    Ok(response) => {
+                        pool.finish_shared_http2(&origin, &request_url, &response);
+                        response
+                    }
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            crate::http_runtime::HttpRuntimeError::Transport
+                                | crate::http_runtime::HttpRuntimeError::Protocol
+                        ) {
+                            pool.discard_shared_http2(&origin);
+                        }
+                        return Err(error_code(error));
+                    }
                 }
-                return Err(error_code(error));
+            }
+            #[cfg(feature = "http3")]
+            PreparedHttpClientRequest::Http3(session, timeouts, request) => {
+                let response = crate::http_runtime::HttpClientPool::request_http3_session(
+                    request,
+                    Arc::clone(&grant),
+                    session,
+                    timeouts,
+                );
+                let _pool_permit = client.gate.acquire().map_err(|error| match error {
+                    crate::sync_primitives::SemaphoreError::Cancelled => 7,
+                    _ => 0,
+                })?;
+                let mut pool = client
+                    .pool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match response {
+                    Ok(response) => {
+                        pool.finish_shared_http3(&request_url, &response);
+                        response
+                    }
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            crate::http_runtime::HttpRuntimeError::Transport
+                                | crate::http_runtime::HttpRuntimeError::Protocol
+                        ) {
+                            pool.discard_shared_http3(&origin);
+                        }
+                        return Err(error_code(error));
+                    }
+                }
             }
         };
         invalidate_cached_uris_after_write(
@@ -2633,9 +3245,14 @@ pub unsafe extern "C" fn zirk_http_client_request(
             response.status,
             &response.headers,
         );
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_client_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
-    .unwrap_or_else(failure);
+    .unwrap_or_else(client_failure);
     if !out.is_null() {
         unsafe { out.write(outcome) };
     }
@@ -2655,7 +3272,7 @@ pub unsafe extern "C" fn zirk_http_client_request_stream(
     callback: Option<HttpUploadProducerCallback>,
     context: *mut c_void,
     producer_errors: i32,
-    out: *mut HttpGetOut,
+    out: *mut HttpClientRequestOut,
 ) {
     let outcome = (|| {
         let client = client_by_handle(handle).ok_or(0)?;
@@ -2747,10 +3364,11 @@ pub unsafe extern "C" fn zirk_http_client_request_stream(
                         response.status,
                         &response.headers,
                     );
-                    return successful_response(
+                    return successful_client_response(
                         response.status.as_u16(),
                         &response.headers,
                         &response.body,
+                        response.protocol,
                     );
                 }
             }
@@ -2789,9 +3407,14 @@ pub unsafe extern "C" fn zirk_http_client_request_stream(
             response.status,
             &response.headers,
         );
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_client_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })();
-    let outcome = outcome.unwrap_or_else(failure);
+    let outcome = outcome.unwrap_or_else(client_failure);
     if !out.is_null() {
         unsafe { out.write(outcome) };
     }
@@ -2808,12 +3431,13 @@ pub unsafe extern "C" fn zirk_http_websocket_connect(
     url: *mut c_void,
     origin: *mut c_void,
     subprotocols: *mut c_void,
+    http3: bool,
     out: *mut HttpClientCreateOut,
 ) {
     if out.is_null() {
         return;
     }
-    let outcome = unsafe { connect_http_websocket(url, origin, subprotocols, None, false) };
+    let outcome = unsafe { connect_http_websocket(url, origin, subprotocols, None, false, http3) };
     unsafe { out.write(client_create_out(outcome)) };
 }
 
@@ -2830,6 +3454,7 @@ pub unsafe extern "C" fn zirk_http_websocket_connect_with_trust_roots(
     subprotocols: *mut c_void,
     roots: *mut c_void,
     allow_tls12: bool,
+    http3: bool,
     out: *mut HttpClientCreateOut,
 ) {
     if out.is_null() {
@@ -2837,7 +3462,9 @@ pub unsafe extern "C" fn zirk_http_websocket_connect_with_trust_roots(
     }
     let outcome = (|| {
         let roots = unsafe { copy_http_trust_roots(roots) }.ok_or(3)?;
-        unsafe { connect_http_websocket(url, origin, subprotocols, Some(roots), allow_tls12) }
+        unsafe {
+            connect_http_websocket(url, origin, subprotocols, Some(roots), allow_tls12, http3)
+        }
     })();
     unsafe { out.write(client_create_out(outcome)) };
 }
@@ -2848,6 +3475,7 @@ unsafe fn connect_http_websocket(
     subprotocols: *mut c_void,
     roots_der: Option<Vec<Vec<u8>>>,
     allow_tls12: bool,
+    force_http3: bool,
 ) -> Result<u64, i32> {
     (|| {
         let url = unsafe { crate::string::borrow(url) }.ok_or(0)?;
@@ -2882,26 +3510,54 @@ unsafe fn connect_http_websocket(
             "" => None,
             value => Some(value),
         };
-        let socket = match roots_der {
-            Some(roots) => {
-                crate::http_runtime::HttpWebSocket::connect_with_options_and_trust_roots(
+        let socket = if force_http3 {
+            #[cfg(feature = "http3")]
+            {
+                if allow_tls12 {
+                    return Err(3);
+                }
+                let tls_config = roots_der
+                    .map(|roots| {
+                        crate::network_transport::client_tls_config_with_trust_roots(roots, false)
+                    })
+                    .transpose()
+                    .map_err(|_| 3)?;
+                crate::http_runtime::HttpWebSocket::connect_http3_with_options(
                     &url,
                     grant,
                     crate::http_runtime::HttpTimeouts::default(),
                     origin,
                     &protocols,
-                    roots,
-                    allow_tls12,
+                    tls_config,
                 )
             }
-            None => crate::http_runtime::HttpWebSocket::connect_with_options(
-                &url,
-                grant,
-                crate::http_runtime::HttpTimeouts::default(),
-                None,
-                origin,
-                &protocols,
-            ),
+            #[cfg(not(feature = "http3"))]
+            {
+                let _ = (roots_der, allow_tls12, url, grant, origin, protocols);
+                return Err(error_code(crate::http_runtime::HttpRuntimeError::Protocol));
+            }
+        } else {
+            match roots_der {
+                Some(roots) => {
+                    crate::http_runtime::HttpWebSocket::connect_with_options_and_trust_roots(
+                        &url,
+                        grant,
+                        crate::http_runtime::HttpTimeouts::default(),
+                        origin,
+                        &protocols,
+                        roots,
+                        allow_tls12,
+                    )
+                }
+                None => crate::http_runtime::HttpWebSocket::connect_with_options(
+                    &url,
+                    grant,
+                    crate::http_runtime::HttpTimeouts::default(),
+                    None,
+                    origin,
+                    &protocols,
+                ),
+            }
         }
         .map_err(error_code)?;
         let mut sockets = http_websockets()
@@ -3262,7 +3918,12 @@ pub unsafe extern "C" fn zirk_http_get(url: *const c_void, out: *mut HttpGetOut)
         let request = HttpRequestValues::new(HttpMethod::Get, url);
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -3289,7 +3950,12 @@ pub unsafe extern "C" fn zirk_http_get_cached(url: *const c_void, out: *mut Http
         let partition = cache_partition(verified.project_id(), verified.manifest_digest());
         let request = HttpRequestValues::new(HttpMethod::Get, url);
         let response = send_cached(request, Arc::clone(&grant), &partition).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -3354,6 +4020,7 @@ fn send_cached(
                 body: response.body,
                 body_stream: None,
                 body_producer: None,
+                protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
             });
         }
         cache.revalidation_candidate(&request, partition, now)
@@ -3368,6 +4035,7 @@ fn send_cached(
                 body: Vec::new(),
                 body_stream: None,
                 body_producer: None,
+                protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
             });
         }
         Some(false) => {}
@@ -3411,6 +4079,7 @@ fn send_cached(
             body: cached.body.clone(),
             body_stream: None,
             body_producer: None,
+            protocol: crate::http_runtime::HttpProtocolVersion::Unknown,
         };
         let mut cache = cache
             .lock()
@@ -3500,7 +4169,12 @@ pub unsafe extern "C" fn zirk_http_request(
         let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -3562,7 +4236,12 @@ pub unsafe extern "C" fn zirk_http_request_cached(
         let verified = crate::permissions::verified_grant().ok_or(1)?;
         let partition = cache_partition(verified.project_id(), verified.manifest_digest());
         let response = send_cached(request, Arc::clone(&grant), &partition).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -3616,7 +4295,12 @@ pub unsafe extern "C" fn zirk_http_request_secret(
         let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4236,7 +4920,12 @@ pub unsafe extern "C" fn zirk_http_head(url: *const c_void, out: *mut HttpGetOut
         let request = HttpRequestValues::new(HttpMethod::Head, url);
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4275,7 +4964,12 @@ pub unsafe extern "C" fn zirk_http_query(
         validate_client_request(&request)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4318,7 +5012,12 @@ pub unsafe extern "C" fn zirk_http_query_with_content_type(
         validate_client_request(&request)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4354,7 +5053,12 @@ pub unsafe extern "C" fn zirk_http_post(
         request.set_body(body).map_err(|_| 4)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4391,7 +5095,12 @@ pub unsafe extern "C" fn zirk_http_post_json(
         request.set_body(body).map_err(|_| 4)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {
@@ -4425,7 +5134,12 @@ pub unsafe extern "C" fn zirk_http_post_bytes(
         request.set_body(body).map_err(|_| 4)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
-        successful_response(response.status.as_u16(), &response.headers, &response.body)
+        successful_response(
+            response.status.as_u16(),
+            &response.headers,
+            &response.body,
+            response.protocol,
+        )
     })()
     .unwrap_or_else(failure);
     if !out.is_null() {

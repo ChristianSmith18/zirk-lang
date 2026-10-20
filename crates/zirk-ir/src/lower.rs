@@ -8813,6 +8813,110 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
+                        "std.net.tls.connect_with_alpn" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("configured TLS connect returns a typed Result enum")
+                            };
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [endpoint, roots_der, allow_tls12, protocols] =
+                                arguments.as_slice()
+                            else {
+                                unreachable!("TLS options connect has exactly four arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsConnectWithAlpn {
+                                    endpoint: *endpoint,
+                                    roots_der: *roots_der,
+                                    allow_tls12: *allow_tls12,
+                                    protocols: *protocols,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tcp.upgrade_tls" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TCP TLS upgrade returns a typed Result enum")
+                            };
+                            let layout = &self.module.enums[enum_id as usize];
+                            let stream_field = layout.variants[0][0];
+                            let IrType::Object(stream_class_id) =
+                                layout.fields[stream_field as usize].ty
+                            else {
+                                unreachable!("TCP TLS upgrade success contains TLSStream")
+                            };
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [tcp_handle, endpoint, roots_der, allow_tls12, protocols] =
+                                arguments.as_slice()
+                            else {
+                                unreachable!("TCP TLS upgrade has five arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsUpgradeTcp {
+                                    tcp_handle: *tcp_handle,
+                                    endpoint: *endpoint,
+                                    roots_der: *roots_der,
+                                    allow_tls12: *allow_tls12,
+                                    protocols: *protocols,
+                                    enum_id,
+                                    stream_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.connect_with_client_identity" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS connect returns a typed Result enum")
+                            };
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [
+                                endpoint,
+                                roots_der,
+                                certificate_chain_der,
+                                private_key_der,
+                                allow_tls12,
+                                protocols,
+                            ] = arguments.as_slice()
+                            else {
+                                unreachable!("TLS client identity has six arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsConnectWithClientIdentity {
+                                    endpoint: *endpoint,
+                                    roots_der: *roots_der,
+                                    certificate_chain_der: *certificate_chain_der,
+                                    private_key_der: *private_key_der,
+                                    allow_tls12: *allow_tls12,
+                                    protocols: *protocols,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
                         "std.net.tls.listen" | "std.net.tls.listen_http" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("TLS listen returns a typed Result enum")
@@ -8848,6 +8952,41 @@ impl<'a> FunctionLowering<'a> {
                                     private_key_der: *private_key_der,
                                     allow_tls12: *allow_tls12,
                                     http_alpn: binding == "std.net.tls.listen_http",
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.listen_with_client_auth" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("mutual-auth TLS listen returns a typed Result enum")
+                            };
+                            let argument_types = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.ir_type(self.checked.expr_types[&argument.value.span()])
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = self.lower_held_args(&e.args, &argument_types);
+                            let [
+                                endpoint,
+                                certificate_chain_der,
+                                private_key_der,
+                                client_roots_der,
+                                allow_tls12,
+                            ] = arguments.as_slice()
+                            else {
+                                unreachable!("mutual-auth TLS listen has five arguments")
+                            };
+                            self.emit(
+                                InstKind::NetworkTlsListenWithClientAuth {
+                                    endpoint: *endpoint,
+                                    certificate_chain_der: *certificate_chain_der,
+                                    private_key_der: *private_key_der,
+                                    client_roots_der: *client_roots_der,
+                                    allow_tls12: *allow_tls12,
                                     enum_id,
                                 },
                                 returns,
@@ -8958,6 +9097,30 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
+                        "std.net.tls.negotiated_alpn" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS negotiated ALPN returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsNegotiatedAlpn { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.tls.peer_certificate_sha256" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("TLS peer certificate query returns a typed Result")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkTlsPeerCertificateSha256 { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
                         "std.net.address.parse" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("IP address parsing returns a typed Result enum")
@@ -8993,6 +9156,16 @@ impl<'a> FunctionLowering<'a> {
                             let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
                             self.emit(
                                 InstKind::NetworkDnsResolve { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.interfaces.snapshot" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("interface snapshot returns a typed Result enum")
+                            };
+                            self.emit(
+                                InstKind::NetworkInterfacesSnapshot { enum_id },
                                 returns,
                                 span,
                             )
@@ -9121,6 +9294,304 @@ impl<'a> FunctionLowering<'a> {
                                 self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
                             self.emit(InstKind::NetworkTcpIsClosed { handle }, returns, span)
                         }
+                        "std.net.udp.connect" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP connect returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkUdpConnect { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.bind" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP bind returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkUdpBind { endpoint, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.send" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP send returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::NetworkUdpSend {
+                                    handle,
+                                    bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.send_to" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP send_to returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            let endpoint = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkUdpSendTo {
+                                    handle,
+                                    bytes,
+                                    endpoint,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.send_broadcast" | "std.net.udp.send_multicast" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP special send returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            let endpoint = self.lower_expr_as(&e.args[2].value, IrType::String);
+                            let kind = if binding == "std.net.udp.send_broadcast" {
+                                InstKind::NetworkUdpSendBroadcast {
+                                    handle,
+                                    bytes,
+                                    endpoint,
+                                    enum_id,
+                                }
+                            } else {
+                                InstKind::NetworkUdpSendMulticast {
+                                    handle,
+                                    bytes,
+                                    endpoint,
+                                    enum_id,
+                                }
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.udp.join_multicast" | "std.net.udp.leave_multicast" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP multicast membership returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let group = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let kind = if binding == "std.net.udp.join_multicast" {
+                                InstKind::NetworkUdpJoinMulticast {
+                                    handle,
+                                    group,
+                                    enum_id,
+                                }
+                            } else {
+                                InstKind::NetworkUdpLeaveMulticast {
+                                    handle,
+                                    group,
+                                    enum_id,
+                                }
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.udp.receive" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP receive returns a typed result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let max_bytes =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64));
+                            let value_field = self.module.enums[enum_id as usize].variants[0][0];
+                            let IrType::Object(datagram_class_id) =
+                                self.module.enums[enum_id as usize].fields[value_field as usize].ty
+                            else {
+                                unreachable!("UDP receive returns a UDPDatagram value")
+                            };
+                            self.emit(
+                                InstKind::NetworkUdpReceive {
+                                    handle,
+                                    max_bytes,
+                                    enum_id,
+                                    datagram_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.close" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP close returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::NetworkUdpClose { handle, enum_id }, returns, span)
+                        }
+                        "std.net.udp.local_address" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("UDP local_address returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkUdpLocalAddress { handle, enum_id },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.udp.is_closed" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::NetworkUdpIsClosed { handle }, returns, span)
+                        }
+                        "std.net.local.connect" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local connect returns a typed Result enum")
+                            };
+                            let result = &self.module.enums[enum_id as usize];
+                            let value_field = result.variants[0][0];
+                            let IrType::Object(stream_class_id) =
+                                result.fields[value_field as usize].ty
+                            else {
+                                unreachable!("local connect success contains LocalStream")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            self.emit(
+                                InstKind::NetworkLocalConnect {
+                                    endpoint,
+                                    enum_id,
+                                    stream_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.local.bind" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local bind returns a typed Result enum")
+                            };
+                            let result = &self.module.enums[enum_id as usize];
+                            let value_field = result.variants[0][0];
+                            let IrType::Object(listener_class_id) =
+                                result.fields[value_field as usize].ty
+                            else {
+                                unreachable!("local bind success contains LocalListener")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let remove_stale =
+                                self.lower_expr_as(&e.args[1].value, IrType::Boolean);
+                            self.emit(
+                                InstKind::NetworkLocalBind {
+                                    endpoint,
+                                    remove_stale,
+                                    enum_id,
+                                    listener_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.local.accept" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local accept returns a typed Result enum")
+                            };
+                            let result = &self.module.enums[enum_id as usize];
+                            let value_field = result.variants[0][0];
+                            let IrType::Object(stream_class_id) =
+                                result.fields[value_field as usize].ty
+                            else {
+                                unreachable!("local accept success contains LocalStream")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkLocalAccept {
+                                    handle,
+                                    enum_id,
+                                    stream_class_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.local.read" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local read returns a typed result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let max_bytes =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkLocalRead {
+                                    handle,
+                                    max_bytes,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.local.write" | "std.net.local.write_all" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local write returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let bytes = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::NetworkLocalWrite {
+                                    handle,
+                                    bytes,
+                                    enum_id,
+                                    write_all: binding == "std.net.local.write_all",
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.net.local.shutdown"
+                        | "std.net.local.close_stream"
+                        | "std.net.local.close_listener" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("local resource operation returns a typed Result enum")
+                            };
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let kind = match binding.as_str() {
+                                "std.net.local.shutdown" => {
+                                    InstKind::NetworkLocalShutdown { handle, enum_id }
+                                }
+                                "std.net.local.close_stream" => InstKind::NetworkLocalClose {
+                                    handle,
+                                    enum_id,
+                                    listener: false,
+                                },
+                                _ => InstKind::NetworkLocalClose {
+                                    handle,
+                                    enum_id,
+                                    listener: true,
+                                },
+                            };
+                            self.emit(kind, returns, span)
+                        }
+                        "std.net.local.is_stream_closed" | "std.net.local.is_listener_closed" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::NetworkLocalIsClosed {
+                                    handle,
+                                    listener: binding == "std.net.local.is_listener_closed",
+                                },
+                                returns,
+                                span,
+                            )
+                        }
                         "std.net.tcp.peer_address" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("TCP peer address returns a typed Result enum")
@@ -9226,12 +9697,15 @@ impl<'a> FunctionLowering<'a> {
                                 self.lower_expr_as(&e.args[2].value, IrType::Int(IntWidth::I64));
                             let response_idle_timeout_ms =
                                 self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
+                            let protocol_code =
+                                self.lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I32));
                             self.emit(
                                 InstKind::HttpClientCreateWithOptions {
                                     max_origins,
                                     connect_timeout_ms,
                                     response_headers_timeout_ms,
                                     response_idle_timeout_ms,
+                                    protocol_code,
                                     enum_id,
                                 },
                                 returns,
@@ -9251,6 +9725,8 @@ impl<'a> FunctionLowering<'a> {
                                 self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
                             let response_idle_timeout_ms =
                                 self.lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
+                            let protocol_code =
+                                self.lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::I32));
                             self.emit(
                                 InstKind::HttpClientCreateWithTrustRoots {
                                     roots,
@@ -9258,6 +9734,7 @@ impl<'a> FunctionLowering<'a> {
                                     connect_timeout_ms,
                                     response_headers_timeout_ms,
                                     response_idle_timeout_ms,
+                                    protocol_code,
                                     enum_id,
                                 },
                                 returns,
@@ -9364,6 +9841,8 @@ impl<'a> FunctionLowering<'a> {
                                     .lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
                                 let response_idle_timeout_ms = self
                                     .lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::I64));
+                                let protocol_code = self
+                                    .lower_expr_as(&e.args[6].value, IrType::Int(IntWidth::I32));
                                 self.emit(
                                     InstKind::HttpClientCreateWithProxyAndTrustRoots {
                                         proxy_url,
@@ -9373,6 +9852,7 @@ impl<'a> FunctionLowering<'a> {
                                         connect_timeout_ms,
                                         response_headers_timeout_ms,
                                         response_idle_timeout_ms,
+                                        protocol_code,
                                         enum_id,
                                     },
                                     returns,
@@ -9387,6 +9867,8 @@ impl<'a> FunctionLowering<'a> {
                                     .lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::I64));
                                 let response_idle_timeout_ms = self
                                     .lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::I64));
+                                let protocol_code = self
+                                    .lower_expr_as(&e.args[5].value, IrType::Int(IntWidth::I32));
                                 self.emit(
                                     InstKind::HttpClientCreateWithProxy {
                                         proxy_url,
@@ -9395,6 +9877,7 @@ impl<'a> FunctionLowering<'a> {
                                         connect_timeout_ms,
                                         response_headers_timeout_ms,
                                         response_idle_timeout_ms,
+                                        protocol_code,
                                         enum_id,
                                     },
                                     returns,
@@ -9472,7 +9955,9 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
-                        "std.http.client_enable_cookies" | "std.http.client_close" => {
+                        "std.http.client_enable_cookies"
+                        | "std.http.client_clear_cookies"
+                        | "std.http.client_close" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("HTTP client action returns a typed Result enum")
                             };
@@ -9482,13 +9967,14 @@ impl<'a> FunctionLowering<'a> {
                                 InstKind::HttpClientAction {
                                     handle,
                                     close: binding == "std.http.client_close",
+                                    clear_cookies: binding == "std.http.client_clear_cookies",
                                     enum_id,
                                 },
                                 returns,
                                 span,
                             )
                         }
-                        "std.http.websocket.connect" => {
+                        "std.http.websocket.connect" | "std.http.websocket.connect_http3" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("WebSocket connect returns a typed Result enum")
                             };
@@ -9500,6 +9986,7 @@ impl<'a> FunctionLowering<'a> {
                                     url,
                                     origin,
                                     subprotocols,
+                                    http3: binding == "std.http.websocket.connect_http3",
                                     enum_id,
                                 },
                                 returns,
@@ -9522,6 +10009,31 @@ impl<'a> FunctionLowering<'a> {
                                     subprotocols,
                                     roots_der,
                                     allow_tls12,
+                                    http3: false,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.websocket.connect_http3_with_trust_roots" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("WebSocket connect returns a typed Result enum")
+                            };
+                            let url = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let origin = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let subprotocols = self.lower_expr(&e.args[2].value);
+                            let roots_der = self.lower_expr(&e.args[3].value);
+                            let allow_tls12 =
+                                self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+                            self.emit(
+                                InstKind::HttpWebSocketConnectWithTrustRoots {
+                                    url,
+                                    origin,
+                                    subprotocols,
+                                    roots_der,
+                                    allow_tls12,
+                                    http3: true,
                                     enum_id,
                                 },
                                 returns,
@@ -10137,6 +10649,50 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
+                        "std.http.server.serve_http3" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP/3 server dispatch returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let certificate_chain_der = self.lower_expr(&e.args[1].value);
+                            let private_key_der = self.lower_expr(&e.args[2].value);
+                            let max_requests =
+                                self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::U64));
+                            let max_connections =
+                                self.lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::U64));
+                            let callback = self.lower_expr(&e.args[5].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP/3 server handler is a callable")
+                            };
+                            let callback_signature =
+                                &self.module.closures[callback_layout as usize];
+                            let [IrType::Object(request_class_id)] =
+                                callback_signature.params.as_slice()
+                            else {
+                                unreachable!("HTTP/3 handler takes one HTTPRequest")
+                            };
+                            let IrType::Object(response_class_id) = callback_signature.returns
+                            else {
+                                unreachable!("HTTP/3 handler returns an HTTPResponse")
+                            };
+                            self.emit(
+                                InstKind::HttpServerServeHttp3 {
+                                    endpoint,
+                                    certificate_chain_der,
+                                    private_key_der,
+                                    max_requests,
+                                    max_connections,
+                                    callback,
+                                    callback_layout,
+                                    request_class_id: *request_class_id,
+                                    response_class_id,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
                         "std.http.server.serve_once"
                         | "std.http.server.serve_tls_once"
                         | "std.http.server.serve_tls_requests" => {
@@ -10252,6 +10808,52 @@ impl<'a> FunctionLowering<'a> {
                                     allow_missing_origin,
                                     protocols,
                                     max_messages,
+                                    callback,
+                                    callback_layout,
+                                    websocket_class_id: *websocket_class_id,
+                                    enum_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.http.server.websocket_serve_http3_once" => {
+                            let IrType::Enum(enum_id) = returns else {
+                                unreachable!("HTTP/3 WebSocket server returns a typed Result enum")
+                            };
+                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let certificate_chain_der = self.lower_expr(&e.args[1].value);
+                            let private_key_der = self.lower_expr(&e.args[2].value);
+                            let path = self.lower_expr_as(&e.args[3].value, IrType::String);
+                            let allowed_origins = self.lower_expr(&e.args[4].value);
+                            let allow_missing_origin =
+                                self.lower_expr_as(&e.args[5].value, IrType::Boolean);
+                            let protocols = self.lower_expr(&e.args[6].value);
+                            let max_messages =
+                                self.lower_expr_as(&e.args[7].value, IrType::Int(IntWidth::U64));
+                            let idle_timeout_ms =
+                                self.lower_expr_as(&e.args[8].value, IrType::Int(IntWidth::U64));
+                            let callback = self.lower_expr(&e.args[9].value);
+                            let IrType::Callable(callback_layout) = self.type_of_operand(callback)
+                            else {
+                                unreachable!("HTTP/3 WebSocket handler is a callable")
+                            };
+                            let signature = &self.module.closures[callback_layout as usize];
+                            let [IrType::Object(websocket_class_id)] = signature.params.as_slice()
+                            else {
+                                unreachable!("HTTP/3 WebSocket handler takes one session")
+                            };
+                            self.emit(
+                                InstKind::HttpServerWebSocketServeHttp3Once {
+                                    endpoint,
+                                    certificate_chain_der,
+                                    private_key_der,
+                                    path,
+                                    allowed_origins,
+                                    allow_missing_origin,
+                                    protocols,
+                                    max_messages,
+                                    idle_timeout_ms,
                                     callback,
                                     callback_layout,
                                     websocket_class_id: *websocket_class_id,

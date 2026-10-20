@@ -251,7 +251,39 @@ native backend is delivered.
 
 GitHub Actions run [39359107965](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39359107965), on compiler revision `b28daa73379a527159c9c303509632bd3ecf413a` (runtime/test revision `73a8bbccbf878b85f6b093de4e279cc033d73d22`), passes the full serial workspace suite on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64. Each target passes 155/155 compiled-Zirk CLI E2E tests. `zirk-runtime` passes 498 tests with 3 ignored and `zirk-runtime-core` passes 164 with 1 ignored on macOS and both Linux targets; Windows passes 500/3 ignored and 165/1 ignored, respectively. Generic response-producer backpressure fixtures pass for HTTP/1.1 and HTTP/2 on Unix and HTTP/2 on Windows; the Windows HTTP/1.1 socket-buffer fixture remains Unix-gated.
 
-This closes the native execution gates for the implemented `std.environment`, `std.net`, and `std.http` preview: exact-grant environment access, TCP/DNS/TLS, HTTP/1.1, TLS HTTP/2, QUERY, streaming and the listed server protocols. UDP, local sockets, interface enumeration, HTTP/3/QUIC, browser networking, additional secret sinks, and the broader Phase 7 standard-library surface remain incomplete or excluded. Historical validation notes above describe the evidence available at their stated dates; this entry is the current target status.
+This closes the native execution gates for the archived `deliver-std-http-and-environment` baseline: exact-grant environment access, TCP/DNS/TLS, HTTP/1.1, TLS HTTP/2, QUERY, streaming and the listed server protocols. The UDP, local sockets, interface enumeration, HTTP/3/QUIC, browser networking, and secret-redaction follow-ups below describe the separate active extension; the broader Phase 7 standard-library surface remains incomplete.
+
+## Current networking extension evidence (working tree, 2026-10-20)
+
+The active OpenSpec change `complete-stdlib-networking-and-http` adds UDP, local
+IPC, interface snapshots, extended TLS, optional HTTP/3 and HTTP/3 WebSocket,
+and injected browser Fetch. These changes are still uncommitted and have not
+passed the complete native CI matrix. Evidence gathered on macOS ARM64:
+
+- `cargo test -p zirk-runtime local_transport::tests -- --nocapture`: 5 local
+  transport tests passed; the Zirk CLI Unix-socket exchange E2E passed.
+- `python3 scripts/test-http3-websocket-public-api.py`: HTTP/3 WebSocket echo
+  and close passed between two compiled Zirk programs and in both directions
+  with independent `aioquic` 1.7.0 peers; an unapproved Origin receives 403
+  before the Zirk handler runs. The Zirk HTTP/3 client also completed GET and
+  QUERY against aioquic, with the peer validating the query body and content
+  type and the client confirming the negotiated HTTP/3 response protocol.
+- `cargo test -p zirk-runtime --features http3 --lib
+  http3_transport::tests -- --test-threads=1`: 10 HTTP/3 transport tests passed.
+- `scripts/test-browser-http-fetch.sh`: the `wasm32-unknown-unknown` build and
+  injected-Fetch checks passed, including GET, POST, QUERY, origin denial,
+  body limits, CORS failure, and cancellation.
+- `cargo test -p zirk-browser -- --test-threads=1`: 41 passed, 1 ignored.
+  `cargo deny check all` and `cargo audit` passed for the current lockfile.
+- `cargo check -p zirk-runtime --features http3 --target
+  x86_64-pc-windows-msvc` could not run on this Mac because the Windows C
+  compiler/SDK is unavailable (`assert.h` was not found). This is not Windows
+  build evidence; the configured Windows CI runner must provide it.
+
+Linux runtime results, Windows runtime results, the full four-target feature
+matrix, cross-target independent HTTP/3 peer conformance, final linked
+application size, and website synchronization remain pending. These local
+results do not close OpenSpec tasks 1.2.4, 1.4, 1.6.4, 2.1-2.8, or 4.3-4.6.
 
 ## Phase 7b — Functional style
 

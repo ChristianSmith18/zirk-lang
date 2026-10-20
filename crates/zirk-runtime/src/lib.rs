@@ -55,8 +55,11 @@ mod decimal;
 mod duration;
 pub mod environment;
 mod exceptions;
+#[cfg(feature = "http3")]
+mod http3_transport;
 pub mod http_api;
 pub mod http_runtime;
+pub mod local_transport;
 // The cooperative executor (`ADR-017`): `zirk_rt_run_main` drives it, and
 // `fase-5-structured-tasks` will add the `task` / `await` C-ABI surface.
 #[allow(dead_code)]
@@ -77,6 +80,7 @@ mod native_slice;
 pub mod network_api;
 #[allow(dead_code)] // Runtime spike; public transport bindings are delivered in later tasks.
 mod network_future;
+pub(crate) mod network_interfaces;
 pub mod network_transport;
 pub mod permissions;
 // The `parallel` CPU-region worker pool (`ADR-019`, `parallel-cpu-regions`).

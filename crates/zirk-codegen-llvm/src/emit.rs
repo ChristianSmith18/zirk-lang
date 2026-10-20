@@ -5207,6 +5207,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
             }
 
+            ir::InstKind::NetworkInterfacesSnapshot { enum_id } => {
+                let (kind, error, _, payload) =
+                    self.call_network_out(self.runtime.network_interfaces_snapshot, &[]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
+            }
+
             ir::InstKind::NetworkIpAddressParse { value, enum_id } => {
                 let value = self.operand(*value);
                 let (kind, error, _, payload) =
@@ -5281,6 +5287,132 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
             }
 
+            ir::InstKind::NetworkTlsConnectWithAlpn {
+                endpoint,
+                roots_der,
+                allow_tls12,
+                protocols,
+                enum_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let roots_der = self.operand(*roots_der);
+                let allow_tls12 = self.operand(*allow_tls12);
+                let protocols = self.operand(*protocols);
+                let out_ty = self.network_out_struct();
+                let out = self.aligned_alloca(out_ty.into(), "network.tls.alpn.out");
+                self.builder
+                    .build_call(
+                        self.runtime.network_tls_connect_with_alpn,
+                        &[
+                            endpoint.into(),
+                            roots_der.into(),
+                            allow_tls12.into(),
+                            protocols.into(),
+                            out.into(),
+                        ],
+                        "network.tls.alpn",
+                    )
+                    .expect("call configured TLS ALPN connect");
+                let loaded = self
+                    .builder
+                    .build_load(out_ty, out, "network.tls.alpn.load")
+                    .expect("load configured TLS ALPN result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(loaded, 0, "network.tls.alpn.kind")
+                    .expect("extract configured TLS ALPN result kind")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(loaded, 1, "network.tls.alpn.error")
+                    .expect("extract configured TLS ALPN result error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(loaded, 2, "network.tls.alpn.handle")
+                    .expect("extract configured TLS ALPN handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkTlsUpgradeTcp {
+                tcp_handle,
+                endpoint,
+                roots_der,
+                allow_tls12,
+                protocols,
+                enum_id,
+                stream_class_id,
+            } => {
+                let (kind, error, stream, _) = self.call_network_out(
+                    self.runtime.network_tls_upgrade_tcp,
+                    &[
+                        self.operand(*tcp_handle).into(),
+                        self.operand(*endpoint).into(),
+                        self.operand(*roots_der).into(),
+                        self.operand(*allow_tls12).into(),
+                        self.operand(*protocols).into(),
+                    ],
+                );
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *stream_class_id,
+                    kind,
+                    error,
+                    stream,
+                ))
+            }
+
+            ir::InstKind::NetworkTlsConnectWithClientIdentity {
+                endpoint,
+                roots_der,
+                certificate_chain_der,
+                private_key_der,
+                allow_tls12,
+                protocols,
+                enum_id,
+            } => {
+                let out_ty = self.network_out_struct();
+                let out = self.aligned_alloca(out_ty.into(), "network.tls.identity.out");
+                self.builder
+                    .build_call(
+                        self.runtime.network_tls_connect_with_client_identity,
+                        &[
+                            self.operand(*endpoint).into(),
+                            self.operand(*roots_der).into(),
+                            self.operand(*certificate_chain_der).into(),
+                            self.operand(*private_key_der).into(),
+                            self.operand(*allow_tls12).into(),
+                            self.operand(*protocols).into(),
+                            out.into(),
+                        ],
+                        "network.tls.identity",
+                    )
+                    .expect("call mutual TLS client connect");
+                let loaded = self
+                    .builder
+                    .build_load(out_ty, out, "network.tls.identity.load")
+                    .expect("load mutual TLS result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(loaded, 0, "network.tls.identity.kind")
+                    .expect("extract mutual TLS result kind")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(loaded, 1, "network.tls.identity.error")
+                    .expect("extract mutual TLS result error")
+                    .into_int_value();
+                let handle = self
+                    .builder
+                    .build_extract_value(loaded, 2, "network.tls.identity.handle")
+                    .expect("extract mutual TLS stream handle")
+                    .into_int_value();
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
             ir::InstKind::NetworkTlsListen {
                 endpoint,
                 certificate_chain_der,
@@ -5304,6 +5436,32 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         endpoint.into(),
                         certificate_chain_der.into(),
                         private_key_der.into(),
+                        allow_tls12.into(),
+                    ],
+                );
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkTlsListenWithClientAuth {
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                client_roots_der,
+                allow_tls12,
+                enum_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let certificate_chain_der = self.operand(*certificate_chain_der);
+                let private_key_der = self.operand(*private_key_der);
+                let client_roots_der = self.operand(*client_roots_der);
+                let allow_tls12 = self.operand(*allow_tls12);
+                let (kind, error, handle, _) = self.call_network_out(
+                    self.runtime.network_tls_listen_with_client_auth,
+                    &[
+                        endpoint.into(),
+                        certificate_chain_der.into(),
+                        private_key_der.into(),
+                        client_roots_der.into(),
                         allow_tls12.into(),
                     ],
                 );
@@ -5356,6 +5514,33 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let (kind, error, _, address) =
                     self.call_network_out(self.runtime.network_tls_peer_address, &[handle.into()]);
                 Some(self.build_tagged_outcome(*enum_id, kind, error, address, 0, 1))
+            }
+
+            ir::InstKind::NetworkTlsNegotiatedAlpn { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, protocol) = self
+                    .call_network_out(self.runtime.network_tls_negotiated_alpn, &[handle.into()]);
+                Some(
+                    self.build_nullable_string_tagged_outcome(
+                        *enum_id, kind, error, protocol, 0, 1,
+                    ),
+                )
+            }
+
+            ir::InstKind::NetworkTlsPeerCertificateSha256 { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, fingerprint) = self.call_network_out(
+                    self.runtime.network_tls_peer_certificate_sha256,
+                    &[handle.into()],
+                );
+                Some(self.build_nullable_string_tagged_outcome(
+                    *enum_id,
+                    kind,
+                    error,
+                    fingerprint,
+                    0,
+                    1,
+                ))
             }
 
             ir::InstKind::NetworkTlsRead {
@@ -5546,6 +5731,325 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(value.into())
             }
 
+            ir::InstKind::NetworkUdpConnect { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, handle, _) =
+                    self.call_network_out(self.runtime.network_udp_connect, &[endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkUdpBind { endpoint, enum_id } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, handle, _) =
+                    self.call_network_out(self.runtime.network_udp_bind, &[endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, handle))
+            }
+
+            ir::InstKind::NetworkUdpSend {
+                handle,
+                bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let (kind, error, written, _) = self.call_network_out(
+                    self.runtime.network_udp_send,
+                    &[handle.into(), bytes.into()],
+                );
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, written))
+            }
+
+            ir::InstKind::NetworkUdpSendTo {
+                handle,
+                bytes,
+                endpoint,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, written, _) = self.call_network_out(
+                    self.runtime.network_udp_send_to,
+                    &[handle.into(), bytes.into(), endpoint.into()],
+                );
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, written))
+            }
+
+            ir::InstKind::NetworkUdpSendBroadcast {
+                handle,
+                bytes,
+                endpoint,
+                enum_id,
+            }
+            | ir::InstKind::NetworkUdpSendMulticast {
+                handle,
+                bytes,
+                endpoint,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let endpoint = self.operand(*endpoint);
+                let function = if matches!(
+                    instruction.kind,
+                    ir::InstKind::NetworkUdpSendBroadcast { .. }
+                ) {
+                    self.runtime.network_udp_send_broadcast
+                } else {
+                    self.runtime.network_udp_send_multicast
+                };
+                let (kind, error, written, _) = self
+                    .call_network_out(function, &[handle.into(), bytes.into(), endpoint.into()]);
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, written))
+            }
+
+            ir::InstKind::NetworkUdpJoinMulticast {
+                handle,
+                group,
+                enum_id,
+            }
+            | ir::InstKind::NetworkUdpLeaveMulticast {
+                handle,
+                group,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let group = self.operand(*group);
+                let function = if matches!(
+                    instruction.kind,
+                    ir::InstKind::NetworkUdpJoinMulticast { .. }
+                ) {
+                    self.runtime.network_udp_join_multicast
+                } else {
+                    self.runtime.network_udp_leave_multicast
+                };
+                let (kind, error, _, _) =
+                    self.call_network_out(function, &[handle.into(), group.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkUdpReceive {
+                handle,
+                max_bytes,
+                enum_id,
+                datagram_class_id,
+            } => {
+                let handle = self.operand(*handle);
+                let max_bytes = self.operand(*max_bytes);
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.ptr_type(AddressSpace::default()).into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "network.udp.receive.out");
+                self.builder
+                    .build_call(
+                        self.runtime.network_udp_receive,
+                        &[handle.into(), max_bytes.into(), out.into()],
+                        "network.udp.receive",
+                    )
+                    .expect("call UDP receive runtime operation");
+                let loaded = self
+                    .builder
+                    .build_load(out_ty, out, "network.udp.receive.load")
+                    .expect("load UDP datagram result")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(loaded, 0, "network.udp.receive.kind")
+                    .expect("extract UDP result kind")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(loaded, 1, "network.udp.receive.error")
+                    .expect("extract UDP result error")
+                    .into_int_value();
+                let bytes = self
+                    .builder
+                    .build_extract_value(loaded, 2, "network.udp.receive.bytes")
+                    .expect("extract UDP payload")
+                    .into_pointer_value();
+                let peer = self
+                    .builder
+                    .build_extract_value(loaded, 3, "network.udp.receive.peer")
+                    .expect("extract UDP peer endpoint")
+                    .into_pointer_value();
+                Some(self.build_udp_datagram_tagged_outcome(
+                    *enum_id,
+                    *datagram_class_id,
+                    kind,
+                    error,
+                    bytes,
+                    peer,
+                ))
+            }
+
+            ir::InstKind::NetworkUdpClose { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_udp_close, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkUdpLocalAddress { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, address) =
+                    self.call_network_out(self.runtime.network_udp_local_address, &[handle.into()]);
+                Some(self.build_tagged_outcome(*enum_id, kind, error, address, 0, 1))
+            }
+
+            ir::InstKind::NetworkUdpIsClosed { handle } => {
+                let handle = self.operand(*handle);
+                let value = self
+                    .builder
+                    .build_call(
+                        self.runtime.network_udp_is_closed,
+                        &[handle.into()],
+                        "udp.is_closed",
+                    )
+                    .expect("call UDP is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("UDP is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
+            ir::InstKind::NetworkLocalConnect {
+                endpoint,
+                enum_id,
+                stream_class_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let (kind, error, handle, _) =
+                    self.call_network_out(self.runtime.network_local_connect, &[endpoint.into()]);
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *stream_class_id,
+                    kind,
+                    error,
+                    handle,
+                ))
+            }
+
+            ir::InstKind::NetworkLocalBind {
+                endpoint,
+                remove_stale,
+                enum_id,
+                listener_class_id,
+            } => {
+                let endpoint = self.operand(*endpoint);
+                let remove_stale = self.operand(*remove_stale);
+                let (kind, error, handle, _) = self.call_network_out(
+                    self.runtime.network_local_bind,
+                    &[endpoint.into(), remove_stale.into()],
+                );
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *listener_class_id,
+                    kind,
+                    error,
+                    handle,
+                ))
+            }
+
+            ir::InstKind::NetworkLocalAccept {
+                handle,
+                enum_id,
+                stream_class_id,
+            } => {
+                let handle = self.operand(*handle);
+                let (kind, error, stream_handle, _) =
+                    self.call_network_out(self.runtime.network_local_accept, &[handle.into()]);
+                Some(self.build_u64_object_tagged_outcome(
+                    *enum_id,
+                    *stream_class_id,
+                    kind,
+                    error,
+                    stream_handle,
+                ))
+            }
+
+            ir::InstKind::NetworkLocalRead {
+                handle,
+                max_bytes,
+                enum_id,
+            } => {
+                let handle = self.operand(*handle);
+                let max_bytes = self.operand(*max_bytes);
+                let (kind, error, _, payload) = self.call_network_out(
+                    self.runtime.network_local_read,
+                    &[handle.into(), max_bytes.into()],
+                );
+                Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 2))
+            }
+
+            ir::InstKind::NetworkLocalWrite {
+                handle,
+                bytes,
+                enum_id,
+                write_all,
+            } => {
+                let handle = self.operand(*handle);
+                let bytes = self.operand(*bytes);
+                let function = if *write_all {
+                    self.runtime.network_local_write_all
+                } else {
+                    self.runtime.network_local_write
+                };
+                let (kind, error, written, _) =
+                    self.call_network_out(function, &[handle.into(), bytes.into()]);
+                if *write_all {
+                    Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+                } else {
+                    Some(self.build_u64_tagged_outcome(*enum_id, kind, error, written))
+                }
+            }
+
+            ir::InstKind::NetworkLocalShutdown { handle, enum_id } => {
+                let handle = self.operand(*handle);
+                let (kind, error, _, _) =
+                    self.call_network_out(self.runtime.network_local_shutdown, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkLocalClose {
+                handle,
+                enum_id,
+                listener,
+            } => {
+                let handle = self.operand(*handle);
+                let function = if *listener {
+                    self.runtime.network_local_close_listener
+                } else {
+                    self.runtime.network_local_close_stream
+                };
+                let (kind, error, _, _) = self.call_network_out(function, &[handle.into()]);
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::NetworkLocalIsClosed { handle, listener } => {
+                let handle = self.operand(*handle);
+                let function = if *listener {
+                    self.runtime.network_local_listener_is_closed
+                } else {
+                    self.runtime.network_local_stream_is_closed
+                };
+                let value = self
+                    .builder
+                    .build_call(function, &[handle.into()], "local.is_closed")
+                    .expect("call local resource is_closed")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("local resource is_closed returns a Boolean")
+                    .into_int_value();
+                Some(value.into())
+            }
+
             ir::InstKind::HttpGet {
                 url,
                 cached,
@@ -5560,6 +6064,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -5605,13 +6110,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.get.headers")
                     .expect("extract HTTP response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpRequest {
@@ -5636,6 +6147,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -5699,13 +6211,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.request.headers")
                     .expect("extract HTTP request response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (response_body, response_headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpClientCreate {
@@ -5756,6 +6274,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 connect_timeout_ms,
                 response_headers_timeout_ms,
                 response_idle_timeout_ms,
+                protocol_code,
                 enum_id,
             } => {
                 let max_origins = self.operand(*max_origins).into_int_value();
@@ -5764,6 +6283,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.operand(*response_headers_timeout_ms).into_int_value();
                 let response_idle_timeout_ms =
                     self.operand(*response_idle_timeout_ms).into_int_value();
+                let protocol_code = self.operand(*protocol_code).into_int_value();
                 let out_ty = self.context.struct_type(
                     &[
                         self.context.i32_type().into(),
@@ -5775,12 +6295,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let out = self.aligned_alloca(out_ty.into(), "http.client.options.out");
                 self.builder
                     .build_call(
-                        self.runtime.http_client_create_with_options,
+                        self.runtime.http_client_create_with_protocol_options,
                         &[
                             max_origins.into(),
                             connect_timeout_ms.into(),
                             response_headers_timeout_ms.into(),
                             response_idle_timeout_ms.into(),
+                            protocol_code.into(),
                             out.into(),
                         ],
                         "http.client.options.create",
@@ -5814,6 +6335,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 connect_timeout_ms,
                 response_headers_timeout_ms,
                 response_idle_timeout_ms,
+                protocol_code,
                 enum_id,
             } => {
                 let roots = self.operand(*roots);
@@ -5823,6 +6345,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.operand(*response_headers_timeout_ms).into_int_value();
                 let response_idle_timeout_ms =
                     self.operand(*response_idle_timeout_ms).into_int_value();
+                let protocol_code = self.operand(*protocol_code).into_int_value();
                 let out_ty = self.context.struct_type(
                     &[
                         self.context.i32_type().into(),
@@ -5841,6 +6364,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             connect_timeout_ms.into(),
                             response_headers_timeout_ms.into(),
                             response_idle_timeout_ms.into(),
+                            protocol_code.into(),
                             out.into(),
                         ],
                         "http.client.create.roots",
@@ -5875,6 +6399,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 connect_timeout_ms,
                 response_headers_timeout_ms,
                 response_idle_timeout_ms,
+                protocol_code,
                 enum_id,
             } => {
                 let proxy_url = self.operand(*proxy_url);
@@ -5885,6 +6410,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.operand(*response_headers_timeout_ms).into_int_value();
                 let response_idle_timeout_ms =
                     self.operand(*response_idle_timeout_ms).into_int_value();
+                let protocol_code = self.operand(*protocol_code).into_int_value();
                 let out_ty = self.context.struct_type(
                     &[
                         self.context.i32_type().into(),
@@ -5904,6 +6430,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             connect_timeout_ms.into(),
                             response_headers_timeout_ms.into(),
                             response_idle_timeout_ms.into(),
+                            protocol_code.into(),
                             out.into(),
                         ],
                         "http.client.create.proxy",
@@ -5939,6 +6466,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 connect_timeout_ms,
                 response_headers_timeout_ms,
                 response_idle_timeout_ms,
+                protocol_code,
                 enum_id,
             } => {
                 let proxy_url = self.operand(*proxy_url);
@@ -5950,6 +6478,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.operand(*response_headers_timeout_ms).into_int_value();
                 let response_idle_timeout_ms =
                     self.operand(*response_idle_timeout_ms).into_int_value();
+                let protocol_code = self.operand(*protocol_code).into_int_value();
                 let out_ty = self.context.struct_type(
                     &[
                         self.context.i32_type().into(),
@@ -5970,6 +6499,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             connect_timeout_ms.into(),
                             response_headers_timeout_ms.into(),
                             response_idle_timeout_ms.into(),
+                            protocol_code.into(),
                             out.into(),
                         ],
                         "http.client.create.proxy.roots",
@@ -6020,6 +6550,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6069,13 +6600,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.client.request.headers")
                     .expect("extract HTTP client response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.client.request.protocol")
+                    .expect("extract HTTP client negotiated protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpClientRequestStream {
@@ -6154,6 +6691,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         ptr.into(),
                         ptr.into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6208,18 +6746,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.client.upload.headers")
                     .expect("extract reusable HTTP headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.client.upload.protocol")
+                    .expect("extract reusable HTTP negotiated protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, response_headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpClientAction {
                 handle,
                 close,
+                clear_cookies,
                 enum_id,
             } => {
                 let handle = self.operand(*handle).into_int_value();
@@ -6233,6 +6778,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let out = self.aligned_alloca(out_ty.into(), "http.client.action.out");
                 let function = if *close {
                     self.runtime.http_client_close
+                } else if *clear_cookies {
+                    self.runtime.http_client_clear_cookies
                 } else {
                     self.runtime.http_client_enable_cookies
                 };
@@ -6260,6 +6807,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 url,
                 origin,
                 subprotocols,
+                http3,
                 enum_id,
             } => {
                 let out_ty = self.context.struct_type(
@@ -6278,6 +6826,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             self.operand(*url).into(),
                             self.operand(*origin).into(),
                             self.operand(*subprotocols).into(),
+                            self.context
+                                .bool_type()
+                                .const_int(u64::from(*http3), false)
+                                .into(),
                             out.into(),
                         ],
                         "http.websocket.connect",
@@ -6311,6 +6863,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 subprotocols,
                 roots_der,
                 allow_tls12,
+                http3,
                 enum_id,
             } => {
                 let out_ty = self.context.struct_type(
@@ -6331,6 +6884,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             self.operand(*subprotocols).into(),
                             self.operand(*roots_der).into(),
                             self.operand(*allow_tls12).into(),
+                            self.context
+                                .bool_type()
+                                .const_int(u64::from(*http3), false)
+                                .into(),
                             out.into(),
                         ],
                         "http.websocket.roots.connect",
@@ -6555,6 +7112,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6604,13 +7162,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.secret_request.headers")
                     .expect("extract HTTP secret sink response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (response_body, response_headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpHead {
@@ -6626,6 +7190,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6667,13 +7232,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.head.headers")
                     .expect("extract HTTP response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpQuery {
@@ -6691,6 +7262,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6732,13 +7304,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.query.headers")
                     .expect("extract HTTP response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpQueryWithContentType {
@@ -6758,6 +7336,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6799,13 +7378,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.query.custom.headers")
                     .expect("extract custom HTTP QUERY response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpPost {
@@ -6823,6 +7408,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6864,13 +7450,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.post.headers")
                     .expect("extract HTTP response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpPostJson {
@@ -6888,6 +7480,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6929,13 +7522,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.post.headers")
                     .expect("extract HTTP response headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpPostBytes {
@@ -6953,6 +7552,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i32_type().into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
                         self.context.ptr_type(AddressSpace::default()).into(),
+                        self.context.i32_type().into(),
                     ],
                     false,
                 );
@@ -6994,13 +7594,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_extract_value(value, 4, "http.post.bytes.headers")
                     .expect("extract HTTP byte POST headers")
                     .into_pointer_value();
-                Some(self.build_http_get_result(
+                let protocol = self
+                    .builder
+                    .build_extract_value(value, 5, "http.response.protocol")
+                    .expect("extract HTTP response protocol")
+                    .into_int_value();
+                Some(self.build_http_get_result_with_protocol(
                     *enum_id,
                     *response_class_id,
                     kind,
                     error,
                     status,
                     (response_body, headers),
+                    protocol,
                 ))
             }
             ir::InstKind::HttpGetStream {
@@ -8297,6 +8903,128 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("pop HTTP handler roots");
                 Some(self.build_void_tagged_outcome(*enum_id, kind, error))
             }
+            ir::InstKind::HttpServerServeHttp3 {
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                max_requests,
+                max_connections,
+                callback,
+                callback_layout,
+                request_class_id,
+                response_class_id,
+                enum_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let capture_value = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http3.server.capture")
+                    .expect("extract HTTP/3 handler captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http3.server.capture.root")
+                    .expect("allocate HTTP/3 handler root");
+                self.builder
+                    .build_store(capture_root, capture_value)
+                    .expect("store HTTP/3 handler root");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http3.server.roots")
+                    .expect("allocate HTTP/3 server roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http3.server.root.entry",
+                    )
+                }
+                .expect("index HTTP/3 handler root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register HTTP/3 handler root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http3.server.push.roots",
+                    )
+                    .expect("root HTTP/3 handler captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http3.server.context")
+                    .expect("allocate HTTP/3 callback context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store HTTP/3 callback context");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http3.server.out");
+                let thunk = self.http_server_handler_thunk(
+                    *callback_layout,
+                    *request_class_id,
+                    *response_class_id,
+                );
+                self.builder
+                    .build_call(
+                        self.runtime.http_server_serve_http3,
+                        &[
+                            self.operand(*endpoint).into(),
+                            self.operand(*certificate_chain_der).into(),
+                            self.operand(*private_key_der).into(),
+                            self.operand(*max_requests).into(),
+                            self.operand(*max_connections).into(),
+                            thunk.as_global_value().as_pointer_value().into(),
+                            context.into(),
+                            out.into(),
+                        ],
+                        "http3.server.serve",
+                    )
+                    .expect("serve HTTP/3 requests");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http3.server.out.value")
+                    .expect("load HTTP/3 server outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http3.server.kind")
+                    .expect("extract HTTP/3 server tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http3.server.error")
+                    .expect("extract HTTP/3 server error")
+                    .into_int_value();
+                let count = self
+                    .builder
+                    .build_extract_value(value, 2, "http3.server.count")
+                    .expect("extract HTTP/3 request count")
+                    .into_int_value();
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http3.server.pop.roots")
+                    .expect("pop HTTP/3 handler roots");
+                Some(self.build_u64_tagged_outcome(*enum_id, kind, error, count))
+            }
             ir::InstKind::HttpServerWebSocketServeOnce {
                 stream_handle,
                 secure,
@@ -8422,6 +9150,134 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 self.builder
                     .build_call(self.runtime.pop_frame, &[], "http.websocket.pop.roots")
                     .expect("pop WebSocket handler roots");
+                Some(self.build_void_tagged_outcome(*enum_id, kind, error))
+            }
+
+            ir::InstKind::HttpServerWebSocketServeHttp3Once {
+                endpoint,
+                certificate_chain_der,
+                private_key_der,
+                path,
+                allowed_origins,
+                allow_missing_origin,
+                protocols,
+                max_messages,
+                idle_timeout_ms,
+                callback,
+                callback_layout,
+                websocket_class_id,
+                enum_id,
+            } => {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                let callable = self.operand(*callback).into_struct_value();
+                let capture_value = self
+                    .builder
+                    .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "http3.ws.capture")
+                    .expect("extract HTTP/3 WebSocket captures")
+                    .into_pointer_value();
+                let capture_root = self
+                    .builder
+                    .build_alloca(ptr, "http3.ws.capture.root")
+                    .expect("allocate HTTP/3 WebSocket capture root");
+                self.builder
+                    .build_store(capture_root, capture_value)
+                    .expect("store HTTP/3 WebSocket capture root");
+                let roots_ty = ptr.array_type(1);
+                let roots = self
+                    .builder
+                    .build_alloca(roots_ty, "http3.ws.roots")
+                    .expect("allocate HTTP/3 WebSocket roots");
+                let root_entry = unsafe {
+                    self.builder.build_gep(
+                        roots_ty,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_zero(),
+                        ],
+                        "http3.ws.root.entry",
+                    )
+                }
+                .expect("index HTTP/3 WebSocket capture root");
+                self.builder
+                    .build_store(root_entry, capture_root)
+                    .expect("register HTTP/3 WebSocket capture root");
+                self.builder
+                    .build_call(
+                        self.runtime.push_frame,
+                        &[
+                            roots.into(),
+                            self.context.i64_type().const_int(1, false).into(),
+                        ],
+                        "http3.ws.push.roots",
+                    )
+                    .expect("root HTTP/3 WebSocket handler captures");
+
+                let context_ty = self
+                    .context
+                    .struct_type(&[callable.get_type().into()], false);
+                let context = self
+                    .builder
+                    .build_alloca(context_ty, "http3.ws.context")
+                    .expect("allocate HTTP/3 WebSocket callback context");
+                self.builder
+                    .build_store(context, callable)
+                    .expect("store HTTP/3 WebSocket callback context");
+                let out_ty = self.context.struct_type(
+                    &[
+                        self.context.i32_type().into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let out = self.aligned_alloca(out_ty.into(), "http3.ws.server.out");
+                let thunk =
+                    self.http_websocket_server_handler_thunk(*callback_layout, *websocket_class_id);
+                self.builder
+                    .build_call(
+                        self.runtime.http_server_websocket_serve_http3_once,
+                        &[
+                            self.operand(*endpoint).into(),
+                            self.operand(*certificate_chain_der).into(),
+                            self.operand(*private_key_der).into(),
+                            self.operand(*path).into(),
+                            self.operand(*allowed_origins).into(),
+                            self.builder
+                                .build_int_z_extend(
+                                    self.operand(*allow_missing_origin).into_int_value(),
+                                    self.context.i32_type(),
+                                    "http3.ws.allow.missing",
+                                )
+                                .expect("extend origin flag")
+                                .into(),
+                            self.operand(*protocols).into(),
+                            self.operand(*max_messages).into(),
+                            self.operand(*idle_timeout_ms).into(),
+                            thunk.as_global_value().as_pointer_value().into(),
+                            context.into(),
+                            out.into(),
+                        ],
+                        "http3.ws.server.serve",
+                    )
+                    .expect("serve HTTP/3 WebSocket session");
+                let value = self
+                    .builder
+                    .build_load(out_ty, out, "http3.ws.server.out.value")
+                    .expect("load HTTP/3 WebSocket server outcome")
+                    .into_struct_value();
+                let kind = self
+                    .builder
+                    .build_extract_value(value, 0, "http3.ws.server.kind")
+                    .expect("extract HTTP/3 WebSocket server tag")
+                    .into_int_value();
+                let error = self
+                    .builder
+                    .build_extract_value(value, 1, "http3.ws.server.error")
+                    .expect("extract HTTP/3 WebSocket server error")
+                    .into_int_value();
+                self.builder
+                    .build_call(self.runtime.pop_frame, &[], "http3.ws.pop.roots")
+                    .expect("pop HTTP/3 WebSocket handler roots");
                 Some(self.build_void_tagged_outcome(*enum_id, kind, error))
             }
 
@@ -11283,7 +12139,120 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .into()
     }
 
-    fn build_http_get_result(
+    fn build_udp_datagram_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        class_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        bytes: PointerValue<'ctx>,
+        peer: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let rooted_bytes = self
+            .builder
+            .build_alloca(pointer_type, "udp.datagram.bytes.root")
+            .expect("allocate UDP payload root slot");
+        self.builder
+            .build_store(rooted_bytes, bytes)
+            .expect("root UDP payload across allocation");
+        let rooted_peer = self
+            .builder
+            .build_alloca(pointer_type, "udp.datagram.peer.root")
+            .expect("allocate UDP peer root slot");
+        self.builder
+            .build_store(rooted_peer, peer)
+            .expect("root UDP peer across allocation");
+
+        let layout = self.module.objects[class_id as usize].clone();
+        let object_type = object_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let object = self
+            .builder
+            .build_call(
+                self.runtime.alloc,
+                &[
+                    object_type
+                        .size_of()
+                        .expect("UDPDatagram object size")
+                        .into(),
+                    object_type.get_alignment().into(),
+                ],
+                "udp.datagram.object",
+            )
+            .expect("allocate UDPDatagram")
+            .try_as_basic_value()
+            .basic()
+            .expect("runtime allocator returns a pointer")
+            .into_pointer_value();
+        self.builder
+            .build_store(object, self.descriptors[class_id as usize])
+            .expect("write UDPDatagram type descriptor");
+        for (field_index, rooted, name) in [
+            (0, rooted_bytes, "udp.datagram.bytes"),
+            (1, rooted_peer, "udp.datagram.peer"),
+        ] {
+            let field = self
+                .builder
+                .build_struct_gep(
+                    object_type,
+                    object,
+                    OBJECT_HEADER_FIELDS + field_index,
+                    &format!("{name}.field"),
+                )
+                .expect("address UDPDatagram field");
+            let value = self
+                .builder
+                .build_load(pointer_type, rooted, &format!("{name}.load"))
+                .expect("load rooted UDPDatagram field");
+            self.builder
+                .build_store(field, value)
+                .expect("store UDPDatagram field");
+        }
+
+        let result_layout = self.module.enums[enum_id as usize].clone();
+        let result_type = enum_struct(
+            self.context,
+            &result_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let built = self
+            .builder
+            .build_insert_value(result_type.const_zero(), kind, 0, "udp.receive.kind")
+            .expect("insert UDP result tag")
+            .into_struct_value();
+        let value_field = result_layout.variants[0][0];
+        let built = self
+            .builder
+            .build_insert_value(
+                built,
+                object,
+                value_field + ENUM_HEADER_FIELDS,
+                "udp.receive.datagram",
+            )
+            .expect("insert UDPDatagram")
+            .into_struct_value();
+        let error_field = result_layout.variants[1][0];
+        self.builder
+            .build_insert_value(
+                built,
+                error,
+                error_field + ENUM_HEADER_FIELDS,
+                "udp.receive.error",
+            )
+            .expect("insert UDP receive error")
+            .into_struct_value()
+            .into()
+    }
+
+    fn build_http_get_result_with_protocol(
         &mut self,
         enum_id: u32,
         response_class_id: u32,
@@ -11291,6 +12260,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         error: IntValue<'ctx>,
         status: IntValue<'ctx>,
         response_buffers: (PointerValue<'ctx>, PointerValue<'ctx>),
+        protocol: IntValue<'ctx>,
     ) -> BasicValueEnum<'ctx> {
         let (body, headers) = response_buffers;
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -11360,7 +12330,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         let layout = &self.module.objects[response_class_id as usize];
         // HTTPResponse adds consumption, client stream, and server producer
         // state plus optional SSE heartbeat metadata after buffered values.
-        debug_assert_eq!(layout.fields.len(), 7);
+        debug_assert_eq!(layout.fields.len(), 8);
         let object_type = object_struct(
             self.context,
             layout,
@@ -11433,6 +12403,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.builder
             .build_store(headers_field, rooted_headers_value)
             .expect("store HTTPResponse headers");
+        let protocol_field = self
+            .builder
+            .build_struct_gep(
+                object_type,
+                object,
+                OBJECT_HEADER_FIELDS + 7,
+                "http.response.protocol",
+            )
+            .expect("address HTTPResponse protocol field");
+        self.builder
+            .build_store(protocol_field, protocol)
+            .expect("store HTTPResponse protocol");
         self.builder
             .build_call(self.runtime.pop_frame, &[], "http.get.pop.roots")
             .expect("pop temporary HTTP response roots");
@@ -11894,6 +12876,61 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .expect("insert the error field")
             .into_struct_value();
         built.into()
+    }
+
+    /// Builds `Result<String?, E>` from an optional native string pointer.
+    /// Nullable values use an explicit presence flag in Zirk's ABI.
+    fn build_nullable_string_tagged_outcome(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        payload: PointerValue<'ctx>,
+        value_variant: u32,
+        error_variant: u32,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let nullable_type = self
+            .llvm_type(ir::IrType::Nullable(ir::Nullable::String))
+            .expect("nullable String has an LLVM representation")
+            .into_struct_type();
+        let present = self
+            .builder
+            .build_is_not_null(payload, "tls.alpn.present")
+            .expect("compare optional ALPN pointer");
+        let nullable = self
+            .builder
+            .build_insert_value(nullable_type.get_undef(), present, 0, "tls.alpn.presence")
+            .expect("insert nullable ALPN presence")
+            .into_struct_value();
+        let nullable = self
+            .builder
+            .build_insert_value(nullable, payload, 1, "tls.alpn.value")
+            .expect("insert nullable ALPN string")
+            .into_struct_value();
+        let built = self
+            .builder
+            .build_insert_value(struct_type.const_zero(), kind, 0, "tls.alpn.kind")
+            .expect("insert TLS ALPN result discriminant")
+            .into_struct_value();
+        let value_field = layout.variants[value_variant as usize][0] + ENUM_HEADER_FIELDS;
+        let built = self
+            .builder
+            .build_insert_value(built, nullable, value_field, "tls.alpn.result")
+            .expect("insert nullable ALPN result")
+            .into_struct_value();
+        let error_field = layout.variants[error_variant as usize][0] + ENUM_HEADER_FIELDS;
+        self.builder
+            .build_insert_value(built, error, error_field, "tls.alpn.error")
+            .expect("insert TLS ALPN error")
+            .as_basic_value_enum()
     }
 
     /// Builds `Result<Boolean, EnvironmentError>` from an environment

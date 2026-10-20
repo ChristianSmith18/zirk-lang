@@ -206,6 +206,25 @@ fn merge_scopes(target: &mut PermissionScopes, source: &PermissionScopes) {
     target
         .network_listen
         .extend(source.network_listen.iter().cloned());
+    target
+        .network_udp_destinations
+        .extend(source.network_udp_destinations.iter().cloned());
+    target
+        .network_udp_listen
+        .extend(source.network_udp_listen.iter().cloned());
+    target
+        .network_udp_broadcast_destinations
+        .extend(source.network_udp_broadcast_destinations.iter().cloned());
+    target
+        .network_udp_multicast_groups
+        .extend(source.network_udp_multicast_groups.iter().cloned());
+    target
+        .network_local_connect
+        .extend(source.network_local_connect.iter().cloned());
+    target
+        .network_local_listen
+        .extend(source.network_local_listen.iter().cloned());
+    target.network_inspect_interfaces |= source.network_inspect_interfaces;
 }
 
 fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
@@ -215,6 +234,16 @@ fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
         environment_list_names: manifest.environment_permissions.list_names,
         network_connect: manifest.network_permissions.connect_origins.clone(),
         network_listen: manifest.network_permissions.listen_addresses.clone(),
+        network_udp_destinations: manifest.network_permissions.udp_destinations.clone(),
+        network_udp_listen: manifest.network_permissions.udp_listen_addresses.clone(),
+        network_udp_broadcast_destinations: manifest
+            .network_permissions
+            .udp_broadcast_destinations
+            .clone(),
+        network_udp_multicast_groups: manifest.network_permissions.udp_multicast_groups.clone(),
+        network_local_connect: manifest.network_permissions.local_connect_endpoints.clone(),
+        network_local_listen: manifest.network_permissions.local_listen_endpoints.clone(),
+        network_inspect_interfaces: manifest.network_permissions.inspect_interfaces,
     }
 }
 
@@ -403,6 +432,27 @@ pub fn print_scopes(scopes: &PermissionScopes) {
     for address in &scopes.network_listen {
         println!("  network.listen: {address}");
     }
+    for destination in &scopes.network_udp_destinations {
+        println!("  network.udp_send: {destination}");
+    }
+    for address in &scopes.network_udp_listen {
+        println!("  network.udp_listen: {address}");
+    }
+    for destination in &scopes.network_udp_broadcast_destinations {
+        println!("  network.udp_broadcast: {destination}");
+    }
+    for group in &scopes.network_udp_multicast_groups {
+        println!("  network.udp_multicast: {group}");
+    }
+    for endpoint in &scopes.network_local_connect {
+        println!("  network.local_connect: {endpoint}");
+    }
+    for endpoint in &scopes.network_local_listen {
+        println!("  network.local_listen: {endpoint}");
+    }
+    if scopes.network_inspect_interfaces {
+        println!("  network.inspect_interfaces: enabled");
+    }
 }
 
 fn print_scopes_indented(scopes: &PermissionScopes) {
@@ -420,6 +470,27 @@ fn print_scopes_indented(scopes: &PermissionScopes) {
     }
     for address in &scopes.network_listen {
         println!("    network.listen: {address}");
+    }
+    for destination in &scopes.network_udp_destinations {
+        println!("    network.udp_send: {destination}");
+    }
+    for address in &scopes.network_udp_listen {
+        println!("    network.udp_listen: {address}");
+    }
+    for destination in &scopes.network_udp_broadcast_destinations {
+        println!("    network.udp_broadcast: {destination}");
+    }
+    for group in &scopes.network_udp_multicast_groups {
+        println!("    network.udp_multicast: {group}");
+    }
+    for endpoint in &scopes.network_local_connect {
+        println!("    network.local_connect: {endpoint}");
+    }
+    for endpoint in &scopes.network_local_listen {
+        println!("    network.local_listen: {endpoint}");
+    }
+    if scopes.network_inspect_interfaces {
+        println!("    network.inspect_interfaces: enabled");
     }
 }
 

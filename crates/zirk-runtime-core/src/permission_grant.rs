@@ -10,7 +10,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-const GRANT_SCHEMA_VERSION: u32 = 1;
+const GRANT_SCHEMA_VERSION: u32 = 3;
 const MAX_GRANT_BYTES: usize = 64 * 1024;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -23,6 +23,20 @@ pub struct PermissionScopes {
     pub environment_list_names: bool,
     pub network_connect: BTreeSet<String>,
     pub network_listen: BTreeSet<String>,
+    #[serde(default)]
+    pub network_udp_destinations: BTreeSet<String>,
+    #[serde(default)]
+    pub network_udp_listen: BTreeSet<String>,
+    #[serde(default)]
+    pub network_udp_broadcast_destinations: BTreeSet<String>,
+    #[serde(default)]
+    pub network_udp_multicast_groups: BTreeSet<String>,
+    #[serde(default)]
+    pub network_local_connect: BTreeSet<String>,
+    #[serde(default)]
+    pub network_local_listen: BTreeSet<String>,
+    #[serde(default)]
+    pub network_inspect_interfaces: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +219,14 @@ mod tests {
             environment_list_names: false,
             network_connect: ["https://api.example:443".into()].into(),
             network_listen: BTreeSet::new(),
+            network_udp_destinations: ["udp://192.0.2.9:53".into()].into(),
+            network_udp_listen: ["127.0.0.1:5353".into()].into(),
+            network_udp_broadcast_destinations: ["udp://255.255.255.255:9000".into()].into(),
+            network_udp_multicast_groups: ["239.1.2.3".into()].into(),
+            network_local_connect: ["unix:///tmp/zirk.sock".into()].into(),
+            network_local_listen: ["npipe://./pipe/zirk".into()].into(),
+            network_inspect_interfaces: true,
+            ..PermissionScopes::default()
         }
     }
 

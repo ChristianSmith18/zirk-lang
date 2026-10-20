@@ -9,9 +9,9 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use zirk_diagnostics::Span;
+use zirk_diagnostics::{FileId, Span};
 use zirk_ir::{
     BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Nullable, Terminator,
     UnaryOp, ValueId, verify,
@@ -356,6 +356,111 @@ pub enum HeapEntry {
     },
 }
 
+fn decode_interpreter_http_headers(encoded: &[u8]) -> Result<Vec<(String, Vec<u8>)>, i32> {
+    use zirk_runtime_core::http_values::{Headers, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_COUNT};
+
+    let Some(count_bytes) = encoded.get(..4) else {
+        return Err(3);
+    };
+    let count = u32::from_le_bytes(count_bytes.try_into().map_err(|_| 3)?) as usize;
+    if count > MAX_HTTP_HEADER_COUNT {
+        return Err(12);
+    }
+    let mut cursor = 4usize;
+    let mut total_bytes = 0usize;
+    let mut validated = Headers::new();
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name_length = u16::from_le_bytes(
+            encoded
+                .get(cursor..cursor + 2)
+                .ok_or(3)?
+                .try_into()
+                .map_err(|_| 3)?,
+        );
+        cursor += 2;
+        let sensitive = name_length & 0x8000 != 0;
+        let name_length = usize::from(name_length & 0x7fff);
+        let value_length = u32::from_le_bytes(
+            encoded
+                .get(cursor..cursor + 4)
+                .ok_or(3)?
+                .try_into()
+                .map_err(|_| 3)?,
+        ) as usize;
+        cursor += 4;
+        let name = encoded.get(cursor..cursor + name_length).ok_or(3)?;
+        cursor += name_length;
+        let value = encoded.get(cursor..cursor + value_length).ok_or(3)?;
+        cursor += value_length;
+        total_bytes = total_bytes
+            .checked_add(name_length)
+            .and_then(|size| size.checked_add(value_length))
+            .ok_or(13)?;
+        if name.is_empty() || total_bytes > MAX_HTTP_HEADER_BYTES {
+            return Err(if name.is_empty() { 3 } else { 13 });
+        }
+        let name = std::str::from_utf8(name).map_err(|_| 3)?;
+        if if sensitive {
+            validated.append_sensitive(name, value)
+        } else {
+            validated.append(name, value)
+        }
+        .is_err()
+        {
+            return Err(3);
+        }
+        fields.push((name.to_owned(), value.to_vec()));
+    }
+    if cursor != encoded.len() {
+        return Err(3);
+    }
+    Ok(fields)
+}
+
+fn encode_interpreter_http_headers(names: &[String], values: &[String]) -> Option<Vec<u8>> {
+    use zirk_runtime_core::http_values::{Headers, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_COUNT};
+
+    if names.len() != values.len() || names.len() > MAX_HTTP_HEADER_COUNT {
+        return None;
+    }
+    let mut encoded = Vec::with_capacity(4);
+    encoded.extend_from_slice(&u32::try_from(names.len()).ok()?.to_le_bytes());
+    let mut headers = Headers::new();
+    for (name, value) in names.iter().zip(values) {
+        let sensitive = name.starts_with('\t');
+        let name = name.strip_prefix('\t').unwrap_or(name);
+        let name_bytes = name.as_bytes();
+        let value_bytes = value.as_bytes();
+        let next_size = encoded
+            .len()
+            .checked_add(6)?
+            .checked_add(name_bytes.len())?
+            .checked_add(value_bytes.len())?;
+        if name_bytes.is_empty()
+            || name_bytes.len() > 0x7fff
+            || value_bytes.len() > u32::MAX as usize
+            || next_size > MAX_HTTP_HEADER_BYTES + 6 * MAX_HTTP_HEADER_COUNT + 4
+        {
+            return None;
+        }
+        let result = if sensitive {
+            headers.append_sensitive(name, value_bytes)
+        } else {
+            headers.append(name, value_bytes)
+        };
+        if result.is_err() {
+            return None;
+        }
+        let name_length = name_bytes.len() as u16 | if sensitive { 0x8000 } else { 0 };
+        encoded.extend_from_slice(&name_length.to_le_bytes());
+        encoded.extend_from_slice(&u32::try_from(value_bytes.len()).ok()?.to_le_bytes());
+        encoded.extend_from_slice(name_bytes);
+        encoded.extend_from_slice(value_bytes);
+    }
+    Some(encoded)
+}
+
 /// Bounds for the opt-in execution trace. Exhausting any of them stops
 /// recording and marks the trace truncated; it never fails the program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +657,28 @@ pub enum OutputDestination {
     Stderr,
 }
 
+/// One bounded HTTP request handed from interpreted Zirk to an explicit
+/// embedding host. The interpreter never performs ambient browser I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpHostRequest {
+    pub id: u64,
+    pub method: String,
+    pub url: String,
+    pub cached: bool,
+    pub validate_json: bool,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Vec<u8>,
+}
+
+/// Buffered response returned by an embedding HTTP host when it resumes a
+/// suspended interpreter request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpHostResponse {
+    pub status: u16,
+    pub headers: Vec<(String, Vec<u8>)>,
+    pub body: Vec<u8>,
+}
+
 /// The entire authority surface granted to interpreted Zirk code.
 ///
 /// Hosts may reject an event when their own bounded sink is full. They expose
@@ -560,6 +687,14 @@ pub enum OutputDestination {
 pub trait InterpreterHost {
     fn emit(&mut self, event: OutputEvent) -> Result<(), HostOutputError>;
     fn is_cancelled(&self) -> bool;
+
+    /// Authorizes and accepts one HTTP effect for asynchronous completion.
+    /// Hosts without an explicitly scoped HTTP capability keep the default
+    /// denial. Returning `true` suspends execution and exposes the request in
+    /// `ExecutionResult::HttpSuspended`.
+    fn begin_http_request(&mut self, _request: &HttpHostRequest) -> bool {
+        false
+    }
 
     /// Reads more bytes from the host's bounded standard-input fixture into
     /// `buf`, returning the number of bytes read (`0` at end-of-stream), the
@@ -600,6 +735,8 @@ impl std::io::Read for HostReader<'_> {
 pub struct CapturedHost {
     events: Vec<OutputEvent>,
     cancelled: bool,
+    http_enabled: bool,
+    http_requests: Vec<HttpHostRequest>,
     /// A fixed byte sequence `read_stdin` serves from, for deterministic
     /// `stdin.read_*` interpreter unit tests
     /// (`add-stdin-stdout-standard-library`). Empty by default — browser
@@ -614,6 +751,19 @@ impl CapturedHost {
     }
     pub fn cancel(&mut self) {
         self.cancelled = true;
+    }
+
+    /// Enables deterministic capture of browser-compatible HTTP requests for
+    /// interpreter tests. It performs no network I/O.
+    pub fn with_http_capability() -> Self {
+        Self {
+            http_enabled: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn http_requests(&self) -> &[HttpHostRequest] {
+        &self.http_requests
     }
 
     /// Injects a fixed byte sequence for subsequent `read_stdin` calls to
@@ -648,6 +798,14 @@ impl InterpreterHost for CapturedHost {
         self.cancelled
     }
 
+    fn begin_http_request(&mut self, request: &HttpHostRequest) -> bool {
+        if !self.http_enabled {
+            return false;
+        }
+        self.http_requests.push(request.clone());
+        true
+    }
+
     fn read_stdin(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         std::io::Read::read(&mut self.stdin, buf)
     }
@@ -676,7 +834,20 @@ pub struct InternalFailure {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionResult {
-    Completed { value: Option<Value> },
+    /// Execution paused at an instruction boundary after consuming the
+    /// caller's cooperative slice. The same interpreter instance can resume
+    /// with `run_main_with_host_slice`; frames, heap, budgets and tracing stay
+    /// attached to that instance.
+    Yielded,
+    /// Execution is paused on an accepted asynchronous HTTP host effect.
+    /// Resume it with the matching request id; stale and duplicate responses
+    /// are rejected without changing the retained interpreter state.
+    HttpSuspended {
+        request: HttpHostRequest,
+    },
+    Completed {
+        value: Option<Value>,
+    },
     RuntimeFailure(RuntimeFailure),
     LimitFailure(LimitFailure),
     CapabilityFailure(CapabilityFailure),
@@ -687,12 +858,23 @@ pub enum ExecutionResult {
 /// run in a browser. It is intentionally non-mutating: callers can render all
 /// diagnostics, then decide whether to construct an execution.
 pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
+    preflight_with_standard_sources(module, &HashSet::new())
+}
+
+/// Like [`preflight`], while allowing the embedding host to identify trusted
+/// bundled standard-library source files. Unreachable functions from those
+/// files are omitted from the compatibility scan; reachable effects remain
+/// subject to the same fail-closed checks. User sources are always scanned.
+pub fn preflight_with_standard_sources(
+    module: &Module,
+    standard_sources: &HashSet<FileId>,
+) -> Result<(), Vec<CapabilityFailure>> {
     let mut failures = Vec::new();
     // Standard-library implementation bodies are bundled into every module,
-    // including stdin's browser-excluded host leaves. Follow ordinary direct
-    // calls from `main` so an unused bundled leaf is not treated as ambient
-    // authority. Other declarations retain the conservative whole-module
-    // review below, preserving the existing diagnostics for user code.
+    // including host leaves for targets such as the browser. Follow ordinary
+    // direct calls from `main` so an unused bundled leaf is not treated as
+    // ambient authority. Other declarations retain the conservative
+    // whole-module review below, preserving existing diagnostics for user code.
     let functions_by_name: std::collections::HashMap<&str, &zirk_ir::Function> = module
         .functions
         .iter()
@@ -721,6 +903,10 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
     let called_externs: std::collections::HashSet<&str> = module
         .functions
         .iter()
+        .filter(|function| {
+            !standard_sources.contains(&function.span.file)
+                || reachable.contains(function.name.as_str())
+        })
         .flat_map(|function| &function.blocks)
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| match &instruction.kind {
@@ -735,7 +921,7 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
         }
         failures.push(CapabilityFailure {
             code: "ZB001".into(),
-            message: format!("extern `{}` is unavailable in the browser", external.name),
+            message: browser_extern_capability_message(&external.name),
             span: None,
         });
         for ty in external
@@ -748,7 +934,8 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
         }
     }
     for function in &module.functions {
-        if function.name.starts_with("std.io.stdin.") && !reachable.contains(function.name.as_str())
+        if standard_sources.contains(&function.span.file)
+            && !reachable.contains(function.name.as_str())
         {
             continue;
         }
@@ -823,6 +1010,40 @@ pub fn preflight(module: &Module) -> Result<(), Vec<CapabilityFailure>> {
     }
 }
 
+/// Explains which host capability a bundled native binding needs. Browser
+/// execution stays fail-closed, but diagnostics should identify the actual
+/// boundary instead of exposing an implementation-only extern symbol.
+fn browser_extern_capability_message(name: &str) -> String {
+    if name.starts_with("zirk_environment_") {
+        return "process environment access is unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_http_") {
+        return "native std.http transport is unavailable in the browser; this run has no injected browser HTTP capability".into();
+    }
+    if name.starts_with("zirk_network_udp_") {
+        return "native UDP sockets are unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_local_") {
+        return "native local sockets are unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_tls_") {
+        return "native TLS sockets are unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_tcp_") {
+        return "native TCP sockets are unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_dns_") {
+        return "native DNS access is unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_interfaces_") {
+        return "network interface inspection is unavailable in the browser".into();
+    }
+    if name.starts_with("zirk_network_") {
+        return "native network host access is unavailable in the browser".into();
+    }
+    format!("extern `{name}` is unavailable in the browser")
+}
+
 /// Externs that need a host clock the browser boundary deliberately does not
 /// grant: `Date.today`, `Time.now_*` and `DateTime.now_*` are platform
 /// authority, not portable value semantics.
@@ -895,6 +1116,18 @@ fn excluded_feature(kind: &InstKind) -> (String, String) {
         "JobOutcomeWaitTake" | "ScopeOutcomeWaitTake" | "JobOutcomeTake" | "JobResultLoad" => {
             "managed completion outcomes"
         }
+        "EnvironmentGet" | "EnvironmentContains" | "EnvironmentListNames" => {
+            "process environment access"
+        }
+        "NetworkDnsResolve" => "native DNS access",
+        "NetworkInterfacesSnapshot" => "network interface inspection",
+        "NetworkIpAddressParse" => "IP address parsing",
+        "NetworkTcpOriginNormalize" => "TCP endpoint normalization",
+        name if name.starts_with("NetworkUdp") => "native UDP sockets",
+        name if name.starts_with("NetworkLocal") => "native local sockets",
+        name if name.starts_with("NetworkTls") => "native TLS sockets",
+        name if name.starts_with("NetworkTcp") => "native TCP sockets",
+        name if name.starts_with("Http") => "native HTTP transport",
         "TimerSleep" => "timers",
         "ResourceTransfer" => "resource transfer",
         "DependentFrom" => "dependent references",
@@ -939,6 +1172,16 @@ struct ThrowableInfo {
     suppressed: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingHttpContinuation {
+    request_id: u64,
+    frame_index: usize,
+    result: ValueId,
+    enum_id: u32,
+    response_class_id: u32,
+    span: Span,
+}
+
 impl From<String> for ExecutionFault {
     fn from(message: String) -> Self {
         Self::Internal(message)
@@ -960,9 +1203,14 @@ pub struct Interpreter<'module> {
     open_output_line: Option<OutputDestination>,
     output_truncated: bool,
     cancellation_shield_depth: u32,
+    main_started: bool,
+    main_paused: bool,
     pending_exception: Option<HeapId>,
     throwables: HashMap<HeapId, ThrowableInfo>,
     trace: Option<TraceState>,
+    bundled_standard_sources: HashSet<FileId>,
+    next_http_request_id: u64,
+    pending_http: Option<PendingHttpContinuation>,
 }
 
 impl<'module> Interpreter<'module> {
@@ -989,10 +1237,23 @@ impl<'module> Interpreter<'module> {
             open_output_line: None,
             output_truncated: false,
             cancellation_shield_depth: 0,
+            main_started: false,
+            main_paused: false,
             pending_exception: None,
             throwables: HashMap::new(),
             trace: None,
+            bundled_standard_sources: HashSet::new(),
+            next_http_request_id: 1,
+            pending_http: None,
         })
+    }
+
+    /// Marks compiler-bundled source files as trusted standard-library code
+    /// for dead-code compatibility scanning. The host must derive this set
+    /// from its immutable compiler bundle, never from user-provided source
+    /// labels. Reachable code is still fully preflighted.
+    pub fn set_bundled_standard_sources(&mut self, sources: impl IntoIterator<Item = FileId>) {
+        self.bundled_standard_sources = sources.into_iter().collect();
     }
 
     /// Enables the read-only execution trace. Tracing has no effect on
@@ -1047,32 +1308,92 @@ impl<'module> Interpreter<'module> {
     /// Executes `main` using the sole authority granted to interpreted code.
     /// The caller owns the output sink and cooperative cancellation state.
     pub fn run_main_with_host(&mut self, host: &mut dyn InterpreterHost) -> ExecutionResult {
-        if let Err(mut failures) = preflight(self.module) {
-            return ExecutionResult::CapabilityFailure(failures.remove(0));
+        loop {
+            let result = self.run_main_with_host_slice(host, self.limits.instructions);
+            match result {
+                ExecutionResult::Yielded => continue,
+                result => return result,
+            }
         }
-        let Some(function) = self
-            .module
-            .functions
-            .iter()
-            .position(|function| function.name == "main")
-        else {
+    }
+
+    /// Runs at most `max_steps` instruction or terminator steps before
+    /// returning `Yielded`. Call this method again on the same instance to
+    /// resume. The slice is a scheduling hint; the overall instruction limit,
+    /// heap, cancellation state, output budget, frames and trace remain
+    /// continuous. Browser hosts can use this boundary to return to the
+    /// JavaScript event loop while retaining the execution for an async host
+    /// effect.
+    pub fn run_main_with_host_slice(
+        &mut self,
+        host: &mut dyn InterpreterHost,
+        max_steps: u64,
+    ) -> ExecutionResult {
+        if max_steps == 0 {
             return ExecutionResult::InternalFailure(InternalFailure {
-                message: "verified module has no main entrypoint".into(),
+                message: "interpreter slice must allow at least one instruction".into(),
                 span: None,
             });
-        };
-        if host.is_cancelled() {
-            return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
         }
-        if let Err(failure) = self.push_frame(function, Vec::new(), None) {
-            return ExecutionResult::LimitFailure(failure);
+        if self.main_started && !self.main_paused {
+            return ExecutionResult::InternalFailure(InternalFailure {
+                message: "interpreter execution is not suspended".into(),
+                span: None,
+            });
+        }
+        if self.pending_http.is_some() {
+            if host.is_cancelled() {
+                self.pending_http = None;
+                self.main_paused = false;
+                return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
+            }
+            return self.internal("interpreter has an HTTP request awaiting a response", None);
+        }
+        self.main_paused = false;
+
+        if !self.main_started {
+            if let Err(mut failures) =
+                preflight_with_standard_sources(self.module, &self.bundled_standard_sources)
+            {
+                return ExecutionResult::CapabilityFailure(failures.remove(0));
+            }
+            let Some(function) = self
+                .module
+                .functions
+                .iter()
+                .position(|function| function.name == "main")
+            else {
+                return ExecutionResult::InternalFailure(InternalFailure {
+                    message: "verified module has no main entrypoint".into(),
+                    span: None,
+                });
+            };
+            if host.is_cancelled() {
+                self.pending_http = None;
+                return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
+            }
+            if let Err(failure) = self.push_frame(function, Vec::new(), None) {
+                return ExecutionResult::LimitFailure(failure);
+            }
+            self.main_started = true;
         }
 
+        let mut slice_steps = 0;
         loop {
             if self.executed_steps >= self.limits.instructions {
                 return ExecutionResult::LimitFailure(LimitFailure::Instructions);
             }
+            if host.is_cancelled() {
+                self.pending_http = None;
+                self.main_paused = false;
+                return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
+            }
+            if slice_steps >= max_steps {
+                self.main_paused = true;
+                return ExecutionResult::Yielded;
+            }
             self.executed_steps += 1;
+            slice_steps += 1;
             let frame_index = self.frames.len() - 1;
             let (instruction, terminator) = {
                 let frame = &self.frames[frame_index];
@@ -1089,6 +1410,204 @@ impl<'module> Interpreter<'module> {
 
             if let Some(instruction) = instruction {
                 self.frames[frame_index].instruction += 1;
+                match self.browser_http_convenience_request(frame_index, &instruction.kind) {
+                    Ok(Some((request, enum_id, response_class_id))) => {
+                        return self.suspend_http_request(
+                            frame_index,
+                            &instruction,
+                            host,
+                            request,
+                            enum_id,
+                            response_class_id,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(ExecutionFault::Internal(message)) => {
+                        return self.internal(message, Some(instruction.span));
+                    }
+                    Err(ExecutionFault::Limit(failure)) => {
+                        return ExecutionResult::LimitFailure(failure);
+                    }
+                    Err(ExecutionFault::Runtime { category, message }) => {
+                        return ExecutionResult::RuntimeFailure(RuntimeFailure {
+                            category,
+                            message,
+                            span: Some(instruction.span),
+                            frames: self.capture_stack(),
+                        });
+                    }
+                }
+                if let InstKind::HttpGet {
+                    url,
+                    cached,
+                    enum_id,
+                    response_class_id,
+                    ..
+                } = &instruction.kind
+                {
+                    let url = match self.string_operand(frame_index, *url) {
+                        Ok(url) => url,
+                        Err(ExecutionFault::Internal(message)) => {
+                            return self.internal(message, Some(instruction.span));
+                        }
+                        Err(ExecutionFault::Limit(failure)) => {
+                            return ExecutionResult::LimitFailure(failure);
+                        }
+                        Err(ExecutionFault::Runtime { category, message }) => {
+                            return ExecutionResult::RuntimeFailure(RuntimeFailure {
+                                category,
+                                message,
+                                span: Some(instruction.span),
+                                frames: self.capture_stack(),
+                            });
+                        }
+                    };
+                    let request_id = self.next_http_request_id;
+                    let Some(next_request_id) = request_id.checked_add(1) else {
+                        return self
+                            .internal("HTTP request id space exhausted", Some(instruction.span));
+                    };
+                    let Some(result) = instruction.result else {
+                        return self.internal(
+                            "HTTP GET has no result destination",
+                            Some(instruction.span),
+                        );
+                    };
+                    let request = HttpHostRequest {
+                        id: request_id,
+                        method: "GET".into(),
+                        url,
+                        cached: *cached,
+                        validate_json: false,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    };
+                    if !host.begin_http_request(&request) {
+                        return ExecutionResult::CapabilityFailure(CapabilityFailure {
+                            code: "ZB006".into(),
+                            message: "HTTP requires an explicit host capability for this execution"
+                                .into(),
+                            span: Some(instruction.span),
+                        });
+                    }
+                    self.next_http_request_id = next_request_id;
+                    self.pending_http = Some(PendingHttpContinuation {
+                        request_id,
+                        frame_index,
+                        result,
+                        enum_id: *enum_id,
+                        response_class_id: *response_class_id,
+                        span: instruction.span,
+                    });
+                    self.main_paused = true;
+                    return ExecutionResult::HttpSuspended { request };
+                }
+                if let InstKind::HttpRequest {
+                    method,
+                    url,
+                    body,
+                    headers,
+                    validate_json,
+                    cached,
+                    enum_id,
+                    response_class_id,
+                } = &instruction.kind
+                {
+                    let request_values = (|| {
+                        let method = self.string_operand(frame_index, *method)?;
+                        let url = self.string_operand(frame_index, *url)?;
+                        let body = self.byte_array_operand(frame_index, *body)?;
+                        let header_block = self.byte_array_operand(frame_index, *headers)?;
+                        let headers =
+                            decode_interpreter_http_headers(&header_block).map_err(|_| {
+                                ExecutionFault::Runtime {
+                                    category: "HttpError".into(),
+                                    message: "invalid HTTP request headers".into(),
+                                }
+                            })?;
+                        let validate_json = matches!(
+                            self.value(frame_index, *validate_json),
+                            Ok(Value::Boolean(true))
+                        );
+                        Ok((method, url, body, headers, validate_json))
+                    })();
+                    let (method, url, body, headers, validate_json) = match request_values {
+                        Ok(values) => values,
+                        Err(ExecutionFault::Runtime { .. }) => {
+                            let Some(result) = instruction.result else {
+                                return self.internal(
+                                    "HTTP request has no result destination",
+                                    Some(instruction.span),
+                                );
+                            };
+                            match self.build_tagged_outcome(*enum_id, 1, 3, None, 0, 1) {
+                                Ok(value) => {
+                                    self.frames[frame_index].values.insert(result, value);
+                                    continue;
+                                }
+                                Err(ExecutionFault::Limit(failure)) => {
+                                    return ExecutionResult::LimitFailure(failure);
+                                }
+                                Err(ExecutionFault::Internal(message)) => {
+                                    return self.internal(message, Some(instruction.span));
+                                }
+                                Err(ExecutionFault::Runtime { category, message }) => {
+                                    return ExecutionResult::RuntimeFailure(RuntimeFailure {
+                                        category,
+                                        message,
+                                        span: Some(instruction.span),
+                                        frames: self.capture_stack(),
+                                    });
+                                }
+                            }
+                        }
+                        Err(ExecutionFault::Internal(message)) => {
+                            return self.internal(message, Some(instruction.span));
+                        }
+                        Err(ExecutionFault::Limit(failure)) => {
+                            return ExecutionResult::LimitFailure(failure);
+                        }
+                    };
+                    let request_id = self.next_http_request_id;
+                    let Some(next_request_id) = request_id.checked_add(1) else {
+                        return self
+                            .internal("HTTP request id space exhausted", Some(instruction.span));
+                    };
+                    let Some(result) = instruction.result else {
+                        return self.internal(
+                            "HTTP request has no result destination",
+                            Some(instruction.span),
+                        );
+                    };
+                    let request = HttpHostRequest {
+                        id: request_id,
+                        method,
+                        url,
+                        cached: *cached,
+                        validate_json,
+                        headers,
+                        body,
+                    };
+                    if !host.begin_http_request(&request) {
+                        return ExecutionResult::CapabilityFailure(CapabilityFailure {
+                            code: "ZB006".into(),
+                            message: "HTTP requires an explicit host capability for this execution"
+                                .into(),
+                            span: Some(instruction.span),
+                        });
+                    }
+                    self.next_http_request_id = next_request_id;
+                    self.pending_http = Some(PendingHttpContinuation {
+                        request_id,
+                        frame_index,
+                        result,
+                        enum_id: *enum_id,
+                        response_class_id: *response_class_id,
+                        span: instruction.span,
+                    });
+                    self.main_paused = true;
+                    return ExecutionResult::HttpSuspended { request };
+                }
                 let value = match self.execute_instruction(frame_index, &instruction, host) {
                     Ok(value) => value,
                     Err(ExecutionFault::Runtime { category, message }) => {
@@ -1196,6 +1715,211 @@ impl<'module> Interpreter<'module> {
                 None => return self.internal("verified block has no terminator", None),
             }
         }
+    }
+
+    /// Completes the one outstanding buffered HTTP request. The request id is
+    /// single-use; this keeps late or duplicate browser `fetch` completions
+    /// from writing into a different interpreter continuation.
+    pub fn resume_http_response(
+        &mut self,
+        request_id: u64,
+        response: HttpHostResponse,
+    ) -> Result<(), InternalFailure> {
+        let pending = self.pending_http.ok_or_else(|| InternalFailure {
+            message: "interpreter has no pending HTTP request".into(),
+            span: None,
+        })?;
+        if pending.request_id != request_id {
+            return Err(InternalFailure {
+                message: "HTTP response request id does not match the pending request".into(),
+                span: Some(pending.span),
+            });
+        }
+
+        let result = match self.build_http_response_result(pending, response) {
+            Ok(value) => value,
+            Err(ExecutionFault::Limit(failure)) => {
+                return Err(InternalFailure {
+                    message: format!(
+                        "HTTP response exceeded interpreter resource limits: {failure:?}"
+                    ),
+                    span: Some(pending.span),
+                });
+            }
+            Err(ExecutionFault::Internal(message)) => {
+                return Err(InternalFailure {
+                    message,
+                    span: Some(pending.span),
+                });
+            }
+            Err(ExecutionFault::Runtime { message, .. }) => {
+                return Err(InternalFailure {
+                    message,
+                    span: Some(pending.span),
+                });
+            }
+        };
+        let frame = self
+            .frames
+            .get_mut(pending.frame_index)
+            .ok_or_else(|| InternalFailure {
+                message: "HTTP continuation references a missing frame".into(),
+                span: Some(pending.span),
+            })?;
+        frame.values.insert(pending.result, result);
+        self.pending_http = None;
+        self.main_paused = true;
+        Ok(())
+    }
+
+    /// Completes the pending request with one of the stable `HTTPError`
+    /// discriminants declared in `std.http`. Invalid discriminants are
+    /// rejected before changing the continuation.
+    pub fn resume_http_error(
+        &mut self,
+        request_id: u64,
+        error_code: i32,
+    ) -> Result<(), InternalFailure> {
+        if !(0..=16).contains(&error_code) {
+            return Err(InternalFailure {
+                message: "HTTP host error code is outside the HTTPError enum".into(),
+                span: None,
+            });
+        }
+        let pending = self.pending_http.ok_or_else(|| InternalFailure {
+            message: "interpreter has no pending HTTP request".into(),
+            span: None,
+        })?;
+        if pending.request_id != request_id {
+            return Err(InternalFailure {
+                message: "HTTP error request id does not match the pending request".into(),
+                span: Some(pending.span),
+            });
+        }
+        let result = self
+            .build_tagged_outcome(pending.enum_id, 1, error_code, None, 0, 1)
+            .map_err(|fault| InternalFailure {
+                message: format!("could not materialize HTTP error: {fault:?}"),
+                span: Some(pending.span),
+            })?;
+        let frame = self
+            .frames
+            .get_mut(pending.frame_index)
+            .ok_or_else(|| InternalFailure {
+                message: "HTTP continuation references a missing frame".into(),
+                span: Some(pending.span),
+            })?;
+        frame.values.insert(pending.result, result);
+        self.pending_http = None;
+        self.main_paused = true;
+        Ok(())
+    }
+
+    fn build_http_response_result(
+        &mut self,
+        pending: PendingHttpContinuation,
+        response: HttpHostResponse,
+    ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::http_values::{Headers, MAX_HTTP_BUFFERED_BODY_BYTES};
+
+        if response.body.len() > MAX_HTTP_BUFFERED_BODY_BYTES {
+            return self.build_tagged_outcome(pending.enum_id, 1, 4, None, 0, 1);
+        }
+        if !(100..=999).contains(&response.status) {
+            return self.build_tagged_outcome(pending.enum_id, 1, 3, None, 0, 1);
+        }
+        let mut headers = Headers::new();
+        for (name, value) in response.headers {
+            if headers.append(&name, &value).is_err() {
+                return self.build_tagged_outcome(pending.enum_id, 1, 3, None, 0, 1);
+            }
+        }
+        let count = headers.iter().count();
+        let mut encoded_headers = Vec::with_capacity(4);
+        encoded_headers.extend_from_slice(&(count as u32).to_le_bytes());
+        for (name, value) in headers.iter() {
+            let name = name.as_str().as_bytes();
+            let value = value.as_bytes();
+            let Ok(name_len) = u16::try_from(name.len()) else {
+                return self.build_tagged_outcome(pending.enum_id, 1, 3, None, 0, 1);
+            };
+            let Ok(value_len) = u32::try_from(value.len()) else {
+                return self.build_tagged_outcome(pending.enum_id, 1, 3, None, 0, 1);
+            };
+            encoded_headers.extend_from_slice(&name_len.to_le_bytes());
+            encoded_headers.extend_from_slice(&value_len.to_le_bytes());
+            encoded_headers.extend_from_slice(name);
+            encoded_headers.extend_from_slice(value);
+        }
+
+        let response_layout = self
+            .module
+            .objects
+            .get(pending.response_class_id as usize)
+            .ok_or_else(|| {
+                ExecutionFault::Internal("HTTP response references a missing class layout".into())
+            })?
+            .clone();
+        if response_layout.name != "HTTPResponse" {
+            return Err(ExecutionFault::Internal(
+                "HTTP response class id does not identify the official HTTPResponse layout".into(),
+            ));
+        }
+        let mut fields = Vec::with_capacity(response_layout.fields.len());
+        for field in &response_layout.fields {
+            fields.push(self.default_value(field.ty)?);
+        }
+        let status = IntegerValue::from_literal(i128::from(response.status), IntWidth::I32)
+            .map_err(ExecutionFault::Internal)?;
+        let status_index = response_layout
+            .field_index("status_code_value")
+            .ok_or_else(|| {
+                ExecutionFault::Internal("HTTPResponse has no status_code_value field".into())
+            })?;
+        fields[status_index] = Value::Int(status);
+        let body_index = response_layout.field_index("body_value").ok_or_else(|| {
+            ExecutionFault::Internal("HTTPResponse has no body_value field".into())
+        })?;
+        fields[body_index] = self.allocate_byte_array(response.body)?;
+        let headers_index = response_layout.field_index("header_data").ok_or_else(|| {
+            ExecutionFault::Internal("HTTPResponse has no header_data field".into())
+        })?;
+        fields[headers_index] = self.allocate_byte_array(encoded_headers)?;
+        for (field_name, value) in [
+            ("body_consumed", Value::Boolean(false)),
+            ("server_producer_handle", Self::zero_integer(IntWidth::U64)?),
+            (
+                "server_sse_heartbeat_ms",
+                Self::zero_integer(IntWidth::I32)?,
+            ),
+            ("stream_handle", Self::zero_integer(IntWidth::U64)?),
+            ("protocol_value", Self::zero_integer(IntWidth::I32)?),
+        ] {
+            let index = response_layout.field_index(field_name).ok_or_else(|| {
+                ExecutionFault::Internal(format!("HTTPResponse has no {field_name} field"))
+            })?;
+            fields[index] = value;
+        }
+        let bytes = std::mem::size_of::<HeapEntry>() + fields.len() * std::mem::size_of::<Value>();
+        let response_object = self
+            .heap
+            .allocate(
+                HeapEntry::Object {
+                    layout: pending.response_class_id,
+                    fields,
+                },
+                bytes,
+                self.limits,
+            )
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)?;
+        self.build_tagged_outcome(pending.enum_id, 0, 0, Some(response_object), 0, 1)
+    }
+
+    fn zero_integer(width: IntWidth) -> Result<Value, ExecutionFault> {
+        IntegerValue::from_literal(0, width)
+            .map(Value::Int)
+            .map_err(ExecutionFault::Internal)
     }
 
     fn enter_block(&mut self, frame_index: usize, block: BlockId) {
@@ -1486,6 +2210,86 @@ impl<'module> Interpreter<'module> {
                         ))
                     })?;
                 self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
+            InstKind::HttpUrlNormalize { value, enum_id } => {
+                let value = self.string_operand(frame_index, *value)?;
+                match zirk_runtime_core::http_values::Url::parse(&value) {
+                    Ok(url) => {
+                        let normalized = self.allocate_string(url.as_str().to_owned())?;
+                        self.build_tagged_outcome(
+                            *enum_id,
+                            0,
+                            0,
+                            Some(Value::Heap(normalized)),
+                            0,
+                            1,
+                        )
+                        .map(Some)
+                    }
+                    Err(_) => self
+                        .build_tagged_outcome(*enum_id, 1, 0, None, 0, 1)
+                        .map(Some),
+                }
+            }
+            InstKind::HttpHeadersEncode { names, values } => {
+                let names = self.string_list_operand(frame_index, *names)?;
+                let values = self.string_list_operand(frame_index, *values)?;
+                let encoded = encode_interpreter_http_headers(&names, &values)
+                    .unwrap_or_else(|| 1u32.to_le_bytes().to_vec());
+                self.allocate_byte_array(encoded).map(Some)
+            }
+            InstKind::HttpResponseReadAll { handle, enum_id } => {
+                let handle = self.uint_operand(frame_index, *handle)?;
+                let error = if handle == 0 { 8 } else { 2 };
+                self.build_tagged_outcome(*enum_id, 1, error, None, 0, 1)
+                    .map(Some)
+            }
+            InstKind::HttpResponseText { body, enum_id } => {
+                let body = self.byte_array_operand(frame_index, *body)?;
+                match std::str::from_utf8(&body) {
+                    Ok(text) => {
+                        let text = self.allocate_string(text.to_owned())?;
+                        self.build_tagged_outcome(
+                            *enum_id,
+                            0,
+                            0,
+                            Some(Value::Heap(text)),
+                            0,
+                            1,
+                        )
+                        .map(Some)
+                    }
+                    Err(_) => self
+                        .build_tagged_outcome(*enum_id, 1, 5, None, 0, 1)
+                        .map(Some),
+                }
+            }
+            InstKind::HttpUrlResolve {
+                base,
+                reference,
+                enum_id,
+            } => {
+                let base = self.string_operand(frame_index, *base)?;
+                let reference = self.string_operand(frame_index, *reference)?;
+                let resolved = zirk_runtime_core::http_values::Url::parse(&base)
+                    .and_then(|base| base.resolve(&reference));
+                match resolved {
+                    Ok(url) => {
+                        let normalized = self.allocate_string(url.as_str().to_owned())?;
+                        self.build_tagged_outcome(
+                            *enum_id,
+                            0,
+                            0,
+                            Some(Value::Heap(normalized)),
+                            0,
+                            1,
+                        )
+                        .map(Some)
+                    }
+                    Err(_) => self
+                        .build_tagged_outcome(*enum_id, 1, 0, None, 0, 1)
+                        .map(Some),
+                }
             }
             InstKind::ConstChar(id) => {
                 let text = self
@@ -2941,6 +3745,203 @@ impl<'module> Interpreter<'module> {
                 "string operation operand references a missing heap value".into(),
             )),
         }
+    }
+
+    fn byte_array_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<Vec<u8>, ExecutionFault> {
+        let id = self.heap_operand(frame_index, operand)?;
+        let Some(HeapEntry::Array(values)) = self.heap.get(id) else {
+            return Err(ExecutionFault::Internal(
+                "HTTP byte operand is not an Array<Byte>".into(),
+            ));
+        };
+        values
+            .iter()
+            .map(|value| match value {
+                Value::Int(integer) if integer.width == IntWidth::U8 => Ok(integer.bits as u8),
+                _ => Err(ExecutionFault::Internal(
+                    "HTTP byte array contains a non-Byte value".into(),
+                )),
+            })
+            .collect()
+    }
+
+    fn browser_http_convenience_request(
+        &self,
+        frame_index: usize,
+        kind: &zirk_ir::InstKind,
+    ) -> Result<Option<(HttpHostRequest, u32, u32)>, ExecutionFault> {
+        use zirk_ir::InstKind;
+
+        let mut request = HttpHostRequest {
+            id: 0,
+            method: String::new(),
+            url: String::new(),
+            cached: false,
+            validate_json: false,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let (enum_id, response_class_id) = match kind {
+            InstKind::HttpHead {
+                url,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "HEAD".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                (*enum_id, *response_class_id)
+            }
+            InstKind::HttpQuery {
+                url,
+                query,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "QUERY".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                request.body = self.string_operand(frame_index, *query)?.into_bytes();
+                request.validate_json = true;
+                request
+                    .headers
+                    .push(("content-type".into(), b"application/json".to_vec()));
+                (*enum_id, *response_class_id)
+            }
+            InstKind::HttpQueryWithContentType {
+                url,
+                query,
+                content_type,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "QUERY".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                request.body = self.string_operand(frame_index, *query)?.into_bytes();
+                request.headers.push((
+                    "content-type".into(),
+                    self.string_operand(frame_index, *content_type)?
+                        .into_bytes(),
+                ));
+                (*enum_id, *response_class_id)
+            }
+            InstKind::HttpPost {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "POST".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                request.body = self.string_operand(frame_index, *body)?.into_bytes();
+                request
+                    .headers
+                    .push(("content-type".into(), b"text/plain; charset=utf-8".to_vec()));
+                (*enum_id, *response_class_id)
+            }
+            InstKind::HttpPostJson {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "POST".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                request.body = self.string_operand(frame_index, *body)?.into_bytes();
+                request.validate_json = true;
+                request
+                    .headers
+                    .push(("content-type".into(), b"application/json".to_vec()));
+                (*enum_id, *response_class_id)
+            }
+            InstKind::HttpPostBytes {
+                url,
+                body,
+                enum_id,
+                response_class_id,
+            } => {
+                request.method = "POST".into();
+                request.url = self.string_operand(frame_index, *url)?;
+                request.body = self.byte_array_operand(frame_index, *body)?;
+                request
+                    .headers
+                    .push(("content-type".into(), b"application/octet-stream".to_vec()));
+                (*enum_id, *response_class_id)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some((request, enum_id, response_class_id)))
+    }
+
+    fn suspend_http_request(
+        &mut self,
+        frame_index: usize,
+        instruction: &zirk_ir::Instruction,
+        host: &mut dyn InterpreterHost,
+        mut request: HttpHostRequest,
+        enum_id: u32,
+        response_class_id: u32,
+    ) -> ExecutionResult {
+        let request_id = self.next_http_request_id;
+        let Some(next_request_id) = request_id.checked_add(1) else {
+            return self.internal("HTTP request id space exhausted", Some(instruction.span));
+        };
+        let Some(result) = instruction.result else {
+            return self.internal(
+                "HTTP request has no result destination",
+                Some(instruction.span),
+            );
+        };
+        request.id = request_id;
+        if !host.begin_http_request(&request) {
+            return ExecutionResult::CapabilityFailure(CapabilityFailure {
+                code: "ZB006".into(),
+                message: "HTTP requires an explicit host capability for this execution".into(),
+                span: Some(instruction.span),
+            });
+        }
+        self.next_http_request_id = next_request_id;
+        self.pending_http = Some(PendingHttpContinuation {
+            request_id,
+            frame_index,
+            result,
+            enum_id,
+            response_class_id,
+            span: instruction.span,
+        });
+        self.main_paused = true;
+        ExecutionResult::HttpSuspended { request }
+    }
+
+    fn string_list_operand(
+        &self,
+        frame_index: usize,
+        operand: zirk_ir::Operand,
+    ) -> Result<Vec<String>, ExecutionFault> {
+        let id = self.heap_operand(frame_index, operand)?;
+        let Some(HeapEntry::List(values) | HeapEntry::Array(values)) = self.heap.get(id) else {
+            return Err(ExecutionFault::Internal(
+                "HTTP header names or values are not a string list".into(),
+            ));
+        };
+        values
+            .iter()
+            .map(|value| {
+                let Value::Heap(id) = value else {
+                    return Err(ExecutionFault::Internal(
+                        "HTTP header name or value is not a string".into(),
+                    ));
+                };
+                match self.heap.get(*id) {
+                    Some(HeapEntry::String(text)) => Ok(text.clone()),
+                    _ => Err(ExecutionFault::Internal(
+                        "HTTP header name or value is not a string".into(),
+                    )),
+                }
+            })
+            .collect()
     }
 
     fn integer_operand(
@@ -5047,11 +6048,8 @@ impl<'module> Interpreter<'module> {
             .map_err(ExecutionFault::Limit)
     }
 
-    /// Builds a value of `IoError` (a fieldless enum) with `discriminant`
-    /// selecting its variant, matching `zirk_runtime_core::stdin`'s
-    /// `ERROR_*` constants and the declaration order in
-    /// `stdlib/std/io/package.zrk`.
-    fn build_io_error_value(
+    /// Builds a no-payload enum value with `discriminant` selecting its variant.
+    fn build_empty_variant_enum(
         &mut self,
         io_error_enum_id: u32,
         discriminant: u32,
@@ -5071,13 +6069,10 @@ impl<'module> Interpreter<'module> {
             .map_err(ExecutionFault::Limit)
     }
 
-    /// Builds a `ReadResult<T>`/`Result<T, IoError>` value directly from a
-    /// `stdin.read_*` host outcome (`add-stdin-stdout-standard-library`,
-    /// design D2), mirroring `crates/zirk-codegen-llvm/src/emit.rs`'s
-    /// `build_tagged_outcome`: `kind` is already the outer discriminant,
-    /// `error` is the nested `IoError` discriminant (read only when `kind ==
-    /// error_variant`), and `payload` is the already-allocated value (read
-    /// only when `kind == value_variant`).
+    /// Builds a two-variant `Result`-shaped value. `kind` is the outer
+    /// discriminant, `error` is read only for the error variant, and `payload`
+    /// is the already-allocated success value. Fieldless enums are
+    /// integer-backed; payload enums retain their tagged layout.
     fn build_tagged_outcome(
         &mut self,
         enum_id: u32,
@@ -5109,12 +6104,22 @@ impl<'module> Interpreter<'module> {
                 .ok_or_else(|| {
                     ExecutionFault::Internal("the Error variant carries no field".into())
                 })?;
-            let IrType::Enum(io_error_id) = layout.fields[error_field_index as usize].ty else {
-                return Err(ExecutionFault::Internal(
-                    "the Error variant's field is not an IoError enum".into(),
-                ));
+            let error_ty = layout.fields[error_field_index as usize].ty;
+            let error_value = match error_ty {
+                IrType::Enum(error_enum_id) => {
+                    self.build_empty_variant_enum(error_enum_id, error as u32)?
+                }
+                IrType::Int(width) => Value::Int(
+                    IntegerValue::from_literal(i128::from(error), width)
+                        .map_err(ExecutionFault::Internal)?,
+                ),
+                other => {
+                    return Err(ExecutionFault::Internal(format!(
+                        "the Error variant carries unsupported type {other:?}"
+                    )));
+                }
             };
-            vec![self.build_io_error_value(io_error_id, error as u32)?]
+            vec![error_value]
         } else {
             Vec::new()
         };
@@ -5732,11 +6737,17 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::NetworkIpAddressParse { .. }
         | InstKind::NetworkTlsConnect { .. }
         | InstKind::NetworkTlsConnectWithRoots { .. }
+        | InstKind::NetworkTlsConnectWithAlpn { .. }
+        | InstKind::NetworkTlsConnectWithClientIdentity { .. }
+        | InstKind::NetworkTlsUpgradeTcp { .. }
         | InstKind::NetworkTlsListen { .. }
+        | InstKind::NetworkTlsListenWithClientAuth { .. }
         | InstKind::NetworkTlsAccept { .. }
         | InstKind::NetworkTlsCloseListener { .. }
         | InstKind::NetworkTlsListenerIsClosed { .. }
         | InstKind::NetworkTlsPeerAddress { .. }
+        | InstKind::NetworkTlsNegotiatedAlpn { .. }
+        | InstKind::NetworkTlsPeerCertificateSha256 { .. }
         | InstKind::NetworkTlsRead { .. }
         | InstKind::NetworkTlsWriteAll { .. }
         | InstKind::NetworkTlsShutdown { .. }
@@ -5755,8 +6766,27 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::NetworkTcpCloseListener { .. }
         | InstKind::NetworkTcpListenerIsClosed { .. }
         | InstKind::NetworkTcpOriginNormalize { .. }
-        | InstKind::HttpGet { .. }
-        | InstKind::HttpRequest { .. }
+        | InstKind::NetworkUdpConnect { .. }
+        | InstKind::NetworkUdpBind { .. }
+        | InstKind::NetworkUdpSend { .. }
+        | InstKind::NetworkUdpSendTo { .. }
+        | InstKind::NetworkUdpSendBroadcast { .. }
+        | InstKind::NetworkUdpSendMulticast { .. }
+        | InstKind::NetworkUdpJoinMulticast { .. }
+        | InstKind::NetworkUdpLeaveMulticast { .. }
+        | InstKind::NetworkUdpReceive { .. }
+        | InstKind::NetworkUdpClose { .. }
+        | InstKind::NetworkUdpLocalAddress { .. }
+        | InstKind::NetworkUdpIsClosed { .. }
+        | InstKind::NetworkInterfacesSnapshot { .. }
+        | InstKind::NetworkLocalConnect { .. }
+        | InstKind::NetworkLocalBind { .. }
+        | InstKind::NetworkLocalAccept { .. }
+        | InstKind::NetworkLocalRead { .. }
+        | InstKind::NetworkLocalWrite { .. }
+        | InstKind::NetworkLocalShutdown { .. }
+        | InstKind::NetworkLocalClose { .. }
+        | InstKind::NetworkLocalIsClosed { .. }
         | InstKind::HttpClientCreate { .. }
         | InstKind::HttpClientCreateWithOptions { .. }
         | InstKind::HttpClientCreateWithTrustRoots { .. }
@@ -5772,26 +6802,15 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpWebSocketClose { .. }
         | InstKind::HttpWebSocketCloseWith { .. }
         | InstKind::HttpRequestSecret { .. }
-        | InstKind::HttpHead { .. }
-        | InstKind::HttpQuery { .. }
-        | InstKind::HttpQueryWithContentType { .. }
-        | InstKind::HttpPost { .. }
-        | InstKind::HttpPostJson { .. }
-        | InstKind::HttpPostBytes { .. }
         | InstKind::HttpGetStream { .. }
         | InstKind::HttpResponseToStream { .. }
         | InstKind::HttpRequestStream { .. }
         | InstKind::HttpRegisterServerResponseProducer { .. }
         | InstKind::HttpResponseReadChunk { .. }
-        | InstKind::HttpResponseReadAll { .. }
         | InstKind::HttpResponseReadSseEvent { .. }
         | InstKind::HttpResponseSseHeartbeatCount { .. }
         | InstKind::HttpResponseStreamClose { .. }
-        | InstKind::HttpUrlNormalize { .. }
-        | InstKind::HttpUrlResolve { .. }
-        | InstKind::HttpResponseText { .. }
         | InstKind::HttpResponseHeaderValues { .. }
-        | InstKind::HttpHeadersEncode { .. }
         | InstKind::HttpFormParse { .. }
         | InstKind::HttpMultipartParse { .. }
         | InstKind::HttpFormValues { .. }
@@ -5803,13 +6822,28 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpRoutePatternConflict { .. }
         | InstKind::HttpRouteMatch { .. }
         | InstKind::HttpRouteAllowHeader { .. } => BrowserSupport::Excluded,
+        InstKind::HttpGet { .. }
+        | InstKind::HttpRequest { .. }
+        | InstKind::HttpHead { .. }
+        | InstKind::HttpQuery { .. }
+        | InstKind::HttpQueryWithContentType { .. }
+        | InstKind::HttpPost { .. }
+        | InstKind::HttpPostJson { .. }
+        | InstKind::HttpPostBytes { .. } => BrowserSupport::BoundedHost,
         InstKind::HttpServerServeOnce { .. } => BrowserSupport::Excluded,
+        InstKind::HttpServerServeHttp3 { .. }
+        | InstKind::HttpServerWebSocketServeHttp3Once { .. } => BrowserSupport::Excluded,
         InstKind::HttpServerWebSocketServeOnce { .. } => BrowserSupport::Excluded,
         InstKind::ConstString(_)
         | InstKind::ConstChar(_)
         | InstKind::StringGraphemeOffset { .. }
         | InstKind::GraphemeLenAt { .. }
         | InstKind::GraphemeSlice { .. }
+        | InstKind::HttpUrlNormalize { .. }
+        | InstKind::HttpUrlResolve { .. }
+        | InstKind::HttpHeadersEncode { .. }
+        | InstKind::HttpResponseReadAll { .. }
+        | InstKind::HttpResponseText { .. }
         | InstKind::Alloc(_)
         | InstKind::CheckedCast { .. }
         | InstKind::IsInstance { .. }
@@ -6065,6 +7099,189 @@ mod tests {
             float_to_integer_bits(2.0_f64.powi(127), IntWidth::U128),
             Some(1_u128 << 127)
         );
+    }
+
+    #[test]
+    fn interpreter_slices_resume_with_continuous_output_and_trace_state() {
+        let span = Span::empty(0);
+        let module = Module {
+            strings: vec!["resumed".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstString(zirk_ir::StringId(0)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Println(Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        interpreter.enable_trace(TraceLimits::DEFAULT);
+        let mut host = CapturedHost::default();
+
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        assert!(host.events().is_empty());
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 2),
+            ExecutionResult::Yielded
+        );
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 2),
+            ExecutionResult::Completed { value: None }
+        );
+        assert_eq!(host.events().len(), 1);
+        assert_eq!(host.events()[0].text, "resumed\n");
+        assert!(
+            interpreter
+                .take_trace()
+                .events
+                .iter()
+                .any(|event| { matches!(event.kind, TraceEventKind::Output { index: 0 }) })
+        );
+        assert!(matches!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::InternalFailure(InternalFailure { ref message, .. })
+                if message.contains("not suspended")
+        ));
+    }
+
+    #[test]
+    fn interpreter_slice_preserves_global_instruction_budget_across_resumes() {
+        let span = Span::empty(0);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::SafepointPoll,
+                            ty: IrType::Void,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+            }],
+            ..Module::default()
+        };
+        let limits = InterpreterLimits {
+            instructions: 3,
+            ..InterpreterLimits::default()
+        };
+        let mut interpreter = Interpreter::new(&module, limits).unwrap();
+        let mut host = CapturedHost::default();
+
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::LimitFailure(LimitFailure::Instructions)
+        );
+    }
+
+    #[test]
+    fn interpreter_slice_cancellation_terminates_the_suspended_execution() {
+        let span = Span::empty(0);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: None,
+                        kind: InstKind::SafepointPoll,
+                        ty: IrType::Void,
+                        span,
+                    }],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let mut host = CapturedHost::default();
+
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        host.cancel();
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::LimitFailure(LimitFailure::Cancelled)
+        );
+        assert!(matches!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::InternalFailure(InternalFailure { ref message, .. })
+                if message.contains("not suspended")
+        ));
     }
 
     // Numeric parity regressions use runtime-core as the reference contract:
@@ -6570,6 +7787,106 @@ mod tests {
     }
 
     #[test]
+    fn preflight_names_missing_browser_capabilities_for_standard_modules() {
+        let names = [
+            "zirk_environment_get",
+            "zirk_network_udp_bind",
+            "zirk_network_udp_receive",
+            "zirk_network_local_connect",
+            "zirk_network_local_bind",
+            "zirk_network_interfaces_snapshot",
+            "zirk_network_tls_connect",
+            "zirk_network_tcp_listen",
+            "zirk_network_dns_resolve",
+            "zirk_http_request",
+            "zirk_http_server_serve_once",
+        ];
+        let module = Module {
+            externs: names
+                .iter()
+                .map(|name| zirk_ir::ExternFn {
+                    name: (*name).into(),
+                    params: Vec::new(),
+                    return_type: IrType::Void,
+                })
+                .collect(),
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: names
+                        .iter()
+                        .map(|name| Instruction {
+                            result: None,
+                            kind: InstKind::Call {
+                                callee: (*name).into(),
+                                args: Vec::new(),
+                            },
+                            ty: IrType::Void,
+                            span: Span::empty(1),
+                        })
+                        .collect(),
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+
+        let failures = preflight(&module).expect_err("native host capabilities are unavailable");
+        let messages: Vec<_> = failures
+            .iter()
+            .filter(|failure| failure.code == "ZB001")
+            .map(|failure| failure.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("process environment"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("UDP sockets"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("local sockets"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("interface inspection"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("TLS sockets"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("TCP sockets"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("DNS access"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| { message.contains("injected browser HTTP capability") })
+        );
+    }
+
+    #[test]
     fn preflight_accepts_a_baseline_scalar_module() {
         let module = Module {
             functions: vec![Function {
@@ -6812,6 +8129,22 @@ mod tests {
                 endpoint: value,
                 enum_id: 0,
             },
+            InstKind::NetworkInterfacesSnapshot { enum_id: 0 },
+            InstKind::HttpServerWebSocketServeHttp3Once {
+                endpoint: value,
+                certificate_chain_der: value,
+                private_key_der: value,
+                path: value,
+                allowed_origins: value,
+                allow_missing_origin: value,
+                protocols: value,
+                max_messages: value,
+                idle_timeout_ms: value,
+                callback: value,
+                callback_layout: 0,
+                websocket_class_id: 0,
+                enum_id: 0,
+            },
             InstKind::NetworkIpAddressParse { value, enum_id: 0 },
             InstKind::NetworkTlsConnect {
                 endpoint: value,
@@ -6831,8 +8164,25 @@ mod tests {
                 http_alpn: false,
                 enum_id: 0,
             },
+            InstKind::NetworkTlsListenWithClientAuth {
+                endpoint: value,
+                certificate_chain_der: value,
+                private_key_der: value,
+                client_roots_der: value,
+                allow_tls12: value,
+                enum_id: 0,
+            },
             InstKind::NetworkTlsAccept {
                 handle: value,
+                enum_id: 0,
+                stream_class_id: 0,
+            },
+            InstKind::NetworkTlsUpgradeTcp {
+                tcp_handle: value,
+                endpoint: value,
+                roots_der: value,
+                allow_tls12: value,
+                protocols: value,
                 enum_id: 0,
                 stream_class_id: 0,
             },
@@ -6845,20 +8195,109 @@ mod tests {
                 handle: value,
                 enum_id: 0,
             },
-            InstKind::HttpHead {
-                url: value,
+            InstKind::NetworkTlsNegotiatedAlpn {
+                handle: value,
                 enum_id: 0,
-                response_class_id: 0,
             },
-            InstKind::HttpRequest {
-                method: value,
-                url: value,
-                body: value,
-                headers: value,
-                validate_json: value,
-                cached: false,
+            InstKind::NetworkTlsPeerCertificateSha256 {
+                handle: value,
                 enum_id: 0,
-                response_class_id: 0,
+            },
+            InstKind::NetworkUdpSendTo {
+                handle: value,
+                bytes: value,
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpConnect {
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpBind {
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpSend {
+                handle: value,
+                bytes: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpSendBroadcast {
+                handle: value,
+                bytes: value,
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpSendMulticast {
+                handle: value,
+                bytes: value,
+                endpoint: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpJoinMulticast {
+                handle: value,
+                group: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpLeaveMulticast {
+                handle: value,
+                group: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpReceive {
+                handle: value,
+                max_bytes: value,
+                enum_id: 0,
+                datagram_class_id: 0,
+            },
+            InstKind::NetworkUdpClose {
+                handle: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpLocalAddress {
+                handle: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkUdpIsClosed { handle: value },
+            InstKind::NetworkLocalConnect {
+                endpoint: value,
+                enum_id: 0,
+                stream_class_id: 0,
+            },
+            InstKind::NetworkLocalBind {
+                endpoint: value,
+                remove_stale: value,
+                enum_id: 0,
+                listener_class_id: 0,
+            },
+            InstKind::NetworkLocalAccept {
+                handle: value,
+                enum_id: 0,
+                stream_class_id: 0,
+            },
+            InstKind::NetworkLocalRead {
+                handle: value,
+                max_bytes: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkLocalWrite {
+                handle: value,
+                bytes: value,
+                enum_id: 0,
+                write_all: false,
+            },
+            InstKind::NetworkLocalShutdown {
+                handle: value,
+                enum_id: 0,
+            },
+            InstKind::NetworkLocalClose {
+                handle: value,
+                enum_id: 0,
+                listener: false,
+            },
+            InstKind::NetworkLocalIsClosed {
+                handle: value,
+                listener: true,
             },
             InstKind::HttpRequestSecret {
                 method: value,
@@ -6869,10 +8308,6 @@ mod tests {
                 secret_value: value,
                 enum_id: 0,
                 response_class_id: 0,
-            },
-            InstKind::HttpHeadersEncode {
-                names: value,
-                values: value,
             },
             InstKind::HttpFormParse {
                 body: value,
@@ -6899,20 +8334,83 @@ mod tests {
                 boundary: value,
                 enum_id: 0,
             },
-            InstKind::HttpResponseText {
-                body: value,
-                enum_id: 0,
-            },
-            InstKind::HttpUrlResolve {
-                base: value,
-                reference: value,
-                enum_id: 0,
-            },
         ];
 
         for instruction in instructions {
             assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+            let feature = excluded_feature(&instruction).0;
+            assert!(!feature.starts_with("instruction "), "{feature}");
         }
+        assert_eq!(
+            instruction_support(&InstKind::HttpRequest {
+                method: value,
+                url: value,
+                body: value,
+                headers: value,
+                validate_json: value,
+                cached: false,
+                enum_id: 0,
+                response_class_id: 0,
+            }),
+            BrowserSupport::BoundedHost
+        );
+        for instruction in [
+            InstKind::HttpHead {
+                url: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpQuery {
+                url: value,
+                query: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpQueryWithContentType {
+                url: value,
+                query: value,
+                content_type: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpPost {
+                url: value,
+                body: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpPostJson {
+                url: value,
+                body: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+            InstKind::HttpPostBytes {
+                url: value,
+                body: value,
+                enum_id: 0,
+                response_class_id: 0,
+            },
+        ] {
+            assert_eq!(
+                instruction_support(&instruction),
+                BrowserSupport::BoundedHost
+            );
+        }
+        assert_eq!(
+            instruction_support(&InstKind::HttpHeadersEncode {
+                names: value,
+                values: value,
+            }),
+            BrowserSupport::RuntimeCore
+        );
+        assert_eq!(
+            instruction_support(&InstKind::HttpResponseText {
+                body: value,
+                enum_id: 0,
+            }),
+            BrowserSupport::RuntimeCore
+        );
     }
 
     #[test]

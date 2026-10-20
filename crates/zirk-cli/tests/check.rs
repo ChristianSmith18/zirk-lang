@@ -681,6 +681,46 @@ fn websocket_server_tcp_and_tls_callbacks_compile_through_bundled_std_http() {
 }
 
 #[test]
+fn websocket_server_http3_api_compiles_through_bundled_std_http() {
+    let dir = workspace("standard_http3_websocket_server");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { HTTPError, HTTPServer, HTTPWebSocket } from std.http;\n\
+         fn handle(socket: HTTPWebSocket): Void { _ = socket.receive(); }\n\
+         fn serve(endpoint: String, certificates: Array<Array<Byte>>, key: Array<Byte>): Result<Void, HTTPError> {\n\
+             mut origins: List<String> = List();\n\
+             mut protocols: List<String> = List();\n\
+             protocols.add(\"zirk.echo.v1\");\n\
+             return HTTPServer.serve_http3_websocket_once(endpoint, certificates, key, \"/socket\", origins, protocols, 8, handle, false, 30000);\n\
+         }\n\
+         fn main(): Void { }\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check bundled HTTP/3 WebSocket server API");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(compiler())
+        .args(["build", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("lower and compile bundled HTTP/3 WebSocket server API");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn a_user_defined_http_type_does_not_acquire_bundled_native_bindings() {
     let dir = workspace("user_http_name_collision");
     std::fs::write(

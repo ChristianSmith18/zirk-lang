@@ -321,6 +321,7 @@ share enum HTTPError {
     TooManyParts,
     UnsupportedMethod,
     InvalidArgument,
+    BrowserPolicy,
 }
 
 share enum HTTPStreamChunk {
@@ -413,6 +414,7 @@ share class HTTPResponse {
     // Nonzero only when the body is backed by the task-owned network stream
     // registry. Buffered responses keep their bytes in body_value instead.
     private inmut stream_handle: UInt64;
+    private inmut protocol_value: Int32;
 
     private construct(status_code: Int32, body: Array<Byte>, headers: Array<Byte>) {
         this.status_code_value = status_code;
@@ -422,9 +424,19 @@ share class HTTPResponse {
         this.stream_handle = 0 as UInt64;
         this.server_producer_handle = 0 as UInt64;
         this.server_sse_heartbeat_ms = 0;
+        this.protocol_value = 0;
     }
 
     status_code(): Int32 { return this.status_code_value; }
+
+    protocol(): HTTPProtocolVersion {
+        return match this.protocol_value {
+            1 => HTTPProtocolVersion.HTTP1;
+            2 => HTTPProtocolVersion.HTTP2;
+            3 => HTTPProtocolVersion.HTTP3;
+            _ => HTTPProtocolVersion.Unknown;
+        };
+    }
 
     // Stream-backed responses use the same public type as buffered responses.
     // Call stream() first to move a buffered body into the bounded reader.
@@ -1719,6 +1731,47 @@ share class HTTPServer {
         return Error(HTTPError.Transport);
     }
 
+    // Serves HTTP/3 requests on an explicitly granted UDP endpoint. QUIC uses
+    // TLS 1.3 and the h3 ALPN; the caller owns the certificate and private-key
+    // bytes for the duration of the call. Connection and request limits are
+    // mandatory so listener and handler resources remain bounded.
+    static serve_http3(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        max_requests: UInt64,
+        max_connections: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        if max_requests == 0 || max_connections == 0 {
+            return HTTPServer.serve_http3_error(HTTPError.InvalidArgument);
+        }
+        return HTTPServer.serve_http3_native(
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            max_requests,
+            max_connections,
+            (request: HTTPRequest): HTTPResponse =>
+            HTTPServer.invoke_handler(handler, request),
+        );
+    }
+
+    private static serve_http3_native(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        max_requests: UInt64,
+        max_connections: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        return HTTPServer.serve_http3_error(HTTPError.Protocol);
+    }
+
+    private static serve_http3_error(error: HTTPError): Result<UInt64, HTTPError> {
+        return Error(error);
+    }
+
     // Accepts one RFC 6455 upgrade on an already accepted TCP stream. Origins
     // are exact normalized HTTP(S) origins; server preference orders selected
     // subprotocols. The session is bounded by max_messages and owned by this
@@ -1770,6 +1823,53 @@ share class HTTPServer {
         allow_missing_origin: Boolean,
         protocols: List<String>,
         max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+    ): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    // Binds one permission-checked QUIC endpoint and accepts a single RFC 9220
+    // WebSocket session. The configured idle timeout and message count bound
+    // resources; the callback runs on the owning Zirk task.
+    static serve_http3_websocket_once(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        path: String,
+        allowed_origins: List<String>,
+        protocols: List<String>,
+        max_messages: UInt64,
+        handler: Fn(HTTPWebSocket) => Void,
+        allow_missing_origin: Boolean = false,
+        idle_timeout_ms: UInt64 = 30000,
+    ): Result<Void, HTTPError> {
+        if max_messages == 0 || idle_timeout_ms == 0 {
+            return Error(HTTPError.InvalidArgument);
+        }
+        return HTTPServer.serve_http3_websocket_once_native(
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            idle_timeout_ms,
+            handler,
+        );
+    }
+
+    private static serve_http3_websocket_once_native(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        path: String,
+        allowed_origins: List<String>,
+        allow_missing_origin: Boolean,
+        protocols: List<String>,
+        max_messages: UInt64,
+        idle_timeout_ms: UInt64,
         handler: Fn(HTTPWebSocket) => Void,
     ): Result<Void, HTTPError> {
         return Error(HTTPError.Transport);
@@ -2482,6 +2582,36 @@ share class HTTPWebSocket {
         };
     }
 
+    // Forces RFC 9220 WebSocket bootstrap over HTTP/3 with system trust roots.
+    static connect_http3(
+        url: URL,
+        origin: String,
+        subprotocols: List<String>,
+    ): Result<HTTPWebSocket, HTTPError> {
+        return match HTTPWebSocket.websocket_connect_http3_native(
+            url.as_string(), origin, subprotocols,
+        ) {
+            Ok(handle) => HTTPWebSocket.connect_ok(HTTPWebSocket(handle));
+            Error(error) => HTTPWebSocket.connect_error(error);
+        };
+    }
+
+    // Uses caller-supplied DER trust roots with the TLS 1.3-only HTTP/3
+    // transport. HTTP/3 does not permit opting down to TLS 1.2.
+    static connect_http3_with_trust_roots(
+        url: URL,
+        origin: String,
+        subprotocols: List<String>,
+        roots_der: Array<Array<Byte >>,
+    ): Result<HTTPWebSocket, HTTPError> {
+        return match HTTPWebSocket.websocket_connect_http3_with_trust_roots_native(
+            url.as_string(), origin, subprotocols, roots_der,
+        ) {
+            Ok(handle) => HTTPWebSocket.connect_ok(HTTPWebSocket(handle));
+            Error(error) => HTTPWebSocket.connect_error(error);
+        };
+    }
+
     // Replaces platform trust roots with bounded DER certificates. The full
     // options variant also supports Origin and subprotocol negotiation.
     static connect_with_trust_roots(
@@ -2642,6 +2772,23 @@ share class HTTPWebSocket {
         return Error(HTTPError.InvalidUrl);
     }
 
+    private static websocket_connect_http3_native(
+        url: String,
+        origin: String,
+        subprotocols: List<String>,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static websocket_connect_http3_with_trust_roots_native(
+        url: String,
+        origin: String,
+        subprotocols: List<String>,
+        roots_der: Array<Array<Byte >>,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
     private static websocket_send_native(handle: UInt64, frame: Array<Byte>): Result<Void, HTTPError> {
         return Error(HTTPError.Transport);
     }
@@ -2686,20 +2833,171 @@ share enum HTTPRedirectPolicy {
     Follow,
 }
 
+share enum HTTPProtocolPreference {
+    Auto,
+    HTTP1,
+    HTTP2,
+    HTTP3,
+}
+
+share enum HTTPProtocolVersion {
+    Unknown,
+    HTTP1,
+    HTTP2,
+    HTTP3,
+}
+
+// Redirect-aware calls expose a separate immutable view so native response
+// allocation and streaming-body ownership do not need additional object ABI
+// fields. Destinations are normalized and query values are redacted at entry.
+share class HTTPRedirectResult {
+    private inmut response_value: HTTPResponse;
+    private inmut history_text_value: String;
+
+    private construct(response: HTTPResponse, history_text: String) {
+        this.response_value = response;
+        this.history_text_value = history_text;
+    }
+
+    response(): HTTPResponse { return this.response_value; }
+
+    history(): List<String> {
+        mut entries: List<String> = List();
+        if this.history_text_value == "" { return entries; }
+        for entry in this.history_text_value.split("\n") {
+            if entry != "" { entries.add(entry); }
+        }
+        return entries;
+    }
+
+    // Returns the already redacted history as JSON for structured output.
+    history_json(): String {
+        mut output: String = "[";
+        mut first = true;
+        for entry in this.history() {
+            mut safe = entry.replace("\\", "\\\\");
+            safe = safe.replace("\"", "\\\"");
+            safe = safe.replace("\r", "\\r");
+            safe = safe.replace("\t", "\\t");
+            safe = safe.replace("\0", "\\u0000");
+            if first {
+                output = "{output}\"{safe}\"";
+                first = false;
+            } else {
+                output = "{output},\"{safe}\"";
+            }
+        }
+        return "{output}]";
+    }
+
+    static from_client(response: HTTPResponse, history_text: String): HTTPRedirectResult {
+        mut safe_history: String = "";
+        mut accepted: Int32 = 0;
+        for line in history_text.split("\n") {
+            if accepted < 20 && line != "" {
+                mut parts = line.split(" ");
+                if parts.length == 3 {
+                    mut method = parts[0];
+                    mut method_valid = method == "GET" || method == "HEAD"
+                    || method == "POST" || method == "PUT" || method == "PATCH"
+                    || method == "DELETE" || method == "OPTIONS" || method == "CONNECT"
+                    || method == "TRACE" || method == "QUERY";
+                    mut status = parts[1];
+                    mut status_valid = status == "301" || status == "302"
+                    || status == "303" || status == "307" || status == "308";
+                    if method_valid && status_valid {
+                        match URL.parse(parts[2]) {
+                            Ok(url) => {
+                                mut destination = HTTPRedirectResult.redacted_destination(
+                                    url.as_string(),
+                                );
+                                safe_history = "{safe_history}{method} {status} {destination}\n";
+                                accepted = accepted + 1;
+                            }
+                            Error(_) => {}
+                        };
+                    }
+                }
+            }
+        }
+        return HTTPRedirectResult(response, safe_history);
+    }
+
+    static format_hop(method: HTTPMethod, status: Int32, destination: String): String {
+        return "{HTTPRedirectResult.method_name(method)} {status} {HTTPRedirectResult.redacted_destination(destination)}";
+    }
+
+    private static method_name(method: HTTPMethod): String {
+        return match method {
+            HTTPMethod.Get => "GET";
+            HTTPMethod.Head => "HEAD";
+            HTTPMethod.Post => "POST";
+            HTTPMethod.Put => "PUT";
+            HTTPMethod.Patch => "PATCH";
+            HTTPMethod.Delete => "DELETE";
+            HTTPMethod.Options => "OPTIONS";
+            HTTPMethod.Connect => "CONNECT";
+            HTTPMethod.Trace => "TRACE";
+            HTTPMethod.Query => "QUERY";
+        };
+    }
+
+    private static redacted_destination(destination: String): String {
+        mut userinfo_pattern = re'://[^/@]*@';
+        mut without_userinfo = userinfo_pattern.replace(destination, "://");
+        mut without_fragment = without_userinfo.split("#")[0];
+        mut parts = without_fragment.split("?");
+        mut safe_destination = parts[0];
+        if parts.length > 1 {
+            safe_destination = "{safe_destination}?redacted";
+        }
+        // URL normalization produces printable ASCII. This keeps each stored
+        // hop below 8 KiB even when a server returns an unusually long target.
+        if safe_destination.bytes().length > 8192 {
+            return "{safe_destination.substring(0, 8192)}...";
+        }
+        return safe_destination;
+    }
+}
+
 share class HTTPClientOptions {
     private inmut origins: Int32;
     private inmut connect_ms: UInt64;
     private inmut headers_ms: UInt64;
     private inmut idle_ms: UInt64;
+    private inmut protocol_value: Int32;
 
-    private construct(origins: Int32, connect_ms: UInt64, headers_ms: UInt64, idle_ms: UInt64) {
+    private construct(
+        origins: Int32,
+        connect_ms: UInt64,
+        headers_ms: UInt64,
+        idle_ms: UInt64,
+        protocol_value: Int32,
+    ) {
         this.origins = origins;
         this.connect_ms = connect_ms;
         this.headers_ms = headers_ms;
         this.idle_ms = idle_ms;
+        this.protocol_value = protocol_value;
     }
 
     static create(
+        connect_timeout_ms: UInt64 = 10000,
+        response_headers_timeout_ms: UInt64 = 30000,
+        response_idle_timeout_ms: UInt64 = 30000,
+        max_origins: Int32 = 8,
+    ): Result<HTTPClientOptions, HTTPError> {
+        return HTTPClientOptions.create_with_protocol(
+            HTTPProtocolPreference.Auto,
+            connect_timeout_ms,
+            response_headers_timeout_ms,
+            response_idle_timeout_ms,
+            max_origins,
+        );
+    }
+
+    static create_with_protocol(
+        protocol: HTTPProtocolPreference,
         connect_timeout_ms: UInt64 = 10000,
         response_headers_timeout_ms: UInt64 = 30000,
         response_idle_timeout_ms: UInt64 = 30000,
@@ -2714,7 +3012,7 @@ share class HTTPClientOptions {
         return HTTPClientOptions.create_ok(
             HTTPClientOptions(
             max_origins, connect_timeout_ms, response_headers_timeout_ms,
-            response_idle_timeout_ms,
+            response_idle_timeout_ms, HTTPClientOptions.protocol_code(protocol),
         ),
         );
     }
@@ -2731,6 +3029,26 @@ share class HTTPClientOptions {
     connect_timeout_ms(): UInt64 { return this.connect_ms; }
     response_headers_timeout_ms(): UInt64 { return this.headers_ms; }
     response_idle_timeout_ms(): UInt64 { return this.idle_ms; }
+    protocol(): HTTPProtocolPreference { return HTTPClientOptions.protocol_from_code(this.protocol_value); }
+
+    static protocol_code(protocol: HTTPProtocolPreference): Int32 {
+        return match protocol {
+            HTTPProtocolPreference.Auto => 0;
+            HTTPProtocolPreference.HTTP1 => 1;
+            HTTPProtocolPreference.HTTP2 => 2;
+            HTTPProtocolPreference.HTTP3 => 3;
+        };
+    }
+
+    private static protocol_from_code(code: Int32): HTTPProtocolPreference {
+        return match code {
+            1 => HTTPProtocolPreference.HTTP1;
+            2 => HTTPProtocolPreference.HTTP2;
+            3 => HTTPProtocolPreference.HTTP3;
+            _ => HTTPProtocolPreference.Auto;
+        };
+    }
+
 }
 
 // Reusable client that may be shared between Zirk tasks. Runtime access is
@@ -2752,6 +3070,7 @@ share class HTTPClient {
         || status == 307 || status == 308;
     }
 
+
     private construct(handle: UInt64) {
         this.handle = handle;
     }
@@ -2771,11 +3090,13 @@ share class HTTPClient {
         mut connect_timeout_ms = options.connect_timeout_ms();
         mut response_headers_timeout_ms = options.response_headers_timeout_ms();
         mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        mut protocol_code = HTTPClientOptions.protocol_code(options.protocol());
         return match HTTPClient.create_with_options_native(
             max_origins,
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2793,7 +3114,7 @@ share class HTTPClient {
             return HTTPClient.create_error(HTTPError.Protocol);
         }
         return match HTTPClient.create_with_trust_roots_native(
-            roots, max_origins, 10000, 30000, 30000,
+            roots, max_origins, 10000, 30000, 30000, 0,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2808,9 +3129,11 @@ share class HTTPClient {
         mut connect_timeout_ms = options.connect_timeout_ms();
         mut response_headers_timeout_ms = options.response_headers_timeout_ms();
         mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        mut protocol_code = HTTPClientOptions.protocol_code(options.protocol());
         return match HTTPClient.create_with_trust_roots_native(
             roots, max_origins, connect_timeout_ms,
             response_headers_timeout_ms, response_idle_timeout_ms,
+            protocol_code,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2822,7 +3145,7 @@ share class HTTPClient {
             return HTTPClient.create_error(HTTPError.Protocol);
         }
         return match HTTPClient.create_with_proxy_native(
-            proxy, max_origins, 10000, 30000, 30000,
+            proxy, max_origins, 10000, 30000, 30000, 0,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2837,9 +3160,11 @@ share class HTTPClient {
         mut connect_timeout_ms = options.connect_timeout_ms();
         mut response_headers_timeout_ms = options.response_headers_timeout_ms();
         mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        mut protocol_code = HTTPClientOptions.protocol_code(options.protocol());
         return match HTTPClient.create_with_proxy_native(
             proxy, max_origins, connect_timeout_ms,
             response_headers_timeout_ms, response_idle_timeout_ms,
+            protocol_code,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2857,7 +3182,7 @@ share class HTTPClient {
             return HTTPClient.create_error(HTTPError.Protocol);
         }
         return match HTTPClient.create_with_proxy_and_trust_roots_native(
-            proxy, roots, max_origins, 10000, 30000, 30000,
+            proxy, roots, max_origins, 10000, 30000, 30000, 0,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2873,9 +3198,11 @@ share class HTTPClient {
         mut connect_timeout_ms = options.connect_timeout_ms();
         mut response_headers_timeout_ms = options.response_headers_timeout_ms();
         mut response_idle_timeout_ms = options.response_idle_timeout_ms();
+        mut protocol_code = HTTPClientOptions.protocol_code(options.protocol());
         return match HTTPClient.create_with_proxy_and_trust_roots_native(
             proxy, roots, max_origins, connect_timeout_ms,
             response_headers_timeout_ms, response_idle_timeout_ms,
+            protocol_code,
         ) {
             Error(error) => HTTPClient.create_error(error);
             Ok(handle) => HTTPClient.create_ok(HTTPClient(handle));
@@ -2933,11 +3260,40 @@ share class HTTPClient {
         policy: HTTPRedirectPolicy,
         max_redirects: Int32 = 5,
     ): Result<HTTPResponse, HTTPError> {
+        return match this.request_following_internal(method, url, body, headers, policy, max_redirects) {
+            Error(error) => HTTPClient.response_error(error);
+            Ok(redirected) => HTTPClient.response_ok(redirected.response());
+        };
+    }
+
+    request_following_with_history(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPRedirectResult, HTTPError> {
+        return this.request_following_internal(method, url, body, headers, policy, max_redirects);
+    }
+
+    private request_following_internal(
+        method: HTTPMethod,
+        url: URL,
+        body: Array<Byte>,
+        headers: HTTPHeaders,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32,
+    ): Result<HTTPRedirectResult, HTTPError> {
         if max_redirects < 0 || max_redirects > 20 {
-            return HTTPClient.response_error(HTTPError.RedirectLimit);
+            return Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
         }
+        mut history_text: String = "";
         if policy == HTTPRedirectPolicy.Never {
-            return this.request(method, url, body, headers);
+            return match this.request(method, url, body, headers) {
+                Error(error) => Error<HTTPRedirectResult, HTTPError>(error);
+                Ok(response) => Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
+            };
         }
 
         mut current_method = method;
@@ -2947,54 +3303,55 @@ share class HTTPClient {
         mut visited: String = "\n{url.as_string()}\n";
         mut followed: Int32 = 0;
         mut finished = false;
-        mut result = HTTPClient.response_error(HTTPError.Transport);
+        mut result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
         while ! finished {
             match this.request(current_method, current_url, current_body, current_headers) {
                 Error(error) => {
-                    result = HTTPClient.response_error(error);
+                    result = Error<HTTPRedirectResult, HTTPError>(error);
                     finished = true;
                 }
                 Ok(response) => {
                     mut status = response.status_code();
                     if ! HTTPClient.is_redirect_status(status) {
-                        result = HTTPClient.response_ok(response);
+                        result = Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
                         finished = true;
                     } else if followed >= max_redirects {
                         _ = response.close();
-                        result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                        result = Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
                         finished = true;
                     } else {
                         match response.header_values("location") {
                             Error(error) => {
                                 _ = response.close();
-                                result = HTTPClient.response_error(error);
+                                result = Error<HTTPRedirectResult, HTTPError>(error);
                                 finished = true;
                             }
                             Ok(values) => {
                                 if values.length != 1 {
                                     _ = response.close();
-                                    result = HTTPClient.response_error(HTTPError.Protocol);
+                                    result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Protocol);
                                     finished = true;
                                 } else {
                                     match URL.resolve(current_url, values[0]) {
                                         Error(error) => {
                                             _ = response.close();
-                                            result = HTTPClient.response_error(error);
+                                            result = Error<HTTPRedirectResult, HTTPError>(error);
                                             finished = true;
                                         }
                                         Ok(next) => {
                                             if policy == HTTPRedirectPolicy.SameOrigin
                                             && ! HTTPClient.same_origin(current_url, next) {
-                                                result = HTTPClient.response_ok(response);
+                                                result = Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
                                                 finished = true;
                                             } else if HTTPClient.has_visited_url(
                                                 visited,
                                                 next.as_string(),
                                             ) {
                                                 _ = response.close();
-                                                result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                                                result = Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
                                                 finished = true;
                                             } else {
+                                                history_text = "{history_text}{HTTPRedirectResult.format_hop(current_method, status, next.as_string())}\n";
                                                 _ = response.close();
                                                 current_headers = current_headers.redirect_copy(
                                                     HTTPClient.same_origin(current_url, next), status != 303,
@@ -3048,11 +3405,38 @@ share class HTTPClient {
         policy: HTTPRedirectPolicy,
         max_redirects: Int32 = 5,
     ): Result<HTTPResponse, HTTPError> {
+        return match this.request_body_following_internal(method, url, body, policy, max_redirects) {
+            Error(error) => HTTPClient.response_error(error);
+            Ok(redirected) => HTTPClient.response_ok(redirected.response());
+        };
+    }
+
+    request_body_following_with_history(
+        method: HTTPMethod,
+        url: URL,
+        body: HTTPBody,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32 = 5,
+    ): Result<HTTPRedirectResult, HTTPError> {
+        return this.request_body_following_internal(method, url, body, policy, max_redirects);
+    }
+
+    private request_body_following_internal(
+        method: HTTPMethod,
+        url: URL,
+        body: HTTPBody,
+        policy: HTTPRedirectPolicy,
+        max_redirects: Int32,
+    ): Result<HTTPRedirectResult, HTTPError> {
         if max_redirects < 0 || max_redirects > 20 {
-            return HTTPClient.response_error(HTTPError.RedirectLimit);
+            return Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
         }
+        mut history_text: String = "";
         if policy == HTTPRedirectPolicy.Never {
-            return this.request_body(method, url, body);
+            return match this.request_body(method, url, body) {
+                Error(error) => Error<HTTPRedirectResult, HTTPError>(error);
+                Ok(response) => Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
+            };
         }
 
         mut current_method = method;
@@ -3064,7 +3448,7 @@ share class HTTPClient {
         mut visited: String = "\n{url.as_string()}\n";
         mut followed: Int32 = 0;
         mut finished = false;
-        mut result = HTTPClient.response_error(HTTPError.Transport);
+        mut result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
         while ! finished {
             mut hop_result = HTTPClient.response_error(HTTPError.Transport);
             if body_discarded {
@@ -3074,49 +3458,50 @@ share class HTTPClient {
             }
             match hop_result {
                 Error(error) => {
-                    result = HTTPClient.response_error(error);
+                    result = Error<HTTPRedirectResult, HTTPError>(error);
                     finished = true;
                 }
                 Ok(response) => {
                     mut status = response.status_code();
                     if ! HTTPClient.is_redirect_status(status) {
-                        result = HTTPClient.response_ok(response);
+                        result = Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
                         finished = true;
                     } else if followed >= max_redirects {
                         _ = response.close();
-                        result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                        result = Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
                         finished = true;
                     } else {
                         match response.header_values("location") {
                             Error(error) => {
                                 _ = response.close();
-                                result = HTTPClient.response_error(error);
+                                result = Error<HTTPRedirectResult, HTTPError>(error);
                                 finished = true;
                             }
                             Ok(values) => {
                                 if values.length != 1 {
                                     _ = response.close();
-                                    result = HTTPClient.response_error(HTTPError.Protocol);
+                                    result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Protocol);
                                     finished = true;
                                 } else {
                                     match URL.resolve(current_url, values[0]) {
                                         Error(error) => {
                                             _ = response.close();
-                                            result = HTTPClient.response_error(error);
+                                            result = Error<HTTPRedirectResult, HTTPError>(error);
                                             finished = true;
                                         }
                                         Ok(next) => {
                                             if policy == HTTPRedirectPolicy.SameOrigin
                                             && ! HTTPClient.same_origin(current_url, next) {
-                                                result = HTTPClient.response_ok(response);
+                                                result = Ok<HTTPRedirectResult, HTTPError>(HTTPRedirectResult.from_client(response, history_text));
                                                 finished = true;
                                             } else if HTTPClient.has_visited_url(
                                                 visited, next.as_string(),
                                             ) {
                                                 _ = response.close();
-                                                result = HTTPClient.response_error(HTTPError.RedirectLimit);
+                                                result = Error<HTTPRedirectResult, HTTPError>(HTTPError.RedirectLimit);
                                                 finished = true;
                                             } else {
+                                                history_text = "{history_text}{HTTPRedirectResult.format_hop(current_method, status, next.as_string())}\n";
                                                 current_body = HTTPClient.redirect_body_copy(
                                                     current_body,
                                                     HTTPClient.same_origin(current_url, next),
@@ -3444,8 +3829,14 @@ share class HTTPClient {
         return result;
     }
 
+    // Creates an isolated, memory-only cookie store owned by this client.
     enable_cookies(): Result<Void, HTTPError> {
         return HTTPClient.enable_cookies_native(this.handle);
+    }
+
+    // Clears cookie values from this client's memory-only store.
+    clear_cookies(): Result<Void, HTTPError> {
+        return HTTPClient.clear_cookies_native(this.handle);
     }
 
     close(): Result<Void, HTTPError> {
@@ -3464,6 +3855,7 @@ share class HTTPClient {
         connect_timeout_ms: UInt64,
         response_headers_timeout_ms: UInt64,
         response_idle_timeout_ms: UInt64,
+        protocol_code: Int32,
     ): Result<UInt64, HTTPError> {
         return Error(HTTPError.Protocol);
     }
@@ -3474,6 +3866,7 @@ share class HTTPClient {
         connect_timeout_ms: UInt64,
         response_headers_timeout_ms: UInt64,
         response_idle_timeout_ms: UInt64,
+        protocol_code: Int32,
     ): Result<UInt64, HTTPError> {
         return Error(HTTPError.Protocol);
     }
@@ -3484,6 +3877,7 @@ share class HTTPClient {
         connect_timeout_ms: UInt64,
         response_headers_timeout_ms: UInt64,
         response_idle_timeout_ms: UInt64,
+        protocol_code: Int32,
     ): Result<UInt64, HTTPError> {
         return Error(HTTPError.Protocol);
     }
@@ -3495,6 +3889,7 @@ share class HTTPClient {
         connect_timeout_ms: UInt64,
         response_headers_timeout_ms: UInt64,
         response_idle_timeout_ms: UInt64,
+        protocol_code: Int32,
     ): Result<UInt64, HTTPError> {
         return Error(HTTPError.Protocol);
     }
@@ -3521,6 +3916,10 @@ share class HTTPClient {
     }
 
     private static enable_cookies_native(handle: UInt64): Result<Void, HTTPError> {
+        return Error(HTTPError.Transport);
+    }
+
+    private static clear_cookies_native(handle: UInt64): Result<Void, HTTPError> {
         return Error(HTTPError.Transport);
     }
 

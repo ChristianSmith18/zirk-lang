@@ -98,7 +98,7 @@ const DEFAULT_HTTP_SERVER_TIMEOUTS: HttpTimeouts = HttpTimeouts {
     response_headers: Duration::from_secs(30),
     response_idle: Duration::from_secs(30),
 };
-const DEFAULT_HTTP_SERVER_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_HTTP_SERVER_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound for protocol-level draining after the final admitted request.
 /// The connection future owns all remaining Hyper streams; dropping it at the
 /// deadline closes those streams and lets their cancellation guards notify the
@@ -127,12 +127,22 @@ pub struct HttpResponseValues {
     pub status: HttpStatusCode,
     pub headers: Headers,
     pub body: Vec<u8>,
+    pub protocol: HttpProtocolVersion,
     /// Optional bounded producer channel. Hyper polls this on its transport
     /// task; the Zirk owner task remains responsible for producing chunks.
     pub body_stream: Option<tokio::sync::mpsc::Receiver<Result<Bytes, io::Error>>>,
     /// Generated source producer, consumed on its owning Zirk task. HTTP/2
     /// responses move it to a bounded channel before entering the reactor.
     pub(crate) body_producer: Option<crate::http_api::HttpServerBodyProducer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum HttpProtocolVersion {
+    Unknown = 0,
+    Http1 = 1,
+    Http2 = 2,
+    Http3 = 3,
 }
 
 struct HttpChannelBody {
@@ -324,6 +334,7 @@ impl Body for HttpZirkCompressedProducerBody {
 pub struct HttpStreamingResponse {
     pub status: HttpStatusCode,
     pub headers: Headers,
+    pub protocol: HttpProtocolVersion,
     body: Option<HttpStreamingBody>,
     driver: Option<Vec<AbortOnDrop>>,
     pending: Bytes,
@@ -435,6 +446,7 @@ enum HttpStreamingBody {
 const HTTP_COMPRESSED_RESPONSE_LIMIT: usize = MAX_HTTP_BUFFERED_BODY_BYTES;
 const HTTP_EXPANDED_RESPONSE_LIMIT: usize = MAX_HTTP_BUFFERED_BODY_BYTES;
 const HTTP_MAX_DECOMPRESSION_RATIO: usize = 1000;
+const HTTP_MAX_CONTENT_CODING_DEPTH: usize = 4;
 const HTTP_CONTENT_CODING_CPU_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
@@ -579,8 +591,8 @@ async fn read_with_cpu_budget(
 }
 
 /// Moves content decoding to a Tokio worker and transfers decoded chunks back
-/// through a two-item queue. One coding layer is accepted; malformed stacks
-/// are rejected before the body is exposed to application code.
+/// through a two-item queue. A bounded stack of supported codings is decoded
+/// in reverse application order.
 fn decode_response_body(
     mut headers: Headers,
     body: HttpStreamingBody,
@@ -593,27 +605,33 @@ fn decode_response_body(
     if values.is_empty() {
         return Ok((headers, body, None));
     }
-    if values.len() != 1 {
-        return Err(HttpRuntimeError::Protocol);
+    let mut codings = Vec::new();
+    for value in values {
+        let value = value.to_str().map_err(|_| HttpRuntimeError::Protocol)?;
+        for token in value.split(',') {
+            let token = token.trim_matches([' ', '\t']);
+            if token.is_empty() {
+                return Err(HttpRuntimeError::Protocol);
+            }
+            let coding = match token.to_ascii_lowercase().as_str() {
+                "br" => ContentCoding::Brotli,
+                "gzip" => ContentCoding::Gzip,
+                "deflate" => ContentCoding::Deflate,
+                "identity" => ContentCoding::Identity,
+                _ => return Err(HttpRuntimeError::Protocol),
+            };
+            if accepted.quality(coding) == 0 {
+                return Err(HttpRuntimeError::Protocol);
+            }
+            if coding != ContentCoding::Identity {
+                codings.push(coding);
+                if codings.len() > HTTP_MAX_CONTENT_CODING_DEPTH {
+                    return Err(HttpRuntimeError::Protocol);
+                }
+            }
+        }
     }
-    let coding = values[0]
-        .to_str()
-        .map_err(|_| HttpRuntimeError::Protocol)?
-        .trim_matches([' ', '\t']);
-    if coding.contains(',') {
-        return Err(HttpRuntimeError::Protocol);
-    }
-    let coding = match coding.to_ascii_lowercase().as_str() {
-        "br" => ContentCoding::Brotli,
-        "gzip" => ContentCoding::Gzip,
-        "deflate" => ContentCoding::Deflate,
-        "identity" => ContentCoding::Identity,
-        _ => return Err(HttpRuntimeError::Protocol),
-    };
-    if accepted.quality(coding) == 0 {
-        return Err(HttpRuntimeError::Protocol);
-    }
-    if coding == ContentCoding::Identity {
+    if codings.is_empty() {
         headers.remove("content-encoding");
         return Ok((headers, body, None));
     }
@@ -623,14 +641,17 @@ fn decode_response_body(
     // task's fixed 128 KiB stack.
     let worker = crate::network_future::spawn_on_reactor(async move {
         let (input, compressed_bytes) = HttpBodyReader::new(body);
-        let input = tokio::io::BufReader::with_capacity(8 * 1024, input);
-        let mut decoder: Pin<Box<dyn AsyncRead + Send>> = match coding {
-            ContentCoding::Brotli => Box::pin(BrotliDecoder::new(input)),
-            ContentCoding::Gzip => Box::pin(GzipDecoder::new(input)),
-            // HTTP's `deflate` content coding uses the zlib-wrapped format.
-            ContentCoding::Deflate => Box::pin(ZlibDecoder::new(input)),
-            ContentCoding::Identity => unreachable!("identity returned above"),
-        };
+        let mut decoder: Pin<Box<dyn AsyncRead + Send>> = Box::pin(input);
+        for coding in codings.into_iter().rev() {
+            let input = tokio::io::BufReader::with_capacity(8 * 1024, decoder);
+            decoder = match coding {
+                ContentCoding::Brotli => Box::pin(BrotliDecoder::new(input)),
+                ContentCoding::Gzip => Box::pin(GzipDecoder::new(input)),
+                // HTTP's `deflate` content coding uses the zlib-wrapped format.
+                ContentCoding::Deflate => Box::pin(ZlibDecoder::new(input)),
+                ContentCoding::Identity => unreachable!("identity was filtered above"),
+            };
+        }
         tokio::spawn(async move {
             let mut expanded = 0usize;
             let mut decoder_cpu_time = Duration::ZERO;
@@ -1136,6 +1157,7 @@ impl HttpStreamingResponse {
         Self {
             status,
             headers,
+            protocol: HttpProtocolVersion::Unknown,
             body: Some(HttpStreamingBody::Buffered {
                 bytes: Bytes::from(body),
                 offset: 0,
@@ -1271,6 +1293,8 @@ enum HttpIo {
         >,
     ),
     Upgraded(Box<TokioIo<hyper::upgrade::Upgraded>>),
+    #[cfg(feature = "http3")]
+    Http3(Box<tokio::io::DuplexStream>),
 }
 
 /// A single-origin HTTP/1.1 connection that can carry sequential requests.
@@ -1585,6 +1609,7 @@ impl Http2RequestSender {
             body: result.body,
             body_stream: None,
             body_producer: None,
+            protocol: HttpProtocolVersion::Http2,
         })
     }
 
@@ -1719,6 +1744,7 @@ impl Http2RequestSender {
             body: result.body,
             body_stream: None,
             body_producer: None,
+            protocol: HttpProtocolVersion::Http2,
         })
     }
 }
@@ -1743,8 +1769,16 @@ impl HttpReusableConnection {
         timeouts: HttpTimeouts,
     ) -> Result<HttpResponseValues, HttpRuntimeError> {
         match self {
-            Self::Http1(connection) => connection.send(request, grant, timeouts),
-            Self::Http2(connection) => connection.send(request, grant, timeouts),
+            Self::Http1(connection) => {
+                let mut response = connection.send(request, grant, timeouts)?;
+                response.protocol = HttpProtocolVersion::Http1;
+                Ok(response)
+            }
+            Self::Http2(connection) => {
+                let mut response = connection.send(request, grant, timeouts)?;
+                response.protocol = HttpProtocolVersion::Http2;
+                Ok(response)
+            }
         }
     }
 
@@ -1757,11 +1791,17 @@ impl HttpReusableConnection {
     ) -> Result<HttpResponseValues, HttpRuntimeError> {
         match self {
             Self::Http1(connection) => {
-                connection.send_streaming(request, grant, timeouts, producer)
+                let mut response = connection.send_streaming(request, grant, timeouts, producer)?;
+                response.protocol = HttpProtocolVersion::Http1;
+                Ok(response)
             }
-            Self::Http2(connection) => connection
-                .request_sender()
-                .send_streaming(request, grant, timeouts, producer),
+            Self::Http2(connection) => {
+                let mut response = connection
+                    .request_sender()
+                    .send_streaming(request, grant, timeouts, producer)?;
+                response.protocol = HttpProtocolVersion::Http2;
+                Ok(response)
+            }
         }
     }
 
@@ -1771,22 +1811,41 @@ impl HttpReusableConnection {
         timeouts: HttpTimeouts,
         tls_config: Option<Arc<crate::network_transport::RustlsClientConfig>>,
         proxy: Option<&HttpProxy>,
+        protocol_preference: HttpProtocolPreference,
     ) -> Result<Self, HttpRuntimeError> {
+        if protocol_preference == HttpProtocolPreference::Http3 {
+            return Err(HttpRuntimeError::Protocol);
+        }
+        if protocol_preference == HttpProtocolPreference::Http2
+            && (url.scheme() != "https" || proxy.is_some())
+        {
+            return Err(HttpRuntimeError::Protocol);
+        }
         if url.scheme() == "https" && proxy.is_none() {
-            let (stream, protocol) = match tls_config {
-                Some(config) => TlsClientStream::connect_for_http_with_config(
-                    url.as_str(),
-                    Arc::clone(&grant),
-                    timeouts.connect,
-                    config,
-                ),
-                None => TlsClientStream::connect_for_http(
-                    url.as_str(),
-                    Arc::clone(&grant),
-                    timeouts.connect,
-                ),
-            }
+            let config = match tls_config {
+                Some(config) => config,
+                None => crate::network_transport::client_tls_config_for_http()
+                    .map_err(HttpRuntimeError::from)?,
+            };
+            let alpn = match protocol_preference {
+                HttpProtocolPreference::Auto => vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+                HttpProtocolPreference::Http1 => vec![b"http/1.1".to_vec()],
+                HttpProtocolPreference::Http2 => vec![b"h2".to_vec()],
+                HttpProtocolPreference::Http3 => unreachable!(),
+            };
+            let (stream, protocol) = TlsClientStream::connect_for_http_with_protocols(
+                url.as_str(),
+                Arc::clone(&grant),
+                timeouts.connect,
+                config,
+                alpn,
+            )
             .map_err(HttpRuntimeError::from)?;
+            if protocol_preference == HttpProtocolPreference::Http2
+                && protocol != NegotiatedHttpProtocol::Http2
+            {
+                return Err(HttpRuntimeError::Protocol);
+            }
             let io = HttpIo::Tls(Box::new(stream.into_inner()));
             return match protocol {
                 NegotiatedHttpProtocol::Http2 => Ok(Self::Http2(Http2ReusableConnection::connect(
@@ -2113,6 +2172,7 @@ impl Http1ReusableConnection {
                 body: bytes,
                 body_stream: None,
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             })
         })
         .map_err(|error| match error {
@@ -2289,6 +2349,7 @@ impl Http1ReusableConnection {
                 body: bytes,
                 body_stream: None,
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             })
         })
         .map_err(|error| match error {
@@ -2391,8 +2452,11 @@ pub struct HttpClientPool {
     timeouts: HttpTimeouts,
     tls_config: Option<Arc<crate::network_transport::RustlsClientConfig>>,
     proxy: Option<HttpProxy>,
+    protocol: HttpProtocolPreference,
     sequence: u64,
     connections: HashMap<String, (HttpReusableConnection, u64)>,
+    #[cfg(feature = "http3")]
+    http3_connections: HashMap<String, (Arc<crate::http3_transport::Http3ClientSession>, u64)>,
     cookies: Option<CookieJar>,
 }
 
@@ -2414,6 +2478,27 @@ impl HttpClientPool {
         Self::new_for_owner(max_origins, timeouts, None)
     }
 
+    pub(crate) fn new_shared_with_protocol(
+        max_origins: usize,
+        timeouts: HttpTimeouts,
+        protocol: HttpProtocolPreference,
+        tls_config: Option<Arc<crate::network_transport::RustlsClientConfig>>,
+        proxy: Option<HttpProxy>,
+    ) -> Result<Self, HttpRuntimeError> {
+        if protocol == HttpProtocolPreference::Http3 && proxy.is_some() {
+            return Err(HttpRuntimeError::Protocol);
+        }
+        #[cfg(not(feature = "http3"))]
+        if protocol == HttpProtocolPreference::Http3 {
+            return Err(HttpRuntimeError::Protocol);
+        }
+        let mut pool = Self::new_for_owner(max_origins, timeouts, None)?;
+        pool.protocol = protocol;
+        pool.tls_config = tls_config;
+        pool.proxy = proxy;
+        Ok(pool)
+    }
+
     fn new_for_owner(
         max_origins: usize,
         timeouts: HttpTimeouts,
@@ -2432,8 +2517,11 @@ impl HttpClientPool {
             timeouts,
             tls_config: None,
             proxy: None,
+            protocol: HttpProtocolPreference::Auto,
             sequence: 0,
             connections: HashMap::new(),
+            #[cfg(feature = "http3")]
+            http3_connections: HashMap::new(),
             cookies: None,
         })
     }
@@ -2551,6 +2639,7 @@ impl HttpClientPool {
             self.timeouts,
             self.tls_config.clone(),
             self.proxy.as_ref(),
+            self.protocol,
         )?;
         self.sequence = self.sequence.wrapping_add(1).max(1);
         if self.connections.len() >= self.max_origins
@@ -2583,6 +2672,8 @@ impl HttpClientPool {
         let request_url = request.url.clone();
         if let Err(error) = grant.authorize_origin(&origin) {
             self.connections.remove(&origin);
+            #[cfg(feature = "http3")]
+            self.http3_connections.remove(&origin);
             return Err(match error {
                 zirk_runtime_core::network_policy::NetworkPolicyError::PermissionDenied => {
                     HttpRuntimeError::PermissionDenied
@@ -2594,6 +2685,8 @@ impl HttpClientPool {
             && let Err(error) = grant.authorize_origin(&proxy.origin())
         {
             self.connections.remove(&origin);
+            #[cfg(feature = "http3")]
+            self.http3_connections.remove(&origin);
             return Err(match error {
                 zirk_runtime_core::network_policy::NetworkPolicyError::PermissionDenied => {
                     HttpRuntimeError::PermissionDenied
@@ -2617,9 +2710,34 @@ impl HttpClientPool {
                 .insert("cookie", cookie_header.as_str().as_bytes())
                 .map_err(|_| HttpRuntimeError::InvalidRequest)?;
         }
+        let timeouts = self.timeouts;
+        if self.protocol == HttpProtocolPreference::Http3 {
+            #[cfg(feature = "http3")]
+            {
+                let session = self
+                    .prepare_shared_http3(&mut request, &grant)?
+                    .ok_or(HttpRuntimeError::Protocol)?;
+                let response =
+                    match Self::request_http3_session(request, grant, session, self.timeouts) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            if matches!(
+                                error,
+                                HttpRuntimeError::Transport | HttpRuntimeError::Protocol
+                            ) {
+                                self.discard_shared_http3(&origin);
+                            }
+                            return Err(error);
+                        }
+                    };
+                self.store_response_cookies(&response.headers, &request_url, SystemTime::now());
+                return Ok(response);
+            }
+            #[cfg(not(feature = "http3"))]
+            return Err(HttpRuntimeError::Protocol);
+        }
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let sequence = self.sequence;
-        let timeouts = self.timeouts;
         if let Some((mut connection, _)) = self.connections.remove(&origin) {
             let response = connection.send(request, &grant, timeouts)?;
             self.store_response_cookies(&response.headers, &request_url, SystemTime::now());
@@ -2635,6 +2753,7 @@ impl HttpClientPool {
             timeouts,
             self.tls_config.clone(),
             self.proxy.as_ref(),
+            self.protocol,
         )?;
         let response = connection.send(request, &grant, timeouts)?;
         self.store_response_cookies(&response.headers, &request_url, SystemTime::now());
@@ -2651,6 +2770,133 @@ impl HttpClientPool {
             self.connections.insert(origin, (connection, sequence));
         }
         Ok(response)
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn prepare_shared_http3(
+        &mut self,
+        request: &mut HttpRequestValues,
+        grant: &Arc<EffectiveNetworkGrant>,
+    ) -> Result<Option<Arc<crate::http3_transport::Http3ClientSession>>, HttpRuntimeError> {
+        if self.protocol != HttpProtocolPreference::Http3 {
+            return Ok(None);
+        }
+        if self.proxy.is_some() {
+            return Err(HttpRuntimeError::Protocol);
+        }
+        grant
+            .authorize_origin(&request.url.origin())
+            .map_err(|error| match error {
+                zirk_runtime_core::network_policy::NetworkPolicyError::PermissionDenied => {
+                    HttpRuntimeError::PermissionDenied
+                }
+                _ => HttpRuntimeError::InvalidRequest,
+            })?;
+        if let Some(cookies) = &mut self.cookies
+            && request.headers.get("cookie").is_none()
+            && let Some(cookie_header) = cookies.cookie_header(
+                &request.url,
+                Some(&request.url),
+                false,
+                request.method.is_safe(),
+                SystemTime::now(),
+            )
+        {
+            request
+                .headers
+                .insert("cookie", cookie_header.as_str().as_bytes())
+                .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        let origin = request.url.origin();
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        if let Some((session, last_used)) = self.http3_connections.get_mut(&origin) {
+            if !session.is_closed() {
+                *last_used = self.sequence;
+                return Ok(Some(Arc::clone(session)));
+            }
+        }
+        self.http3_connections.remove(&origin);
+        if self.http3_connections.len() >= self.max_origins
+            && let Some(oldest) = self
+                .http3_connections
+                .iter()
+                .min_by_key(|(_, (_, last_used))| *last_used)
+                .map(|(origin, _)| origin.clone())
+        {
+            self.http3_connections.remove(&oldest);
+        }
+        let parsed_origin = zirk_runtime_core::network_policy::NetworkOrigin::parse(&origin)
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        let session = crate::http3_transport::Http3ClientSession::connect(
+            parsed_origin,
+            Arc::clone(grant),
+            self.timeouts.connect,
+            self.tls_config.clone(),
+        )?;
+        self.http3_connections
+            .insert(origin, (Arc::clone(&session), self.sequence));
+        Ok(Some(session))
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn finish_shared_http3(
+        &mut self,
+        request_url: &zirk_runtime_core::http_values::Url,
+        response: &HttpResponseValues,
+    ) {
+        self.store_response_cookies(&response.headers, request_url, SystemTime::now());
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn discard_shared_http3(&mut self, origin: &str) {
+        self.http3_connections.remove(origin);
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn request_http3_session(
+        request: HttpRequestValues,
+        grant: Arc<EffectiveNetworkGrant>,
+        session: Arc<crate::http3_transport::Http3ClientSession>,
+        timeouts: HttpTimeouts,
+    ) -> Result<HttpResponseValues, HttpRuntimeError> {
+        let mut builder = http::Request::builder()
+            .method(
+                http::Method::from_bytes(request.method_token.as_bytes())
+                    .map_err(|_| HttpRuntimeError::InvalidRequest)?,
+            )
+            .uri(request.url.as_str())
+            .version(http::Version::HTTP_3);
+        for (name, _) in request.headers.iter() {
+            for value in request.headers.get_all(name.as_str()).into_iter().flatten() {
+                builder = builder.header(name, value.as_bytes());
+            }
+        }
+        let request = builder
+            .body(request.body)
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        let response = session.request(
+            request,
+            grant,
+            timeouts.response_headers,
+            timeouts.response_idle,
+        )?;
+        let mut headers = Headers::new();
+        for name in response.headers().keys() {
+            for value in response.headers().get_all(name).iter() {
+                headers
+                    .append(name.as_str(), value.as_bytes())
+                    .map_err(|_| HttpRuntimeError::Protocol)?;
+            }
+        }
+        Ok(HttpResponseValues {
+            status: HttpStatusCode::new(response.status().as_u16())
+                .map_err(|_| HttpRuntimeError::Protocol)?,
+            headers,
+            body: response.into_body(),
+            body_stream: None,
+            body_producer: None,
+            protocol: HttpProtocolVersion::Http3,
+        })
     }
 
     /// Sends a bounded one-pass producer body through this client's pooled
@@ -2714,6 +2960,7 @@ impl HttpClientPool {
                 timeouts,
                 self.tls_config.clone(),
                 self.proxy.as_ref(),
+                self.protocol,
             )?,
         };
         let response = connection.send_streaming(request, &grant, timeouts, &mut producer)?;
@@ -2837,6 +3084,28 @@ impl HttpClientPool {
         };
         for value in headers.get_all("set-cookie").into_iter().flatten() {
             let _ = jar.store_set_cookie(request_url, value.as_bytes(), now);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpProtocolPreference {
+    Auto,
+    Http1,
+    Http2,
+    Http3,
+}
+
+impl TryFrom<i32> for HttpProtocolPreference {
+    type Error = HttpRuntimeError;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Auto),
+            1 => Ok(Self::Http1),
+            2 => Ok(Self::Http2),
+            3 => Ok(Self::Http3),
+            _ => Err(HttpRuntimeError::InvalidRequest),
         }
     }
 }
@@ -3166,6 +3435,8 @@ impl AsyncRead for HttpIo {
             Self::Tls(stream) => Pin::new(stream).poll_read(cx, buffer),
             Self::TlsOverTls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buffer),
             Self::Upgraded(stream) => Pin::new(stream.as_mut()).poll_read(cx, buffer),
+            #[cfg(feature = "http3")]
+            Self::Http3(stream) => Pin::new(stream.as_mut()).poll_read(cx, buffer),
         }
     }
 }
@@ -3181,6 +3452,8 @@ impl AsyncWrite for HttpIo {
             Self::Tls(stream) => Pin::new(stream).poll_write(cx, bytes),
             Self::TlsOverTls(stream) => Pin::new(stream.as_mut()).poll_write(cx, bytes),
             Self::Upgraded(stream) => Pin::new(stream.as_mut()).poll_write(cx, bytes),
+            #[cfg(feature = "http3")]
+            Self::Http3(stream) => Pin::new(stream.as_mut()).poll_write(cx, bytes),
         }
     }
 
@@ -3190,6 +3463,8 @@ impl AsyncWrite for HttpIo {
             Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
             Self::TlsOverTls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
             Self::Upgraded(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+            #[cfg(feature = "http3")]
+            Self::Http3(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
         }
     }
 
@@ -3199,6 +3474,8 @@ impl AsyncWrite for HttpIo {
             Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::TlsOverTls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
             Self::Upgraded(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            #[cfg(feature = "http3")]
+            Self::Http3(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -3226,6 +3503,7 @@ pub struct HttpWebSocket {
     // extended CONNECT stream. Keep that driver alive exactly as long as the
     // WebSocket and abort it when the stream closes or is dropped.
     h2_driver: Option<AbortOnDrop>,
+    http3_server_close: Option<tokio::sync::oneshot::Receiver<()>>,
     owner: crate::task::TaskId,
     idle_timeout: Duration,
     negotiated_subprotocol: Option<String>,
@@ -3235,6 +3513,46 @@ pub struct HttpWebSocket {
 }
 
 impl HttpWebSocket {
+    /// Wraps a stream whose RFC 9220 extended CONNECT handshake has already
+    /// been accepted by the HTTP/3 transport adapter.
+    #[cfg(feature = "http3")]
+    pub(crate) fn from_http3_server_stream(
+        io: tokio::io::DuplexStream,
+        negotiated_subprotocol: Option<String>,
+        idle_timeout: Duration,
+        max_messages: usize,
+        driver: tokio::task::AbortHandle,
+        close_drain: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<Self, HttpRuntimeError> {
+        let driver = AbortOnDrop(driver);
+        if idle_timeout.is_zero() || max_messages == 0 || max_messages > 1_024 {
+            return Err(HttpRuntimeError::InvalidRequest);
+        }
+        let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        config.max_message_size = Some(HTTP_WEBSOCKET_MESSAGE_LIMIT);
+        config.max_frame_size = Some(HTTP_WEBSOCKET_MESSAGE_LIMIT);
+        config.max_write_buffer_size = HTTP_WEBSOCKET_MESSAGE_LIMIT + 64 * 1024;
+        let stream = crate::network_future::block_on_current(
+            tokio_tungstenite::WebSocketStream::from_raw_socket(
+                HttpIo::Http3(Box::new(io)),
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                Some(config),
+            ),
+        )
+        .map_err(map_network_future_error)?;
+        Ok(Self {
+            stream,
+            h2_driver: Some(driver),
+            http3_server_close: Some(close_drain),
+            owner: crate::executor::current_task(),
+            idle_timeout,
+            negotiated_subprotocol,
+            closed: false,
+            receive_limit: max_messages,
+            received_messages: 0,
+        })
+    }
+
     pub fn connect(
         url: &zirk_runtime_core::http_values::Url,
         grant: Arc<EffectiveNetworkGrant>,
@@ -3362,6 +3680,88 @@ impl HttpWebSocket {
         Ok(Self {
             stream,
             h2_driver,
+            http3_server_close: None,
+            owner: crate::executor::current_task(),
+            idle_timeout: timeouts.response_idle,
+            negotiated_subprotocol,
+            closed: false,
+            receive_limit: usize::MAX,
+            received_messages: 0,
+        })
+    }
+
+    /// Connects using RFC 9220 Extended CONNECT over authenticated HTTP/3.
+    #[cfg(feature = "http3")]
+    pub fn connect_http3_with_options(
+        url: &zirk_runtime_core::http_values::Url,
+        grant: Arc<EffectiveNetworkGrant>,
+        timeouts: HttpTimeouts,
+        origin: Option<&str>,
+        subprotocols: &[String],
+        tls_config: Option<Arc<crate::network_transport::RustlsClientConfig>>,
+    ) -> Result<Self, HttpRuntimeError> {
+        if url.scheme() != "https"
+            || timeouts.connect.is_zero()
+            || timeouts.response_headers.is_zero()
+            || timeouts.response_idle.is_zero()
+            || origin.is_some_and(|origin| normalize_websocket_origin(origin).is_none())
+            || subprotocols.len() > 64
+        {
+            return Err(HttpRuntimeError::InvalidRequest);
+        }
+        let mut protocol_bytes = 0usize;
+        for (index, protocol) in subprotocols.iter().enumerate() {
+            if protocol.is_empty()
+                || protocol.len() > 128
+                || !protocol.bytes().all(is_http_token_byte)
+                || subprotocols[..index]
+                    .iter()
+                    .any(|previous| previous == protocol)
+            {
+                return Err(HttpRuntimeError::InvalidRequest);
+            }
+            protocol_bytes = protocol_bytes
+                .checked_add(protocol.len())
+                .and_then(|size| size.checked_add(2))
+                .ok_or(HttpRuntimeError::InvalidRequest)?;
+        }
+        if protocol_bytes > 8192 {
+            return Err(HttpRuntimeError::InvalidRequest);
+        }
+        let origin_header = origin
+            .map(|origin| {
+                let normalized =
+                    normalize_websocket_origin(origin).ok_or(HttpRuntimeError::InvalidRequest)?;
+                http::HeaderValue::from_str(&normalized)
+                    .map_err(|_| HttpRuntimeError::InvalidRequest)
+            })
+            .transpose()?;
+        let (io, negotiated_subprotocol, driver) =
+            crate::http3_transport::connect_websocket_transport(
+                url,
+                grant,
+                timeouts.connect,
+                timeouts.response_headers,
+                tls_config,
+                origin_header,
+                subprotocols,
+            )?;
+        let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        config.max_message_size = Some(HTTP_WEBSOCKET_MESSAGE_LIMIT);
+        config.max_frame_size = Some(HTTP_WEBSOCKET_MESSAGE_LIMIT);
+        config.max_write_buffer_size = HTTP_WEBSOCKET_MESSAGE_LIMIT + 64 * 1024;
+        let stream = crate::network_future::block_on_current(
+            tokio_tungstenite::WebSocketStream::from_raw_socket(
+                HttpIo::Http3(Box::new(io)),
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                Some(config),
+            ),
+        )
+        .map_err(map_network_future_error)?;
+        Ok(Self {
+            stream,
+            h2_driver: Some(AbortOnDrop(driver)),
+            http3_server_close: None,
             owner: crate::executor::current_task(),
             idle_timeout: timeouts.response_idle,
             negotiated_subprotocol,
@@ -3514,8 +3914,32 @@ impl HttpWebSocket {
                     }
                 })
                 .map_err(map_network_future_error)??;
+                if self.http3_server_close.is_some() {
+                    crate::network_future::block_on_current(async {
+                        tokio::time::timeout(
+                            idle_timeout,
+                            tokio::io::AsyncWriteExt::shutdown(self.stream.get_mut()),
+                        )
+                        .await
+                        .map_err(|_| HttpRuntimeError::Timeout)?
+                        .map_err(|_| HttpRuntimeError::Transport)
+                    })
+                    .map_err(map_network_future_error)??;
+                }
+                if let Some(close_drain) = self.http3_server_close.take() {
+                    let drain_timeout = self.idle_timeout;
+                    crate::network_future::block_on_current(async move {
+                        tokio::time::timeout(drain_timeout, close_drain)
+                            .await
+                            .map_err(|_| HttpRuntimeError::Timeout)?
+                            .map_err(|_| HttpRuntimeError::Protocol)
+                    })
+                    .map_err(map_network_future_error)??;
+                }
                 self.closed = true;
-                self.h2_driver.take();
+                if self.http3_server_close.is_none() {
+                    self.h2_driver.take();
+                }
                 let (code, reason) = frame
                     .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
                     .unwrap_or((1005, String::new()));
@@ -3776,7 +4200,7 @@ fn connect_http2_websocket(
     Ok((stream, negotiated_subprotocol, driver))
 }
 
-fn websocket_selected_subprotocol(
+pub(crate) fn websocket_selected_subprotocol(
     headers: &http::HeaderMap,
     offered: &[String],
 ) -> Result<Option<String>, HttpRuntimeError> {
@@ -4062,6 +4486,7 @@ pub fn send_once(
         body,
         body_stream: None,
         body_producer: None,
+        protocol: response.protocol,
     };
     Ok(response)
 }
@@ -4253,6 +4678,11 @@ fn send_once_streaming_with_tls_config(
         Ok::<_, HttpRuntimeError>(HttpStreamingResponse {
             status,
             headers: response_headers,
+            protocol: if use_http2 {
+                HttpProtocolVersion::Http2
+            } else {
+                HttpProtocolVersion::Http1
+            },
             body: Some(body),
             driver: Some(drivers),
             pending: Bytes::new(),
@@ -4480,6 +4910,7 @@ pub(crate) fn send_once_streaming_with_producer(
     Ok(HttpStreamingResponse {
         status,
         headers,
+        protocol: HttpProtocolVersion::Http2,
         body: Some(body),
         driver: Some(drivers),
         pending: Bytes::new(),
@@ -4736,6 +5167,7 @@ pub(crate) fn serve_http1_websocket_once(
     let websocket = HttpWebSocket {
         stream: websocket_stream,
         h2_driver: None,
+        http3_server_close: None,
         owner: crate::executor::current_task(),
         idle_timeout: DEFAULT_HTTP_SERVER_TIMEOUTS.response_idle,
         negotiated_subprotocol: selected_protocol,
@@ -4920,6 +5352,7 @@ fn serve_http2_websocket_once(
     let websocket = HttpWebSocket {
         stream: websocket_stream,
         h2_driver: None,
+        http3_server_close: None,
         owner: crate::executor::current_task(),
         idle_timeout: DEFAULT_HTTP_SERVER_TIMEOUTS.response_idle,
         negotiated_subprotocol: selected_protocol,
@@ -5238,7 +5671,7 @@ fn serve_http2_many_offloaded(
         if active_tasks.len() >= MAX_CONCURRENT_SERVER_STREAMS as usize
             && let Some(task) = active_tasks.pop_front()
         {
-            await_http2_handler_task(task);
+            await_server_handler_task(task);
         }
         let handler = handler.clone();
         let task_failure = Arc::clone(&handler_failure);
@@ -5295,7 +5728,7 @@ fn serve_http2_many_offloaded(
         crate::executor::yield_now();
     }
     while let Some(task) = active_tasks.pop_front() {
-        await_http2_handler_task(task);
+        await_server_handler_task(task);
     }
     drop(request_rx);
     crate::network_future::block_on_current(server)
@@ -5321,7 +5754,7 @@ fn serve_http2_many_offloaded(
 /// which would cancel the whole connection and unwind across the server ABI.
 /// Consume that child outcome while preserving cancellation of the dispatcher
 /// itself and propagating every non-cancellation failure.
-fn await_http2_handler_task(task: crate::task::TaskId) {
+pub(crate) fn await_server_handler_task(task: crate::task::TaskId) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::executor::await_task(task)
     }));
@@ -5530,6 +5963,15 @@ fn run_server_handler_with_deadline(
     handler: impl FnOnce(HttpRequestValues) -> HttpResponseValues,
     timeout: Duration,
 ) -> Result<HttpResponseValues, HttpRuntimeError> {
+    run_callback_with_deadline(|| handler(request), timeout)
+}
+
+/// Runs a host-to-Zirk callback with the cooperative handler deadline used by
+/// the HTTP/1.1 and HTTP/2 server paths.
+pub(crate) fn run_callback_with_deadline<T>(
+    handler: impl FnOnce() -> T,
+    timeout: Duration,
+) -> Result<T, HttpRuntimeError> {
     if timeout.is_zero() || !crate::executor::in_executor_task() {
         return Err(HttpRuntimeError::InvalidRequest);
     }
@@ -5548,7 +5990,7 @@ fn run_server_handler_with_deadline(
     });
     let _watchdog_guard = ServerHandlerWatchdog(watchdog);
 
-    let response = handler(request);
+    let response = handler();
     if crate::executor::current_task_cancel_requested() {
         return Err(
             if deadline_fired.load(std::sync::atomic::Ordering::Acquire) {
@@ -5772,6 +6214,7 @@ fn simple_response(status: u16, body: &[u8]) -> HttpResponseValues {
         body: body.to_vec(),
         body_stream: None,
         body_producer: None,
+        protocol: HttpProtocolVersion::Unknown,
     }
 }
 
@@ -5901,7 +6344,7 @@ fn attach_http_response_producer(
 /// Drives a generated callback only on the owner task, copying every bounded
 /// Zirk array into native bytes before waiting for channel capacity. A dropped
 /// receiver is peer disconnect and immediately drops the producer root.
-fn pump_http_response_producer(
+pub(crate) fn pump_http_response_producer(
     mut producer: crate::http_api::HttpServerBodyProducer,
     sender: tokio::sync::mpsc::Sender<Result<Bytes, io::Error>>,
 ) -> Result<(), HttpRuntimeError> {
@@ -6028,6 +6471,26 @@ mod tests {
     use crate::executor::{Executor, await_task, spawn};
     use crate::network_future::block_on_current;
     use zirk_runtime_core::http_values::{HttpMethod, HttpStatusCode, Url};
+
+    #[test]
+    fn reusable_client_cookie_store_is_opt_in_and_can_be_cleared() {
+        let outcome = Executor::new().run_with_root(|| {
+            let timeouts = HttpTimeouts {
+                connect: Duration::from_secs(1),
+                response_headers: Duration::from_secs(1),
+                response_idle: Duration::from_secs(1),
+            };
+            let mut client = HttpClientPool::new(1, timeouts).unwrap();
+            assert!(client.cookies.is_none());
+            client.enable_cookies();
+            assert!(client.cookies.as_ref().is_some_and(CookieJar::is_empty));
+            client.clear_cookies();
+            assert!(client.cookies.as_ref().is_some_and(CookieJar::is_empty));
+            client.close();
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
 
     #[test]
     fn http2_graceful_drain_deadline_drops_pending_connection_future() {
@@ -7698,6 +8161,72 @@ mod tests {
     }
 
     #[test]
+    fn stacked_response_codings_decode_in_reverse_order_with_a_depth_limit() {
+        let outcome = Executor::new().run_with_root(|| {
+            let gzip = block_on_current(encode_response_body(
+                Arc::new(b"stacked content coding".to_vec()),
+                ContentCoding::Gzip,
+            ))
+            .unwrap()
+            .unwrap();
+            let brotli =
+                block_on_current(encode_response_body(Arc::new(gzip), ContentCoding::Brotli))
+                    .unwrap()
+                    .unwrap();
+            let mut headers = Headers::new();
+            headers.insert("content-encoding", b"gzip, br").unwrap();
+            headers
+                .insert("content-length", brotli.len().to_string().as_bytes())
+                .unwrap();
+            let (headers, body, worker) = block_on_current(async {
+                decode_response_body(
+                    headers,
+                    HttpStreamingBody::Buffered {
+                        bytes: Bytes::from(brotli),
+                        offset: 0,
+                    },
+                    &AcceptEncoding::parse(&Headers::new()).unwrap(),
+                )
+            })
+            .unwrap()
+            .unwrap();
+            assert!(headers.get("content-encoding").is_none());
+            assert!(headers.get("content-length").is_none());
+            let HttpStreamingBody::Chunks(mut chunks) = body else {
+                panic!("stacked compressed response must stream decoded chunks");
+            };
+            let decoded = block_on_current(async move {
+                let mut output = Vec::new();
+                while let Some(chunk) = chunks.recv().await {
+                    output.extend_from_slice(&chunk.unwrap());
+                }
+                output
+            })
+            .unwrap();
+            drop(worker);
+            assert_eq!(decoded, b"stacked content coding");
+
+            let mut too_deep = Headers::new();
+            too_deep
+                .insert("content-encoding", b"gzip, gzip, gzip, gzip, gzip")
+                .unwrap();
+            assert!(matches!(
+                decode_response_body(
+                    too_deep,
+                    HttpStreamingBody::Buffered {
+                        bytes: Bytes::new(),
+                        offset: 0,
+                    },
+                    &AcceptEncoding::parse(&Headers::new()).unwrap(),
+                ),
+                Err(HttpRuntimeError::Protocol)
+            ));
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
     fn gzip_decompression_bomb_stops_at_the_expansion_ratio_limit() {
         let outcome = Executor::new().run_with_root(|| {
             let compressed = block_on_current(encode_response_body(
@@ -7864,6 +8393,7 @@ mod tests {
                 body: vec![b'a'; 4096],
                 body_stream: None,
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             };
             let result = block_on_current(async move {
                 let response = prepare_server_response(response, &accepted).await?;
@@ -7928,6 +8458,7 @@ mod tests {
                 body: Vec::new(),
                 body_stream: Some(receiver),
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             };
             let prepared =
                 block_on_current(async { prepare_server_response(response, &accepted).await })
@@ -7958,6 +8489,7 @@ mod tests {
                 body: vec![0x1f, 0x8b],
                 body_stream: None,
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             };
             let prepared =
                 block_on_current(async { prepare_server_response(response, &accepted).await })
@@ -7982,6 +8514,7 @@ mod tests {
                 body: vec![0x1f, 0x8b],
                 body_stream: None,
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             };
             let rejected =
                 block_on_current(async { prepare_server_response(nested, &accepted).await })
@@ -8008,6 +8541,7 @@ mod tests {
                 body: Vec::new(),
                 body_stream: Some(source_rx),
                 body_producer: None,
+                protocol: HttpProtocolVersion::Unknown,
             };
             block_on_current(async move {
                 let mut response = prepare_server_response(response, &accepted).await.unwrap();
@@ -8100,6 +8634,7 @@ mod tests {
                             body: vec![b'a'; 4096],
                             body_stream: None,
                             body_producer: None,
+                            protocol: HttpProtocolVersion::Unknown,
                         }
                     },
                 )
@@ -9698,6 +10233,7 @@ mod tests {
                             body: b"ok".to_vec(),
                             body_stream: None,
                             body_producer: None,
+                            protocol: HttpProtocolVersion::Unknown,
                         }
                     },
                 )
@@ -9792,6 +10328,7 @@ mod tests {
                         body: Vec::new(),
                         body_stream: None,
                         body_producer: Some(body_producer),
+                        protocol: HttpProtocolVersion::Unknown,
                     }
                 })
                 .unwrap();
@@ -10039,6 +10576,7 @@ mod tests {
                             body: Vec::new(),
                             body_stream: None,
                             body_producer: Some(body_producer),
+                            protocol: HttpProtocolVersion::Unknown,
                         }
                     });
                     1
@@ -10152,6 +10690,7 @@ mod tests {
                             body: Vec::new(),
                             body_stream: None,
                             body_producer: Some(body_producer),
+                            protocol: HttpProtocolVersion::Unknown,
                         };
                         if compressed {
                             response.headers.insert("vary", b"accept-encoding").unwrap();
@@ -10366,6 +10905,7 @@ mod tests {
                         body: Vec::new(),
                         body_stream: None,
                         body_producer: Some(body_producer),
+                        protocol: HttpProtocolVersion::Unknown,
                     }
                 });
                 assert!(
@@ -10474,6 +11014,7 @@ mod tests {
                         body_producer: Some(
                             crate::http_api::take_http_server_producer(handle).unwrap(),
                         ),
+                        protocol: HttpProtocolVersion::Unknown,
                     }
                 });
                 assert!(matches!(result, Err(HttpRuntimeError::Cancelled)));

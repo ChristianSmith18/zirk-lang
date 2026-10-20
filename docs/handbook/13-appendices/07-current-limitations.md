@@ -22,17 +22,15 @@ native/interpreter parity coverage includes the documented overflow edges.
 Current high-impact delivery limits include:
 
 - `std.environment`, `std.net`, and `std.http` are bundled native previews;
-  their scoped delivery is complete, while the standard library as a whole is
-  still in progress. The implemented environment, network, and HTTP scope
-  passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64,
-  and Windows x86_64 (run 39359107965, compiler revision b28daa7). Environment reads use explicit permissions; the current
-  network preview covers DNS, TCP, authenticated TLS, HTTP/1.1, bounded HTTP/2,
-  QUERY, and the documented streaming/client/server features listed in the
-  feature-status catalog. UDP, local sockets, interface enumeration,
-  HTTP/3/QUIC, browser networking, and the broader Phase 7 library surface
-  remain outside this delivery scope. See the [standard-library status
-  catalog](../../init/ZIRK_FEATURE_STATUS.md) and [module
-  index](../04-standard-library/19-standard-library-indexes.md).
+  the archived first delivery passes full-workspace native CI on macOS ARM64,
+  Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965, compiler
+  revision b28daa7). A separate extension is in progress for UDP, local
+  sockets, interface snapshots, extended TLS, HTTP/3/QUIC, and injected browser
+  Fetch. Its working-tree evidence and remaining target gates are listed in the
+  [standard-library status catalog](../../init/ZIRK_FEATURE_STATUS.md). The
+  broader Phase 7 library remains partial; the [module
+  index](../04-standard-library/19-standard-library-indexes.md) describes the
+  public APIs.
 
 - Package roots, local/vendored dependency traversal, `share mod`, logical
   package imports and lock metadata validation are delivered. Registry/Git

@@ -191,11 +191,15 @@ the proxy TLS identity before sending credentials, and never forwards proxy
 authorization through the destination tunnel. The client separately checks
 the proxy and destination grants. Formatting the proxy redacts its credentials.
 
-The opt-in interpreter execution trace redacts the private payload field,
-including inherited layouts. Fatal runtime diagnostics use a generic redacted
-`E0601` message in JSON mode. Debugger views, heap snapshots, test reports, and
-structured tool output still need dedicated redaction coverage; those sinks
-remain unavailable or unverified.
+The current formatter, collection rendering, interpreter execution trace, and
+fatal runtime diagnostics redact secret payloads. Runtime end-to-end coverage
+checks direct formatting, nested list and map values, interpolation,
+secret-bearing throwables, and the JSON diagnostic output. The dedicated
+[maintainer checklist](../../development/SECRET_REDACTION_CHECKLIST.md) is a
+review gate for any new output sink. Debugger views, heap snapshots, test
+reports, and structured tool-output serializers are not implemented or remain
+unverified; none should be described as redaction-safe until it has
+sink-specific executable coverage.
 
 `SecretString` prevents accidental disclosure through ordinary language sinks; it is not a locked or zeroizing heap allocation. The runtime zeroizes the temporary native copy after transferring the value into the managed heap, but the managed value follows ordinary garbage-collector lifetime and is not promised to be erased when collected.
 

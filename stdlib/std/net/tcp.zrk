@@ -1,4 +1,5 @@
 import { HostPortAddress, SocketAddress } from std.net::address;
+import { TLSError, TLSStream } from std.net::tls;
 
 share enum TCPError {
     InvalidAddress,
@@ -58,6 +59,24 @@ share class TCPStream implements Resource<TCPResourceError> {
         return TCPStream.connect(address.as_tcp_origin());
     }
 
+    // Transfers this connected socket into an authenticated TLS stream. The
+    // HTTPS origin requires its own exact network grant and must authorize the
+    // existing peer address; no second TCP connection is opened.
+    upgrade_tls(
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<TLSStream, TLSError> {
+        return TCPStream.upgrade_tls_native(
+            this.handle,
+            endpoint,
+            roots_der,
+            allow_tls12,
+            protocols,
+        );
+    }
+
     read(max_bytes: UInt64): TCPReadResult<Array<Byte>> {
         return TCPStream.read_native(this.handle, max_bytes);
     }
@@ -91,6 +110,16 @@ share class TCPStream implements Resource<TCPResourceError> {
 
     private static connect_native(endpoint: String): Result<UInt64, TCPError> {
         return Error(TCPError.PermissionDenied);
+    }
+
+    private static upgrade_tls_native(
+        handle: UInt64,
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<TLSStream, TLSError> {
+        return Error(TLSError.InvalidConfiguration);
     }
 
     private static read_native(handle: UInt64, max_bytes: UInt64): TCPReadResult<Array<Byte>> {

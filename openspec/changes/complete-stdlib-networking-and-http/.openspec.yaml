@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-20
+goal: Deliver the remaining supported std.net, std.http, and std.environment
+  capabilities, including UDP, local sockets, interfaces, HTTP/3 over QUIC,
+  browser-compatible HTTP, and secret-sink coverage.

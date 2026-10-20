@@ -56,6 +56,13 @@ pub struct EnvironmentPermissions {
 pub struct NetworkPermissions {
     pub connect_origins: std::collections::BTreeSet<String>,
     pub listen_addresses: std::collections::BTreeSet<String>,
+    pub udp_destinations: std::collections::BTreeSet<String>,
+    pub udp_listen_addresses: std::collections::BTreeSet<String>,
+    pub udp_broadcast_destinations: std::collections::BTreeSet<String>,
+    pub udp_multicast_groups: std::collections::BTreeSet<String>,
+    pub local_connect_endpoints: std::collections::BTreeSet<String>,
+    pub local_listen_endpoints: std::collections::BTreeSet<String>,
+    pub inspect_interfaces: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +355,43 @@ fn parse_network_permission(
             .map(str::trim_end)
             .and_then(|body| body.strip_prefix("addresses: ["))
             .and_then(|rest| rest.strip_suffix(']')),
+        "udp_send" | "udp_broadcast" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("destinations: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        "udp_listen" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("addresses: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        "udp_multicast" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("groups: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        "local_connect" | "local_listen" => body
+            .strip_suffix("during: runtime;")
+            .map(str::trim_end)
+            .and_then(|body| body.strip_suffix(';'))
+            .map(str::trim_end)
+            .and_then(|body| body.strip_prefix("endpoints: ["))
+            .and_then(|rest| rest.strip_suffix(']')),
+        "inspect_interfaces" => {
+            if body == "enabled: true; during: runtime;" {
+                permissions.inspect_interfaces = true;
+                return Ok(());
+            }
+            return Err(ProjectError(
+                "invalid `inspect_interfaces` network permission scope".into(),
+            ));
+        }
         _ => return Err(ProjectError(format!("unknown network permission `{kind}`"))),
     }
     .ok_or_else(|| ProjectError(format!("invalid `{kind}` network permission scope")))?;
@@ -378,10 +422,91 @@ fn parse_network_permission(
                 })?;
                 permissions.listen_addresses.insert(value);
             }
+            "udp_send" => {
+                let address = value
+                    .strip_prefix("udp://")
+                    .ok_or_else(|| ProjectError(format!("invalid UDP destination `{value}`")))?
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|_| {
+                        ProjectError(format!(
+                            "UDP destination `{value}` must be udp://IP:port with an explicit port"
+                        ))
+                    })?;
+                if address.port() == 0 || value != format!("udp://{address}") {
+                    return Err(ProjectError(format!(
+                        "UDP destination `{value}` is not canonical"
+                    )));
+                }
+                permissions.udp_destinations.insert(value);
+            }
+            "udp_broadcast" => {
+                let address = value
+                    .strip_prefix("udp://")
+                    .ok_or_else(|| {
+                        ProjectError(format!("invalid UDP broadcast destination `{value}`"))
+                    })?
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|_| {
+                        ProjectError(format!(
+                            "UDP broadcast destination `{value}` must be udp://IP:port"
+                        ))
+                    })?;
+                if address.port() == 0
+                    || !matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                    || value != format!("udp://{address}")
+                {
+                    return Err(ProjectError(format!(
+                        "UDP broadcast destination `{value}` is not canonical limited broadcast"
+                    )));
+                }
+                permissions.udp_broadcast_destinations.insert(value);
+            }
+            "udp_multicast" => {
+                let group = value.parse::<std::net::IpAddr>().map_err(|_| {
+                    ProjectError(format!(
+                        "UDP multicast group `{value}` must be a canonical IP literal"
+                    ))
+                })?;
+                let canonical = group.to_string();
+                let is_multicast = match group {
+                    std::net::IpAddr::V4(address) => address.is_multicast(),
+                    std::net::IpAddr::V6(address) => address.is_multicast(),
+                };
+                if !is_multicast || value != canonical {
+                    return Err(ProjectError(format!(
+                        "UDP multicast group `{value}` is not a canonical multicast IP"
+                    )));
+                }
+                permissions.udp_multicast_groups.insert(value);
+            }
+            "udp_listen" => {
+                value.parse::<std::net::SocketAddr>().map_err(|_| {
+                    ProjectError(format!(
+                        "UDP listen address `{value}` must be an IP:port pair"
+                    ))
+                })?;
+                permissions.udp_listen_addresses.insert(value);
+            }
+            "local_connect" | "local_listen" => {
+                if !is_canonical_local_endpoint(&value) {
+                    return Err(ProjectError(format!(
+                        "local endpoint `{value}` must be a canonical unix or npipe endpoint"
+                    )));
+                }
+                if kind == "local_connect" {
+                    permissions.local_connect_endpoints.insert(value);
+                } else {
+                    permissions.local_listen_endpoints.insert(value);
+                }
+            }
             _ => unreachable!(),
         }
     }
     Ok(())
+}
+
+fn is_canonical_local_endpoint(value: &str) -> bool {
+    zirk_runtime_core::network_policy::validate_local_endpoint(value).is_ok()
 }
 
 fn parse_environment_permission(
@@ -816,6 +941,84 @@ listen: { addresses: ["127.0.0.1:8080", "[::1]:8443"]; during: runtime; }
                 .map(str::to_owned)
                 .collect()
         );
+    }
+
+    #[test]
+    fn manifest_parses_transport_specific_network_authority() {
+        let manifest = parse_manifest(
+            r#"project "network.app"
+kind application
+permissions {
+network {
+udp_send: { destinations: ["udp://192.0.2.9:5353", "udp://[2001:db8::1]:53"]; during: runtime; }
+udp_listen: { addresses: ["127.0.0.1:5353"]; during: runtime; }
+udp_broadcast: { destinations: ["udp://255.255.255.255:9000"]; during: runtime; }
+udp_multicast: { groups: ["239.1.2.3", "ff02::1"]; during: runtime; }
+local_connect: { endpoints: ["unix:///tmp/zirk.sock", "npipe://./pipe/zirk"]; during: runtime; }
+local_listen: { endpoints: ["unix:///tmp/zirk-server.sock"]; during: runtime; }
+inspect_interfaces: { enabled: true; during: runtime; }
+}
+}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.network_permissions.udp_destinations,
+            ["udp://192.0.2.9:5353", "udp://[2001:db8::1]:53"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.udp_listen_addresses,
+            ["127.0.0.1:5353"].into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.udp_broadcast_destinations,
+            ["udp://255.255.255.255:9000"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.udp_multicast_groups,
+            ["239.1.2.3", "ff02::1"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.local_connect_endpoints,
+            ["unix:///tmp/zirk.sock", "npipe://./pipe/zirk"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            manifest.network_permissions.local_listen_endpoints,
+            ["unix:///tmp/zirk-server.sock"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert!(manifest.network_permissions.inspect_interfaces);
+    }
+
+    #[test]
+    fn manifest_rejects_noncanonical_udp_and_traversing_local_scopes() {
+        for permission in [
+            r#"udp_send: { destinations: ["udp://example.com:53"]; during: runtime; }"#,
+            r#"udp_send: { destinations: ["udp://192.0.2.9:0"]; during: runtime; }"#,
+            r#"udp_broadcast: { destinations: ["udp://192.0.2.1:9000"]; during: runtime; }"#,
+            r#"udp_multicast: { groups: ["192.0.2.1"]; during: runtime; }"#,
+            r#"udp_multicast: { groups: ["239.001.002.003"]; during: runtime; }"#,
+            r#"local_connect: { endpoints: ["unix:///tmp/../etc/passwd"]; during: runtime; }"#,
+            r#"local_listen: { endpoints: ["npipe://./pipe/name/other"]; during: runtime; }"#,
+        ] {
+            let manifest = format!(
+                "project \"app\"\nkind application\npermissions {{\nnetwork {{\n{permission}\n}}\n}}"
+            );
+            assert!(parse_manifest(&manifest).is_err(), "accepted {permission}");
+        }
     }
 
     #[test]

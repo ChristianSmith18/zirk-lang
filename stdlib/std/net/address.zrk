@@ -66,6 +66,14 @@ share class SocketAddress {
         return "tcp://" + host + ":" + this.port_value.to_string();
     }
 
+    as_udp_origin(): String {
+        inmut host = this.ip_value.as_string();
+        if host.contains(":") {
+            return "udp://[" + host + "]:" + this.port_value.to_string();
+        }
+        return "udp://" + host + ":" + this.port_value.to_string();
+    }
+
     private static parse_ok(value: SocketAddress): Result<SocketAddress, AddressError> {
         return Ok(value);
     }

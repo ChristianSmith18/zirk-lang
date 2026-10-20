@@ -220,6 +220,9 @@ fn standard_source(path: &Path) -> Option<&'static str> {
         "net/dns.zrk" => Some(include_str!("../../../stdlib/std/net/dns.zrk")),
         "net/address.zrk" => Some(include_str!("../../../stdlib/std/net/address.zrk")),
         "net/tls.zrk" => Some(include_str!("../../../stdlib/std/net/tls.zrk")),
+        "net/udp.zrk" => Some(include_str!("../../../stdlib/std/net/udp.zrk")),
+        "net/local.zrk" => Some(include_str!("../../../stdlib/std/net/local.zrk")),
+        "net/interfaces.zrk" => Some(include_str!("../../../stdlib/std/net/interfaces.zrk")),
         _ => None,
     }
 }
@@ -516,6 +519,27 @@ mod tests {
             std::env::temp_dir().join(format!("zirk-modules-test-{}-{}", std::process::id(), tag));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn local_network_source_is_bundled_with_the_standard_package() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/net/local.zrk");
+        let source = standard_source(&absolute_normalize(&path)).unwrap();
+        assert!(source.contains("package std.net.local;"));
+        assert!(source.contains("share class LocalStream"));
+        assert!(source.contains("share class LocalListener"));
+        assert!(zirk_sema::stdlib::standard_module("std.net::local").is_some());
+    }
+
+    #[test]
+    fn interface_network_source_is_bundled_with_the_standard_package() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/net/interfaces.zrk");
+        let source = standard_source(&absolute_normalize(&path)).unwrap();
+        assert!(source.contains("package std.net.interfaces;"));
+        assert!(source.contains("share record NetworkInterfaceAddress"));
+        assert!(source.contains("network.inspect.interfaces"));
+        assert!(zirk_sema::stdlib::standard_module("std.net::interfaces").is_some());
     }
 
     #[test]

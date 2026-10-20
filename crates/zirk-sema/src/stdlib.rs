@@ -80,6 +80,18 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
             package: "std.net",
             module: "tls",
         }),
+        "std.net::udp" => Some(StandardModule {
+            package: "std.net",
+            module: "udp",
+        }),
+        "std.net::local" => Some(StandardModule {
+            package: "std.net",
+            module: "local",
+        }),
+        "std.net::interfaces" => Some(StandardModule {
+            package: "std.net",
+            module: "interfaces",
+        }),
         _ => None,
     }
 }
@@ -225,11 +237,51 @@ pub fn compiler_binding_for_environment_member(module: &str, name: &str) -> Opti
 }
 
 /// Private network implementation leaves. These names are bindable only
-/// while checking the compiler-bundled `std.net::tcp` source module.
+/// while checking their compiler-bundled `std.net` source module, by full
+/// package provenance rather than by short name alone.
 pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&'static str> {
+    if module == "interfaces" {
+        return match name {
+            "snapshot_native" => Some("std.net.interfaces.snapshot"),
+            _ => None,
+        };
+    }
     if module == "dns" {
         return match name {
             "resolve_native" => Some("std.net.dns.resolve"),
+            _ => None,
+        };
+    }
+    if module == "udp" {
+        return match name {
+            "connect_native" => Some("std.net.udp.connect"),
+            "bind_native" => Some("std.net.udp.bind"),
+            "send_native" => Some("std.net.udp.send"),
+            "send_to_native" => Some("std.net.udp.send_to"),
+            "send_broadcast_native" => Some("std.net.udp.send_broadcast"),
+            "send_multicast_native" => Some("std.net.udp.send_multicast"),
+            "join_multicast_native" => Some("std.net.udp.join_multicast"),
+            "leave_multicast_native" => Some("std.net.udp.leave_multicast"),
+            "receive_native" => Some("std.net.udp.receive"),
+            "local_address_native" => Some("std.net.udp.local_address"),
+            "close_native" => Some("std.net.udp.close"),
+            "is_closed_native" => Some("std.net.udp.is_closed"),
+            _ => None,
+        };
+    }
+    if module == "local" {
+        return match name {
+            "connect_native" => Some("std.net.local.connect"),
+            "bind_native" => Some("std.net.local.bind"),
+            "accept_native" => Some("std.net.local.accept"),
+            "read_native" => Some("std.net.local.read"),
+            "write_native" => Some("std.net.local.write"),
+            "write_all_native" => Some("std.net.local.write_all"),
+            "shutdown_native" => Some("std.net.local.shutdown"),
+            "close_stream_native" => Some("std.net.local.close_stream"),
+            "is_stream_closed_native" => Some("std.net.local.is_stream_closed"),
+            "close_listener_native" => Some("std.net.local.close_listener"),
+            "is_listener_closed_native" => Some("std.net.local.is_listener_closed"),
             _ => None,
         };
     }
@@ -244,7 +296,12 @@ pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&
         return match name {
             "connect_native" => Some("std.net.tls.connect"),
             "connect_with_trust_roots_native" => Some("std.net.tls.connect_with_trust_roots"),
+            "connect_with_options_native" => Some("std.net.tls.connect_with_alpn"),
+            "connect_with_client_identity_native" => {
+                Some("std.net.tls.connect_with_client_identity")
+            }
             "bind_native" => Some("std.net.tls.listen"),
+            "bind_with_client_auth_native" => Some("std.net.tls.listen_with_client_auth"),
             "bind_http_native" => Some("std.net.tls.listen_http"),
             "accept_native" => Some("std.net.tls.accept"),
             "close_listener_native" => Some("std.net.tls.close_listener"),
@@ -255,6 +312,8 @@ pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&
             "close_native" => Some("std.net.tls.close"),
             "is_closed_native" => Some("std.net.tls.is_closed"),
             "peer_address_native" => Some("std.net.tls.peer_address"),
+            "negotiated_alpn_native" => Some("std.net.tls.negotiated_alpn"),
+            "peer_certificate_sha256_native" => Some("std.net.tls.peer_certificate_sha256"),
             _ => None,
         };
     }
@@ -263,6 +322,7 @@ pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&
     }
     match name {
         "connect_native" => Some("std.net.tcp.connect"),
+        "upgrade_tls_native" => Some("std.net.tcp.upgrade_tls"),
         "read_native" => Some("std.net.tcp.read"),
         "write_native" => Some("std.net.tcp.write"),
         "write_all_native" => Some("std.net.tcp.write_all"),
@@ -322,11 +382,17 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
         "values_intrinsic" => Some("std.http.form_values"),
         "encode_fields_intrinsic" => Some("std.http.form_encode"),
         "serve_once_native" => Some("std.http.server.serve_once"),
+        "serve_http3_native" => Some("std.http.server.serve_http3"),
+        "serve_http3_websocket_once_native" => Some("std.http.server.websocket_serve_http3_once"),
         "serve_websocket_once_native" => Some("std.http.server.websocket_serve_once"),
         "serve_tls_websocket_once_native" => Some("std.http.server.websocket_serve_tls_once"),
         "serve_tls_once_native" => Some("std.http.server.serve_tls_once"),
         "serve_tls_requests_native" => Some("std.http.server.serve_tls_requests"),
         "websocket_connect_native" => Some("std.http.websocket.connect"),
+        "websocket_connect_http3_native" => Some("std.http.websocket.connect_http3"),
+        "websocket_connect_http3_with_trust_roots_native" => {
+            Some("std.http.websocket.connect_http3_with_trust_roots")
+        }
         "websocket_connect_with_trust_roots_native" => {
             Some("std.http.websocket.connect_with_trust_roots")
         }
@@ -353,6 +419,7 @@ pub fn compiler_binding_for_http_client_member(name: &str) -> Option<&'static st
         "request_native" => Some("std.http.client_request"),
         "request_stream_native" => Some("std.http.client_request_stream"),
         "enable_cookies_native" => Some("std.http.client_enable_cookies"),
+        "clear_cookies_native" => Some("std.http.client_clear_cookies"),
         "close_native" => Some("std.http.client_close"),
         _ => None,
     }

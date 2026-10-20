@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use wasm_bindgen::prelude::wasm_bindgen;
-use zirk_ast::{Ident, ModuleDecl};
-use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceMap};
+use zirk_ast::{Ident, ImportSource, ModuleDecl};
+use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceIdentity, SourceMap};
 
 pub mod contract;
 
@@ -87,6 +87,46 @@ impl BrowserApi {
     #[wasm_bindgen(js_name = run)]
     pub fn run_json(&self, request_json: &str) -> String {
         self.dispatch(request_json, true)
+    }
+
+    /// Runs bounded HTTP requests through one explicitly injected browser
+    /// fetch function. The origin list, body ceilings, and abort signal live
+    /// for this invocation only; `run` remains hermetic and synchronous.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = runWithFetch)]
+    pub async fn run_with_fetch_json(
+        &self,
+        request_json: &str,
+        fetch_function: js_sys::Function,
+        allowed_origins_json: &str,
+        max_request_bytes: u32,
+        max_response_bytes: u32,
+        abort_signal: wasm_bindgen::JsValue,
+    ) -> String {
+        let response = if !self.initialized {
+            request_failure("ZB103", "browser API is not initialized")
+        } else {
+            match serde_json::from_str::<contract::Request>(request_json) {
+                Err(_) => request_failure("ZB104", "malformed browser request"),
+                Ok(request) => match serde_json::from_str::<Vec<String>>(allowed_origins_json) {
+                    Err(_) => request_failure("ZB107", "malformed HTTP origin allowlist"),
+                    Ok(origins) => {
+                        run_with_fetch_async(
+                            request,
+                            fetch_function,
+                            origins,
+                            max_request_bytes as usize,
+                            max_response_bytes as usize,
+                            abort_signal,
+                        )
+                        .await
+                    }
+                },
+            }
+        };
+        serde_json::to_string(&response).unwrap_or_else(|_| {
+            request_failure("ZB199", "browser response serialization failed").operation
+        })
     }
 
     /// Runs the additive versioned `format` operation without granting host
@@ -178,16 +218,22 @@ pub fn check_source(
     if sink.has_errors() {
         return (None, sink);
     }
-    let standard_package = bundled_standard_package(&mut sources, &mut sink);
-    let standard_modules = bundled_standard_modules(&mut sources, &mut sink);
+    let (standard_packages, standard_modules) =
+        bundled_standard_sources(&mut sources, &mut sink, &program.imports);
     // The browser has no filesystem-backed loader, so mirror the CLI's merge:
     // modules carry their published-member metadata and their declarations are
     // also part of the checked executable program.
-    program.enums.extend(standard_package.enums);
-    program.classes.extend(standard_package.classes);
-    program.contracts.extend(standard_package.contracts);
-    program.type_aliases.extend(standard_package.type_aliases);
+    for standard_package in standard_packages {
+        program
+            .imports
+            .extend(standard_package.imports.iter().cloned());
+        program.enums.extend(standard_package.enums);
+        program.classes.extend(standard_package.classes);
+        program.contracts.extend(standard_package.contracts);
+        program.type_aliases.extend(standard_package.type_aliases);
+    }
     for module in &standard_modules {
+        program.imports.extend(module.body.imports.iter().cloned());
         program.enums.extend(module.body.enums.iter().cloned());
         program.classes.extend(module.body.classes.iter().cloned());
         program
@@ -218,40 +264,146 @@ pub fn check_source(
     )
 }
 
-fn bundled_standard_package(
+/// Parses compiler-bundled standard packages into the browser's in-memory
+/// source map. This mirrors the native package graph without filesystem reads
+/// and gives bundled sources the same identities used by trusted stdlib
+/// binding checks in semantic analysis.
+fn bundled_standard_sources(
     sources: &mut SourceMap,
     sink: &mut DiagnosticSink,
-) -> zirk_ast::Program {
-    let file = sources.add(SourceFile::new(
-        "std.io/package.zrk",
-        include_str!("../../../stdlib/std/io/package.zrk"),
-    ));
-    let tokens = zirk_lexer::tokenize(sources.file(file), sink);
-    zirk_parser::parse(sources.file(file), &tokens, sink)
+    imports: &[zirk_ast::ImportDecl],
+) -> (Vec<zirk_ast::Program>, Vec<ModuleDecl>) {
+    let mut required_packages = std::collections::HashSet::from(["io".to_string()]);
+    for import in imports {
+        if let ImportSource::Package { path, .. } = &import.source
+            && let Some(package) = path.strip_prefix("std.")
+        {
+            let package = package.split("::").next().unwrap_or(package);
+            if matches!(package, "environment" | "http" | "net") {
+                required_packages.insert(package.to_string());
+            }
+        }
+    }
+    // HTTP's source API is built on the ordinary network and environment
+    // packages. Include that dependency closure when HTTP is imported.
+    if required_packages.contains("http") {
+        required_packages.insert("environment".into());
+        required_packages.insert("net".into());
+    }
+    let packages = [
+        (
+            "io",
+            include_str!("../../../stdlib/std/io/package.zrk"),
+            vec![
+                ("stdin", include_str!("../../../stdlib/std/io/stdin.zrk")),
+                ("stdout", include_str!("../../../stdlib/std/io/stdout.zrk")),
+                ("stderr", include_str!("../../../stdlib/std/io/stderr.zrk")),
+            ],
+        ),
+        (
+            "environment",
+            include_str!("../../../stdlib/std/environment/package.zrk"),
+            vec![(
+                "environment",
+                include_str!("../../../stdlib/std/environment/environment.zrk"),
+            )],
+        ),
+        (
+            "http",
+            include_str!("../../../stdlib/std/http/package.zrk"),
+            vec![("http", include_str!("../../../stdlib/std/http/http.zrk"))],
+        ),
+        (
+            "net",
+            include_str!("../../../stdlib/std/net/package.zrk"),
+            vec![
+                ("tcp", include_str!("../../../stdlib/std/net/tcp.zrk")),
+                ("dns", include_str!("../../../stdlib/std/net/dns.zrk")),
+                (
+                    "address",
+                    include_str!("../../../stdlib/std/net/address.zrk"),
+                ),
+                ("tls", include_str!("../../../stdlib/std/net/tls.zrk")),
+                ("udp", include_str!("../../../stdlib/std/net/udp.zrk")),
+                ("local", include_str!("../../../stdlib/std/net/local.zrk")),
+                (
+                    "interfaces",
+                    include_str!("../../../stdlib/std/net/interfaces.zrk"),
+                ),
+            ],
+        ),
+    ];
+
+    let mut package_programs = Vec::with_capacity(packages.len());
+    let mut modules = Vec::new();
+    for (package, package_source, package_modules) in packages {
+        if !required_packages.contains(package) {
+            continue;
+        }
+        let package_path = format!("/stdlib/std/{package}/package.zrk");
+        let package_file = add_bundled_source(
+            sources,
+            package_path,
+            format!("std.{package}"),
+            "package",
+            &format!("stdlib/std/{package}"),
+            package_source,
+        );
+        let tokens = zirk_lexer::tokenize(sources.file(package_file), sink);
+        let package_program = zirk_parser::parse(sources.file(package_file), &tokens, sink);
+        package_programs.push(package_program);
+
+        for (name, source) in package_modules {
+            let module_path = format!("/stdlib/std/{package}/{name}.zrk");
+            let module_file = add_bundled_source(
+                sources,
+                module_path,
+                format!("std.{package}"),
+                name,
+                &format!("stdlib/std/{package}"),
+                source,
+            );
+            let tokens = zirk_lexer::tokenize(sources.file(module_file), sink);
+            let body = zirk_parser::parse(sources.file(module_file), &tokens, sink);
+            modules.push(ModuleDecl {
+                name: Ident::new(name, body.span),
+                shared: true,
+                span: body.span,
+                body: Box::new(body),
+            });
+        }
+    }
+    (package_programs, modules)
 }
 
-/// Parses the compiler-bundled standard modules into the same `SourceMap` as
-/// the caller's buffer. This keeps browser resolution source-based while the
-/// browser remains unable to read host files or fetch packages.
-fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) -> Vec<ModuleDecl> {
-    [
-        ("stdin", include_str!("../../../stdlib/std/io/stdin.zrk")),
-        ("stdout", include_str!("../../../stdlib/std/io/stdout.zrk")),
-        ("stderr", include_str!("../../../stdlib/std/io/stderr.zrk")),
-    ]
-    .into_iter()
-    .map(|(name, source)| {
-        let file = sources.add(SourceFile::new(format!("std.io/{name}.zrk"), source));
-        let tokens = zirk_lexer::tokenize(sources.file(file), sink);
-        let body = zirk_parser::parse(sources.file(file), &tokens, sink);
-        ModuleDecl {
-            name: Ident::new(name, body.span),
-            shared: true,
-            span: body.span,
-            body: Box::new(body),
-        }
-    })
-    .collect()
+fn add_bundled_source(
+    sources: &mut SourceMap,
+    path: String,
+    package: String,
+    canonical_module_path: &str,
+    package_root: &str,
+    source: &str,
+) -> zirk_diagnostics::FileId {
+    let mut file = SourceFile::new(path.clone(), source);
+    file.set_identity(SourceIdentity {
+        package,
+        canonical_module_path: canonical_module_path.into(),
+        written_path: path,
+        package_root: package_root.into(),
+    });
+    sources.add(file)
+}
+
+fn bundled_standard_source_ids(sources: &SourceMap) -> Vec<zirk_diagnostics::FileId> {
+    sources
+        .files()
+        .filter_map(|(id, source)| {
+            source
+                .identity()
+                .is_some_and(|identity| identity.package.starts_with("std."))
+                .then_some(id)
+        })
+        .collect()
 }
 
 /// Executes the browser `check` operation. It deliberately stops at the
@@ -464,6 +616,7 @@ pub fn run(request: contract::Request) -> contract::Response {
         response.completion = None;
         return response;
     };
+    interpreter.set_bundled_standard_sources(bundled_standard_source_ids(&frontend.sources));
     let trace_limits = trace_options.as_ref().map(|options| {
         let defaults = zirk_interpreter::TraceLimits::DEFAULT;
         zirk_interpreter::TraceLimits {
@@ -496,6 +649,521 @@ pub fn run(request: contract::Request) -> contract::Response {
     response.completion = None;
     response.failure = execution_failure(result, &mut response.completion);
     response
+}
+
+#[cfg(target_arch = "wasm32")]
+struct FetchHost {
+    events: Vec<zirk_interpreter::OutputEvent>,
+    allowed_origins: std::collections::HashSet<String>,
+    abort_signal: wasm_bindgen::JsValue,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl zirk_interpreter::InterpreterHost for FetchHost {
+    fn emit(
+        &mut self,
+        event: zirk_interpreter::OutputEvent,
+    ) -> Result<(), zirk_interpreter::HostOutputError> {
+        if let Some(last) = self.events.last_mut()
+            && !event.truncated
+            && !last.truncated
+            && last.destination == event.destination
+            && !last.text.ends_with('\n')
+        {
+            last.text.push_str(&event.text);
+            return Ok(());
+        }
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn is_cancelled(&self) -> bool {
+        js_sys::Reflect::get(&self.abort_signal, &"aborted".into())
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn begin_http_request(&mut self, request: &zirk_interpreter::HttpHostRequest) -> bool {
+        if self.is_cancelled() {
+            return false;
+        }
+        request_origin(&request.url).is_some_and(|origin| self.allowed_origins.contains(&origin))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn canonical_origin(value: &str) -> Option<String> {
+    let url = zirk_runtime_core::http_values::Url::parse(value).ok()?;
+    let normalized = url.as_str();
+    let authority_and_suffix = normalized.split_once("://")?.1;
+    let suffix_start = authority_and_suffix
+        .find(['/', '?', '#'])
+        .unwrap_or(authority_and_suffix.len());
+    if !matches!(&authority_and_suffix[suffix_start..], "" | "/") {
+        return None;
+    }
+    Some(url.origin())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn request_origin(value: &str) -> Option<String> {
+    zirk_runtime_core::http_values::Url::parse(value)
+        .ok()
+        .map(|url| url.origin())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_origin_allowlist(
+    origins: Vec<String>,
+) -> Result<std::collections::HashSet<String>, contract::Response> {
+    if origins.is_empty() || origins.len() > 256 {
+        return Err(request_failure(
+            "ZB107",
+            "HTTP origin allowlist must contain between 1 and 256 origins",
+        ));
+    }
+    let mut normalized = std::collections::HashSet::with_capacity(origins.len());
+    for origin in origins {
+        let Some(origin) = canonical_origin(&origin) else {
+            return Err(request_failure(
+                "ZB107",
+                "HTTP allowlist entries must be credential-free HTTP origins without a path",
+            ));
+        };
+        normalized.insert(origin);
+    }
+    Ok(normalized)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn run_with_fetch_async(
+    request: contract::Request,
+    fetch_function: js_sys::Function,
+    origins: Vec<String>,
+    max_request_bytes: usize,
+    max_response_bytes: usize,
+    abort_signal: wasm_bindgen::JsValue,
+) -> contract::Response {
+    use contract::{Failure, FailureKind, OutputEvent};
+
+    let mut response = check(request.clone());
+    response.operation = "run".into();
+    if response.failure.is_some() || response.completion.is_none() {
+        response.completion = None;
+        return response;
+    }
+    let default_body_limit = zirk_runtime_core::http_values::MAX_HTTP_BUFFERED_BODY_BYTES;
+    if max_request_bytes == 0
+        || max_request_bytes > default_body_limit
+        || max_response_bytes == 0
+        || max_response_bytes > default_body_limit
+    {
+        response.failure = Some(Failure {
+            kind: FailureKind::Request,
+            code: "ZB107".into(),
+            message: "HTTP request and response byte limits must be between 1 and 16777216".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    }
+    let allowed_origins = match parse_origin_allowlist(origins) {
+        Ok(origins) => origins,
+        Err(failure) => return failure,
+    };
+
+    let source = request.source.clone();
+    let virtual_name = request.virtual_name.clone();
+    let trace_options = request.trace.clone();
+    let (frontend, diagnostics) = check_source(source, virtual_name);
+    if diagnostics.has_errors() {
+        response.failure = Some(Failure {
+            kind: FailureKind::Internal,
+            code: "ZB199".into(),
+            message: "frontend result changed before asynchronous execution".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    }
+    let Some(frontend) = frontend else {
+        response.failure = Some(Failure {
+            kind: FailureKind::Internal,
+            code: "ZB199".into(),
+            message: "frontend produced no executable result".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    };
+    let standard_sources = bundled_standard_source_ids(&frontend.sources);
+    let module = zirk_ir::lower(&frontend.program, &frontend.checked);
+    if zirk_ir::verify(&module).is_err() {
+        response.failure = Some(Failure {
+            kind: FailureKind::Internal,
+            code: "ZB198".into(),
+            message: "compiler produced invalid IR".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    }
+    let limits = zirk_interpreter::InterpreterLimits {
+        instructions: response.limits.instructions,
+        call_depth: response.limits.call_depth,
+        heap_bytes: response.limits.heap_bytes,
+        output_bytes: response.limits.output_bytes,
+        output_events: response.limits.output_events,
+        stack_frames: response.limits.stack_frames,
+    };
+    let Ok(mut interpreter) = zirk_interpreter::Interpreter::new(&module, limits) else {
+        response.failure = Some(Failure {
+            kind: FailureKind::Internal,
+            code: "ZB198".into(),
+            message: "interpreter rejected compiler IR".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    };
+    interpreter.set_bundled_standard_sources(standard_sources);
+    let trace_limits = trace_options.as_ref().map(|options| {
+        let defaults = zirk_interpreter::TraceLimits::DEFAULT;
+        zirk_interpreter::TraceLimits {
+            max_events: options.events.unwrap_or(defaults.max_events),
+            max_bytes: options.bytes.unwrap_or(defaults.max_bytes),
+            max_value_bytes: options.value_bytes.unwrap_or(defaults.max_value_bytes),
+        }
+        .clamped()
+    });
+    if let Some(limits) = trace_limits {
+        interpreter.enable_trace(limits);
+    }
+    let mut host = FetchHost {
+        events: Vec::new(),
+        allowed_origins,
+        abort_signal,
+    };
+    let terminal_result = loop {
+        match interpreter.run_main_with_host_slice(&mut host, 20_000) {
+            zirk_interpreter::ExecutionResult::Yielded => {
+                let tick = js_sys::Promise::resolve(&wasm_bindgen::JsValue::UNDEFINED);
+                let _ = wasm_bindgen_futures::JsFuture::from(tick).await;
+            }
+            zirk_interpreter::ExecutionResult::HttpSuspended { request } => {
+                if request.body.len() > max_request_bytes {
+                    let _ = interpreter.resume_http_error(request.id, 4);
+                    continue;
+                }
+                match fetch_http_request(
+                    &fetch_function,
+                    &request,
+                    &host.allowed_origins,
+                    max_response_bytes,
+                    &host.abort_signal,
+                )
+                .await
+                {
+                    Ok(response) => {
+                        if interpreter
+                            .resume_http_response(request.id, response)
+                            .is_err()
+                        {
+                            break zirk_interpreter::ExecutionResult::InternalFailure(
+                                zirk_interpreter::InternalFailure {
+                                    message:
+                                        "browser HTTP response could not resume the interpreter"
+                                            .into(),
+                                    span: None,
+                                },
+                            );
+                        }
+                    }
+                    Err(error_code) => {
+                        if interpreter
+                            .resume_http_error(request.id, error_code)
+                            .is_err()
+                        {
+                            break zirk_interpreter::ExecutionResult::InternalFailure(
+                                zirk_interpreter::InternalFailure {
+                                    message:
+                                        "browser HTTP failure could not resume the interpreter"
+                                            .into(),
+                                    span: None,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            terminal => break terminal,
+        }
+    };
+    if let (Some(limits), Some(options)) = (trace_limits, trace_options.as_ref()) {
+        response.trace = Some(convert_trace(interpreter.take_trace(), limits, options));
+    }
+    response.output = host
+        .events
+        .into_iter()
+        .map(|event| OutputEvent {
+            text: event.text,
+            destination: match event.destination {
+                zirk_interpreter::OutputDestination::Stdout => "stdout".into(),
+                zirk_interpreter::OutputDestination::Stderr => "stderr".into(),
+            },
+            truncated: event.truncated,
+        })
+        .collect();
+    response.completion = None;
+    response.failure = execution_failure(terminal_result, &mut response.completion);
+    response
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_http_request(
+    fetch_function: &js_sys::Function,
+    request: &zirk_interpreter::HttpHostRequest,
+    allowed_origins: &std::collections::HashSet<String>,
+    max_response_bytes: usize,
+    abort_signal: &wasm_bindgen::JsValue,
+) -> Result<zirk_interpreter::HttpHostResponse, i32> {
+    use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
+    use wasm_bindgen::{JsCast, JsValue};
+    use zirk_runtime_core::http_values::{Headers, HttpMethod, HttpRequestValues, Url};
+
+    if abort_signal_aborted(abort_signal) {
+        return Err(7);
+    }
+    let origin = request_origin(&request.url).ok_or(0)?;
+    if !allowed_origins.contains(&origin) {
+        return Err(16);
+    }
+    if !valid_http_method_token(&request.method) {
+        return Err(15);
+    }
+    let method = match request.method.as_str() {
+        "GET" => HttpMethod::Get,
+        "HEAD" => HttpMethod::Head,
+        "POST" => HttpMethod::Post,
+        "PUT" => HttpMethod::Put,
+        "PATCH" => HttpMethod::Patch,
+        "DELETE" => HttpMethod::Delete,
+        "OPTIONS" => HttpMethod::Options,
+        "CONNECT" => HttpMethod::Connect,
+        "TRACE" => HttpMethod::Trace,
+        "QUERY" => HttpMethod::Query,
+        _ => HttpMethod::Other,
+    };
+    let url = Url::parse(&request.url).map_err(|_| 0)?;
+    let mut validated_headers = Headers::new();
+    for (name, value) in &request.headers {
+        validated_headers.append(name, value).map_err(|_| 3)?;
+    }
+    let mut values = HttpRequestValues::new(method, url);
+    values.method_token.clone_from(&request.method);
+    values.headers = validated_headers;
+    values.set_body(request.body.clone()).map_err(|_| 4)?;
+    values
+        .validate_client_request()
+        .map_err(|error| match error {
+            zirk_runtime_core::http_values::HttpValueError::UnsupportedMethod => 14,
+            _ => 3,
+        })?;
+    if request.validate_json && serde_json::from_slice::<serde_json::Value>(&request.body).is_err()
+    {
+        return Err(9);
+    }
+    let global = js_sys::global();
+    let headers_constructor = Reflect::get(&global, &"Headers".into())
+        .map_err(|_| 16)?
+        .dyn_into::<Function>()
+        .map_err(|_| 16)?;
+    let headers = Reflect::construct(&headers_constructor, &Array::new()).map_err(|_| 16)?;
+    let append_header = Reflect::get(&headers, &"append".into())
+        .map_err(|_| 16)?
+        .dyn_into::<Function>()
+        .map_err(|_| 16)?;
+    for (name, bytes) in &request.headers {
+        let value = String::from_utf8(bytes.clone()).map_err(|_| 3)?;
+        append_header
+            .call2(
+                &headers,
+                &JsValue::from_str(name),
+                &JsValue::from_str(&value),
+            )
+            .map_err(|_| 3)?;
+    }
+
+    let options = js_sys::Object::new();
+    set_js_property(&options, "method", &JsValue::from_str(&request.method)).map_err(|_| 3)?;
+    set_js_property(&options, "headers", &headers).map_err(|_| 3)?;
+    set_js_property(&options, "mode", &JsValue::from_str("cors")).map_err(|_| 3)?;
+    set_js_property(&options, "credentials", &JsValue::from_str("omit")).map_err(|_| 3)?;
+    set_js_property(&options, "redirect", &JsValue::from_str("error")).map_err(|_| 3)?;
+    let cache = if request.cached {
+        "default"
+    } else {
+        "no-store"
+    };
+    set_js_property(&options, "cache", &JsValue::from_str(cache)).map_err(|_| 3)?;
+    if !abort_signal.is_null() && !abort_signal.is_undefined() {
+        set_js_property(&options, "signal", abort_signal).map_err(|_| 3)?;
+    }
+    if !request.body.is_empty() {
+        let body = Uint8Array::from(request.body.as_slice());
+        set_js_property(&options, "body", &body.into()).map_err(|_| 3)?;
+    }
+    let fetch_promise = fetch_function
+        .call2(&global, &JsValue::from_str(&request.url), &options.into())
+        .map_err(|_| {
+            if abort_signal_aborted(abort_signal) {
+                7
+            } else {
+                16
+            }
+        })?;
+    let response = wasm_bindgen_futures::JsFuture::from(Promise::resolve(&fetch_promise))
+        .await
+        .map_err(|_| {
+            if abort_signal_aborted(abort_signal) {
+                7
+            } else {
+                16
+            }
+        })?;
+    let status = Reflect::get(&response, &"status".into())
+        .map_err(|_| 16)?
+        .as_f64()
+        .filter(|status| status.fract() == 0.0 && (100.0..=999.0).contains(status))
+        .ok_or(16)? as u16;
+
+    let response_headers = Reflect::get(&response, &"headers".into()).map_err(|_| 16)?;
+    let entries_function = Reflect::get(&response_headers, &"entries".into())
+        .map_err(|_| 16)?
+        .dyn_into::<Function>()
+        .map_err(|_| 16)?;
+    let entries = entries_function.call0(&response_headers).map_err(|_| 16)?;
+    let iterator = js_sys::try_iter(&entries).map_err(|_| 16)?.ok_or(16)?;
+    let mut headers = Vec::new();
+    let mut header_bytes = 0usize;
+    for entry in iterator {
+        let pair = Array::from(&entry.map_err(|_| 16)?);
+        if pair.length() != 2 || headers.len() >= 256 {
+            return Err(3);
+        }
+        let name = pair.get(0).as_string().ok_or(3)?;
+        let value = pair.get(1).as_string().ok_or(3)?;
+        header_bytes = header_bytes
+            .checked_add(name.len() + value.len())
+            .ok_or(3)?;
+        if header_bytes > 64 * 1024 {
+            return Err(3);
+        }
+        headers.push((name, value.into_bytes()));
+    }
+
+    let body_stream = Reflect::get(&response, &"body".into()).map_err(|_| 16)?;
+    let mut body = Vec::new();
+    if !body_stream.is_null() && !body_stream.is_undefined() {
+        let reader = Reflect::get(&body_stream, &"getReader".into())
+            .map_err(|_| 16)?
+            .dyn_into::<Function>()
+            .map_err(|_| 16)?
+            .call0(&body_stream)
+            .map_err(|_| 16)?;
+        let read = Reflect::get(&reader, &"read".into())
+            .map_err(|_| 16)?
+            .dyn_into::<Function>()
+            .map_err(|_| 16)?;
+        loop {
+            if abort_signal_aborted(abort_signal) {
+                if let Ok(cancel) = Reflect::get(&reader, &"cancel".into())
+                    && let Ok(cancel) = cancel.dyn_into::<Function>()
+                {
+                    let _ = cancel.call0(&reader);
+                }
+                return Err(7);
+            }
+            let read_promise = read.call0(&reader).map_err(|_| 16)?;
+            let result = wasm_bindgen_futures::JsFuture::from(Promise::resolve(&read_promise))
+                .await
+                .map_err(|_| {
+                    if abort_signal_aborted(abort_signal) {
+                        7
+                    } else {
+                        16
+                    }
+                })?;
+            if Reflect::get(&result, &"done".into())
+                .map_err(|_| 16)?
+                .as_bool()
+                .unwrap_or(false)
+            {
+                break;
+            }
+            let chunk = Uint8Array::new(&Reflect::get(&result, &"value".into()).map_err(|_| 16)?);
+            let next_len = body.len().checked_add(chunk.length() as usize).ok_or(4)?;
+            if next_len > max_response_bytes {
+                if let Ok(cancel) = Reflect::get(&reader, &"cancel".into())
+                    && let Ok(cancel) = cancel.dyn_into::<Function>()
+                {
+                    let _ = cancel.call0(&reader);
+                }
+                return Err(4);
+            }
+            body.extend_from_slice(&chunk.to_vec());
+        }
+    }
+    Ok(zirk_interpreter::HttpHostResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn valid_http_method_token(method: &str) -> bool {
+    !method.is_empty()
+        && method.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn set_js_property(
+    target: &js_sys::Object,
+    name: &str,
+    value: &wasm_bindgen::JsValue,
+) -> Result<(), wasm_bindgen::JsValue> {
+    js_sys::Reflect::set(target, &name.into(), value).map(|_| ())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn abort_signal_aborted(signal: &wasm_bindgen::JsValue) -> bool {
+    !signal.is_null()
+        && !signal.is_undefined()
+        && js_sys::Reflect::get(signal, &"aborted".into())
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
 }
 
 fn convert_trace(
@@ -577,6 +1245,18 @@ fn execution_failure(
 ) -> Option<contract::Failure> {
     use contract::{Completion, Failure, FailureKind};
     match result {
+        zirk_interpreter::ExecutionResult::Yielded => Some(Failure {
+            kind: FailureKind::Internal,
+            code: "ZB198".into(),
+            message: "synchronous browser run cannot resume a suspended interpreter".into(),
+            limit: None,
+        }),
+        zirk_interpreter::ExecutionResult::HttpSuspended { .. } => Some(Failure {
+            kind: FailureKind::Capability,
+            code: "ZB006".into(),
+            message: "HTTP requires the asynchronous browser execution API and an explicit fetch capability".into(),
+            limit: None,
+        }),
         zirk_interpreter::ExecutionResult::Completed { .. } => {
             *completion = Some(Completion::Completed);
             None
@@ -634,7 +1314,9 @@ fn diagnostic_start(source: &str, location: &zirk_diagnostics::Location) -> u32 
 
 #[cfg(test)]
 mod tests {
-    use super::{API_VERSION, BrowserApi, check, check_source, format, run};
+    use super::{
+        API_VERSION, BrowserApi, bundled_standard_source_ids, check, check_source, format, run,
+    };
     use crate::contract::{FailureKind, Limits, Request};
 
     #[test]
@@ -785,6 +1467,355 @@ mod tests {
         assert_eq!(response.diagnostics[0].code, "E0401");
         assert!(response.diagnostics[0].start < response.diagnostics[0].end);
         assert!(response.output.is_empty());
+    }
+
+    #[test]
+    fn browser_frontend_checks_http_and_environment_from_bundled_sources() {
+        for source in [
+            "import { HTTP, HTTPClient, HTTPHeaders, URL } from std.http;\nfn main(): Void {}",
+            "import { Environment } from std.environment;\nfn main(): Void {}",
+        ] {
+            let (frontend, diagnostics) = check_source(source, "stdlib-browser.zrk");
+            assert!(
+                frontend.is_some(),
+                "bundled standard source did not check: {:?}",
+                diagnostics.diagnostics()
+            );
+            assert!(!diagnostics.has_errors());
+        }
+    }
+
+    #[test]
+    fn browser_can_parse_and_resolve_http_urls_without_network_authority() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: "import { stdout } from std.io;\nimport { URL } from std.http;\nfn main(): Void { match URL.parse(\"HTTPS://Example.COM:443/a/b\") { Ok(base) => { match URL.resolve(base, \"../c?q=1\") { Ok(url) => stdout.println(url.as_string()); Error(_) => stdout.println(\"resolve-error\"); } } Error(_) => stdout.println(\"parse-error\"); } match URL.parse(\"ftp://example.com/\") { Ok(_) => stdout.println(\"unexpected-ok\"); Error(_) => stdout.println(\"invalid-url\"); } }".into(),
+            virtual_name: "browser-http-url.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            response.failure.is_none(),
+            "URL operations are portable: {response:?}"
+        );
+        assert_eq!(response.output.len(), 2);
+        assert_eq!(response.output[0].text, "https://example.com/c?q=1\n");
+        assert_eq!(response.output[1].text, "invalid-url\n");
+    }
+
+    #[test]
+    fn browser_run_rejects_http_until_a_fetch_capability_is_injected() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: "import { HTTP, URL } from std.http;\nfn main(): Void { match URL.parse(\"https://example.com/\") { Ok(url) => { _ = HTTP.get(url); } Error(_) => {} } }".into(),
+            virtual_name: "browser-http.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            matches!(
+                response.failure,
+                Some(crate::contract::Failure {
+                    kind: FailureKind::Capability,
+                    ..
+                })
+            ),
+            "browser HTTP must remain fail-closed without a host capability: {response:?}"
+        );
+        assert!(response.output.is_empty());
+
+        let request_response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: "import { HTTP, HTTPHeaders, HTTPMethod, URL } from std.http;\nfn main(): Void { mut body: Array<Byte> = [1 as Byte]; match URL.parse(\"https://example.com/submit\") { Ok(url) => { _ = HTTP.request(HTTPMethod.Post, url, body, HTTPHeaders.create()); } Error(_) => {} } }".into(),
+            virtual_name: "browser-http-request.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            matches!(
+                request_response.failure,
+                Some(crate::contract::Failure {
+                    kind: FailureKind::Capability,
+                    ..
+                })
+            ),
+            "general browser requests must stay default-deny without an injected fetch capability: {request_response:?}"
+        );
+    }
+
+    #[test]
+    fn interpreter_suspends_and_resumes_http_get_without_restarting_main() {
+        let source = "import { stdout } from std.io;\nimport { HTTP, URL } from std.http;\nfn main(): Void { stdout.println(\"before\"); match URL.parse(\"https://example.com/path\") { Ok(url) => { match HTTP.get(url) { Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"http-error\"); } } Error(_) => stdout.println(\"url-error\"); } }";
+        let (frontend, diagnostics) = check_source(source, "browser-http-resume.zrk");
+        assert!(
+            !diagnostics.has_errors(),
+            "source diagnostics: {:?}",
+            diagnostics.diagnostics()
+        );
+        let frontend = frontend.expect("valid HTTP fixture");
+        let standard_sources = bundled_standard_source_ids(&frontend.sources);
+        let module = zirk_ir::lower(&frontend.program, &frontend.checked);
+        let mut interpreter = zirk_interpreter::Interpreter::new(
+            &module,
+            zirk_interpreter::InterpreterLimits::default(),
+        )
+        .expect("verified browser fixture");
+        interpreter.set_bundled_standard_sources(standard_sources.clone());
+        interpreter.enable_trace(zirk_interpreter::TraceLimits::DEFAULT);
+        let mut host = zirk_interpreter::CapturedHost::with_http_capability();
+
+        let request = match interpreter.run_main_with_host(&mut host) {
+            zirk_interpreter::ExecutionResult::HttpSuspended { request } => request,
+            other => panic!("expected one suspended HTTP request, got {other:?}"),
+        };
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.url, "https://example.com/path");
+        assert_eq!(
+            host.events().len(),
+            1,
+            "main ran up to the suspension point"
+        );
+        assert_eq!(host.events()[0].text, "before\n");
+        let trace_before_resume = interpreter.take_trace();
+        assert!(trace_before_resume.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                zirk_interpreter::TraceEventKind::Output { index: 0 }
+            )
+        }));
+        assert!(
+            interpreter
+                .resume_http_response(
+                    request.id + 1,
+                    zirk_interpreter::HttpHostResponse {
+                        status: 201,
+                        headers: vec![("x-test".into(), b"value".to_vec())],
+                        body: b"payload".to_vec(),
+                    },
+                )
+                .is_err(),
+            "stale responses must be rejected"
+        );
+        interpreter
+            .resume_http_response(
+                request.id,
+                zirk_interpreter::HttpHostResponse {
+                    status: 201,
+                    headers: vec![("x-test".into(), b"value".to_vec())],
+                    body: b"payload".to_vec(),
+                },
+            )
+            .expect("matching response resumes the request");
+        assert!(
+            interpreter
+                .resume_http_response(
+                    request.id,
+                    zirk_interpreter::HttpHostResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    },
+                )
+                .is_err(),
+            "duplicate responses must be rejected"
+        );
+        assert!(matches!(
+            interpreter.run_main_with_host(&mut host),
+            zirk_interpreter::ExecutionResult::Completed { value: None }
+        ));
+        assert_eq!(
+            host.events()
+                .iter()
+                .map(|event| event.text.as_str())
+                .collect::<Vec<_>>(),
+            ["before\n", "201\n"],
+            "resuming must continue after the suspended instruction"
+        );
+        let trace_after_resume = interpreter.take_trace();
+        assert!(trace_after_resume.events.iter().any(|event| {
+            matches!(
+                event.kind,
+                zirk_interpreter::TraceEventKind::Output { index: 1 }
+            )
+        }));
+        assert!(
+            trace_after_resume.events.first().unwrap().seq
+                > trace_before_resume.events.last().unwrap().seq,
+            "trace sequence must continue across the HTTP suspension"
+        );
+        assert_eq!(host.http_requests().len(), 1);
+
+        let mut cancelled_interpreter = zirk_interpreter::Interpreter::new(
+            &module,
+            zirk_interpreter::InterpreterLimits::default(),
+        )
+        .expect("verified browser fixture");
+        cancelled_interpreter.set_bundled_standard_sources(standard_sources);
+        let mut cancelled_host = zirk_interpreter::CapturedHost::with_http_capability();
+        let cancelled_request = match cancelled_interpreter.run_main_with_host(&mut cancelled_host)
+        {
+            zirk_interpreter::ExecutionResult::HttpSuspended { request } => request,
+            other => panic!("expected suspended request before cancellation, got {other:?}"),
+        };
+        cancelled_host.cancel();
+        assert_eq!(
+            cancelled_interpreter.run_main_with_host_slice(&mut cancelled_host, 1),
+            zirk_interpreter::ExecutionResult::LimitFailure(
+                zirk_interpreter::LimitFailure::Cancelled
+            )
+        );
+        assert!(
+            cancelled_interpreter
+                .resume_http_response(
+                    cancelled_request.id,
+                    zirk_interpreter::HttpHostResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    },
+                )
+                .is_err(),
+            "cancelled requests must release their continuation"
+        );
+    }
+
+    #[test]
+    fn interpreter_suspends_and_resumes_http_request_with_body_and_headers() {
+        let source = "import { stdout } from std.io;\nimport { HTTP, HTTPHeaders, HTTPMethod, URL } from std.http;\nfn main(): Void { mut payload: Array<Byte> = [112 as Byte, 97 as Byte, 121 as Byte, 108 as Byte, 111 as Byte, 97 as Byte, 100 as Byte]; mut headers = HTTPHeaders.create(); _ = headers.add(\"x-test\", \"yes\"); match URL.parse(\"https://example.com/submit\") { Ok(url) => { match HTTP.request(HTTPMethod.Post, url, payload, headers) { Ok(response) => { stdout.println(response.status_code()); match response.text() { Ok(text) => stdout.println(text); Error(_) => stdout.println(\"text-error\"); } } Error(_) => stdout.println(\"request-error\"); } } Error(_) => stdout.println(\"url-error\"); } }";
+        let (frontend, diagnostics) = check_source(source, "browser-http-request-resume.zrk");
+        assert!(
+            !diagnostics.has_errors(),
+            "source diagnostics: {:?}",
+            diagnostics.diagnostics()
+        );
+        let frontend = frontend.expect("valid HTTP request fixture");
+        let standard_sources = bundled_standard_source_ids(&frontend.sources);
+        let module = zirk_ir::lower(&frontend.program, &frontend.checked);
+        let mut interpreter = zirk_interpreter::Interpreter::new(
+            &module,
+            zirk_interpreter::InterpreterLimits::default(),
+        )
+        .expect("verified browser HTTP request fixture");
+        interpreter.set_bundled_standard_sources(standard_sources);
+        let mut host = zirk_interpreter::CapturedHost::with_http_capability();
+        let request = match interpreter.run_main_with_host(&mut host) {
+            zirk_interpreter::ExecutionResult::HttpSuspended { request } => request,
+            other => panic!("expected suspended HTTP request, got {other:?}"),
+        };
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.url, "https://example.com/submit");
+        assert_eq!(request.body, b"payload");
+        assert_eq!(request.headers, [("x-test".into(), b"yes".to_vec())]);
+        assert!(!request.validate_json);
+
+        interpreter
+            .resume_http_response(
+                request.id,
+                zirk_interpreter::HttpHostResponse {
+                    status: 202,
+                    headers: Vec::new(),
+                    body: b"response body".to_vec(),
+                },
+            )
+            .expect("matching HTTP request response resumes execution");
+        assert!(matches!(
+            interpreter.run_main_with_host(&mut host),
+            zirk_interpreter::ExecutionResult::Completed { value: None }
+        ));
+        assert_eq!(host.events()[0].text, "202\n");
+        assert_eq!(host.events()[1].text, "response body\n");
+        assert_eq!(host.http_requests(), &[request]);
+    }
+
+    #[test]
+    fn interpreter_maps_http_convenience_calls_to_bounded_host_requests() {
+        let source = r#"
+import { HTTP, URL } from std.http;
+fn main(): Void {
+    match URL.parse("https://example.com/api") {
+        Ok(url) => {
+            _ = HTTP.head(url);
+            _ = HTTP.query(url, "true");
+            _ = HTTP.query_with_content_type(url, "select 1", "application/sql");
+            _ = HTTP.post(url, "plain text");
+            _ = HTTP.post_json(url, "true");
+            mut bytes: Array<Byte> = [1 as Byte, 255 as Byte];
+            _ = HTTP.post_bytes(url, bytes);
+        }
+        Error(_) => {}
+    }
+}
+"#;
+        let (frontend, diagnostics) = check_source(source, "browser-http-convenience.zrk");
+        assert!(
+            !diagnostics.has_errors(),
+            "source diagnostics: {:?}",
+            diagnostics.diagnostics()
+        );
+        let frontend = frontend.expect("valid HTTP convenience fixture");
+        let standard_sources = bundled_standard_source_ids(&frontend.sources);
+        let module = zirk_ir::lower(&frontend.program, &frontend.checked);
+        let mut interpreter = zirk_interpreter::Interpreter::new(
+            &module,
+            zirk_interpreter::InterpreterLimits::default(),
+        )
+        .expect("verified HTTP convenience fixture");
+        interpreter.set_bundled_standard_sources(standard_sources);
+        let mut host = zirk_interpreter::CapturedHost::with_http_capability();
+        loop {
+            match interpreter.run_main_with_host(&mut host) {
+                zirk_interpreter::ExecutionResult::HttpSuspended { request } => interpreter
+                    .resume_http_response(
+                        request.id,
+                        zirk_interpreter::HttpHostResponse {
+                            status: 204,
+                            headers: Vec::new(),
+                            body: Vec::new(),
+                        },
+                    )
+                    .expect("each convenience request resumes the same interpreter"),
+                zirk_interpreter::ExecutionResult::Completed { value: None } => break,
+                other => panic!("expected HTTP request suspension or completion, got {other:?}"),
+            }
+        }
+        let requests = host.http_requests();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.method.as_str())
+                .collect::<Vec<_>>(),
+            ["HEAD", "QUERY", "QUERY", "POST", "POST", "POST"]
+        );
+        assert_eq!(requests[0].body, b"");
+        assert_eq!(requests[1].body, b"true");
+        assert_eq!(
+            requests[1].headers,
+            [("content-type".into(), b"application/json".to_vec())]
+        );
+        assert!(requests[1].validate_json);
+        assert_eq!(requests[2].body, b"select 1");
+        assert_eq!(
+            requests[2].headers,
+            [("content-type".into(), b"application/sql".to_vec())]
+        );
+        assert!(!requests[2].validate_json);
+        assert_eq!(requests[3].body, b"plain text");
+        assert_eq!(
+            requests[3].headers,
+            [("content-type".into(), b"text/plain; charset=utf-8".to_vec())]
+        );
+        assert_eq!(requests[4].body, b"true");
+        assert!(requests[4].validate_json);
+        assert_eq!(
+            requests[4].headers,
+            [("content-type".into(), b"application/json".to_vec())]
+        );
+        assert_eq!(requests[5].body, [1, 255]);
+        assert_eq!(
+            requests[5].headers,
+            [("content-type".into(), b"application/octet-stream".to_vec())]
+        );
     }
 
     #[test]
@@ -1391,6 +2422,7 @@ mod tests {
             zirk_interpreter::InterpreterLimits::default(),
         )
         .expect("compatible fixture");
+        interpreter.set_bundled_standard_sources(bundled_standard_source_ids(&frontend.sources));
         let mut host = zirk_interpreter::CapturedHost::default();
         let result = interpreter.run_main_with_host(&mut host);
         assert!(matches!(
@@ -1462,6 +2494,8 @@ mod tests {
                 zirk_interpreter::InterpreterLimits::default(),
             )
             .unwrap();
+            interpreter
+                .set_bundled_standard_sources(bundled_standard_source_ids(&frontend.sources));
             let mut host = zirk_interpreter::CapturedHost::default();
             let host_result = interpreter.run_main_with_host(&mut host);
             let browser = run(Request {

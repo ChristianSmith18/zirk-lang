@@ -1,0 +1,153 @@
+package std.net.local;
+
+share enum LocalError {
+    InvalidAddress,
+    PermissionDenied,
+    AddressNotAllowed,
+    UnsupportedTransport,
+    BufferLimitExceeded,
+    Io,
+    Cancelled,
+    CapacityExceeded,
+    Timeout,
+    Closed,
+    WrongOwner,
+}
+
+share enum LocalReadResult<T> {
+    Value(value: T),
+    End,
+    Error(error: LocalError),
+}
+
+// Existing filesystem socket paths are rejected unless the caller explicitly
+// opts in to removal of an owned stale socket. Windows named pipes never use
+// filesystem stale-path cleanup.
+share enum LocalStaleEndpointPolicy {
+    RejectExisting,
+    RemoveStaleSocket,
+}
+
+share class LocalResourceError implements Error {
+    private inmut reason: LocalError;
+
+    construct(reason: LocalError) { this.reason = reason; }
+    message(): String { return this.reason.to_string(); }
+    code(): String { return "LOCAL_RESOURCE"; }
+    cause(): Error? { return null; }
+}
+
+// A bounded local byte stream. Unix endpoints use filesystem sockets;
+// Windows endpoints use names in the local named-pipe namespace.
+share class LocalStream implements Resource<LocalResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static connect(endpoint: String): Result<LocalStream, LocalError> {
+        return LocalStream.connect_native(endpoint);
+    }
+
+    read(max_bytes: UInt64): LocalReadResult<Array<Byte>> {
+        return LocalStream.read_native(this.handle, max_bytes);
+    }
+
+    write(bytes: Array<Byte>): Result<UInt64, LocalError> {
+        return LocalStream.write_native(this.handle, bytes);
+    }
+
+    write_all(bytes: Array<Byte>): Result<Void, LocalError> {
+        return LocalStream.write_all_native(this.handle, bytes);
+    }
+
+    shutdown(): Result<Void, LocalError> {
+        return LocalStream.shutdown_native(this.handle);
+    }
+
+    close(): Result<Void, LocalResourceError> {
+        return match LocalStream.close_stream_native(this.handle) {
+            Ok(_) => LocalStream.close_ok();
+            Error(error) => LocalStream.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean { return LocalStream.is_stream_closed_native(this.handle); }
+
+    private static connect_native(endpoint: String): Result<LocalStream, LocalError> {
+        return Error(LocalError.PermissionDenied);
+    }
+    private static read_native(handle: UInt64, max_bytes: UInt64): LocalReadResult<Array<Byte>> {
+        return LocalReadResult.Error(LocalError.Closed);
+    }
+    private static write_native(handle: UInt64, bytes: Array<Byte>): Result<UInt64, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static write_all_native(handle: UInt64, bytes: Array<Byte>): Result<Void, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static shutdown_native(handle: UInt64): Result<Void, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static close_stream_native(handle: UInt64): Result<Void, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static is_stream_closed_native(handle: UInt64): Boolean { return true; }
+    private static close_ok(): Result<Void, LocalResourceError> {
+        return Ok(LocalStream.unit());
+    }
+    private static unit(): Void { return; }
+    private static close_error(error: LocalError): Result<Void, LocalResourceError> {
+        return Error(LocalResourceError(error));
+    }
+}
+
+share class LocalListener implements Resource<LocalResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static bind(
+        endpoint: String,
+        stale_policy: LocalStaleEndpointPolicy,
+    ): Result<LocalListener, LocalError> {
+        mut remove_stale: Boolean = match stale_policy {
+            RejectExisting => false;
+            RemoveStaleSocket => true;
+        };
+        return LocalListener.bind_native(endpoint, remove_stale);
+    }
+
+    accept(): Result<LocalStream, LocalError> {
+        return LocalListener.accept_native(this.handle);
+    }
+
+    close(): Result<Void, LocalResourceError> {
+        return match LocalListener.close_listener_native(this.handle) {
+            Ok(_) => LocalListener.close_ok();
+            Error(error) => LocalListener.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean { return LocalListener.is_listener_closed_native(this.handle); }
+
+    private static bind_native(
+        endpoint: String,
+        remove_stale: Boolean,
+    ): Result<LocalListener, LocalError> {
+        return Error(LocalError.PermissionDenied);
+    }
+    private static accept_native(handle: UInt64): Result<LocalStream, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static close_listener_native(handle: UInt64): Result<Void, LocalError> {
+        return Error(LocalError.Closed);
+    }
+    private static is_listener_closed_native(handle: UInt64): Boolean { return true; }
+    private static close_ok(): Result<Void, LocalResourceError> {
+        return Ok(LocalListener.unit());
+    }
+    private static unit(): Void { return; }
+    private static close_error(error: LocalError): Result<Void, LocalResourceError> {
+        return Error(LocalResourceError(error));
+    }
+}

@@ -1962,6 +1962,14 @@ impl<'a> Checker<'a> {
             | "std.environment.Environment.contains_authorized"
             | "std.environment.Environment.list_names"
             | "std.net.tcp.listen" => self.mark_may_block(),
+            "std.net.udp.connect" | "std.net.udp.bind" => self.mark_may_suspend(),
+            "std.net.udp.send"
+            | "std.net.udp.send_to"
+            | "std.net.udp.send_broadcast"
+            | "std.net.udp.send_multicast"
+            | "std.net.udp.join_multicast"
+            | "std.net.udp.leave_multicast"
+            | "std.net.udp.receive" => self.mark_may_suspend(),
             "std.net.tcp.connect"
             | "std.net.tcp.read"
             | "std.net.tcp.write"
@@ -1972,6 +1980,9 @@ impl<'a> Checker<'a> {
             | "std.http.request"
             | "std.http.request_cached"
             | "std.http.client_request"
+            | "std.http.client_enable_cookies"
+            | "std.http.client_clear_cookies"
+            | "std.http.client_close"
             | "std.http.head"
             | "std.http.query"
             | "std.http.query_with_content_type"

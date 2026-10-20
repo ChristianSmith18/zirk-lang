@@ -3251,6 +3251,179 @@ fn main(): Void {{
 }
 
 #[test]
+fn bundled_std_http3_server_api_uses_the_official_host_binding() {
+    let project = workspace("bundled_std_http3_server_api");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.http.http3.server.api.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        r#"import { HTTPServer, HTTPRequest, HTTPResponse } from std.http;
+import { stdout } from std.io;
+fn main(): Void {
+    mut certificates: Array<Array<Byte>> = [];
+    mut private_key: Array<Byte> = [];
+    match HTTPServer.serve_http3(
+        "udp://127.0.0.1:8443",
+        certificates,
+        private_key,
+        1,
+        1,
+        (request: HTTPRequest): HTTPResponse => HTTPResponse.from_text(200, "ok"),
+    ) {
+        Error(error) => stdout.println(error.to_string());
+        Ok(count) => stdout.println(count);
+    }
+}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "Protocol\n"
+    );
+}
+
+#[test]
+fn bundled_std_http3_websocket_server_fails_closed_without_runtime_feature() {
+    let project = workspace("bundled_std_http3_websocket_server");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.http.http3.websocket.server.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        r#"import { HTTPError, HTTPServer, HTTPWebSocket } from std.http;
+import { stdout } from std.io;
+fn handle(socket: HTTPWebSocket): Void { _ = socket.close(); }
+fn main(): Void {
+    mut certificates: Array<Array<Byte>> = [];
+    mut private_key: Array<Byte> = [];
+    mut origins: List<String> = List();
+    mut protocols: List<String> = List();
+    match HTTPServer.serve_http3_websocket_once(
+        "udp://127.0.0.1:8444", certificates, private_key, "/socket",
+        origins, protocols, 1, handle,
+    ) {
+        Error(error) => stdout.println(error.to_string());
+        Ok(_) => stdout.println("served");
+    }
+}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "Protocol\n"
+    );
+}
+
+#[test]
+fn bundled_std_http3_websocket_fails_closed_without_http3_runtime_feature() {
+    let project = workspace("bundled_std_http3_websocket_client");
+    let home = workspace("bundled_std_http3_websocket_client_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.http.http3.websocket.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nnetwork {\nconnect: { origins: [\"https://127.0.0.1:443\"]; during: runtime; }\n}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        r#"import { HTTPWebSocket, URL } from std.http;
+import { stdout } from std.io;
+fn main(): Void {
+    mut protocols: List<String> = List();
+    mut root: Array<Byte> = [1 as Byte];
+    mut roots: Array<Array<Byte>> = [root];
+    match URL.parse("https://127.0.0.1/socket") {
+        Error(_) => stdout.println("InvalidUrl");
+        Ok(url) => {
+            match HTTPWebSocket.connect_http3(url, "https://app.example", protocols) {
+                Error(error) => stdout.println(error.to_string());
+                Ok(_) => stdout.println("connected");
+            }
+            match HTTPWebSocket.connect_http3_with_trust_roots(
+                url, "https://app.example", protocols, roots,
+            ) {
+                Error(error) => stdout.println(error.to_string());
+                Ok(_) => stdout.println("connected with roots");
+            }
+        }
+    }
+}"#,
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "Protocol\nProtocol\n"
+    );
+}
+
+#[test]
 fn bundled_std_http1_client_interoperates_with_independent_hyper_peer() {
     use hyper::service::service_fn;
     use std::convert::Infallible;
@@ -3295,7 +3468,7 @@ fn bundled_std_http1_client_interoperates_with_independent_hyper_peer() {
     std::fs::write(
         project.join("src/main.zrk"),
         format!(
-            "import {{ HTTP, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"{origin}/interop\") {{\nError(_) => stdout.println(\"URL parse failed\");\nOk(url) => match HTTP.get(url) {{\nError(error) => stdout.println(error.to_string());\nOk(response) => {{ stdout.println(response.status_code()); match response.text() {{ Ok(body) => stdout.println(body); Error(error) => stdout.println(error.to_string()); }} }}\n}}\n}}\n}}"
+            "import {{ HTTP, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"{origin}/interop\") {{\nError(_) => stdout.println(\"URL parse failed\");\nOk(url) => match HTTP.get(url) {{\nError(error) => stdout.println(error.to_string());\nOk(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); match response.text() {{ Ok(body) => stdout.println(body); Error(error) => stdout.println(error.to_string()); }} }}\n}}\n}}\n}}"
         ),
     )
     .unwrap();
@@ -3337,7 +3510,7 @@ fn bundled_std_http1_client_interoperates_with_independent_hyper_peer() {
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "200\nhyper-http1-peer\n"
+        "200\nHTTP1\nhyper-http1-peer\n"
     );
     peer.join().unwrap();
 }
@@ -3496,7 +3669,7 @@ fn bundled_std_http_client_reuses_connection_and_scopes_cookie_jar() {
     std::fs::write(
         project.join("src/main.zrk"),
         format!(
-            "import {{ HTTPClient, HTTPClientOptions, HTTPError, HTTPMethod, HTTPBody, HTTPHeaders, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn client_with_options(): Result<HTTPClient, HTTPError> {{ return match HTTPClientOptions.create(connect_timeout_ms: 5000, response_headers_timeout_ms: 30000, response_idle_timeout_ms: 30000, max_origins: 2) {{ Ok(options) => {{ stdout.println(options.connect_timeout_ms()); stdout.println(options.response_headers_timeout_ms()); stdout.println(options.response_idle_timeout_ms()); stdout.println(options.max_origins()); HTTPClient.create_with_options(options); }} Error(error) => Error<HTTPClient, HTTPError>(error); }}; }}\nfn main(): Void {{\nmatch URL.parse(\"http://127.0.0.1:{}/client\") {{\nOk(url) => {{ match HTTPClient.create(0) {{ Ok(_) => stdout.println(\"invalid client bounds accepted\"); Error(_) => stdout.println(\"invalid client bounds rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid connect timeout accepted\"); Error(_) => stdout.println(\"invalid connect timeout rejected\"); }} match HTTPClientOptions.create(response_headers_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid headers timeout accepted\"); Error(_) => stdout.println(\"invalid headers timeout rejected\"); }} match HTTPClientOptions.create(response_idle_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid idle timeout accepted\"); Error(_) => stdout.println(\"invalid idle timeout rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 3600001) {{ Ok(_) => stdout.println(\"oversized timeout accepted\"); Error(_) => stdout.println(\"oversized timeout rejected\"); }} match HTTPClientOptions.create(max_origins: 33) {{ Ok(_) => stdout.println(\"oversized pool accepted\"); Error(_) => stdout.println(\"oversized pool rejected\"); }} match client_with_options() {{\nOk(client) => {{\nmatch client.enable_cookies() {{ Ok(_) => stdout.println(\"cookies enabled\"); Error(_) => stdout.println(\"cookie setup failed\"); }}\ninmut empty: Array<Byte> = [];\nmatch client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{ Ok(first) => stdout.println(first.status_code()); Error(_) => stdout.println(\"first request failed\"); }}\nmatch client.get_following(url, 20) {{ Ok(redirected) => stdout.println(redirected.status_code()); Error(_) => stdout.println(0); }}\nmatch client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"not-json\")) {{ Error(error) => match error {{ HTTPError.InvalidJson => stdout.println(\"invalid client JSON rejected\"); _ => stdout.println(\"invalid client JSON accepted\"); }}; Ok(_) => stdout.println(\"invalid client JSON accepted\"); }} match client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"true\")) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut stream_headers = HTTPHeaders.create(); _ = stream_headers.add(\"content-type\", \"application/query+json\"); match client.request_body(HTTPMethod.Query, url, HTTPBody.Stream(stream_headers, (index: UInt64): Array<Byte> => match index as Int32 {{ 0 => [115 as Byte, 116 as Byte, 114 as Byte, 101 as Byte, 97 as Byte, 109 as Byte, 101 as Byte, 100 as Byte, 45 as Byte]; 1 => [99 as Byte, 108 as Byte, 105 as Byte, 101 as Byte, 110 as Byte, 116 as Byte, 45 as Byte, 98 as Byte, 111 as Byte, 100 as Byte, 121 as Byte]; _ => {{ mut stream_done: Array<Byte> = Array(0); stream_done; }}; }})) {{ Ok(extension) => stdout.println(extension.status_code()); Error(_) => stdout.println(\"stream request failed\"); }}\nmatch URL.resolve(url, \"duplicate-location\") {{ Ok(target) => match client.get_following(target, 1) {{ Ok(_) => stdout.println(\"ambiguous reusable redirect followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"duplicate reusable URL failed\"); }}\nmatch URL.resolve(url, \"external\") {{ Ok(external) => match client.get_following(external, 1) {{ Ok(_) => stdout.println(\"external client redirect allowed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"external client URL failed\"); }}\nmatch client.close() {{ Ok(_) => stdout.println(\"client closed\"); Error(_) => stdout.println(\"client close failed\"); }} match client.close() {{ Ok(_) => stdout.println(\"client close idempotent\"); Error(_) => stdout.println(\"second client close failed\"); }}\n}}\nError(_) => stdout.println(\"client creation failed\");\n}} }}\nError(_) => stdout.println(\"invalid URL\");\n}}\n}}",
+            "import {{ HTTPClient, HTTPClientOptions, HTTPError, HTTPMethod, HTTPBody, HTTPHeaders, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn client_with_options(): Result<HTTPClient, HTTPError> {{ return match HTTPClientOptions.create(connect_timeout_ms: 5000, response_headers_timeout_ms: 30000, response_idle_timeout_ms: 30000, max_origins: 2) {{ Ok(options) => {{ stdout.println(options.connect_timeout_ms()); stdout.println(options.response_headers_timeout_ms()); stdout.println(options.response_idle_timeout_ms()); stdout.println(options.max_origins()); HTTPClient.create_with_options(options); }} Error(error) => Error<HTTPClient, HTTPError>(error); }}; }}\nfn main(): Void {{\nmatch URL.parse(\"http://127.0.0.1:{}/client\") {{\nOk(url) => {{ match HTTPClient.create(0) {{ Ok(_) => stdout.println(\"invalid client bounds accepted\"); Error(_) => stdout.println(\"invalid client bounds rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid connect timeout accepted\"); Error(_) => stdout.println(\"invalid connect timeout rejected\"); }} match HTTPClientOptions.create(response_headers_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid headers timeout accepted\"); Error(_) => stdout.println(\"invalid headers timeout rejected\"); }} match HTTPClientOptions.create(response_idle_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid idle timeout accepted\"); Error(_) => stdout.println(\"invalid idle timeout rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 3600001) {{ Ok(_) => stdout.println(\"oversized timeout accepted\"); Error(_) => stdout.println(\"oversized timeout rejected\"); }} match HTTPClientOptions.create(max_origins: 33) {{ Ok(_) => stdout.println(\"oversized pool accepted\"); Error(_) => stdout.println(\"oversized pool rejected\"); }} match client_with_options() {{\nOk(client) => {{\nmatch client.enable_cookies() {{ Ok(_) => stdout.println(\"cookies enabled\"); Error(_) => stdout.println(\"cookie setup failed\"); }}\nmatch client.clear_cookies() {{ Ok(_) => stdout.println(\"cookies cleared\"); Error(_) => stdout.println(\"cookie clear failed\"); }}\ninmut empty: Array<Byte> = [];\nmatch client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{ Ok(first) => stdout.println(first.status_code()); Error(_) => stdout.println(\"first request failed\"); }}\nmatch client.get_following(url, 20) {{ Ok(redirected) => stdout.println(redirected.status_code()); Error(_) => stdout.println(0); }}\nmatch client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"not-json\")) {{ Error(error) => match error {{ HTTPError.InvalidJson => stdout.println(\"invalid client JSON rejected\"); _ => stdout.println(\"invalid client JSON accepted\"); }}; Ok(_) => stdout.println(\"invalid client JSON accepted\"); }} match client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"true\")) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut stream_headers = HTTPHeaders.create(); _ = stream_headers.add(\"content-type\", \"application/query+json\"); match client.request_body(HTTPMethod.Query, url, HTTPBody.Stream(stream_headers, (index: UInt64): Array<Byte> => match index as Int32 {{ 0 => [115 as Byte, 116 as Byte, 114 as Byte, 101 as Byte, 97 as Byte, 109 as Byte, 101 as Byte, 100 as Byte, 45 as Byte]; 1 => [99 as Byte, 108 as Byte, 105 as Byte, 101 as Byte, 110 as Byte, 116 as Byte, 45 as Byte, 98 as Byte, 111 as Byte, 100 as Byte, 121 as Byte]; _ => {{ mut stream_done: Array<Byte> = Array(0); stream_done; }}; }})) {{ Ok(extension) => stdout.println(extension.status_code()); Error(_) => stdout.println(\"stream request failed\"); }}\nmatch URL.resolve(url, \"duplicate-location\") {{ Ok(target) => match client.get_following(target, 1) {{ Ok(_) => stdout.println(\"ambiguous reusable redirect followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"duplicate reusable URL failed\"); }}\nmatch URL.resolve(url, \"external\") {{ Ok(external) => match client.get_following(external, 1) {{ Ok(_) => stdout.println(\"external client redirect allowed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"external client URL failed\"); }}\nmatch client.close() {{ Ok(_) => stdout.println(\"client closed\"); Error(_) => stdout.println(\"client close failed\"); }} match client.close() {{ Ok(_) => stdout.println(\"client close idempotent\"); Error(_) => stdout.println(\"second client close failed\"); }}\n}}\nError(_) => stdout.println(\"client creation failed\");\n}} }}\nError(_) => stdout.println(\"invalid URL\");\n}}\n}}",
             address.port()
         ),
     )
@@ -3539,7 +3712,7 @@ fn bundled_std_http_client_reuses_connection_and_scopes_cookie_jar() {
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "invalid client bounds rejected\ninvalid connect timeout rejected\ninvalid headers timeout rejected\ninvalid idle timeout rejected\noversized timeout rejected\noversized pool rejected\n5000\n30000\n30000\n2\ncookies enabled\n200\n200\ninvalid client JSON rejected\n200\n200\nProtocol\nPermissionDenied\nclient closed\nclient close idempotent\n"
+        "invalid client bounds rejected\ninvalid connect timeout rejected\ninvalid headers timeout rejected\ninvalid idle timeout rejected\noversized timeout rejected\noversized pool rejected\n5000\n30000\n30000\n2\ncookies enabled\ncookies cleared\n200\n200\ninvalid client JSON rejected\n200\n200\nProtocol\nPermissionDenied\nclient closed\nclient close idempotent\n"
     );
     server.join().unwrap();
 }
@@ -3552,6 +3725,7 @@ fn reusable_client_redirect_policy_preserves_method_and_strips_cross_origin_cred
     let first_address = first_listener.local_addr().unwrap();
     let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let second_address = second_listener.local_addr().unwrap();
+    let second_port = second_address.port();
     let first_server = std::thread::spawn(move || {
         let (stream, _) = first_listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
@@ -3627,7 +3801,7 @@ fn reusable_client_redirect_policy_preserves_method_and_strips_cross_origin_cred
         assert_eq!(body, b"payload");
         reader.into_inner().write_all(
             format!(
-                "HTTP/1.1 303 See Other\r\nLocation: http://127.0.0.1:{}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 303 See Other\r\nLocation: http://127.0.0.1:{}/final?token=redirect-secret#fragment-secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 second_address.port()
             )
             .as_bytes(),
@@ -3638,7 +3812,10 @@ fn reusable_client_redirect_policy_preserves_method_and_strips_cross_origin_cred
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
         reader.read_line(&mut request_line).unwrap();
-        assert_eq!(request_line, "GET /final HTTP/1.1\r\n");
+        assert_eq!(
+            request_line,
+            "GET /final?token=redirect-secret HTTP/1.1\r\n"
+        );
         let mut authorization_seen = false;
         let mut session_credential_seen = false;
         let mut client_token_seen = false;
@@ -3705,7 +3882,7 @@ fn reusable_client_redirect_policy_preserves_method_and_strips_cross_origin_cred
     std::fs::write(
         project.join("src/main.zrk"),
         format!(
-            r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPBody, HTTPRedirectPolicy, URL }} from std.http;
+            r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPBody, HTTPRedirectPolicy, HTTPRedirectResult, HTTPResponse, URL }} from std.http;
 import {{ stdout }} from std.io;
 fn main(): Void {{
     match URL.parse("http://127.0.0.1:{}/start") {{
@@ -3720,11 +3897,11 @@ fn main(): Void {{
                 _ = headers.set_sensitive("X-Client-Token", "client-secret");
                 _ = headers.add("X-Client-Token", "later-client-secret");
                 _ = headers.add("x-request", "keep");
-                match client.request_body_following(HTTPMethod.Post, url, HTTPBody.Stream(headers, (index: UInt64): Array<Byte> => match index as Int32 {{
+                match client.request_body_following_with_history(HTTPMethod.Post, url, HTTPBody.Stream(headers, (index: UInt64): Array<Byte> => match index as Int32 {{
                     0 => [112 as Byte, 97 as Byte, 121 as Byte, 108 as Byte, 111 as Byte, 97 as Byte, 100 as Byte];
                     _ => {{ mut done: Array<Byte> = Array(0); done; }};
                 }}), HTTPRedirectPolicy.Follow, 2) {{
-                    Ok(response) => {{ stdout.println(response.status_code()); match response.text() {{ Ok(text) => stdout.println(text); Error(_) => stdout.println("invalid body"); }}; }}
+                    Ok(redirected) => {{ mut response = redirected.response(); stdout.println(response.status_code()); stdout.println(HTTPRedirectResult.format_hop(HTTPMethod.Get, 302, "https://user:secret@example.com/path?token=secret#fragment-secret")); for hop in redirected.history() {{ stdout.println(hop); }} stdout.println(redirected.history_json()); mut fabricated = HTTPRedirectResult.from_client(HTTPResponse.from_text(200, ""), "GET 302 https://example.com/private?credential=factory-secret#fragment\nPOST 999 https://invalid.example/"); stdout.println(fabricated.history_json()); match response.text() {{ Ok(text) => stdout.println(text); Error(_) => stdout.println("invalid body"); }}; }}
                     Error(error) => stdout.println(error.to_string());
                 }}
                 _ = client.close();
@@ -3775,7 +3952,10 @@ fn main(): Void {{
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "200\nok\nclient closed\n"
+        format!(
+            "200\nGET 302 https://example.com/path?redacted\nPOST 303 http://127.0.0.1:{}/final?redacted\n[\"POST 303 http://127.0.0.1:{}/final?redacted\"]\n[\"GET 302 https://example.com/private?redacted\"]\nok\nclient closed\n",
+            second_port, second_port
+        )
     );
     first_server.join().unwrap();
     second_server.join().unwrap();
@@ -5400,7 +5580,7 @@ fn bundled_std_http_client_reuses_authenticated_http2_connection() {
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
-        r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPBody, HTTPResponse, HTTPError, URL }} from std.http;
+        r#"import {{ HTTPClient, HTTPClientOptions, HTTPProtocolPreference, HTTPHeaders, HTTPMethod, HTTPBody, HTTPResponse, HTTPError, URL }} from std.http;
 import {{ stdout }} from std.io;
 fn send(client: HTTPClient, url: URL): Result<HTTPResponse, HTTPError> {{
     mut headers = HTTPHeaders.create();
@@ -5413,7 +5593,9 @@ fn send(client: HTTPClient, url: URL): Result<HTTPResponse, HTTPError> {{
 }}
 fn main(): Void {{
     mut roots: Array<Array<Byte>> = [[{root_literal}]];
-    match HTTPClient.create_with_trust_roots(roots, 2) {{
+    match HTTPClientOptions.create_with_protocol(HTTPProtocolPreference.HTTP2, max_origins: 2) {{
+        Error(_) => stdout.println("options creation failed");
+        Ok(options) => match HTTPClient.create_with_options_and_trust_roots(options, roots) {{
         Error(_) => stdout.println("client creation failed");
         Ok(client) => {{
             match URL.parse("{origin}/reuse") {{
@@ -5423,12 +5605,13 @@ fn main(): Void {{
                         inmut first = send(client, url);
                         inmut second = send(client, url);
                     }}
-                    match first {{ Error(error) => stdout.println(error.to_string()); Ok(response) => stdout.println(response.status_code()); }}
-                    match second {{ Error(error) => stdout.println(error.to_string()); Ok(response) => stdout.println(response.status_code()); }}
+                    match first {{ Error(error) => stdout.println(error.to_string()); Ok(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); }} }}
+                    match second {{ Error(error) => stdout.println(error.to_string()); Ok(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); }} }}
                 }}
             }}
             _ = client.close();
             stdout.println("client closed");
+        }}
         }}
     }}
 }}"#
@@ -5480,7 +5663,7 @@ fn main(): Void {{
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "200\n200\nclient closed\n"
+        "200\nHTTP2\n200\nHTTP2\nclient closed\n"
     );
     server.join().unwrap();
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
@@ -6134,6 +6317,39 @@ fn main(): Void {
 }
 
 #[test]
+fn bundled_std_net_tls_alpn_api_fails_closed_without_network_approval() {
+    let source = r#"import { TLSError, TLSStream } from std.net::tls;
+import { stdout } from std.io;
+fn main(): Void {
+    mut empty: Array<String> = [];
+    match TLSStream.connect_with_alpn("https://127.0.0.1:443", empty) {
+        Ok(_) => stdout.println("unexpected empty ALPN connection");
+        Error(error) => stdout.println(error.to_string());
+    };
+    mut protocols: Array<String> = ["h2", "http/1.1"];
+    match TLSStream.connect_with_alpn("https://127.0.0.1:443", protocols) {
+        Ok(_) => stdout.println("unexpected connection");
+        Error(error) => stdout.println(error.to_string());
+    };
+    mut system_roots: Array<Array<Byte>> = [];
+    mut http_protocols: Array<String> = ["h2", "http/1.1"];
+    match TLSStream.connect_with_options(
+        "https://127.0.0.1:443", system_roots, true, http_protocols,
+    ) {
+        Ok(_) => stdout.println("unexpected configured connection");
+        Error(error) => stdout.println(error.to_string());
+    };
+}"#;
+    let output = crate_of("standard_net_tls_alpn_denied", &[("main.zrk", source)]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "InvalidConfiguration\nPermissionDenied\nPermissionDenied\n"
+    );
+}
+
+#[test]
 fn bundled_std_net_tls_client_completes_approved_trusted_public_api_handshake() {
     use std::io::{Read, Write};
 
@@ -6143,7 +6359,7 @@ fn bundled_std_net_tls_client_completes_approved_trusted_public_api_handshake() 
     let origin = format!("https://127.0.0.1:{}", address.port());
     let certificate = include_bytes!("../../zirk-runtime/testdata/tls-loopback-cert.der");
     let private_key = include_bytes!("../../zirk-runtime/testdata/tls-loopback-key.der");
-    let server_config = std::sync::Arc::new(
+    let mut server_config = std::sync::Arc::new(
         tokio_rustls::rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(
@@ -6155,6 +6371,9 @@ fn bundled_std_net_tls_client_completes_approved_trusted_public_api_handshake() 
             )
             .unwrap(),
     );
+    std::sync::Arc::get_mut(&mut server_config)
+        .unwrap()
+        .alpn_protocols = vec![b"zirktest/1".to_vec()];
     let server = std::thread::spawn(move || -> Result<(), String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let (socket, _) = loop {
@@ -6200,9 +6419,17 @@ fn read(stream: TLSStream): TLSReadResult<Array<Byte>> {{ return stream.read(4);
 fn tls_write(stream: TLSStream, bytes: Array<Byte>): Result<Void, TLSError> {{ return stream.write_all(bytes); }}
 fn main(): Void {{
     mut roots: Array<Array<Byte>> = [[{root_literal}]];
-    match TLSStream.connect_with_trust_roots("{origin}", roots, false) {{
+    mut protocols: Array<String> = ["zirktest/1"];
+    match TLSStream.connect_with_options("{origin}", roots, false, protocols) {{
         Error(_) => stdout.println("TLS connect failed");
         Ok(stream) => {{
+            match stream.negotiated_alpn() {{
+                Ok(protocol) => match protocol {{
+                    null => stdout.println("missing ALPN");
+                    value => stdout.println(value);
+                }};
+                Error(_) => stdout.println("ALPN query failed");
+            }};
             mut request: Array<Byte> = [112 as Byte, 105 as Byte, 110 as Byte, 103 as Byte];
             _ = tls_write(stream, request);
             match read(stream) {{
@@ -6271,7 +6498,358 @@ fn main(): Void {{
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "authenticated TLS exchange\n"
+        "zirktest/1\nauthenticated TLS exchange\n"
+    );
+}
+
+#[test]
+fn bundled_std_net_tcp_upgrades_the_same_authorized_socket_to_tls() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let tcp_origin = format!("tcp://127.0.0.1:{}", address.port());
+    let https_origin = format!("https://127.0.0.1:{}", address.port());
+    let certificate = include_bytes!("../../zirk-runtime/testdata/tls-loopback-cert.der");
+    let private_key = include_bytes!("../../zirk-runtime/testdata/tls-loopback-key.der");
+    let mut server_config = std::sync::Arc::new(
+        tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![tokio_rustls::rustls::pki_types::CertificateDer::from(
+                    certificate.to_vec(),
+                )],
+                tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(private_key.to_vec())
+                    .unwrap(),
+            )
+            .unwrap(),
+    );
+    std::sync::Arc::get_mut(&mut server_config)
+        .unwrap()
+        .alpn_protocols = vec![b"zirk-upgrade/1".to_vec()];
+    let server = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let (socket, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(format!("TCP client did not connect: {error}")),
+            }
+        };
+        socket
+            .set_nonblocking(false)
+            .map_err(|error| error.to_string())?;
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        let connection = tokio_rustls::rustls::ServerConnection::new(server_config)
+            .map_err(|error| error.to_string())?;
+        let mut tls = tokio_rustls::rustls::StreamOwned::new(connection, socket);
+        let mut request = [0; 4];
+        tls.read_exact(&mut request)
+            .map_err(|error| error.to_string())?;
+        if &request != b"ping" {
+            return Err(format!("unexpected upgraded TLS request: {request:?}"));
+        }
+        tls.write_all(b"pong").map_err(|error| error.to_string())?;
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Ok(_) => Err("TLS upgrade opened a second TCP connection".into()),
+            Err(error) => Err(format!("could not check accepted connections: {error}")),
+        }
+    });
+
+    let root = include_bytes!("../../zirk-runtime/testdata/tls-loopback-root.der");
+    let root_literal = root
+        .iter()
+        .map(|byte| format!("{byte} as Byte"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!(
+        r#"import {{ TCPStream }} from std.net::tcp;
+import {{ TLSReadResult }} from std.net::tls;
+import {{ stdout }} from std.io;
+fn main(): Void {{
+    mut roots: Array<Array<Byte>> = [[{root_literal}]];
+    mut protocols: Array<String> = ["zirk-upgrade/1"];
+    match TCPStream.connect("{tcp_origin}") {{
+        Error(_) => stdout.println("TCP connect failed");
+        Ok(tcp) => match tcp.upgrade_tls("{https_origin}", roots, false, protocols) {{
+            Error(_) => stdout.println("TLS upgrade failed");
+            Ok(tls) => {{
+                stdout.println(tcp.is_closed().to_string());
+                match tls.negotiated_alpn() {{
+                    Ok(protocol) => match protocol {{
+                        null => stdout.println("missing ALPN");
+                        value => stdout.println(value);
+                    }};
+                    Error(_) => stdout.println("ALPN query failed");
+                }};
+                mut request: Array<Byte> = [112 as Byte, 105 as Byte, 110 as Byte, 103 as Byte];
+                _ = tls.write_all(request);
+                match tls.read(4) {{
+                    TLSReadResult.Value(_) => stdout.println("same-socket TLS exchange");
+                    _ => stdout.println("TLS read failed");
+                }}
+            }}
+        }};
+    }}
+}}"#,
+        tcp_origin = tcp_origin,
+        https_origin = https_origin,
+    );
+
+    let project = workspace("approved_std_net_tcp_tls_upgrade");
+    let home = workspace("approved_std_net_tcp_tls_upgrade_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.tcp.tls-upgrade.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nconnect: {{ origins: [\"{tcp_origin}\", \"{https_origin}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit TCP and TLS permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved Zirk TCP-to-TLS upgrade");
+    let server_result = server.join().expect("upgrade fixture should not panic");
+    assert!(
+        server_result.is_ok(),
+        "{server_result:?}; client stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "true\nzirk-upgrade/1\nsame-socket TLS exchange\n"
+    );
+}
+
+#[test]
+fn bundled_std_net_tls_client_identity_completes_approved_mutual_authentication() {
+    use std::io::Write;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio_rustls::rustls::{RootCertStore, server::WebPkiClientVerifier};
+
+    let server_certificate = include_bytes!("../../zirk-runtime/testdata/tls-loopback-cert.der");
+    let server_private_key = include_bytes!("../../zirk-runtime/testdata/tls-loopback-key.der");
+    let client_ca = include_bytes!("../../zirk-runtime/testdata/mtls-client-ca.der");
+    let client_certificate = include_bytes!("../../zirk-runtime/testdata/mtls-client.der");
+    let mut client_roots = RootCertStore::empty();
+    client_roots
+        .add(CertificateDer::from(client_ca.to_vec()))
+        .unwrap();
+    let verifier = WebPkiClientVerifier::builder(std::sync::Arc::new(client_roots))
+        .build()
+        .unwrap();
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(
+            vec![CertificateDer::from(server_certificate.to_vec())],
+            PrivateKeyDer::try_from(server_private_key.to_vec()).unwrap(),
+        )
+        .unwrap();
+    server_config.alpn_protocols = vec![b"zirk-mtls-test/1".to_vec()];
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let origin = format!("https://127.0.0.1:{}", address.port());
+    let server = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let (socket, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(format!("mTLS client did not connect: {error}")),
+            }
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async move {
+            let socket = tokio::net::TcpStream::from_std(socket).map_err(|e| e.to_string())?;
+            let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+            let mut stream = acceptor.accept(socket).await.map_err(|e| e.to_string())?;
+            if stream.get_ref().1.alpn_protocol() != Some(b"zirk-mtls-test/1".as_slice()) {
+                return Err("mTLS ALPN did not negotiate".to_owned());
+            }
+            let peer_chain = stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .ok_or_else(|| "client certificate was not presented".to_owned())?;
+            if peer_chain.first().map(|cert| cert.as_ref()) != Some(client_certificate.as_slice()) {
+                return Err("unexpected client certificate".to_owned());
+            }
+            let mut request = [0; 4];
+            stream
+                .read_exact(&mut request)
+                .await
+                .map_err(|error| error.to_string())?;
+            if &request != b"mTLS" {
+                return Err(format!("unexpected mTLS request: {request:?}"));
+            }
+            stream
+                .write_all(b"ok")
+                .await
+                .map_err(|error| error.to_string())
+        })
+    });
+
+    let der_literal = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte} as Byte"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let root_literal = der_literal(include_bytes!(
+        "../../zirk-runtime/testdata/tls-loopback-root.der"
+    ));
+    let client_certificate_literal = der_literal(client_certificate);
+    let client_key_literal = der_literal(include_bytes!(
+        "../../zirk-runtime/testdata/mtls-client-key.der"
+    ));
+    let source = format!(
+        r#"import {{ TLSReadResult, TLSError, TLSStream }} from std.net::tls;
+import {{ stdout }} from std.io;
+fn read(stream: TLSStream): TLSReadResult<Array<Byte>> {{ return stream.read(2); }}
+fn tls_write(stream: TLSStream, bytes: Array<Byte>): Result<Void, TLSError> {{ return stream.write_all(bytes); }}
+fn main(): Void {{
+    mut roots: Array<Array<Byte>> = [[{root_literal}]];
+    mut chain: Array<Array<Byte>> = [[{client_certificate_literal}]];
+    mut key: Array<Byte> = [{client_key_literal}];
+    mut protocols: Array<String> = ["zirk-mtls-test/1"];
+    match TLSStream.connect_with_client_identity(
+        "{origin}", roots, chain, key, false, protocols,
+    ) {{
+        Error(error) => stdout.println(error.to_string());
+        Ok(stream) => {{
+            match stream.negotiated_alpn() {{
+                Ok(protocol) => match protocol {{
+                    null => stdout.println("missing ALPN");
+                    value => stdout.println(value);
+                }};
+                Error(_) => stdout.println("ALPN query failed");
+            }};
+            mut request: Array<Byte> = [109 as Byte, 84 as Byte, 76 as Byte, 83 as Byte];
+            _ = tls_write(stream, request);
+            match read(stream) {{
+                TLSReadResult.Value(_) => stdout.println("mutual TLS exchange");
+                _ => stdout.println("TLS read failed");
+            }}
+            _ = stream.close();
+        }}
+    }}
+}}"#,
+        origin = origin,
+    );
+
+    let project = workspace("approved_std_net_mtls_client");
+    let home = workspace("approved_std_net_mtls_client_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.tls.mtls.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nconnect: {{ origins: [\"{origin}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit mTLS network permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved Zirk mTLS client");
+    let server_result = server.join().expect("mTLS fixture should not panic");
+    assert!(
+        server_result.is_ok(),
+        "{server_result:?}; client stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "zirk-mtls-test/1\nmutual TLS exchange\n"
     );
 }
 
@@ -6287,9 +6865,11 @@ fn main(): Void {
     mut certificate_chain: Array<Array<Byte>> = Array(1);
     mut certificate: Array<Byte> = Array(1);
     mut private_key: Array<Byte> = Array(1);
+    mut client_roots: Array<Array<Byte>> = Array(1);
     certificate[0] = 1 as Byte;
     private_key[0] = 1 as Byte;
     certificate_chain[0] = certificate;
+    client_roots[0] = certificate;
     match TLSListener.bind(
         "tcp://127.0.0.1:0",
         certificate_chain,
@@ -6302,11 +6882,27 @@ fn main(): Void {
             _ => stdout.println("wrong error");
         };
     };
+    match TLSListener.bind_with_client_auth(
+        "tcp://127.0.0.1:0",
+        certificate_chain,
+        private_key,
+        client_roots,
+        false,
+    ) {
+        Ok(_) => stdout.println("unexpected mutual-auth listener");
+        Error(error) => match error {
+            TLSError.PermissionDenied => stdout.println("mutual auth permission denied");
+            _ => stdout.println("wrong mutual-auth error");
+        };
+    };
 }"#;
     let output = crate_of("standard_net_tls_listener_denied", &[("main.zrk", source)]);
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
-    assert_eq!(normalize(&output.stdout), "permission denied\n");
+    assert_eq!(
+        normalize(&output.stdout),
+        "permission denied\nmutual auth permission denied\n"
+    );
 }
 
 #[test]
@@ -6577,6 +7173,246 @@ fn main(): Void {{
     let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
     assert!(stdout.contains("ready\n"), "{stdout}");
     assert!(stdout.contains("served\n"), "{stdout}");
+}
+
+#[test]
+fn bundled_std_net_tls_listener_requires_client_identity_and_exposes_validated_fingerprint() {
+    use std::io::{Read, Write};
+
+    use sha2::{Digest, Sha256};
+
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reserved.local_addr().unwrap().port();
+    drop(reserved);
+    let literal = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte} as Byte"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let server_cert = literal(include_bytes!(
+        "../../zirk-runtime/testdata/tls-loopback-cert.der"
+    ));
+    let server_key = literal(include_bytes!(
+        "../../zirk-runtime/testdata/tls-loopback-key.der"
+    ));
+    let client_ca = literal(include_bytes!(
+        "../../zirk-runtime/testdata/mtls-client-ca.der"
+    ));
+    let source = format!(
+        r#"import {{ TLSError, TLSReadResult, TLSListener, TLSStream }} from std.net::tls;
+import {{ stdout }} from std.io;
+fn accept(listener: TLSListener): Result<TLSStream, TLSError> {{ return listener.accept(); }}
+fn read(stream: TLSStream): TLSReadResult<Array<Byte>> {{ return stream.read(4); }}
+fn tls_write(stream: TLSStream, bytes: Array<Byte>): Result<Void, TLSError> {{ return stream.write_all(bytes); }}
+fn main(): Void {{
+    mut cert: Array<Byte> = [{server_cert}];
+    mut chain: Array<Array<Byte>> = [cert];
+    mut key: Array<Byte> = [{server_key}];
+    mut ca: Array<Byte> = [{client_ca}];
+    mut roots: Array<Array<Byte>> = [ca];
+    match TLSListener.bind_with_client_auth(
+        "tcp://127.0.0.1:{port}", chain, key, roots, false,
+    ) {{
+        Error(error) => stdout.println(error.to_string());
+        Ok(listener) => {{
+            match accept(listener) {{
+                Error(error) => match error {{
+                    TLSError.TlsHandshake => stdout.println("client without identity rejected");
+                    _ => stdout.println("unexpected unauthenticated error");
+                }};
+                Ok(_) => stdout.println("client without identity accepted");
+            }}
+            match accept(listener) {{
+            Error(error) => stdout.println(error.to_string());
+            Ok(stream) => {{
+                match stream.peer_certificate_sha256() {{
+                    Error(_) => stdout.println("fingerprint error");
+                    Ok(fingerprint) => match fingerprint {{
+                        null => stdout.println("client identity missing");
+                        value => stdout.println(value);
+                    }};
+                }};
+                match read(stream) {{
+                    TLSReadResult.Value(_) => {{
+                        mut response: Array<Byte> = [112 as Byte, 111 as Byte, 110 as Byte, 103 as Byte];
+                        _ = tls_write(stream, response);
+                        stdout.println("served mTLS");
+                    }}
+                    _ => stdout.println("TLS read failed");
+                }}
+            }}
+            }}
+        }}
+    }}
+}}"#,
+        port = port,
+    );
+    let client_cert = include_bytes!("../../zirk-runtime/testdata/mtls-client.der");
+    let expected_fingerprint = Sha256::digest(client_cert)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let project = workspace("approved_std_net_tls_mtls_server");
+    let home = workspace("approved_std_net_tls_mtls_server_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.tls.mtls_server.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlisten: {{ addresses: [\"127.0.0.1:{port}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit mTLS listener permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+    let mut child = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start compiled Zirk mTLS server");
+
+    let client = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let unauthenticated_socket = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(socket) => break socket,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(format!("could not connect to mTLS listener: {error}")),
+            }
+        };
+        unauthenticated_socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        let unauthenticated_config = std::sync::Arc::new(
+            tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates({
+                    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+                    roots
+                        .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                            include_bytes!("../../zirk-runtime/testdata/tls-loopback-root.der")
+                                .to_vec(),
+                        ))
+                        .map_err(|error| error.to_string())?;
+                    roots
+                })
+                .with_no_client_auth(),
+        );
+        let unauthenticated_name =
+            tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_owned())
+                .map_err(|error| error.to_string())?;
+        let unauthenticated_connection = tokio_rustls::rustls::ClientConnection::new(
+            unauthenticated_config,
+            unauthenticated_name,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut unauthenticated = tokio_rustls::rustls::StreamOwned::new(
+            unauthenticated_connection,
+            unauthenticated_socket,
+        );
+        let rejected = unauthenticated.write_all(b"ping").is_err()
+            || unauthenticated.read(&mut [0; 1]).is_err();
+        if !rejected {
+            return Err("server accepted a client without a certificate".to_owned());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let socket = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(socket) => break socket,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(format!("could not reconnect to mTLS listener: {error}")),
+            }
+        };
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|error| error.to_string())?;
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots
+            .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                include_bytes!("../../zirk-runtime/testdata/tls-loopback-root.der").to_vec(),
+            ))
+            .map_err(|error| error.to_string())?;
+        let client_chain = vec![tokio_rustls::rustls::pki_types::CertificateDer::from(
+            client_cert.to_vec(),
+        )];
+        let client_key = tokio_rustls::rustls::pki_types::PrivateKeyDer::try_from(
+            include_bytes!("../../zirk-runtime/testdata/mtls-client-key.der").to_vec(),
+        )
+        .map_err(|error| error.to_string())?;
+        let config = std::sync::Arc::new(
+            tokio_rustls::rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(client_chain, client_key)
+                .map_err(|error| error.to_string())?,
+        );
+        let name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_owned())
+            .map_err(|error| error.to_string())?;
+        let connection = tokio_rustls::rustls::ClientConnection::new(config, name)
+            .map_err(|error| error.to_string())?;
+        let mut tls = tokio_rustls::rustls::StreamOwned::new(connection, socket);
+        tls.write_all(b"ping").map_err(|error| error.to_string())?;
+        let mut response = [0; 4];
+        tls.read_exact(&mut response)
+            .map_err(|error| error.to_string())?;
+        if &response != b"pong" {
+            return Err(format!("unexpected mTLS response: {response:?}"));
+        }
+        Ok(())
+    });
+    let client_result = client.join().expect("mTLS client thread should not panic");
+    if let Err(error) = client_result {
+        let _ = child.kill();
+        let output = child.wait_with_output().unwrap();
+        panic!(
+            "mTLS client failed: {error}; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = normalize(&String::from_utf8_lossy(&output.stdout));
+    assert!(stdout.contains(&expected_fingerprint), "stdout: {stdout}");
+    assert!(
+        !stdout.contains("client identity missing"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -8333,6 +9169,236 @@ fn bundled_std_net_tcp_stream_runs_an_approved_loopback_exchange() {
         format!("{expected_peer}\nempty read\nread\nfinished\n")
     );
     server.join().unwrap();
+}
+
+#[test]
+fn bundled_std_net_udp_socket_runs_an_approved_loopback_exchange() {
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let address = server.local_addr().unwrap();
+    let server_thread = std::thread::spawn(move || {
+        let mut request = [0; 8];
+        let (length, sender) = server.recv_from(&mut request).unwrap();
+        assert_eq!(&request[..length], b"ping");
+        server.send_to(b"pong", sender).unwrap();
+    });
+
+    let project = workspace("approved_std_net_udp");
+    let home = workspace("approved_std_net_udp_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.udp.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nudp_send: {{ destinations: [\"udp://{address}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            "import {{ UDPDatagram, UDPSocket }} from std.net::udp;\n\
+             import {{ stdout }} from std.io;\n\
+             fn main(): Void {{\n\
+             match UDPSocket.connect(\"udp://{address}\") {{\n\
+                 Ok(socket) => {{\n\
+                     match socket.local_address() {{\n\
+                         Ok(local) => stdout.println(local);\n\
+                         Error(error) => stdout.println(error.to_string());\n\
+                     }}\n\
+                     match socket.send([112 as Byte, 105 as Byte, 110 as Byte, 103 as Byte]) {{\n\
+                         Ok(count) => {{\n\
+                             stdout.println(count.to_string());\n\
+                             match socket.receive(8 as UInt64) {{\n\
+                                 Ok(datagram) => {{\n\
+                                     stdout.println(datagram.peer());\n\
+                                     stdout.println(datagram.bytes().length.to_string());\n\
+                                 }}\n\
+                                 Error(error) => stdout.println(error.to_string());\n\
+                             }}\n\
+                         }}\n\
+                         Error(error) => stdout.println(error.to_string());\n\
+                     }}\n\
+                     _ = socket.close();\n\
+                 }}\n\
+                 Error(error) => stdout.println(error.to_string());\n\
+             }}\n\
+             }}"
+        ),
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit UDP permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved std.net UDP program");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let output = normalize(&String::from_utf8_lossy(&run.stdout));
+    let mut lines = output.lines();
+    let local = lines.next().expect("UDP local address");
+    assert!(local.starts_with("udp://127.0.0.1:"), "{local}");
+    assert!(local.rsplit_once(':').unwrap().1.parse::<u16>().unwrap() > 0);
+    assert_eq!(lines.next(), Some("4"));
+    assert_eq!(lines.next(), Some(format!("udp://{address}").as_str()));
+    assert_eq!(lines.next(), Some("4"));
+    assert_eq!(lines.next(), None);
+    server_thread.join().unwrap();
+}
+
+#[test]
+fn bundled_std_net_udp_bound_socket_uses_separate_listen_and_send_grants() {
+    use std::io::{BufRead, BufReader, Read};
+
+    let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let local = reserved.local_addr().unwrap();
+    drop(reserved);
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let sender_address = sender.local_addr().unwrap();
+
+    let project = workspace("approved_std_net_udp_bound");
+    let home = workspace("approved_std_net_udp_bound_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.udp.bound.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nudp_send: {{ destinations: [\"udp://{sender_address}\"]; during: runtime; }}\nudp_listen: {{ addresses: [\"{local}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            "import {{ UDPSocket }} from std.net::udp;\n\
+             import {{ stdout }} from std.io;\n\
+             fn main(): Void {{\n\
+                 match UDPSocket.bind(\"udp://{local}\") {{\n\
+                     Ok(socket) => {{\n\
+                         stdout.println(\"ready\");\n\
+                         match socket.receive(8 as UInt64) {{\n\
+                             Ok(datagram) => {{\n\
+                                 stdout.println(datagram.peer());\n\
+                                 stdout.println(datagram.bytes().length.to_string());\n\
+                                 match socket.join_multicast(\"239.1.2.3\") {{\n\
+                                     Ok(_) => stdout.println(\"unexpected multicast membership\");\n\
+                                     Error(error) => stdout.println(error.message());\n\
+                                 }}\n\
+                                 match socket.leave_multicast(\"239.1.2.3\") {{\n\
+                                     Ok(_) => stdout.println(\"unexpected multicast leave\");\n\
+                                     Error(error) => stdout.println(error.message());\n\
+                                 }}\n\
+                                 match socket.send_broadcast([112 as Byte], \"udp://255.255.255.255:9000\") {{\n\
+                                     Ok(_) => stdout.println(\"unexpected broadcast send\");\n\
+                                     Error(error) => stdout.println(error.to_string());\n\
+                                 }}\n\
+                                 match socket.send_multicast([112 as Byte], \"udp://239.1.2.3:9000\") {{\n\
+                                     Ok(_) => stdout.println(\"unexpected multicast send\");\n\
+                                     Error(error) => stdout.println(error.to_string());\n\
+                                 }}\n\
+                                 match socket.send_to([112 as Byte, 111 as Byte, 110 as Byte, 103 as Byte], datagram.peer()) {{\n\
+                                     Ok(count) => stdout.println(count.to_string());\n\
+                                     Error(error) => stdout.println(error.to_string());\n\
+                                 }}\n\
+                             }}\n\
+                             Error(error) => stdout.println(error.to_string());\n\
+                         }}\n\
+                         _ = socket.close();\n\
+                     }}\n\
+                     Error(error) => stdout.println(error.to_string());\n\
+                 }}\n\
+             }}"
+        ),
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit UDP bind and send permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let mut run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start approved bound UDP program");
+    let mut output = BufReader::new(run.stdout.take().unwrap());
+    let mut ready = String::new();
+    output.read_line(&mut ready).unwrap();
+    assert_eq!(normalize(&ready), "ready\n");
+    sender.send_to(b"ping", local).unwrap();
+    let mut response = [0; 8];
+    let (length, peer) = sender.recv_from(&mut response).unwrap();
+    assert_eq!(&response[..length], b"pong");
+    assert_eq!(peer, local);
+
+    let mut remaining = String::new();
+    output.read_to_string(&mut remaining).unwrap();
+    let status = run.wait_with_output().unwrap();
+    assert!(
+        status.status.success(),
+        "stdout: {remaining}\nstderr: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    assert_eq!(
+        normalize(&remaining),
+        format!(
+            "udp://{sender_address}\n4\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\n4\n"
+        )
+    );
 }
 
 #[test]
@@ -11909,4 +12975,269 @@ fn main(): Void {{
     );
     proxy.join().unwrap();
     destination.join().unwrap();
+}
+
+#[test]
+fn bundled_std_net_interfaces_returns_an_approved_typed_snapshot() {
+    let project = workspace("approved_std_net_interfaces");
+    let home = workspace("approved_std_net_interfaces_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.net.interfaces.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nnetwork {\ninspect_interfaces: { enabled: true; during: runtime; }\n}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        "import { NetworkInterfaces } from std.net::interfaces;\n\
+         import { stdout } from std.io;\n\
+         fn main(): Void {\n\
+             match NetworkInterfaces.snapshot() {\n\
+                 Ok(addresses) => {\n\
+                     stdout.println(addresses.length.to_string());\n\
+                     mut saw_loopback: Boolean = false;\n\
+                     for address in addresses {\n\
+                         if address.is_loopback { saw_loopback = true; }\n\
+                         if address.prefix_length > 128 as UInt8 { stdout.println(\"invalid prefix\"); }\n\
+                     }\n\
+                     stdout.println(saw_loopback.to_string());\n\
+                 }\n\
+                 Error(error) => stdout.println(error.to_string());\n\
+             }\n\
+         }",
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit interface inspection approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved interface inspection program");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let output = normalize(&String::from_utf8_lossy(&run.stdout));
+    let mut lines = output.lines();
+    let count = lines
+        .next()
+        .expect("snapshot count")
+        .parse::<usize>()
+        .unwrap();
+    assert!(count > 0 && count <= 256);
+    assert_eq!(lines.next(), Some("true"));
+    assert_eq!(lines.next(), None);
+}
+
+#[test]
+fn bundled_std_net_interfaces_denies_snapshot_without_authority() {
+    let project = workspace("denied_std_net_interfaces");
+    let home = workspace("denied_std_net_interfaces_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.net.interfaces.denied.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        "import { NetworkInterfaces } from std.net::interfaces;\n\
+         import { stdout } from std.io;\n\
+         fn main(): Void {\n\
+             match NetworkInterfaces.snapshot() {\n\
+                 Ok(_) => stdout.println(\"unexpected access\");\n\
+                 Error(error) => stdout.println(error.to_string());\n\
+             }\n\
+         }",
+    )
+    .unwrap();
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run interface inspection without authority");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "PermissionDenied\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_net_local_streams_run_an_approved_unix_socket_exchange() {
+    let project = workspace("approved_std_net_local");
+    let home = workspace("approved_std_net_local_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let socket = std::env::temp_dir().join(format!("zl-{}.sock", std::process::id()));
+    let endpoint = format!("unix://{}", socket.display());
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.local.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlocal_connect: {{ endpoints: [\"{endpoint}\"]; during: runtime; }}\nlocal_listen: {{ endpoints: [\"{endpoint}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            "import {{ LocalListener, LocalReadResult, LocalStaleEndpointPolicy, LocalStream }} from std.net::local;\n\
+             import {{ stdout }} from std.io;\n\
+             fn main(): Void {{\n\
+                 match LocalListener.bind(\"{endpoint}\", LocalStaleEndpointPolicy.RejectExisting) {{\n\
+                     Ok(listener) => {{\n\
+                         match LocalStream.connect(\"{endpoint}\") {{\n\
+                             Ok(client) => {{\n\
+                                 match listener.accept() {{\n\
+                                     Ok(server) => {{\n\
+                                         match client.write_all([112 as Byte, 105 as Byte, 110 as Byte, 103 as Byte]) {{\n\
+                                             Ok(_) => {{\n\
+                                                 match server.read(4 as UInt64) {{\n\
+                                                     LocalReadResult.Value(bytes) => stdout.println(bytes.length.to_string());\n\
+                                                     LocalReadResult.End => stdout.println(\"eof\");\n\
+                                                     LocalReadResult.Error(error) => stdout.println(error.to_string());\n\
+                                                 }}\n\
+                                             }}\n\
+                                             Error(error) => stdout.println(error.to_string());\n\
+                                         }}\n\
+                                         _ = client.close();\n\
+                                         _ = server.close();\n\
+                                     }}\n\
+                                     Error(error) => stdout.println(error.to_string());\n\
+                                 }}\n\
+                             }}\n\
+                             Error(error) => stdout.println(error.to_string());\n\
+                         }}\n\
+                         _ = listener.close();\n\
+                     }}\n\
+                     Error(error) => stdout.println(error.to_string());\n\
+                 }}\n\
+             }}"
+        ),
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit local endpoint permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved local socket program");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(normalize(&String::from_utf8_lossy(&run.stdout)), "4\n");
+    assert!(
+        !socket.exists(),
+        "listener cleanup removes its owned socket"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_net_local_listener_denies_missing_authority_before_path_creation() {
+    let project = workspace("denied_std_net_local");
+    let home = workspace("denied_std_net_local_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let socket = std::env::temp_dir().join(format!("zd-{}.sock", std::process::id()));
+    let endpoint = format!("unix://{}", socket.display());
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"std.net.local.denied.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            "import {{ LocalListener, LocalStaleEndpointPolicy }} from std.net::local;\n\
+             import {{ stdout }} from std.io;\n\
+             fn main(): Void {{\n\
+                 match LocalListener.bind(\"{endpoint}\", LocalStaleEndpointPolicy.RejectExisting) {{\n\
+                     Ok(listener) => {{ stdout.println(\"unexpectedly bound\"); _ = listener.close(); }}\n\
+                     Error(error) => stdout.println(error.to_string());\n\
+                 }}\n\
+             }}"
+        ),
+    )
+    .unwrap();
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run local listener without listen authority");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "PermissionDenied\n"
+    );
+    assert!(
+        !socket.exists(),
+        "a denied bind must not create the endpoint path"
+    );
 }

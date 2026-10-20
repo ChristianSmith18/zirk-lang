@@ -4,3 +4,6 @@ share mod tcp from "./tcp";
 share mod dns from "./dns";
 share mod address from "./address";
 share mod tls from "./tls";
+share mod udp from "./udp";
+share mod local from "./local";
+share mod interfaces from "./interfaces";

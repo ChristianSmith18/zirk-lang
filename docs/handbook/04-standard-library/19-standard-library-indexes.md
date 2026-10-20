@@ -5,6 +5,10 @@ for signatures, ownership, errors, permissions, cancellation, limits, platform
 behavior, and implementation status. When this page and a module chapter differ,
 the module chapter and its normative specification own the contract.
 
+For the packaging model and the split between reviewable `.zrk` APIs and
+compiler-owned host bindings, see the [standard library source and host
+boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
+
 > **Concurrency status:** entries marked **delivered** describe compiler/runtime
 > capabilities available today. `std.thread` and `std.sync` below are specified
 > target APIs, not available Zirk source APIs. Scalar `Atomic<T>` is available
@@ -126,7 +130,7 @@ This index lists prominent entry types rather than every helper or enum.
 | `UDPSocket`, local-socket and interface APIs | [`std.net`](11-std-net.md) | specified contract; deferred from the current preview |
 | `URL`, `HTTPMethod`, `HTTPStatus`, `HTTPHeaders` | [`std.http`](12-std-http.md) | HTTP message identity and bounded metadata, including explicitly sensitive fields |
 | `HTTPBody`, `HTTPRedirectPolicy`, `HTTPClientOptions`, `HTTPJsonParsable<T>`, `HTTPJsonSerializable<T>`, `decode_json<T>` | [`std.http`](12-std-http.md) | closed request-body representations, opt-in redirect policy, bounded client policy, explicit JSON contracts, and typed JSON decoding |
-| `HTTPClient`, `HTTPServer`, `HTTPRequest`, `HTTPResponse`, `HTTPStreamResponse` | [`std.http`](12-std-http.md) | HTTP transport/application boundaries and the response compatibility alias |
+| `HTTPClient`, `HTTPServer`, `HTTPRequest`, `HTTPResponse`, `HTTPRedirectResult`, `HTTPStreamResponse` | [`std.http`](12-std-http.md) | HTTP transport/application boundaries, opt-in redirect history, and the response compatibility alias |
 | `HTTP`, `HTTPProxy`, `HTTPStreamChunk`, `HTTPStreamProducerError` | [`std.http`](12-std-http.md) | one-shot requests, explicit proxying, and bounded stream outcomes |
 | `HTTP.get_cached`, `HTTP.request_cached` | [`std.http`](12-std-http.md) | opt-in bounded response cache with freshness and conditional revalidation |
 | `HTTPRouter`, `HTTPRouteHandler`, `HTTPRouteParameters`, `HTTPMiddleware`, `HTTPNext`, `HTTPFormData`, `HTTPMultipartData`, `HTTPMultipartPart`, `HTTPMultipartBuilder` | [`std.http`](12-std-http.md) | bounded routing, route callbacks, middleware, URL-encoded forms, parsed multipart parts, and in-memory multipart bodies |

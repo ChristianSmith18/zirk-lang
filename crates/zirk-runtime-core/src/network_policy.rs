@@ -21,6 +21,7 @@ const GLOBALLY_REACHABLE_SPECIAL_V6_PREFIXES: [(Ipv6Addr, u32); 7] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkPolicyError {
     InvalidOrigin,
+    InvalidEndpoint,
     PermissionDenied,
     AddressNotAllowed,
 }
@@ -138,6 +139,13 @@ pub fn normalize_tcp_origin(host: &str, port: u16) -> Result<String, NetworkPoli
 pub struct EffectiveNetworkGrant {
     connect_origins: BTreeSet<String>,
     listen_addresses: BTreeSet<SocketAddr>,
+    udp_destinations: BTreeSet<SocketAddr>,
+    udp_listen_addresses: BTreeSet<SocketAddr>,
+    udp_broadcast_destinations: BTreeSet<SocketAddr>,
+    udp_multicast_groups: BTreeSet<IpAddr>,
+    local_connect_endpoints: BTreeSet<String>,
+    local_listen_endpoints: BTreeSet<String>,
+    inspect_interfaces: bool,
 }
 
 impl EffectiveNetworkGrant {
@@ -146,6 +154,54 @@ impl EffectiveNetworkGrant {
     pub fn from_verified_scopes(
         connect_origins: impl IntoIterator<Item = String>,
         listen_addresses: impl IntoIterator<Item = String>,
+    ) -> Result<Self, NetworkPolicyError> {
+        Self::from_verified_network_scopes(
+            connect_origins,
+            listen_addresses,
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            false,
+        )
+    }
+
+    /// Builds the full transport authority from scopes that have already
+    /// passed signed approval verification in the trusted host.
+    pub fn from_verified_network_scopes(
+        connect_origins: impl IntoIterator<Item = String>,
+        listen_addresses: impl IntoIterator<Item = String>,
+        udp_destinations: impl IntoIterator<Item = String>,
+        udp_listen_addresses: impl IntoIterator<Item = String>,
+        local_connect_endpoints: impl IntoIterator<Item = String>,
+        local_listen_endpoints: impl IntoIterator<Item = String>,
+        inspect_interfaces: bool,
+    ) -> Result<Self, NetworkPolicyError> {
+        Self::from_verified_datagram_scopes(
+            connect_origins,
+            listen_addresses,
+            udp_destinations,
+            udp_listen_addresses,
+            std::iter::empty(),
+            std::iter::empty(),
+            local_connect_endpoints,
+            local_listen_endpoints,
+            inspect_interfaces,
+        )
+    }
+
+    /// Builds the complete UDP authority, including separately approved
+    /// limited-broadcast destinations and multicast groups.
+    pub fn from_verified_datagram_scopes(
+        connect_origins: impl IntoIterator<Item = String>,
+        listen_addresses: impl IntoIterator<Item = String>,
+        udp_destinations: impl IntoIterator<Item = String>,
+        udp_listen_addresses: impl IntoIterator<Item = String>,
+        udp_broadcast_destinations: impl IntoIterator<Item = String>,
+        udp_multicast_groups: impl IntoIterator<Item = String>,
+        local_connect_endpoints: impl IntoIterator<Item = String>,
+        local_listen_endpoints: impl IntoIterator<Item = String>,
+        inspect_interfaces: bool,
     ) -> Result<Self, NetworkPolicyError> {
         let connect_origins = connect_origins
             .into_iter()
@@ -162,9 +218,87 @@ impl EffectiveNetworkGrant {
                     .map_err(|_| NetworkPolicyError::AddressNotAllowed)
             })
             .collect::<Result<_, _>>()?;
+        let udp_destinations = udp_destinations
+            .into_iter()
+            .map(|destination| {
+                let value = destination
+                    .strip_prefix("udp://")
+                    .ok_or(NetworkPolicyError::AddressNotAllowed)?;
+                let address = value
+                    .parse::<SocketAddr>()
+                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
+                if address.port() == 0 || destination != format!("udp://{address}") {
+                    return Err(NetworkPolicyError::AddressNotAllowed);
+                }
+                Ok(address)
+            })
+            .collect::<Result<_, _>>()?;
+        let udp_listen_addresses = udp_listen_addresses
+            .into_iter()
+            .map(|address| {
+                let parsed: SocketAddr = address
+                    .parse()
+                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
+                if parsed.port() == 0 || address != parsed.to_string() {
+                    return Err(NetworkPolicyError::AddressNotAllowed);
+                }
+                Ok(parsed)
+            })
+            .collect::<Result<_, _>>()?;
+        let udp_broadcast_destinations = udp_broadcast_destinations
+            .into_iter()
+            .map(|destination| {
+                let value = destination
+                    .strip_prefix("udp://")
+                    .ok_or(NetworkPolicyError::AddressNotAllowed)?;
+                let address = value
+                    .parse::<SocketAddr>()
+                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
+                if address.port() == 0
+                    || !matches!(address.ip(), IpAddr::V4(ip) if ip.is_broadcast())
+                    || destination != format!("udp://{address}")
+                {
+                    return Err(NetworkPolicyError::AddressNotAllowed);
+                }
+                Ok(address)
+            })
+            .collect::<Result<_, _>>()?;
+        let udp_multicast_groups = udp_multicast_groups
+            .into_iter()
+            .map(|group| {
+                let address = group
+                    .parse::<IpAddr>()
+                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
+                if !address.is_multicast() || group != address.to_string() {
+                    return Err(NetworkPolicyError::AddressNotAllowed);
+                }
+                Ok(address)
+            })
+            .collect::<Result<_, _>>()?;
+        let local_connect_endpoints = local_connect_endpoints
+            .into_iter()
+            .map(|endpoint| {
+                validate_local_endpoint(&endpoint)?;
+                Ok(endpoint)
+            })
+            .collect::<Result<_, _>>()?;
+        let local_listen_endpoints = local_listen_endpoints
+            .into_iter()
+            .map(|endpoint| {
+                validate_local_endpoint(&endpoint)?;
+                Ok(endpoint)
+            })
+            .collect::<Result<_, _>>()?;
         Ok(Self {
             connect_origins,
             listen_addresses,
+            udp_destinations,
+            udp_listen_addresses,
+            udp_broadcast_destinations,
+            udp_multicast_groups,
+            local_connect_endpoints,
+            local_listen_endpoints,
+            inspect_interfaces,
         })
     }
 
@@ -214,6 +348,85 @@ impl EffectiveNetworkGrant {
             .then_some(())
             .ok_or(NetworkPolicyError::PermissionDenied)
     }
+
+    pub fn authorize_udp_send(&self, destination: SocketAddr) -> Result<(), NetworkPolicyError> {
+        self.udp_destinations
+            .contains(&destination)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_udp_bind(&self, address: SocketAddr) -> Result<(), NetworkPolicyError> {
+        self.udp_listen_addresses
+            .contains(&address)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_udp_broadcast(
+        &self,
+        destination: SocketAddr,
+    ) -> Result<(), NetworkPolicyError> {
+        self.udp_broadcast_destinations
+            .contains(&destination)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_udp_multicast(&self, group: IpAddr) -> Result<(), NetworkPolicyError> {
+        self.udp_multicast_groups
+            .contains(&group)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_local_connect(&self, endpoint: &str) -> Result<(), NetworkPolicyError> {
+        validate_local_endpoint(endpoint)?;
+        self.local_connect_endpoints
+            .contains(endpoint)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_local_listen(&self, endpoint: &str) -> Result<(), NetworkPolicyError> {
+        validate_local_endpoint(endpoint)?;
+        self.local_listen_endpoints
+            .contains(endpoint)
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+
+    pub fn authorize_interface_inspection(&self) -> Result<(), NetworkPolicyError> {
+        self.inspect_interfaces
+            .then_some(())
+            .ok_or(NetworkPolicyError::PermissionDenied)
+    }
+}
+
+/// Validates the canonical platform endpoint forms accepted in `.zkinit`.
+pub fn validate_local_endpoint(value: &str) -> Result<(), NetworkPolicyError> {
+    let valid = if let Some(path) = value.strip_prefix("unix://") {
+        path.starts_with('/')
+            && path.len() > 1
+            && !path.ends_with('/')
+            && !path.contains('%')
+            && path[1..]
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+    } else if let Some(name) = value.strip_prefix("npipe://./pipe/") {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && name.len() <= 240
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    } else {
+        false
+    };
+    valid
+        .then_some(())
+        .ok_or(NetworkPolicyError::InvalidEndpoint)
 }
 
 fn is_public_address(address: IpAddr) -> bool {
@@ -583,6 +796,138 @@ mod tests {
             grant().authorize_listen("0.0.0.0:8080".parse().unwrap()),
             Err(NetworkPolicyError::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn datagram_local_and_interface_authority_are_independent() {
+        let grant = EffectiveNetworkGrant::from_verified_network_scopes(
+            std::iter::empty(),
+            std::iter::empty(),
+            ["udp://192.0.2.9:5353".into()],
+            ["127.0.0.1:5353".into()],
+            ["unix:///tmp/zirk.sock".into()],
+            ["unix:///tmp/zirk-listener.sock".into()],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            grant.authorize_udp_send("192.0.2.9:5353".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_udp_send("192.0.2.10:5353".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(
+            grant.authorize_udp_bind("127.0.0.1:5353".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_udp_bind("127.0.0.1:5354".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(
+            grant.authorize_listen("127.0.0.1:5353".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied),
+            "UDP bind authority must not imply TCP/HTTP listen authority"
+        );
+        assert_eq!(
+            grant.authorize_local_connect("unix:///tmp/zirk.sock"),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_local_listen("unix:///tmp/zirk.sock"),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(grant.authorize_interface_inspection(), Ok(()));
+
+        let no_inspection = EffectiveNetworkGrant::default();
+        assert_eq!(
+            no_inspection.authorize_interface_inspection(),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn interface_inspection_does_not_grant_connect_or_listen() {
+        let inspection_only = EffectiveNetworkGrant::from_verified_network_scopes(
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(inspection_only.authorize_interface_inspection(), Ok(()));
+        assert_eq!(
+            inspection_only.authorize_origin("tcp://192.0.2.9:443"),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(
+            inspection_only.authorize_listen("127.0.0.1:8080".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn broadcast_and_multicast_authority_is_explicit_and_disjoint() {
+        let broadcast: SocketAddr = "255.255.255.255:9000".parse().unwrap();
+        let group: IpAddr = "239.1.2.3".parse().unwrap();
+        let grant = EffectiveNetworkGrant::from_verified_datagram_scopes(
+            std::iter::empty(),
+            std::iter::empty(),
+            [format!("udp://{broadcast}")],
+            std::iter::empty(),
+            [format!("udp://{broadcast}")],
+            [group.to_string()],
+            std::iter::empty(),
+            std::iter::empty(),
+            false,
+        )
+        .unwrap();
+        assert!(grant.authorize_udp_send(broadcast).is_ok());
+        assert!(grant.authorize_udp_broadcast(broadcast).is_ok());
+        assert!(grant.authorize_udp_multicast(group).is_ok());
+        assert_eq!(
+            grant.authorize_udp_broadcast("255.255.255.255:9001".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(
+            grant.authorize_udp_multicast("239.1.2.4".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert!(
+            EffectiveNetworkGrant::from_verified_datagram_scopes(
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                ["udp://192.0.2.1:9000".to_owned()],
+                ["192.0.2.1".to_owned()],
+                std::iter::empty(),
+                std::iter::empty(),
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn local_endpoint_scope_rejects_traversal_and_noncanonical_forms() {
+        for endpoint in [
+            "unix:///tmp/../etc/passwd",
+            "unix:///tmp/%2e%2e/secret",
+            "npipe://./pipe/name/child",
+        ] {
+            assert_eq!(
+                validate_local_endpoint(endpoint),
+                Err(NetworkPolicyError::InvalidEndpoint)
+            );
+        }
     }
 
     #[test]

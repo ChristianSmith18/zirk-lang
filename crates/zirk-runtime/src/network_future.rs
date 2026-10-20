@@ -62,6 +62,15 @@ where
     ReactorTask(runtime().spawn(future))
 }
 
+/// Starts a reactor-owned protocol task whose lifetime is controlled by an
+/// explicit abort handle held by the owning Zirk resource.
+pub(crate) fn spawn_detached_on_reactor<F>(future: F) -> tokio::task::AbortHandle
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    runtime().spawn(future).abort_handle()
+}
+
 struct TaskWake {
     executor_id: u64,
     task: TaskId,

@@ -1,0 +1,160 @@
+package std.net.interfaces;
+
+import { IPAddress } from std.net::address;
+
+share enum NetworkInterfaceError {
+    PermissionDenied,
+    BufferLimitExceeded,
+    Io,
+    UnsupportedTransport,
+    Cancelled,
+    CapacityExceeded,
+    InvalidMetadata,
+}
+
+share enum NetworkInterfaceStatus {
+    Up,
+    Down,
+    Testing,
+    Unknown,
+    Dormant,
+    NotPresent,
+    LowerLayerDown,
+}
+
+share record NetworkInterfaceAddress {
+    name: String;
+    index: UInt32?;
+    status: NetworkInterfaceStatus;
+    is_loopback: Boolean;
+    is_point_to_point: Boolean;
+    address: IPAddress;
+    prefix_length: UInt8;
+    scope_id: UInt32?;
+}
+
+// An explicit, permission-checked snapshot of local interface metadata that
+// requires `network.inspect.interfaces`.
+// It does not authorize binding, connecting, or selecting an interface.
+share class NetworkInterfaces {
+    static snapshot(): Result<List<NetworkInterfaceAddress>, NetworkInterfaceError> {
+        return match NetworkInterfaces.snapshot_native() {
+            Error(error) => NetworkInterfaces.snapshot_error(error);
+            Ok(rows) => {
+                mut addresses: List<NetworkInterfaceAddress> = [];
+                mut failure: NetworkInterfaceError? = null;
+                for row in rows {
+                    match NetworkInterfaces.decode(row) {
+                        Ok(address) => { addresses.add(address); }
+                        Error(error) => { failure = error; }
+                    }
+                }
+                match failure {
+                    null => NetworkInterfaces.snapshot_ok(addresses);
+                    error => NetworkInterfaces.snapshot_error(error);
+                }
+            }
+        };
+    }
+
+    private static decode(row: List<String>): Result<NetworkInterfaceAddress, NetworkInterfaceError> {
+        if row.length != 8 { return NetworkInterfaces.decode_error(NetworkInterfaceError.InvalidMetadata); }
+        return match NetworkInterfaces.parse_optional_u32(row[1]) {
+            Error(error) => NetworkInterfaces.decode_error(error);
+            Ok(index) => match NetworkInterfaces.parse_status(row[2]) {
+                Error(error) => NetworkInterfaces.decode_error(error);
+                Ok(status) => match NetworkInterfaces.parse_boolean(row[3]) {
+                    Error(error) => NetworkInterfaces.decode_error(error);
+                    Ok(is_loopback) => match NetworkInterfaces.parse_boolean(row[4]) {
+                        Error(error) => NetworkInterfaces.decode_error(error);
+                        Ok(is_point_to_point) => match IPAddress.parse(row[5]) {
+                            Error(_) => NetworkInterfaces.decode_error(NetworkInterfaceError.InvalidMetadata);
+                            Ok(address) => match UInt8.parse(row[6]) {
+                                Error(_) => NetworkInterfaces.decode_error(NetworkInterfaceError.InvalidMetadata);
+                                Ok(prefix_length) => match NetworkInterfaces.parse_optional_u32(row[7]) {
+                                    Error(error) => NetworkInterfaces.decode_error(error);
+                                    Ok(scope_id) => NetworkInterfaces.decode_ok(NetworkInterfaceAddress(
+                                        name: row[0],
+                                        index: index,
+                                        status: status,
+                                        is_loopback: is_loopback,
+                                        is_point_to_point: is_point_to_point,
+                                        address: address,
+                                        prefix_length: prefix_length,
+                                        scope_id: scope_id,
+                                    ));
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    }
+
+    private static parse_optional_u32(text: String): Result<UInt32?, NetworkInterfaceError> {
+        if text == "" { return NetworkInterfaces.optional_u32_ok(null); }
+        return match UInt32.parse(text) {
+            Ok(value) => NetworkInterfaces.optional_u32_ok(value);
+            Error(_) => NetworkInterfaces.optional_u32_error(NetworkInterfaceError.InvalidMetadata);
+        };
+    }
+
+    private static parse_status(text: String): Result<NetworkInterfaceStatus, NetworkInterfaceError> {
+        return match text {
+            "up" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.Up);
+            "down" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.Down);
+            "testing" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.Testing);
+            "unknown" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.Unknown);
+            "dormant" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.Dormant);
+            "not_present" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.NotPresent);
+            "lower_layer_down" => NetworkInterfaces.status_ok(NetworkInterfaceStatus.LowerLayerDown);
+            _ => NetworkInterfaces.status_error(NetworkInterfaceError.InvalidMetadata);
+        };
+    }
+
+    private static parse_boolean(text: String): Result<Boolean, NetworkInterfaceError> {
+        return match text {
+            "true" => NetworkInterfaces.boolean_ok(true);
+            "false" => NetworkInterfaces.boolean_ok(false);
+            _ => NetworkInterfaces.boolean_error(NetworkInterfaceError.InvalidMetadata);
+        };
+    }
+
+    private static snapshot_native(): Result<List<List<String>>, NetworkInterfaceError> {
+        return NetworkInterfaces.snapshot_native_error(NetworkInterfaceError.PermissionDenied);
+    }
+    private static snapshot_ok(value: List<NetworkInterfaceAddress>): Result<List<NetworkInterfaceAddress>, NetworkInterfaceError> {
+        return Ok<List<NetworkInterfaceAddress>, NetworkInterfaceError>(value);
+    }
+    private static snapshot_error(error: NetworkInterfaceError): Result<List<NetworkInterfaceAddress>, NetworkInterfaceError> {
+        return Error<List<NetworkInterfaceAddress>, NetworkInterfaceError>(error);
+    }
+    private static snapshot_native_error(error: NetworkInterfaceError): Result<List<List<String>>, NetworkInterfaceError> {
+        return Error<List<List<String>>, NetworkInterfaceError>(error);
+    }
+    private static decode_ok(value: NetworkInterfaceAddress): Result<NetworkInterfaceAddress, NetworkInterfaceError> {
+        return Ok<NetworkInterfaceAddress, NetworkInterfaceError>(value);
+    }
+    private static decode_error(error: NetworkInterfaceError): Result<NetworkInterfaceAddress, NetworkInterfaceError> {
+        return Error<NetworkInterfaceAddress, NetworkInterfaceError>(error);
+    }
+    private static optional_u32_ok(value: UInt32?): Result<UInt32?, NetworkInterfaceError> {
+        return Ok<UInt32?, NetworkInterfaceError>(value);
+    }
+    private static optional_u32_error(error: NetworkInterfaceError): Result<UInt32?, NetworkInterfaceError> {
+        return Error<UInt32?, NetworkInterfaceError>(error);
+    }
+    private static status_ok(value: NetworkInterfaceStatus): Result<NetworkInterfaceStatus, NetworkInterfaceError> {
+        return Ok<NetworkInterfaceStatus, NetworkInterfaceError>(value);
+    }
+    private static status_error(error: NetworkInterfaceError): Result<NetworkInterfaceStatus, NetworkInterfaceError> {
+        return Error<NetworkInterfaceStatus, NetworkInterfaceError>(error);
+    }
+    private static boolean_ok(value: Boolean): Result<Boolean, NetworkInterfaceError> {
+        return Ok<Boolean, NetworkInterfaceError>(value);
+    }
+    private static boolean_error(error: NetworkInterfaceError): Result<Boolean, NetworkInterfaceError> {
+        return Error<Boolean, NetworkInterfaceError>(error);
+    }
+}

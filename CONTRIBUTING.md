@@ -87,6 +87,16 @@ In practice, at minimum:
 - **diagnostics with a cause and a help** when the invalid case produces an error;
 - **responsibility and boundary documentation** if you touch a new crate.
 
+### Secret-bearing output gate
+
+Any change that adds or modifies a formatter, structured diagnostic, execution
+trace, debugger view, snapshot, test report, or tool-output serializer must
+complete the [secret-redaction maintainer checklist](docs/development/SECRET_REDACTION_CHECKLIST.md)
+before review. The change must include an executable sink-specific test that
+proves nested and captured `SecretString` values and secret-bearing errors do
+not expose their payload. A sink that cannot enforce this contract must omit
+or reject secret-bearing values.
+
 ## Diagnostics
 
 Every compiler error follows the format in `ZIRK_COMPILER_SPEC.md` section 8:

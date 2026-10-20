@@ -1398,6 +1398,11 @@ pub enum InstKind {
         endpoint: Operand,
         enum_id: u32,
     },
+    /// Returns a bounded interface snapshot after checking its independent
+    /// `network.inspect.interfaces` authority.
+    NetworkInterfacesSnapshot {
+        enum_id: u32,
+    },
     /// Parses and canonicalizes an IP literal without performing DNS.
     NetworkIpAddressParse {
         value: Operand,
@@ -1421,6 +1426,35 @@ pub enum InstKind {
         allow_tls12: Operand,
         enum_id: u32,
     },
+    /// Opens an authenticated TLS client stream with application protocols.
+    NetworkTlsConnectWithAlpn {
+        endpoint: Operand,
+        roots_der: Operand,
+        allow_tls12: Operand,
+        protocols: Operand,
+        enum_id: u32,
+    },
+    /// Opens TLS using an explicit client identity for mutual authentication.
+    NetworkTlsConnectWithClientIdentity {
+        endpoint: Operand,
+        roots_der: Operand,
+        certificate_chain_der: Operand,
+        private_key_der: Operand,
+        allow_tls12: Operand,
+        protocols: Operand,
+        enum_id: u32,
+    },
+    /// Upgrades an already-authorized TCP resource after validating the exact
+    /// HTTPS origin and peer address; the TCP handle transfers to TLS.
+    NetworkTlsUpgradeTcp {
+        tcp_handle: Operand,
+        endpoint: Operand,
+        roots_der: Operand,
+        allow_tls12: Operand,
+        protocols: Operand,
+        enum_id: u32,
+        stream_class_id: u32,
+    },
     /// Binds a task-owned TLS server listener with an explicit DER identity.
     NetworkTlsListen {
         endpoint: Operand,
@@ -1428,6 +1462,15 @@ pub enum InstKind {
         private_key_der: Operand,
         allow_tls12: Operand,
         http_alpn: bool,
+        enum_id: u32,
+    },
+    /// Binds a TLS listener that requires certificates from explicit client roots.
+    NetworkTlsListenWithClientAuth {
+        endpoint: Operand,
+        certificate_chain_der: Operand,
+        private_key_der: Operand,
+        client_roots_der: Operand,
+        allow_tls12: Operand,
         enum_id: u32,
     },
     /// Accepts and authenticates a peer, wrapping the task-owned server stream
@@ -1471,6 +1514,16 @@ pub enum InstKind {
     },
     /// Returns the numeric remote peer address for an owner-task TLS stream.
     NetworkTlsPeerAddress {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Returns the ALPN protocol negotiated by an owner-task TLS stream.
+    NetworkTlsNegotiatedAlpn {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Returns the SHA-256 fingerprint of the validated TLS peer certificate.
+    NetworkTlsPeerCertificateSha256 {
         handle: Operand,
         enum_id: u32,
     },
@@ -1533,6 +1586,120 @@ pub enum InstKind {
     NetworkTcpListenerIsClosed {
         handle: Operand,
     },
+    /// Opens a connected, owner-task UDP socket for an exact approved peer.
+    NetworkUdpConnect {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Binds a UDP socket under a separate exact local listen grant.
+    NetworkUdpBind {
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    /// Sends one bounded UDP datagram and returns its byte count.
+    NetworkUdpSend {
+        handle: Operand,
+        bytes: Operand,
+        enum_id: u32,
+    },
+    /// Sends a datagram to an explicitly approved numeric peer.
+    NetworkUdpSendTo {
+        handle: Operand,
+        bytes: Operand,
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    NetworkUdpSendBroadcast {
+        handle: Operand,
+        bytes: Operand,
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    NetworkUdpSendMulticast {
+        handle: Operand,
+        bytes: Operand,
+        endpoint: Operand,
+        enum_id: u32,
+    },
+    NetworkUdpJoinMulticast {
+        handle: Operand,
+        group: Operand,
+        enum_id: u32,
+    },
+    NetworkUdpLeaveMulticast {
+        handle: Operand,
+        group: Operand,
+        enum_id: u32,
+    },
+    /// Receives one bounded UDP datagram; a truncation is an error.
+    NetworkUdpReceive {
+        handle: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+        datagram_class_id: u32,
+    },
+    /// Closes and releases an owner-task UDP socket.
+    NetworkUdpClose {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Returns the numeric local address for a UDP socket.
+    NetworkUdpLocalAddress {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Reports whether the current task owns a live UDP socket.
+    NetworkUdpIsClosed {
+        handle: Operand,
+    },
+    /// Opens a local byte stream under its exact endpoint connect grant.
+    NetworkLocalConnect {
+        endpoint: Operand,
+        enum_id: u32,
+        stream_class_id: u32,
+    },
+    /// Binds a local endpoint and optionally removes a confirmed stale socket.
+    NetworkLocalBind {
+        endpoint: Operand,
+        remove_stale: Operand,
+        enum_id: u32,
+        listener_class_id: u32,
+    },
+    /// Accepts a local stream and wraps its owner-task handle.
+    NetworkLocalAccept {
+        handle: Operand,
+        enum_id: u32,
+        stream_class_id: u32,
+    },
+    /// Reads a bounded chunk from a local stream.
+    NetworkLocalRead {
+        handle: Operand,
+        max_bytes: Operand,
+        enum_id: u32,
+    },
+    /// Writes a chunk or all bytes to a local stream.
+    NetworkLocalWrite {
+        handle: Operand,
+        bytes: Operand,
+        enum_id: u32,
+        write_all: bool,
+    },
+    /// Half-closes a local stream's write side.
+    NetworkLocalShutdown {
+        handle: Operand,
+        enum_id: u32,
+    },
+    /// Closes/releases a local stream or listener resource.
+    NetworkLocalClose {
+        handle: Operand,
+        enum_id: u32,
+        listener: bool,
+    },
+    /// Reports whether the current task owns the local stream/listener handle.
+    NetworkLocalIsClosed {
+        handle: Operand,
+        listener: bool,
+    },
     /// Performs one permission-checked HTTP GET and builds the public
     /// `Result<HTTPResponse, HTTPError>` value from its bounded response.
     HttpGet {
@@ -1563,6 +1730,7 @@ pub enum InstKind {
         connect_timeout_ms: Operand,
         response_headers_timeout_ms: Operand,
         response_idle_timeout_ms: Operand,
+        protocol_code: Operand,
         enum_id: u32,
     },
     /// Creates a reusable HTTP client with an explicit DER trust store.
@@ -1572,6 +1740,7 @@ pub enum InstKind {
         connect_timeout_ms: Operand,
         response_headers_timeout_ms: Operand,
         response_idle_timeout_ms: Operand,
+        protocol_code: Operand,
         enum_id: u32,
     },
     /// Creates a reusable HTTP client with an explicitly permission-scoped proxy.
@@ -1582,6 +1751,7 @@ pub enum InstKind {
         connect_timeout_ms: Operand,
         response_headers_timeout_ms: Operand,
         response_idle_timeout_ms: Operand,
+        protocol_code: Operand,
         enum_id: u32,
     },
     /// Creates a reusable HTTP client with an explicit proxy and DER roots.
@@ -1593,6 +1763,7 @@ pub enum InstKind {
         connect_timeout_ms: Operand,
         response_headers_timeout_ms: Operand,
         response_idle_timeout_ms: Operand,
+        protocol_code: Operand,
         enum_id: u32,
     },
     /// Sends a request through a reusable HTTP client handle.
@@ -1621,6 +1792,7 @@ pub enum InstKind {
     HttpClientAction {
         handle: Operand,
         close: bool,
+        clear_cookies: bool,
         enum_id: u32,
     },
     /// Opens a permission-checked HTTP/1.1 WebSocket client.
@@ -1628,6 +1800,7 @@ pub enum InstKind {
         url: Operand,
         origin: Operand,
         subprotocols: Operand,
+        http3: bool,
         enum_id: u32,
     },
     /// Opens a WebSocket with an explicit bounded DER trust store.
@@ -1637,6 +1810,7 @@ pub enum InstKind {
         subprotocols: Operand,
         roots_der: Operand,
         allow_tls12: Operand,
+        http3: bool,
         enum_id: u32,
     },
     /// Sends one tagged, bounded WebSocket message record.
@@ -1880,6 +2054,20 @@ pub enum InstKind {
         response_class_id: u32,
         enum_id: u32,
     },
+    /// Binds and serves HTTP/3 on a permission-checked QUIC endpoint, invoking
+    /// its callback on the owning Zirk task.
+    HttpServerServeHttp3 {
+        endpoint: Operand,
+        certificate_chain_der: Operand,
+        private_key_der: Operand,
+        max_requests: Operand,
+        max_connections: Operand,
+        callback: Operand,
+        callback_layout: u32,
+        request_class_id: u32,
+        response_class_id: u32,
+        enum_id: u32,
+    },
     /// Accepts one RFC 6455 WebSocket upgrade and dispatches a typed session
     /// callback on the accepted stream's owner task.
     HttpServerWebSocketServeOnce {
@@ -1890,6 +2078,23 @@ pub enum InstKind {
         allow_missing_origin: Operand,
         protocols: Operand,
         max_messages: Operand,
+        callback: Operand,
+        callback_layout: u32,
+        websocket_class_id: u32,
+        enum_id: u32,
+    },
+    /// Binds one permission-checked QUIC endpoint and dispatches an RFC 9220
+    /// WebSocket session to a typed callback on the owning task.
+    HttpServerWebSocketServeHttp3Once {
+        endpoint: Operand,
+        certificate_chain_der: Operand,
+        private_key_der: Operand,
+        path: Operand,
+        allowed_origins: Operand,
+        allow_missing_origin: Operand,
+        protocols: Operand,
+        max_messages: Operand,
+        idle_timeout_ms: Operand,
         callback: Operand,
         callback_layout: u32,
         websocket_class_id: u32,

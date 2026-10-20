@@ -4,14 +4,22 @@
 covers immutable address values, DNS resolution, TCP streams and listeners,
 UDP sockets, local sockets, network-interface inspection, and authenticated
 TLS connections. The current native preview exposes address values, bounded
-DNS resolution, TCP streams and listeners, and authenticated TLS connections.
+DNS resolution, TCP streams and listeners, UDP datagrams, local streams and
+listeners, permission-gated interface snapshots, and authenticated TLS
+connections.
 HTTP is a separate protocol layer documented in
 [`std.http`](12-std-http.md).
 
-The implemented networking scope passes full-workspace native CI on macOS
-ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965,
-compiler revision b28daa7). UDP, local sockets, interface enumeration, and
-other deferred target APIs remain unavailable.
+Focused UDP, local IPC, and interface-enumeration runtime tests pass on macOS
+ARM64, Linux ARM64, and Linux x86_64. The public interface API has approved and
+denied end-to-end tests on macOS ARM64. Windows verification for these additions
+remains pending. Client TLS configuration, client and server mutual TLS,
+negotiated-peer metadata, and upgrading an existing TCP stream to TLS have
+compiled-Zirk loopback evidence on macOS ARM64. Their cross-target verification
+and HTTP/3 remain pending.
+The full `zirk-runtime` library suite also passes in a Linux ARM64 container
+(517 passed, 3 ignored); this is runtime-library evidence and does not establish
+compiled-Zirk CLI behavior on that target.
 
 The module follows the standard-library I/O contract: operations return typed
 `Result` values, waiting suspends the current task rather than occupying a
@@ -19,10 +27,11 @@ scheduler thread, cancellation closes or restores owned resources, buffers are
 bounded, and every external effect is checked against the effective project
 permissions.
 
-> **Implementation status:** this chapter defines the normative public contract.
-> The current compiler and runtime may implement only a subset. Unsupported
-> operations must fail explicitly; they must not silently weaken validation,
-> TLS, permissions, cancellation, or resource limits.
+> **Implementation status:** this chapter documents the public API currently
+> available in the native preview. Target-level evidence is listed above;
+> Windows runtime behavior for UDP, local IPC, and interface inspection is
+> pending. Unsupported operations must preserve the documented permissions,
+> cancellation, and resource limits.
 >
 > The current native preview exposes `std.net::tcp.TCPStream` and
 > `std.net::tcp.TCPListener`, both with managed
@@ -39,8 +48,10 @@ permissions.
 > TCP origin. `HostPortAddress.parse(host, port)` now creates a canonical
 > outbound host/port authority, including IDNA normalization and bracketed
 > IPv6 formatting, without resolving DNS. `TCPStream.connect_to_host` checks
-> the exact canonical origin grant before resolving the host. Full DNS records,
-> UDP, and local sockets remain unavailable. The bundled `std.net::dns` preview exposes
+> the exact canonical origin grant before resolving the host. The bundled
+> `std.net::udp`, `std.net::local`, and `std.net::interfaces` modules expose
+> bounded datagrams, local byte streams, and permission-gated interface
+> snapshots. The `std.net::dns` module exposes
 > `DNS.resolve(origin)`, which requires an exact approved `tcp://`, `http://`,
 > or `https://` origin and returns a bounded `List<String>` of validated IP
 > literals. It uses the host resolver for address records only. The
@@ -60,8 +71,18 @@ explicit close-notify shutdown, and task-owned resource cleanup. `TLSListener.bi
 accepts a numeric `tcp://` endpoint, an explicit DER certificate chain and
 private key, and the TLS 1.2 opt-in. Binding requires a separate exact
 `network.listen.addresses` grant; accepted TLS streams belong to the accepting
-task. `TLSStream.peer_address()` returns the numeric remote address. Client
-certificates and negotiated ALPN access are not yet public. For HTTP servers,
+task. `TLSStream.peer_address()` returns the numeric remote address.
+`TLSStream.connect_with_options(endpoint, roots_der, allow_tls12, protocols)`
+combines ALPN with an explicit trust store and TLS 1.2 opt-in; an empty trust
+store uses system roots. `TLSStream.negotiated_alpn()` returns the selected
+protocol or `null` when the peer selected none. `TCPStream.upgrade_tls(endpoint,
+roots_der, allow_tls12, protocols)` transfers its already-connected socket to
+an authenticated `TLSStream`; it does not open another TCP connection. The
+caller must hold both the exact `tcp://` grant used to connect and the matching
+`https://` grant for the TLS origin and peer. Invalid configuration or denied
+authority leaves the TCP stream available. Once the TLS handshake begins, the
+TCP handle is consumed, and a failed or cancelled handshake closes that socket.
+For HTTP servers,
 `TLSListener.bind_for_http` advertises `h2` and `http/1.1` through ALPN;
 generic `TLSListener.bind` does not advertise an application protocol.
 
@@ -246,31 +267,43 @@ not configurable through this API. HTTP server request limits and HTTP/2 stream
 concurrency are protocol-level policies documented in `std.http`. The runtime
 uses its reactor; it does not create one thread per listener or connection.
 
-## UDP datagrams (not in the current preview)
+## UDP datagrams
 
-The APIs in this section describe the intended standard-library contract.
-Zirk does not currently bundle UDP socket operations.
+`UDPSocket.connect(endpoint)` creates a task-owned socket scoped to one
+approved peer. `UDPSocket.bind(endpoint)` creates a receiver under the separate
+UDP listen permission. `receive(max_bytes)` returns one complete `UDPDatagram`
+with its canonical numeric peer address; oversized datagrams fail instead of
+being silently truncated.
 
 UDP preserves message boundaries. `receive_from` returns the payload and source
 address together; it never silently truncates a datagram. If a configured
 buffer cannot hold a packet, the result identifies the required size or returns
 a typed size-limit error according to the selected receive policy.
 
-The following pseudocode illustrates the planned API; `UDPSocket` is not
-currently bundled and this example is not compilable.
+An unconnected socket can reply only to destinations that the application
+approved:
 
-```text
-match UDPSocket.bind("udp://0.0.0.0:9000") {
+```zirk
+import { UDPSocket } from std.net::udp;
+import { stdout } from std.io;
+
+fn main(): Void {
+match UDPSocket.bind("udp://127.0.0.1:9000") {
     Ok(socket) => {
-        match socket.receive_from(max_bytes: 64KiB) {
+        match socket.receive(65507 as UInt64) {
             Ok(datagram) => {
-                socket.send_to(datagram.bytes, datagram.source);
+                stdout.println(datagram.peer());
+                match socket.send_to(datagram.bytes(), datagram.peer()) {
+                    Ok(_) => stdout.println("reply sent");
+                    Error(error) => stdout.println(error.to_string());
+                }
             }
-            Error(error) => stderr.println(error);
+            Error(error) => stdout.println(error.to_string());
         }
         _ = socket.close();
     }
-    Error(error) => stderr.println(error);
+    Error(error) => stdout.println(error.to_string());
+}
 }
 ```
 
@@ -278,6 +311,9 @@ An unconnected socket uses `send_to` and `receive_from`; a connected UDP socket
 uses `send` and `receive` while retaining datagram semantics. Broadcast and
 multicast participation require explicit options and matching permissions.
 Datagram size, queue depth, and multicast membership are bounded resources.
+Broadcast and multicast require their separate manifest grants. `UDPError`
+reports denied destinations, timeouts, cancellation, capacity, and transport
+failures; `UDPResourceError` is returned by close and membership operations.
 
 ## TLS
 
@@ -311,33 +347,92 @@ fn main(): Void {
 }
 ```
 
-The client overload accepts explicit DER roots and an opt-in TLS 1.2 flag.
-Certificate validation cannot be disabled by a general-purpose `insecure`
-switch. Arbitrary `TLSConfiguration`, mutual TLS, public negotiated-ALPN access,
-session resumption, and TLS key logging are not part of the current preview.
+The trust-root overload accepts explicit DER roots and an opt-in TLS 1.2 flag.
+`TLSStream.connect_with_alpn(endpoint, protocols)` uses system trust roots and
+TLS 1.3 while sending the caller's ordered ALPN identifiers.
+`TLSStream.connect_with_options(endpoint, roots_der, allow_tls12, protocols)`
+combines those settings; an empty roots array selects system roots. After the
+handshake, `stream.negotiated_alpn()` returns the selected protocol or `null`.
+The runtime accepts
+at most 16 unique printable ASCII identifiers, each at most 255 bytes, with a
+1 KiB aggregate limit; invalid lists fail before socket creation. Certificate
+validation cannot be disabled by a general-purpose `insecure` switch. The
+`TLSStream.connect_with_client_identity(endpoint, roots_der,
+client_certificate_chain_der, client_private_key_der, allow_tls12, protocols)`
+overload presents an explicit DER client identity to servers that require
+mutual authentication. The key is not discovered from the environment or a
+file; the runtime bounds and clears its temporary DER copy after constructing
+the TLS signer. The signer remains private to the stream's TLS configuration.
+For servers, `TLSListener.bind_with_client_auth(endpoint,
+certificate_chain_der, private_key_der, client_roots_der, allow_tls12)` requires
+an explicit non-empty DER trust-root list and rejects clients that do not
+present a valid certificate chain. On an authenticated stream,
+`peer_certificate_sha256()` returns the lowercase SHA-256 fingerprint of the
+validated peer leaf certificate, or `null` when no peer certificate is
+available for that TLS role. Session resumption and TLS key logging are not
+part of the current preview.
 
 The TLS stream preserves backpressure, cancellation, and resource ownership. A
-failed or canceled handshake closes resources it created. Wrapping a
-caller-owned TCP stream with a separate TLS configuration remains future work.
+failed or canceled handshake closes resources it owns. When an existing TCP
+stream is upgraded, a validation or permission error occurs before ownership
+transfer; after the handshake starts, the TCP stream belongs to the TLS attempt
+and cannot return to plaintext use.
 
-## Local sockets and interfaces (not in the current preview)
+## Local sockets
 
-These APIs are outside the current `std.net` preview and this HTTP/environment
-delivery scope.
+`LocalStream` and `LocalListener` provide task-owned inter-process byte
+streams. Unix targets use domain sockets; Windows uses named pipes with the
+`npipe://./pipe/name` endpoint form. Connect and listen require distinct exact
+endpoint grants. Reads and writes are bounded, `read` reports EOF through
+`LocalReadResult.End`, and closing a listener removes only the socket entry it
+owns. `LocalListener.bind` requires an explicit
+`LocalStaleEndpointPolicy`: `RejectExisting` is the usual choice;
+`RemoveStaleSocket` removes only an inactive Unix socket entry. Windows named
+pipes do not support stale filesystem cleanup.
 
-`LocalSocket` provides task-aware inter-process byte streams using Unix-domain
-sockets where available and the platform-equivalent local transport elsewhere.
-Names and paths are validated, cleanup ownership is explicit, and a stale socket
-is never removed unless the caller selected and is authorized for that policy.
+```zirk
+import { LocalListener, LocalStaleEndpointPolicy } from std.net::local;
+import { stdout } from std.io;
 
-`NetworkInterfaces.list()` returns a snapshot of interface names, flags,
-addresses, prefix lengths, and scope information. It does not continuously
-watch system configuration. Interface inspection may require a platform or
-permission-specific capability when it reveals sensitive topology.
+match LocalListener.bind("unix:///tmp/zirk.sock", LocalStaleEndpointPolicy.RejectExisting) {
+    Ok(listener) => {
+        match listener.accept() {
+            Ok(stream) => _ = stream.close();
+            Error(error) => stdout.println(error.to_string());
+        }
+        _ = listener.close();
+    }
+    Error(error) => stdout.println(error.to_string());
+}
+```
+
+## Network-interface snapshots
+
+`NetworkInterfaces.snapshot()` requires the explicit runtime permission
+`network.inspect.interfaces` and returns a point-in-time list of typed
+`NetworkInterfaceAddress` records. Each record includes the interface name and
+index, operational status, loopback and point-to-point flags, IP address,
+prefix length, and an optional scope ID for IPv6 link-local addresses. The
+snapshot is bounded and sorted deterministically. Inspection grants no
+permission to connect, listen, or select a network interface.
+
+```zirk
+import { NetworkInterfaces } from std.net::interfaces;
+import { stdout } from std.io;
+
+match NetworkInterfaces.snapshot() {
+    Ok(addresses) => {
+        for address in addresses {
+            stdout.println(address.name + " " + address.address.as_string());
+        }
+    }
+    Error(error) => stdout.println(error.to_string());
+}
+```
 
 Raw sockets, packet capture, Ethernet frames, DHCP, BGP, VPN construction, Tor,
 QUIC, and general kernel-network administration are not part of the current
-`std.net` preview. The toolchain does not currently ship a QUIC package.
+`std.net` preview.
 
 ## Permissions
 
@@ -346,13 +441,13 @@ Network authority distinguishes outbound and inbound scope:
 ```zirk
 permissions {
     network {
-        connect {
-            origins: ["https://example.com:443"];
-        }
-
-        listen {
-            addresses: ["127.0.0.1:8080"];
-        }
+        connect: { origins: ["https://example.com:443"]; during: runtime; }
+        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
+        udp_send: { destinations: ["udp://192.0.2.9:5353"]; during: runtime; }
+        udp_listen: { addresses: ["127.0.0.1:5353"]; during: runtime; }
+        local_connect: { endpoints: ["unix:///tmp/zirk.sock"]; during: runtime; }
+        local_listen: { endpoints: ["unix:///tmp/zirk.sock"]; during: runtime; }
+        inspect_interfaces: { enabled: true; during: runtime; }
     }
 }
 ```
@@ -367,21 +462,25 @@ local bind addresses and ports. UDP broadcast/multicast, local sockets, custom
 resolvers, and interface inspection use explicit scopes rather than inheriting
 broad outbound authority.
 
+`udp_send` and `udp_listen` are separate. `local_connect` and `local_listen`
+are separate exact endpoint grants. `inspect_interfaces` grants only the
+metadata snapshot capability; it does not grant network traffic or binding.
+
 Package `.zkinit` files declare required scopes; they do not grant them. The
 application approval command collects requirements across the locked dependency
 graph and requests consent for their union with application scopes. Missing
 authority produces the operation-specific permission error before the external
-effect occurs. In the current preview this is mapped to each operation's error
-enum (`DNSError.PermissionDenied`,
-`TCPError.PermissionDenied`, or `TLSError.PermissionDenied`); a shared
-`NetworkPermissionError` type is not yet exposed. Runtime library code never
-prompts or edits `.zkinit`; trusted tooling owns consent.
+effect occurs. Errors are reported through each operation's enum, including
+`DNSError`, `TCPError`, `TLSError`, `UDPError`, `LocalError`, and
+`NetworkInterfaceError`. Runtime library code never prompts or edits
+`.zkinit`; trusted tooling owns consent.
 
 ## Errors, limits, and portability
 
 The current preview exposes `AddressError`, `DNSError`, `TCPError`, `TLSError`,
-`TCPReadResult<T>`, `TLSReadResult<T>`, `TCPResourceError`, and
-`TLSResourceError`. Operation results distinguish permission denial, invalid
+`UDPError`, `LocalError`, `NetworkInterfaceError`, `TCPReadResult<T>`,
+`TLSReadResult<T>`, `LocalReadResult<T>`, `TCPResourceError`,
+`TLSResourceError`, and `UDPResourceError`. Operation results distinguish permission denial, invalid
 addresses, disallowed resolved addresses, DNS failure and answer limits,
 transport errors, capacity limits, timeout, cancellation, closed resources,
 and wrong-task ownership where applicable. Closing a resource wraps its
@@ -390,16 +489,14 @@ transport error in the corresponding resource error. `TCPResourceError` and
 matching transport error enum, while `message()`, `code()`, and `cause()` expose
 the standard error interface.
 
-UDP, local sockets, interface inspection, configurable socket options, and a
-shared `NetworkError` hierarchy are target-contract items, not current preview
-APIs. The preview applies fixed runtime bounds to DNS answers, transport
-buffers, and each TCP/TLS resource-handle registry (1,024 streams or listeners
-per resource kind). Reaching a handle limit closes the newly opened socket and
-returns the typed capacity error. Stream I/O also applies backpressure. These
-limits are runtime policy and are not publicly configurable. Exact
-operating-system error numbers and some transport capabilities remain
-platform-specific; the current source API does not expose a general
-platform-cause field.
+UDP datagrams are capped at 65,507 bytes for IPv4 and 65,527 bytes for IPv6.
+TCP and local stream reads and writes are capped at 1 MiB per call. Interface
+snapshots are capped at 256 address records and 256 UTF-8 bytes per interface
+name; exceeding a bound returns an error rather than a partial list. The
+runtime also bounds DNS answers and resource-handle registries. These limits
+are runtime policy and are not publicly configurable. Exact operating-system
+error numbers and some transport capabilities remain platform-specific; the
+source API does not expose a general platform-cause field.
 
 ---
 

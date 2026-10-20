@@ -224,15 +224,22 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::EnvironmentListNames { .. }
             | InstKind::NetworkTcpConnect { .. }
             | InstKind::NetworkDnsResolve { .. }
+            | InstKind::NetworkInterfacesSnapshot { .. }
             | InstKind::NetworkIpAddressParse { .. }
             | InstKind::NetworkTcpOriginNormalize { .. }
             | InstKind::NetworkTlsConnect { .. }
             | InstKind::NetworkTlsConnectWithRoots { .. }
+            | InstKind::NetworkTlsConnectWithAlpn { .. }
+            | InstKind::NetworkTlsConnectWithClientIdentity { .. }
+            | InstKind::NetworkTlsUpgradeTcp { .. }
             | InstKind::NetworkTlsListen { .. }
+            | InstKind::NetworkTlsListenWithClientAuth { .. }
             | InstKind::NetworkTlsAccept { .. }
             | InstKind::NetworkTlsCloseListener { .. }
             | InstKind::NetworkTlsListenerIsClosed { .. }
             | InstKind::NetworkTlsPeerAddress { .. }
+            | InstKind::NetworkTlsNegotiatedAlpn { .. }
+            | InstKind::NetworkTlsPeerCertificateSha256 { .. }
             | InstKind::NetworkTlsRead { .. }
             | InstKind::NetworkTlsWriteAll { .. }
             | InstKind::NetworkTlsShutdown { .. }
@@ -248,6 +255,26 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::NetworkTcpAccept { .. }
             | InstKind::NetworkTcpCloseListener { .. }
             | InstKind::NetworkTcpListenerIsClosed { .. }
+            | InstKind::NetworkUdpConnect { .. }
+            | InstKind::NetworkUdpBind { .. }
+            | InstKind::NetworkUdpSend { .. }
+            | InstKind::NetworkUdpSendTo { .. }
+            | InstKind::NetworkUdpSendBroadcast { .. }
+            | InstKind::NetworkUdpSendMulticast { .. }
+            | InstKind::NetworkUdpJoinMulticast { .. }
+            | InstKind::NetworkUdpLeaveMulticast { .. }
+            | InstKind::NetworkUdpReceive { .. }
+            | InstKind::NetworkUdpClose { .. }
+            | InstKind::NetworkUdpLocalAddress { .. }
+            | InstKind::NetworkUdpIsClosed { .. }
+            | InstKind::NetworkLocalConnect { .. }
+            | InstKind::NetworkLocalBind { .. }
+            | InstKind::NetworkLocalAccept { .. }
+            | InstKind::NetworkLocalRead { .. }
+            | InstKind::NetworkLocalWrite { .. }
+            | InstKind::NetworkLocalShutdown { .. }
+            | InstKind::NetworkLocalClose { .. }
+            | InstKind::NetworkLocalIsClosed { .. }
             | InstKind::HttpGet { .. }
             | InstKind::HttpRequest { .. }
             | InstKind::HttpClientCreate { .. }
@@ -297,7 +324,9 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpRouteAllowHeader { .. }
             | InstKind::HttpHeadersEncode { .. }
             | InstKind::HttpServerServeOnce { .. }
+            | InstKind::HttpServerServeHttp3 { .. }
             | InstKind::HttpServerWebSocketServeOnce { .. }
+            | InstKind::HttpServerWebSocketServeHttp3Once { .. }
             | InstKind::ScopeExit { .. }
             | InstKind::ScopeExitCollectAll { .. }
             | InstKind::JobWait { .. }
@@ -2478,6 +2507,349 @@ fn verify_instruction(
             }
         }
 
+        InstKind::NetworkInterfacesSnapshot { enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkInterfacesSnapshot",
+                report,
+            );
+        }
+
+        InstKind::NetworkUdpConnect { endpoint, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpConnect",
+                report,
+            );
+            if type_of(endpoint) != Some(IrType::String) {
+                report(format!(
+                    "{position}: NetworkUdpConnect endpoint must be String"
+                ));
+            }
+        }
+        InstKind::NetworkUdpSend {
+            handle,
+            bytes,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpSend",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!("{position}: NetworkUdpSend handle must be UInt64"));
+            }
+            if !matches!(type_of(bytes), Some(IrType::Array(_))) {
+                report(format!(
+                    "{position}: NetworkUdpSend payload must be an Array"
+                ));
+            }
+        }
+        InstKind::NetworkUdpBind { endpoint, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpBind",
+                report,
+            );
+            if type_of(endpoint) != Some(IrType::String) {
+                report(format!(
+                    "{position}: NetworkUdpBind endpoint must be String"
+                ));
+            }
+        }
+        InstKind::NetworkUdpSendTo {
+            handle,
+            bytes,
+            endpoint,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpSendTo",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64))
+                || !matches!(type_of(bytes), Some(IrType::Array(_)))
+                || type_of(endpoint) != Some(IrType::String)
+            {
+                report(format!(
+                    "{position}: NetworkUdpSendTo expects (UInt64, Array, String)"
+                ));
+            }
+        }
+        InstKind::NetworkUdpSendBroadcast {
+            handle,
+            bytes,
+            endpoint,
+            enum_id,
+        }
+        | InstKind::NetworkUdpSendMulticast {
+            handle,
+            bytes,
+            endpoint,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpSendSpecial",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64))
+                || !matches!(type_of(bytes), Some(IrType::Array(_)))
+                || type_of(endpoint) != Some(IrType::String)
+            {
+                report(format!(
+                    "{position}: UDP special send expects (UInt64, Array, String)"
+                ));
+            }
+        }
+        InstKind::NetworkUdpJoinMulticast {
+            handle,
+            group,
+            enum_id,
+        }
+        | InstKind::NetworkUdpLeaveMulticast {
+            handle,
+            group,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpMulticastMembership",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64))
+                || type_of(group) != Some(IrType::String)
+            {
+                report(format!(
+                    "{position}: UDP multicast membership expects (UInt64, String)"
+                ));
+            }
+        }
+        InstKind::NetworkUdpReceive {
+            handle,
+            max_bytes,
+            enum_id,
+            datagram_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpReceive",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkUdpReceive handle must be UInt64"
+                ));
+            }
+            if !matches!(type_of(max_bytes), Some(IrType::Int(_))) {
+                report(format!(
+                    "{position}: NetworkUdpReceive max_bytes must be an integer"
+                ));
+            }
+            match module.objects.get(*datagram_class_id as usize) {
+                Some(datagram)
+                    if datagram.fields.len() == 2
+                        && matches!(datagram.fields[0].ty, IrType::Array(_))
+                        && datagram.fields[1].ty == IrType::String => {}
+                Some(_) => report(format!(
+                    "{position}: UDPDatagram must contain an Array payload and canonical peer String"
+                )),
+                None => report(format!(
+                    "{position}: NetworkUdpReceive references missing UDPDatagram class layout {datagram_class_id}"
+                )),
+            }
+        }
+        InstKind::NetworkUdpClose { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpClose",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!("{position}: NetworkUdpClose handle must be UInt64"));
+            }
+        }
+        InstKind::NetworkUdpLocalAddress { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkUdpLocalAddress",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkUdpLocalAddress handle must be UInt64"
+                ));
+            }
+        }
+        InstKind::NetworkUdpIsClosed { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkUdpIsClosed",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkUdpIsClosed handle must be UInt64"
+                ));
+            }
+        }
+        InstKind::NetworkLocalConnect {
+            endpoint,
+            enum_id,
+            stream_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalConnect",
+                report,
+            );
+            if type_of(endpoint) != Some(IrType::String) {
+                report(format!(
+                    "{position}: NetworkLocalConnect endpoint must be String"
+                ));
+            }
+            verify_local_object_result(module, *enum_id, *stream_class_id, position, report);
+        }
+        InstKind::NetworkLocalBind {
+            endpoint,
+            remove_stale,
+            enum_id,
+            listener_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalBind",
+                report,
+            );
+            if type_of(endpoint) != Some(IrType::String)
+                || type_of(remove_stale) != Some(IrType::Boolean)
+            {
+                report(format!(
+                    "{position}: NetworkLocalBind expects (String, Boolean)"
+                ));
+            }
+            verify_local_object_result(module, *enum_id, *listener_class_id, position, report);
+        }
+        InstKind::NetworkLocalAccept {
+            handle,
+            enum_id,
+            stream_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalAccept",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkLocalAccept handle must be UInt64"
+                ));
+            }
+            verify_local_object_result(module, *enum_id, *stream_class_id, position, report);
+        }
+        InstKind::NetworkLocalRead {
+            handle,
+            max_bytes,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalRead",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64))
+                || !matches!(type_of(max_bytes), Some(IrType::Int(_)))
+            {
+                report(format!(
+                    "{position}: NetworkLocalRead expects (UInt64, integer)"
+                ));
+            }
+        }
+        InstKind::NetworkLocalWrite {
+            handle,
+            bytes,
+            enum_id,
+            ..
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalWrite",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64))
+                || !matches!(type_of(bytes), Some(IrType::Array(_)))
+            {
+                report(format!(
+                    "{position}: NetworkLocalWrite expects (UInt64, Array)"
+                ));
+            }
+        }
+        InstKind::NetworkLocalShutdown { handle, enum_id }
+        | InstKind::NetworkLocalClose {
+            handle, enum_id, ..
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkLocalResource",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkLocalResource handle must be UInt64"
+                ));
+            }
+        }
+        InstKind::NetworkLocalIsClosed { handle, .. } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "NetworkLocalIsClosed",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkLocalIsClosed handle must be UInt64"
+                ));
+            }
+        }
+
         InstKind::NetworkIpAddressParse { value, enum_id } => {
             expect(
                 inst.ty,
@@ -2776,6 +3148,59 @@ fn verify_instruction(
             }
         }
 
+        InstKind::NetworkTlsListenWithClientAuth {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            client_roots_der,
+            allow_tls12,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsListenWithClientAuth",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if type_of(&operand).is_some_and(|actual| actual != expected) {
+                    report(format!(
+                        "{position}: NetworkTlsListenWithClientAuth `{label}` has incompatible type"
+                    ));
+                }
+            }
+            for (operand, label) in [
+                (*certificate_chain_der, "certificate_chain_der"),
+                (*client_roots_der, "client_roots_der"),
+            ] {
+                let nested_bytes = matches!(
+                    type_of(&operand),
+                    Some(IrType::Array(outer))
+                        if matches!(module.array_types.get(outer as usize), Some(IrType::Array(inner))
+                            if module.array_types.get(*inner as usize) == Some(&IrType::Int(IntWidth::U8)))
+                );
+                if !nested_bytes {
+                    report(format!(
+                        "{position}: NetworkTlsListenWithClientAuth `{label}` must be Array<Array<Byte>>"
+                    ));
+                }
+            }
+            let private_key_is_bytes = matches!(
+                type_of(private_key_der),
+                Some(IrType::Array(inner))
+                    if module.array_types.get(inner as usize) == Some(&IrType::Int(IntWidth::U8))
+            );
+            if !private_key_is_bytes {
+                report(format!(
+                    "{position}: NetworkTlsListenWithClientAuth `private_key_der` must be Array<Byte>"
+                ));
+            }
+        }
+
         InstKind::NetworkTlsAccept {
             handle,
             enum_id,
@@ -2858,6 +3283,39 @@ fn verify_instruction(
             }
         }
 
+        InstKind::NetworkTlsNegotiatedAlpn { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsNegotiatedAlpn",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: NetworkTlsNegotiatedAlpn receives {} for `handle`, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::NetworkTlsPeerCertificateSha256 { handle, enum_id } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsPeerCertificateSha256",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: NetworkTlsPeerCertificateSha256 handle must be UInt64"
+                ));
+            }
+        }
+
         InstKind::NetworkTlsConnectWithRoots {
             endpoint,
             roots_der,
@@ -2891,6 +3349,172 @@ fn verify_instruction(
                 report(format!(
                     "{position}: NetworkTlsConnectWithRoots receives {} for `roots_der`, expected Array",
                     actual.as_str()
+                ));
+            }
+        }
+        InstKind::NetworkTlsConnectWithAlpn {
+            endpoint,
+            roots_der,
+            allow_tls12,
+            protocols,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsConnectWithAlpn",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: NetworkTlsConnectWithAlpn receives {} for `{label}`, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            if let Some(actual) = type_of(roots_der)
+                && !matches!(actual, IrType::Array(_))
+            {
+                report(format!(
+                    "{position}: NetworkTlsConnectWithAlpn receives {} for `roots_der`, expected Array",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(protocols)
+                && !matches!(actual, IrType::Array(_))
+            {
+                report(format!(
+                    "{position}: NetworkTlsConnectWithAlpn receives {} for `protocols`, expected Array<String>",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::NetworkTlsUpgradeTcp {
+            tcp_handle,
+            endpoint,
+            roots_der,
+            allow_tls12,
+            protocols,
+            enum_id,
+            stream_class_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsUpgradeTcp",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*tcp_handle, IrType::Int(IntWidth::U64), "tcp_handle"),
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if type_of(&operand).is_some_and(|actual| actual != expected) {
+                    report(format!(
+                        "{position}: NetworkTlsUpgradeTcp `{label}` has incompatible type"
+                    ));
+                }
+            }
+            let nested_bytes = |operand: &Operand| {
+                matches!(
+                    type_of(operand),
+                    Some(IrType::Array(outer))
+                        if matches!(module.array_types.get(outer as usize), Some(IrType::Array(inner))
+                            if module.array_types.get(*inner as usize) == Some(&IrType::Int(IntWidth::U8)))
+                )
+            };
+            if !nested_bytes(roots_der) {
+                report(format!(
+                    "{position}: NetworkTlsUpgradeTcp roots_der must be Array<Array<Byte>>"
+                ));
+            }
+            if !matches!(
+                type_of(protocols),
+                Some(IrType::Array(inner))
+                    if module.array_types.get(inner as usize) == Some(&IrType::String)
+            ) {
+                report(format!(
+                    "{position}: NetworkTlsUpgradeTcp protocols must be Array<String>"
+                ));
+            }
+            if *stream_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: NetworkTlsUpgradeTcp references missing TLSStream object layout {}",
+                    stream_class_id
+                ));
+            }
+        }
+        InstKind::NetworkTlsConnectWithClientIdentity {
+            endpoint,
+            roots_der,
+            certificate_chain_der,
+            private_key_der,
+            allow_tls12,
+            protocols,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "NetworkTlsConnectWithClientIdentity",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*allow_tls12, IrType::Boolean, "allow_tls12"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: NetworkTlsConnectWithClientIdentity receives {} for `{label}`, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            for (operand, label) in [
+                (*roots_der, "roots_der"),
+                (*certificate_chain_der, "certificate_chain_der"),
+            ] {
+                let is_certificates = matches!(
+                    type_of(&operand),
+                    Some(IrType::Array(outer))
+                        if matches!(module.array_types.get(outer as usize), Some(IrType::Array(inner))
+                            if module.array_types.get(*inner as usize) == Some(&IrType::Int(IntWidth::U8)))
+                );
+                if !is_certificates {
+                    report(format!(
+                        "{position}: NetworkTlsConnectWithClientIdentity `{label}` must be Array<Array<Byte>>"
+                    ));
+                }
+            }
+            if !matches!(
+                type_of(&private_key_der),
+                Some(IrType::Array(inner))
+                    if module.array_types.get(inner as usize) == Some(&IrType::Int(IntWidth::U8))
+            ) {
+                report(format!(
+                    "{position}: NetworkTlsConnectWithClientIdentity private_key_der must be Array<Byte>"
+                ));
+            }
+            if !matches!(
+                type_of(&protocols),
+                Some(IrType::Array(inner))
+                    if module.array_types.get(inner as usize) == Some(&IrType::String)
+            ) {
+                report(format!(
+                    "{position}: NetworkTlsConnectWithClientIdentity protocols must be Array<String>"
                 ));
             }
         }
@@ -2997,6 +3621,7 @@ fn verify_instruction(
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             enum_id,
         } => {
             expect(
@@ -3023,6 +3648,7 @@ fn verify_instruction(
                     IrType::Int(IntWidth::I64),
                     "response_idle_timeout_ms",
                 ),
+                (protocol_code, IrType::Int(IntWidth::I32), "protocol_code"),
             ] {
                 if let Some(actual) = type_of(operand)
                     && actual != expected
@@ -3039,6 +3665,7 @@ fn verify_instruction(
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             enum_id,
         } => {
             expect(
@@ -3071,6 +3698,11 @@ fn verify_instruction(
                     ));
                 }
             }
+            if type_of(protocol_code) != Some(IrType::Int(IntWidth::I32)) {
+                report(format!(
+                    "{position}: HttpClientCreateWithTrustRoots protocol_code must be Int32"
+                ));
+            }
         }
         InstKind::HttpClientCreateWithProxy {
             proxy_url,
@@ -3079,6 +3711,7 @@ fn verify_instruction(
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             enum_id,
         } => {
             expect(
@@ -3120,6 +3753,11 @@ fn verify_instruction(
                     ));
                 }
             }
+            if type_of(protocol_code) != Some(IrType::Int(IntWidth::I32)) {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxy protocol_code must be Int32"
+                ));
+            }
         }
         InstKind::HttpClientCreateWithProxyAndTrustRoots {
             proxy_url,
@@ -3129,6 +3767,7 @@ fn verify_instruction(
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             enum_id,
         } => {
             expect(
@@ -3165,6 +3804,11 @@ fn verify_instruction(
                         "{position}: HttpClientCreateWithProxyAndTrustRoots {label} must be UInt64"
                     ));
                 }
+            }
+            if type_of(protocol_code) != Some(IrType::Int(IntWidth::I32)) {
+                report(format!(
+                    "{position}: HttpClientCreateWithProxyAndTrustRoots protocol_code must be Int32"
+                ));
             }
         }
         InstKind::HttpClientRequest {
@@ -3290,6 +3934,7 @@ fn verify_instruction(
             url,
             origin,
             subprotocols,
+            http3: _,
             enum_id,
         } => {
             expect(
@@ -3317,6 +3962,7 @@ fn verify_instruction(
             subprotocols,
             roots_der,
             allow_tls12,
+            http3: _,
             enum_id,
         } => {
             expect(
@@ -4623,6 +5269,106 @@ fn verify_instruction(
             }
         }
 
+        InstKind::HttpServerServeHttp3 {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            max_requests,
+            max_connections,
+            callback,
+            callback_layout,
+            request_class_id,
+            response_class_id,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpServerServeHttp3",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (
+                    *max_requests,
+                    IrType::Int(IntWidth::U64),
+                    "maximum requests",
+                ),
+                (
+                    *max_connections,
+                    IrType::Int(IntWidth::U64),
+                    "maximum connections",
+                ),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: HttpServerServeHttp3 {label} has type {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            for (operand, label) in [
+                (*certificate_chain_der, "certificate chain"),
+                (*private_key_der, "private key"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && !matches!(actual, IrType::Array(_))
+                {
+                    report(format!(
+                        "{position}: HttpServerServeHttp3 {label} must be an array, got {}",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if let Some(layout) = module.enums.get(*enum_id as usize) {
+                let success_payload = layout
+                    .variants
+                    .first()
+                    .and_then(|variant| variant.first())
+                    .and_then(|field| layout.fields.get(*field as usize));
+                if success_payload.map(|field| field.ty) != Some(IrType::Int(IntWidth::U64)) {
+                    report(format!(
+                        "{position}: HttpServerServeHttp3 success payload must be UInt64"
+                    ));
+                }
+            }
+            if *request_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerServeHttp3 references missing request object layout {request_class_id}"
+                ));
+            }
+            if *response_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerServeHttp3 references missing response object layout {response_class_id}"
+                ));
+            }
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        layout.params == vec![IrType::Object(*request_class_id)]
+                            && layout.returns == IrType::Object(*response_class_id)
+                    });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpServerServeHttp3 callback layout {callback_layout} must accept the request object and return the response object"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpServerServeHttp3 receives {} for callback, expected callable layout {callback_layout}",
+                    actual.as_str()
+                ));
+            }
+        }
+
         InstKind::HttpServerWebSocketServeOnce {
             stream_handle,
             secure: _,
@@ -4711,6 +5457,115 @@ fn verify_instruction(
             {
                 report(format!(
                     "{position}: HttpServerWebSocketServeOnce callback has type {}, expected callable layout {callback_layout}",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::HttpServerWebSocketServeHttp3Once {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            idle_timeout_ms,
+            callback,
+            callback_layout,
+            websocket_class_id,
+            enum_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Enum(*enum_id),
+                position,
+                "HttpServerWebSocketServeHttp3Once",
+                report,
+            );
+            for (operand, expected, label) in [
+                (*endpoint, IrType::String, "endpoint"),
+                (*path, IrType::String, "path"),
+                (
+                    *allow_missing_origin,
+                    IrType::Boolean,
+                    "allow-missing-origin flag",
+                ),
+                (*max_messages, IrType::Int(IntWidth::U64), "max messages"),
+                (*idle_timeout_ms, IrType::Int(IntWidth::U64), "idle timeout"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: HttpServerWebSocketServeHttp3Once {label} has type {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+            for (operand, label) in [
+                (*certificate_chain_der, "certificate chain"),
+                (*private_key_der, "private key"),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && !matches!(actual, IrType::Array(_))
+                {
+                    report(format!(
+                        "{position}: HttpServerWebSocketServeHttp3Once {label} must be an array, got {}",
+                        actual.as_str()
+                    ));
+                }
+            }
+            let string_list = module
+                .list_types
+                .iter()
+                .position(|element| *element == IrType::String)
+                .map(|id| IrType::List(id as u32));
+            if let Some(expected) = string_list {
+                for (operand, label) in [
+                    (*allowed_origins, "allowed origins"),
+                    (*protocols, "subprotocols"),
+                ] {
+                    if let Some(actual) = type_of(&operand)
+                        && actual != expected
+                    {
+                        report(format!(
+                            "{position}: HttpServerWebSocketServeHttp3Once {label} has type {}, expected {}",
+                            actual.as_str(),
+                            expected.as_str()
+                        ));
+                    }
+                }
+            } else {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeHttp3Once requires List<String> in the module type table"
+                ));
+            }
+            if *websocket_class_id as usize >= module.objects.len() {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeHttp3Once references missing HTTPWebSocket layout {websocket_class_id}"
+                ));
+            }
+            let callback_ok =
+                module
+                    .closures
+                    .get(*callback_layout as usize)
+                    .is_some_and(|layout| {
+                        layout.params == vec![IrType::Object(*websocket_class_id)]
+                            && layout.returns == IrType::Void
+                    });
+            if !callback_ok {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeHttp3Once callback must accept HTTPWebSocket and return Void"
+                ));
+            }
+            if let Some(actual) = type_of(callback)
+                && actual != IrType::Callable(*callback_layout)
+            {
+                report(format!(
+                    "{position}: HttpServerWebSocketServeHttp3Once callback has type {}, expected callable layout {callback_layout}",
                     actual.as_str()
                 ));
             }
@@ -6931,6 +7786,33 @@ fn expect(
     }
 }
 
+fn verify_local_object_result(
+    module: &Module,
+    enum_id: u32,
+    class_id: u32,
+    position: &str,
+    report: &mut impl FnMut(String),
+) {
+    let Some(layout) = module.enums.get(enum_id as usize) else {
+        report(format!(
+            "{position}: local result references missing enum layout {enum_id}"
+        ));
+        return;
+    };
+    let Some(field) = layout.variants.first().and_then(|fields| fields.first()) else {
+        report(format!(
+            "{position}: local result success variant has no object payload"
+        ));
+        return;
+    };
+    let expected = IrType::Object(class_id);
+    if layout.fields.get(*field as usize).map(|field| field.ty) != Some(expected) {
+        report(format!(
+            "{position}: local result success payload must be object class {class_id}"
+        ));
+    }
+}
+
 /// Callable values are represented by a concrete closure layout, while a
 /// function-typed field stores the canonical erased layout for its signature.
 /// A captured lambda is compatible with that field when its call signature
@@ -7106,7 +7988,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::PrintStderr(operand) => vec![*operand],
         InstKind::FlushStdout { .. }
         | InstKind::FlushStderr { .. }
-        | InstKind::EnvironmentListNames { .. } => Vec::new(),
+        | InstKind::EnvironmentListNames { .. }
+        | InstKind::NetworkInterfacesSnapshot { .. } => Vec::new(),
         InstKind::StdinReadLineResult { .. } | InstKind::StdinReadChar { .. } => Vec::new(),
         InstKind::StdinReadBytes { max, .. } => vec![*max],
         InstKind::StdinReadExact { count, .. } => vec![*count],
@@ -7123,6 +8006,88 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             allow_tls12,
             ..
         } => vec![*endpoint, *roots_der, *allow_tls12],
+        InstKind::NetworkTlsConnectWithAlpn {
+            endpoint,
+            roots_der,
+            allow_tls12,
+            protocols,
+            ..
+        } => vec![*endpoint, *roots_der, *allow_tls12, *protocols],
+        InstKind::NetworkTlsUpgradeTcp {
+            tcp_handle,
+            endpoint,
+            roots_der,
+            allow_tls12,
+            protocols,
+            ..
+        } => vec![*tcp_handle, *endpoint, *roots_der, *allow_tls12, *protocols],
+        InstKind::NetworkTlsConnectWithClientIdentity {
+            endpoint,
+            roots_der,
+            certificate_chain_der,
+            private_key_der,
+            allow_tls12,
+            protocols,
+            ..
+        } => vec![
+            *endpoint,
+            *roots_der,
+            *certificate_chain_der,
+            *private_key_der,
+            *allow_tls12,
+            *protocols,
+        ],
+        InstKind::NetworkUdpConnect { endpoint, .. }
+        | InstKind::NetworkUdpBind { endpoint, .. } => vec![*endpoint],
+        InstKind::NetworkLocalConnect { endpoint, .. } => vec![*endpoint],
+        InstKind::NetworkLocalBind {
+            endpoint,
+            remove_stale,
+            ..
+        } => {
+            vec![*endpoint, *remove_stale]
+        }
+        InstKind::NetworkLocalAccept { handle, .. }
+        | InstKind::NetworkLocalClose { handle, .. }
+        | InstKind::NetworkLocalShutdown { handle, .. }
+        | InstKind::NetworkLocalIsClosed { handle, .. } => vec![*handle],
+        InstKind::NetworkLocalRead {
+            handle, max_bytes, ..
+        } => vec![*handle, *max_bytes],
+        InstKind::NetworkLocalWrite { handle, bytes, .. } => vec![*handle, *bytes],
+        InstKind::NetworkUdpSend { handle, bytes, .. } => vec![*handle, *bytes],
+        InstKind::NetworkUdpSendTo {
+            handle,
+            bytes,
+            endpoint,
+            ..
+        } => {
+            vec![*handle, *bytes, *endpoint]
+        }
+        InstKind::NetworkUdpSendBroadcast {
+            handle,
+            bytes,
+            endpoint,
+            ..
+        }
+        | InstKind::NetworkUdpSendMulticast {
+            handle,
+            bytes,
+            endpoint,
+            ..
+        } => {
+            vec![*handle, *bytes, *endpoint]
+        }
+        InstKind::NetworkUdpJoinMulticast { handle, group, .. }
+        | InstKind::NetworkUdpLeaveMulticast { handle, group, .. } => vec![*handle, *group],
+        InstKind::NetworkUdpReceive {
+            handle, max_bytes, ..
+        } => vec![*handle, *max_bytes],
+        InstKind::NetworkUdpClose { handle, .. }
+        | InstKind::NetworkUdpLocalAddress { handle, .. }
+        | InstKind::NetworkUdpIsClosed { handle } => {
+            vec![*handle]
+        }
         InstKind::NetworkTlsListen {
             endpoint,
             certificate_chain_der,
@@ -7133,6 +8098,20 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *endpoint,
             *certificate_chain_der,
             *private_key_der,
+            *allow_tls12,
+        ],
+        InstKind::NetworkTlsListenWithClientAuth {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            client_roots_der,
+            allow_tls12,
+            ..
+        } => vec![
+            *endpoint,
+            *certificate_chain_der,
+            *private_key_der,
+            *client_roots_der,
             *allow_tls12,
         ],
         InstKind::NetworkIpAddressParse { value, .. } => vec![*value],
@@ -7153,6 +8132,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::NetworkTlsIsClosed { handle }
         | InstKind::NetworkTlsListenerIsClosed { handle }
         | InstKind::NetworkTlsPeerAddress { handle, .. }
+        | InstKind::NetworkTlsNegotiatedAlpn { handle, .. }
+        | InstKind::NetworkTlsPeerCertificateSha256 { handle, .. }
         | InstKind::NetworkTcpIsClosed { handle }
         | InstKind::NetworkTcpPeerAddress { handle, .. } => vec![*handle],
         InstKind::NetworkTcpAccept { handle, .. }
@@ -7175,12 +8156,15 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             ..
         } => vec![
             *max_origins,
             *connect_timeout_ms,
             *response_headers_timeout_ms,
             *response_idle_timeout_ms,
+            *protocol_code,
+            *protocol_code,
         ],
         InstKind::HttpClientCreateWithTrustRoots {
             roots,
@@ -7188,6 +8172,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             ..
         } => vec![
             *roots,
@@ -7195,6 +8180,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *connect_timeout_ms,
             *response_headers_timeout_ms,
             *response_idle_timeout_ms,
+            *protocol_code,
         ],
         InstKind::HttpClientCreateWithProxy {
             proxy_url,
@@ -7203,6 +8189,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             ..
         } => vec![
             *proxy_url,
@@ -7211,6 +8198,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *connect_timeout_ms,
             *response_headers_timeout_ms,
             *response_idle_timeout_ms,
+            *protocol_code,
         ],
         InstKind::HttpClientCreateWithProxyAndTrustRoots {
             proxy_url,
@@ -7220,6 +8208,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             connect_timeout_ms,
             response_headers_timeout_ms,
             response_idle_timeout_ms,
+            protocol_code,
             ..
         } => vec![
             *proxy_url,
@@ -7229,6 +8218,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *connect_timeout_ms,
             *response_headers_timeout_ms,
             *response_idle_timeout_ms,
+            *protocol_code,
         ],
         InstKind::HttpClientRequest {
             handle,
@@ -7365,6 +8355,22 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             callback,
             ..
         } => vec![*stream_handle, *max_requests, *callback],
+        InstKind::HttpServerServeHttp3 {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            max_requests,
+            max_connections,
+            callback,
+            ..
+        } => vec![
+            *endpoint,
+            *certificate_chain_der,
+            *private_key_der,
+            *max_requests,
+            *max_connections,
+            *callback,
+        ],
         InstKind::HttpServerWebSocketServeOnce {
             stream_handle,
             path,
@@ -7381,6 +8387,30 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *allow_missing_origin,
             *protocols,
             *max_messages,
+            *callback,
+        ],
+        InstKind::HttpServerWebSocketServeHttp3Once {
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            path,
+            allowed_origins,
+            allow_missing_origin,
+            protocols,
+            max_messages,
+            idle_timeout_ms,
+            callback,
+            ..
+        } => vec![
+            *endpoint,
+            *certificate_chain_der,
+            *private_key_der,
+            *path,
+            *allowed_origins,
+            *allow_missing_origin,
+            *protocols,
+            *max_messages,
+            *idle_timeout_ms,
             *callback,
         ],
         InstKind::NullValue(_) => Vec::new(),

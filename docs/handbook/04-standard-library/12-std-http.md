@@ -59,8 +59,17 @@ behavior belong in packages built on this module.
 > credential headers and fields marked with `add_sensitive`/`set_sensitive`
 > while preserving ordinary headers.
 > It keeps at most one
-> HTTP/1.1 or HTTP/2 connection per origin in a bounded LRU pool and selects
-> HTTP/2 through TLS ALPN. A client may be shared by tasks in the same
+> HTTP/1.1 or HTTP/2 connection per origin in a bounded LRU pool.
+> `HTTPClientOptions.create_with_protocol(protocol, ...)` accepts
+> `HTTPProtocolPreference.Auto`, `HTTP1`, `HTTP2`, or `HTTP3`. `Auto` currently
+> negotiates HTTP/2 or HTTP/1.1 through TLS ALPN; it does not try HTTP/3 until
+> safe pre-commit fallback and independent-peer conformance are complete.
+> Explicit `HTTP3` uses the native QUIC/H3 client when the Zirk runtime is
+> built with its `http3` feature. It requires direct HTTPS, uses TLS 1.3 and
+> `h3` ALPN, disables 0-RTT, and currently rejects configured proxies.
+> `HTTPResponse.protocol()` reports `HTTP1`, `HTTP2`, `HTTP3`, or `Unknown`.
+> Integration tests verify HTTP/1.1 and HTTP/2 reporting against independent
+> peers. A client may be shared by tasks in the same
 > approved executor and project/manifest identity. HTTP/1.1 requests use a
 > cooperative FIFO queue; HTTP/2 allows up to eight simultaneous streams on
 > one connection. Every request checks its exact network grant. `close()` waits
@@ -77,7 +86,8 @@ behavior belong in packages built on this module.
 > The client also exposes opt-in bounded
 > retries for replayable safe methods on transport/timeout failures.
 > Configurable `HTTPClientOptions` carries `connect_timeout_ms`,
-> `response_headers_timeout_ms`, `response_idle_timeout_ms`, and `max_origins`.
+> `response_headers_timeout_ms`, `response_idle_timeout_ms`, `max_origins`,
+> and the protocol preference.
 > Each timeout is validated from 1 ms through one hour, and the origin pool is
 > bounded from 1 through 32 entries. The options object is accepted by direct,
 > custom-trust-root, proxy, and combined proxy/custom-root client factories.
@@ -224,6 +234,15 @@ behavior belong in packages built on this module.
 > loops, so the 20-hop maximum does not grow the Zirk task stack. Its
 > approved-project E2E covers a relative redirect,
 > a cross-origin grant denial, and a redirect loop limit on macOS.
+> `HTTPClient.request_following_with_history` and
+> `request_body_following_with_history` return `HTTPRedirectResult`, which
+> keeps the final `HTTPResponse` and a bounded list of followed hops. Each hop
+> records the method, status, and normalized destination; user information is
+> removed, every query string is replaced with `?redacted`, fragments are
+> discarded, and each stored destination is capped at 8 KiB. A compiled-Zirk E2E verifies
+> a `POST` to `303` transition, cross-origin credential stripping, and that the
+> original query value is absent from printed and JSON history. `history_json()`
+> returns a bounded JSON array with string delimiters escaped.
 > These paths have approved-project runtime evidence on macOS;
 > the remaining client/server surface below is the target contract, not a claim
 > that those APIs are already usable.
@@ -648,8 +667,19 @@ caller headers while keeping those protocol-owned fields unavailable.
 
 ## Responses and body consumption
 
-The target response API exposes `status`, `headers`, protocol version, final URL,
-redirect history, and one body consumed exactly once through one of:
+`HTTPResponse.protocol()` reports the negotiated version for HTTP calls and
+`Unknown` for locally constructed responses. `HTTPResponse` does not change its
+native object layout to carry redirect metadata. Call one of the explicit
+`HTTPClient` history methods to receive an `HTTPRedirectResult`; its
+`response()` returns the final response and `history()` returns up to 20
+`METHOD status destination` entries; each normalized destination is capped at
+8 KiB. `history_json()` serializes those redacted entries as a JSON array. The
+helper removes URL user information, redacts the entire query
+string, protecting unknown credential parameter names as well as known ones,
+and discards URL fragments.
+These entries contain no request headers or cookies. Final URL metadata and
+serialized structured hop objects are not yet exposed. A response body is
+consumed exactly once through one of:
 
 The current bundled API exposes typed JSON decoding as the top-level
 `decode_json<T>(response)` function. The `response.json<T>()` form below is the
@@ -1169,10 +1199,12 @@ second and above one hour on macOS aarch64 and Linux ARM64 Docker.
 
 ## WebSocket
 
-> **Availability:** `HTTPWebSocket` provides a bounded HTTP/1.1 and TLS
-> HTTP/2 extended CONNECT (RFC 8441) client, an HTTP/1.1 server preview, and
-> TLS HTTP/1.1 or HTTP/2 server previews. All supported transports provide
-> typed messages, origin/subprotocol policy, and close handshakes.
+> **Availability:** `HTTPWebSocket` provides bounded HTTP/1.1 and TLS HTTP/2
+> extended CONNECT (RFC 8441) clients, plus an opt-in HTTP/3 client using
+> RFC 9220 extended CONNECT when the runtime is built with its `http3` feature.
+> The server preview supports HTTP/1.1 and TLS HTTP/1.1 or HTTP/2. Supported
+> transports provide typed messages, origin/subprotocol policy, and close
+> handshakes.
 
 The server accepts one already-authorized TCP or TLS stream and runs its
 callback on the task that owns that stream. It accepts upgrades only at the
@@ -1310,6 +1342,36 @@ protocol contracts remain outside the current preview.
 the application-selected close code and UTF-8 reason, sends the close frame,
 and waits for the peer's close response within the close timeout.
 
+`connect_http3(url, origin, subprotocols)` forces RFC 9220 WebSocket over
+HTTP/3. It requires an `https` URL, the same exact-origin network grant as
+other HTTP clients, TLS 1.3, and the runtime's optional `http3` feature. The
+runtime validates the negotiated subprotocol and keeps the QUIC/H3 driver alive
+for the WebSocket session. A runtime loopback peer verifies the extended
+CONNECT `:protocol = websocket` handshake and bidirectional frame exchange.
+`connect_http3_with_trust_roots(url, origin, subprotocols, roots_der)` replaces
+system trust with the provided bounded DER certificate roots. It always uses
+TLS 1.3; TLS 1.2 cannot be enabled for HTTP/3. Protocol fallback is not exposed
+by these explicit HTTP/3 methods. Servers can expose one RFC 9220 session with
+`HTTPServer.serve_http3_websocket_once(endpoint, certificate_chain_der,
+private_key_der, path, allowed_origins, protocols, max_messages, handler,
+allow_missing_origin, idle_timeout_ms)`. The endpoint uses the explicit UDP
+bind grant and TLS 1.3; the handler owns the session on its Zirk task. Path,
+Origin, and subprotocol policy are checked before the callback. The compiler
+build fixture verifies this method lowers to its runtime ABI. Two separately
+compiled Zirk programs have also completed an HTTP/3 WebSocket echo and close
+handshake on macOS ARM64 with the `http3` runtime feature. The checked-in
+`scripts/test-http3-websocket-public-api.py` reproduces the exchange and tests
+both directions against independent `aioquic` 1.7.0 client and server peers;
+it also verifies Zirk HTTP/3 GET and QUERY requests against the independent
+server, including the query body and content type. CI installs the pinned
+test-only peer and runs it on each native matrix target.
+The runtime loopback test also covers the server codec, bidirectional messages,
+and close lifecycle through the adapter. The independent peer test verifies
+that an unapproved Origin receives `403` before the Zirk handler runs.
+Independent-peer results are currently verified only on macOS ARM64;
+Linux/Windows runtime results and broader adversarial peer cases remain
+pending.
+
 ## Protocol versions
 
 The current server preview supports HTTP/1.1 and TLS ALPN negotiation of HTTP/2.
@@ -1321,9 +1383,46 @@ handlers overlap on macOS aarch64 and Linux ARM64. Long-lived listener
 admission, complete client interoperability, flow-control/reset conformance, and hostile pseudo-field
 coverage remain pending.
 
-HTTP/3 and QUIC are outside the current `std.http` and `std.net` previews; the
-toolchain does not currently ship an HTTP/3 or QUIC package. A future transport
-package would require its own implementation and delivery decision.
+HTTP/3 client and listener APIs are available only when the native runtime is
+built with the optional `http3` feature. An `HTTPClient` retains at most one
+HTTP/3 session per configured origin and uses independent streams for
+concurrent requests. Focused loopback tests verify concurrent streams share
+one connection and sequential requests reuse the same pool connection.
+Automatic HTTP/3 negotiation and fallback, externally requested graceful
+listener shutdown, per-stream disconnect cancellation, cross-target
+independent-peer interoperability, and Windows runtime verification remain in
+progress. The finite HTTP/3 listener
+admits connections concurrently with at most 16 QUIC handshakes in flight. It
+dispatches at most four active request streams across the listener to separate
+Zirk handler tasks on the owning executor and cancels pending handshakes when
+the configured request limit is reached. At the existing 16 MiB per-body
+limit, buffered request and response vectors are capped at 128 MiB per
+listener, in addition to Quinn's transport windows.
+
+## Browser execution
+
+The browser facade provides buffered `HTTP.get`, `HTTP.head`, `HTTP.query`,
+`HTTP.query_with_content_type`, `HTTP.post`, `HTTP.post_json`,
+`HTTP.post_bytes`, and `HTTP.request` through `BrowserApi.runWithFetch`. Each
+call receives a Fetch function, an explicit
+JSON origin allowlist, request and response byte ceilings, and an optional
+`AbortSignal`. The Fetch capability is discarded when that invocation ends;
+the synchronous `run` method remains default-deny. Request and response
+bodies are bounded, response streams are cancelled when the configured byte
+limit is exceeded, redirects are rejected by Fetch, and Fetch/CORS failures
+map to `HTTPError.BrowserPolicy`. Buffered response text is decoded as strict
+UTF-8. JSON query and POST helpers validate their JSON document before
+calling Fetch; `QUERY` and the POST convenience methods preserve their
+documented media types. Native sockets, listeners, streaming request helpers,
+and WebSocket remain unsupported by this browser host path.
+
+Run the JavaScript/WASM boundary checks with
+`scripts/test-browser-http-fetch.sh`. The script builds the browser crate for
+`wasm32-unknown-unknown`, generates its Node.js bindings with the matching
+`wasm-bindgen` CLI, and checks request forwarding, convenience methods,
+response decoding, origin denial, body limits, CORS error mapping, and cancellation. This is a Fetch
+adapter test under Node.js; it does not claim to verify browser-enforced CORS
+against a live remote origin.
 
 ## Security and permissions
 

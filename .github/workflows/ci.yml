@@ -43,6 +43,31 @@ env:
   LLVM_FULL_VERSION: "20.1.8"
 
 jobs:
+  browser-wasm-fetch:
+    name: browser-wasm-fetch
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain and browser target
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the matching wasm-bindgen CLI
+        run: cargo install --locked --version 0.2.128 wasm-bindgen-cli
+
+      - name: Verify browser Fetch HTTP behavior
+        run: scripts/test-browser-http-fetch.sh
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -283,6 +308,20 @@ jobs:
           RUNTIME_TEST_FILTER: ${{ inputs.runtime_test_filter }}
           RUST_BACKTRACE: "1"
 
+      # These transport and protocol engines are opt-in in release builds, so
+      # the ordinary workspace suite does not compile or exercise them. Keep
+      # their target-specific runtime behavior visible on every native runner.
+      - name: Networking and HTTP/3 runtime conformance
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        shell: bash
+        run: |
+          cargo test -p zirk-runtime --features http3 --lib udp -- --test-threads=1
+          cargo test -p zirk-runtime --features http3 --lib local_transport::tests -- --test-threads=1
+          cargo test -p zirk-runtime --features http3 --lib network_interfaces::tests -- --test-threads=1
+          cargo test -p zirk-runtime --features http3 --lib network_transport::tests::tls_ -- --test-threads=1
+          cargo test -p zirk-runtime --features http3 --lib http3_transport::tests -- --test-threads=1
+          cargo test -p zirk-runtime-core network_policy -- --test-threads=1
+
       - name: Tests
         if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         run: cargo test --workspace -- --test-threads=1 --nocapture
@@ -291,6 +330,19 @@ jobs:
           # Trazas del backend: un fallo dentro de LLVM puede abortar sin dejar
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
           ZIRK_TRACE: "1"
+
+      - uses: actions/setup-python@v5
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        with:
+          python-version: "3.14"
+
+      - name: Install pinned independent HTTP/3 peer
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        run: python -m pip install --disable-pip-version-check -r scripts/requirements-http3-interop.txt
+
+      - name: Public HTTP/3 WebSocket interoperability
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        run: python scripts/test-http3-websocket-public-api.py
 
       - name: Upload focused native crash dumps (Windows)
         if: failure() && runner.os == 'Windows' && (inputs.test_filter != '' || inputs.runtime_test_filter != '')

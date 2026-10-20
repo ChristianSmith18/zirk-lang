@@ -18,6 +18,7 @@ share enum TLSError {
     Timeout,
     Closed,
     WrongOwner,
+    InvalidConfiguration,
 }
 
 share enum TLSReadResult<T> {
@@ -61,6 +62,55 @@ share class TLSStream implements Resource<TLSResourceError> {
         };
     }
 
+    // Selects application protocols during the authenticated TLS handshake.
+    // System trust roots and TLS 1.3 remain the defaults for this overload.
+    static connect_with_alpn(
+        endpoint: String,
+        protocols: Array<String>,
+    ): Result<TLSStream, TLSError> {
+        mut roots: Array<Array<Byte>> = [];
+        return match TLSStream.connect_with_options_native(endpoint, roots, false, protocols) {
+            Ok(handle) => TLSStream.connect_ok(TLSStream(handle));
+            Error(error) => TLSStream.connect_error(error);
+        };
+    }
+
+    // Empty roots select the platform trust store. TLS 1.2 is opt-in.
+    static connect_with_options(
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<TLSStream, TLSError> {
+        return match TLSStream.connect_with_options_native(endpoint, roots_der, allow_tls12, protocols) {
+            Ok(handle) => TLSStream.connect_ok(TLSStream(handle));
+            Error(error) => TLSStream.connect_error(error);
+        };
+    }
+
+    // Configures mutual TLS with caller-owned DER client credentials. Empty
+    // roots select the platform trust store; TLS 1.2 remains opt-in.
+    static connect_with_client_identity(
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        client_certificate_chain_der: Array<Array<Byte>>,
+        client_private_key_der: Array<Byte>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<TLSStream, TLSError> {
+        return match TLSStream.connect_with_client_identity_native(
+            endpoint,
+            roots_der,
+            client_certificate_chain_der,
+            client_private_key_der,
+            allow_tls12,
+            protocols,
+        ) {
+            Ok(handle) => TLSStream.connect_ok(TLSStream(handle));
+            Error(error) => TLSStream.connect_error(error);
+        };
+    }
+
     read(max_bytes: UInt64): TLSReadResult<Array<Byte>> {
         return TLSStream.read_native(this.handle, max_bytes);
     }
@@ -86,6 +136,16 @@ share class TLSStream implements Resource<TLSResourceError> {
         return TLSStream.peer_address_native(this.handle);
     }
 
+    negotiated_alpn(): Result<String?, TLSError> {
+        return TLSStream.negotiated_alpn_native(this.handle);
+    }
+
+    // Returns the SHA-256 fingerprint of the authenticated peer certificate,
+    // or null when the TLS role has no peer certificate metadata.
+    peer_certificate_sha256(): Result<String?, TLSError> {
+        return TLSStream.peer_certificate_sha256_native(this.handle);
+    }
+
     private static connect_native(endpoint: String): Result<UInt64, TLSError> {
         return Error(TLSError.PermissionDenied);
     }
@@ -96,6 +156,26 @@ share class TLSStream implements Resource<TLSResourceError> {
         allow_tls12: Boolean,
     ): Result<UInt64, TLSError> {
         return Error(TLSError.CertificateStore);
+    }
+
+    private static connect_with_options_native(
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<UInt64, TLSError> {
+        return Error(TLSError.InvalidConfiguration);
+    }
+
+    private static connect_with_client_identity_native(
+        endpoint: String,
+        roots_der: Array<Array<Byte>>,
+        client_certificate_chain_der: Array<Array<Byte>>,
+        client_private_key_der: Array<Byte>,
+        allow_tls12: Boolean,
+        protocols: Array<String>,
+    ): Result<UInt64, TLSError> {
+        return Error(TLSError.InvalidConfiguration);
     }
 
     private static read_native(handle: UInt64, max_bytes: UInt64): TLSReadResult<Array<Byte>> {
@@ -117,6 +197,14 @@ share class TLSStream implements Resource<TLSResourceError> {
     private static is_closed_native(handle: UInt64): Boolean { return true; }
 
     private static peer_address_native(handle: UInt64): Result<String, TLSError> {
+        return Error(TLSError.Closed);
+    }
+
+    private static negotiated_alpn_native(handle: UInt64): Result<String?, TLSError> {
+        return Error(TLSError.Closed);
+    }
+
+    private static peer_certificate_sha256_native(handle: UInt64): Result<String?, TLSError> {
         return Error(TLSError.Closed);
     }
 
@@ -146,6 +234,27 @@ share class TLSListener implements Resource<TLSResourceError> {
             endpoint,
             certificate_chain_der,
             private_key_der,
+            allow_tls12,
+        ) {
+            Ok(handle) => TLSListener.bind_ok(TLSListener(handle));
+            Error(error) => TLSListener.bind_error(error);
+        };
+    }
+
+    // Requires clients to present a certificate chained to one of the
+    // explicitly supplied DER roots. TLS 1.2 remains opt-in.
+    static bind_with_client_auth(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte>>,
+        private_key_der: Array<Byte>,
+        client_roots_der: Array<Array<Byte>>,
+        allow_tls12: Boolean,
+    ): Result<TLSListener, TLSError> {
+        return match TLSListener.bind_with_client_auth_native(
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            client_roots_der,
             allow_tls12,
         ) {
             Ok(handle) => TLSListener.bind_ok(TLSListener(handle));
@@ -199,6 +308,16 @@ share class TLSListener implements Resource<TLSResourceError> {
         endpoint: String,
         certificate_chain_der: Array<Array<Byte>>,
         private_key_der: Array<Byte>,
+        allow_tls12: Boolean,
+    ): Result<UInt64, TLSError> {
+        return Error(TLSError.PermissionDenied);
+    }
+
+    private static bind_with_client_auth_native(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte>>,
+        private_key_der: Array<Byte>,
+        client_roots_der: Array<Array<Byte>>,
         allow_tls12: Boolean,
     ): Result<UInt64, TLSError> {
         return Error(TLSError.PermissionDenied);

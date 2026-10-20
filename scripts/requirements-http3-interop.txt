@@ -1,0 +1,10 @@
+# Test-only independent HTTP/3 peer. Keep the complete resolver output pinned.
+aioquic==1.7.0
+attrs==26.1.0
+certifi==2026.10.19
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.11
+pylsqpack==1.0.0
+pyOpenSSL==26.4.0
+service-identity==26.1.0

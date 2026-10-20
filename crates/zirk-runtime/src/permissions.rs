@@ -30,9 +30,16 @@ fn network_grant_from_verified(
     verified: &VerifiedPermissionGrant,
 ) -> Result<Arc<EffectiveNetworkGrant>, NetworkPolicyError> {
     let scopes = verified.scopes();
-    EffectiveNetworkGrant::from_verified_scopes(
+    EffectiveNetworkGrant::from_verified_datagram_scopes(
         scopes.network_connect.iter().cloned(),
         scopes.network_listen.iter().cloned(),
+        scopes.network_udp_destinations.iter().cloned(),
+        scopes.network_udp_listen.iter().cloned(),
+        scopes.network_udp_broadcast_destinations.iter().cloned(),
+        scopes.network_udp_multicast_groups.iter().cloned(),
+        scopes.network_local_connect.iter().cloned(),
+        scopes.network_local_listen.iter().cloned(),
+        scopes.network_inspect_interfaces,
     )
     .map(Arc::new)
 }
@@ -96,6 +103,13 @@ mod tests {
         let scopes = PermissionScopes {
             network_connect: ["https://api.example:443".into()].into(),
             network_listen: ["127.0.0.1:8080".into()].into(),
+            network_udp_destinations: ["udp://192.0.2.9:5353".into()].into(),
+            network_udp_listen: ["127.0.0.1:5353".into()].into(),
+            network_udp_broadcast_destinations: ["udp://255.255.255.255:9000".into()].into(),
+            network_udp_multicast_groups: ["239.1.2.3".into()].into(),
+            network_local_connect: ["unix:///tmp/zirk.sock".into()].into(),
+            network_local_listen: ["npipe://./pipe/zirk".into()].into(),
+            network_inspect_interfaces: true,
             ..PermissionScopes::default()
         };
         let verified = SignedPermissionGrant::sign("a".repeat(64), "b".repeat(64), scopes, b"key")
@@ -117,5 +131,27 @@ mod tests {
             grant.authorize_listen("127.0.0.1:8081".parse().unwrap()),
             Err(NetworkPolicyError::PermissionDenied)
         );
+        assert_eq!(
+            grant.authorize_udp_send("192.0.2.9:5353".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_udp_bind("127.0.0.1:5353".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_udp_broadcast("255.255.255.255:9000".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_udp_multicast("239.1.2.3".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_local_connect("unix:///tmp/zirk.sock"),
+            Ok(())
+        );
+        assert_eq!(grant.authorize_local_listen("npipe://./pipe/zirk"), Ok(()));
+        assert_eq!(grant.authorize_interface_inspection(), Ok(()));
     }
 }

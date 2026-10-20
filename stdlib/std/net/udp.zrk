@@ -1,0 +1,177 @@
+package std.net.udp;
+
+import { SocketAddress } from std.net::address;
+
+share enum UDPError {
+    InvalidAddress,
+    PermissionDenied,
+    AddressNotAllowed,
+    DnsFailure,
+    DnsResultLimit,
+    UnsupportedTransport,
+    BufferLimitExceeded,
+    Io,
+    Cancelled,
+    CapacityExceeded,
+    Timeout,
+    Closed,
+    WrongOwner,
+}
+
+share class UDPResourceError implements Error {
+    private inmut reason: UDPError;
+
+    construct(reason: UDPError) { this.reason = reason; }
+    message(): String { return this.reason.to_string(); }
+    code(): String { return "UDP_RESOURCE"; }
+    cause(): Error? { return null; }
+}
+
+// One complete received packet. The peer is returned as a canonical numeric
+// `udp://` endpoint and never contains a resolved host name.
+share class UDPDatagram {
+    private inmut payload: Array<Byte>;
+    private inmut peer_endpoint: String;
+
+    private construct(payload: Array<Byte>, peer_endpoint: String) {
+        this.payload = payload;
+        this.peer_endpoint = peer_endpoint;
+    }
+
+    bytes(): Array<Byte> { return this.payload; }
+    peer(): String { return this.peer_endpoint; }
+}
+
+// Connected UDP sockets only send to the exact peer approved by the project
+// manifest. The implicit ephemeral local port grants no listen authority.
+share class UDPSocket implements Resource<UDPResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static connect(endpoint: String): Result<UDPSocket, UDPError> {
+        return match UDPSocket.connect_native(endpoint) {
+            Ok(handle) => UDPSocket.connect_ok(UDPSocket(handle));
+            Error(error) => UDPSocket.connect_error(error);
+        };
+    }
+
+    static connect_to(address: SocketAddress): Result<UDPSocket, UDPError> {
+        return UDPSocket.connect(address.as_udp_origin());
+    }
+
+    static bind(endpoint: String): Result<UDPSocket, UDPError> {
+        return match UDPSocket.bind_native(endpoint) {
+            Ok(handle) => UDPSocket.connect_ok(UDPSocket(handle));
+            Error(error) => UDPSocket.connect_error(error);
+        };
+    }
+
+    static bind_to(address: SocketAddress): Result<UDPSocket, UDPError> {
+        return UDPSocket.bind(address.as_udp_origin());
+    }
+
+    send(bytes: Array<Byte>): Result<UInt64, UDPError> {
+        return UDPSocket.send_native(this.handle, bytes);
+    }
+
+    send_to(bytes: Array<Byte>, peer: String): Result<UInt64, UDPError> {
+        return UDPSocket.send_to_native(this.handle, bytes, peer);
+    }
+
+    // Limited IPv4 broadcast requires both a broadcast destination grant and
+    // the corresponding UDP destination grant in the project permissions.
+    send_broadcast(bytes: Array<Byte>, endpoint: String): Result<UInt64, UDPError> {
+        return UDPSocket.send_broadcast_native(this.handle, bytes, endpoint);
+    }
+
+    // Sends to an explicitly permitted multicast group and UDP port.
+    send_multicast(bytes: Array<Byte>, endpoint: String): Result<UInt64, UDPError> {
+        return UDPSocket.send_multicast_native(this.handle, bytes, endpoint);
+    }
+
+    // Membership operations require a bound socket and an explicit group grant.
+    join_multicast(group: String): Result<Void, UDPResourceError> {
+        return match UDPSocket.join_multicast_native(this.handle, group) {
+            Ok(_) => UDPSocket.close_ok();
+            Error(error) => UDPSocket.close_error(error);
+        };
+    }
+
+    leave_multicast(group: String): Result<Void, UDPResourceError> {
+        return match UDPSocket.leave_multicast_native(this.handle, group) {
+            Ok(_) => UDPSocket.close_ok();
+            Error(error) => UDPSocket.close_error(error);
+        };
+    }
+
+    local_address(): Result<String, UDPError> {
+        return UDPSocket.local_address_native(this.handle);
+    }
+
+    receive(max_bytes: UInt64): Result<UDPDatagram, UDPError> {
+        return UDPSocket.receive_native(this.handle, max_bytes);
+    }
+
+    close(): Result<Void, UDPResourceError> {
+        return match UDPSocket.close_native(this.handle) {
+            Ok(_) => UDPSocket.close_ok();
+            Error(error) => UDPSocket.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean { return UDPSocket.is_closed_native(this.handle); }
+
+    private static connect_native(endpoint: String): Result<UInt64, UDPError> {
+        return Error(UDPError.PermissionDenied);
+    }
+    private static bind_native(endpoint: String): Result<UInt64, UDPError> {
+        return Error(UDPError.PermissionDenied);
+    }
+    private static send_native(handle: UInt64, bytes: Array<Byte>): Result<UInt64, UDPError> {
+        return Error(UDPError.Closed);
+    }
+    private static send_to_native(
+        handle: UInt64,
+        bytes: Array<Byte>,
+        endpoint: String,
+    ): Result<UInt64, UDPError> {
+        return Error(UDPError.Closed);
+    }
+    private static send_broadcast_native(
+        handle: UInt64,
+        bytes: Array<Byte>,
+        endpoint: String,
+    ): Result<UInt64, UDPError> { return Error(UDPError.PermissionDenied); }
+    private static send_multicast_native(
+        handle: UInt64,
+        bytes: Array<Byte>,
+        endpoint: String,
+    ): Result<UInt64, UDPError> { return Error(UDPError.PermissionDenied); }
+    private static join_multicast_native(
+        handle: UInt64,
+        group: String,
+    ): Result<Void, UDPError> { return Error(UDPError.PermissionDenied); }
+    private static leave_multicast_native(
+        handle: UInt64,
+        group: String,
+    ): Result<Void, UDPError> { return Error(UDPError.PermissionDenied); }
+    private static receive_native(handle: UInt64, max_bytes: UInt64): Result<UDPDatagram, UDPError> {
+        return Error(UDPError.Closed);
+    }
+    private static close_native(handle: UInt64): Result<Void, UDPError> {
+        return Error(UDPError.Closed);
+    }
+    private static local_address_native(handle: UInt64): Result<String, UDPError> {
+        return Error(UDPError.Closed);
+    }
+    private static is_closed_native(handle: UInt64): Boolean { return true; }
+
+    private static connect_ok(value: UDPSocket): Result<UDPSocket, UDPError> { return Ok(value); }
+    private static connect_error(error: UDPError): Result<UDPSocket, UDPError> { return Error(error); }
+    private static close_ok(): Result<Void, UDPResourceError> { return Ok(UDPSocket.unit()); }
+    private static unit(): Void { return; }
+    private static close_error(error: UDPError): Result<Void, UDPResourceError> {
+        return Error(UDPResourceError(error));
+    }
+}
