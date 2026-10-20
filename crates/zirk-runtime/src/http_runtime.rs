@@ -9888,7 +9888,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn live_http1_slow_consumer_backpressures_the_zirk_sse_producer() {
+    fn live_http1_slow_consumer_backpressures_the_zirk_response_producer() {
         use crate::executor::{await_task, spawn};
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
@@ -9948,7 +9948,7 @@ mod tests {
                 } else {
                     b"identity".as_slice()
                 };
-                write!(stream, "GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: {}\r\nConnection: close\r\n\r\n", std::str::from_utf8(accept_encoding).unwrap()).unwrap();
+                write!(stream, "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept-Encoding: {}\r\nConnection: close\r\n\r\n", std::str::from_utf8(accept_encoding).unwrap()).unwrap();
                 let mut header = Vec::new();
                 let mut byte = [0u8; 1];
                 while !header.ends_with(b"\r\n\r\n") {
@@ -9957,6 +9957,12 @@ mod tests {
                     assert!(header.len() < 16 * 1024, "response headers exceeded limit");
                 }
                 let header_lower = header.to_ascii_lowercase();
+                assert!(
+                    header_lower
+                        .windows(b"content-type: application/octet-stream".len())
+                        .any(|window| window == b"content-type: application/octet-stream"),
+                    "generic streaming response must preserve its media type"
+                );
                 assert_eq!(
                     header_lower
                         .windows(b"content-encoding: gzip".len())
@@ -10007,7 +10013,7 @@ mod tests {
                     let _ = serve_once(HttpServerIo::from(accepted), false, move |_| {
                         let mut headers = Headers::new();
                         headers
-                            .append("content-type", b"text/event-stream; charset=utf-8")
+                            .append("content-type", b"application/octet-stream")
                             .unwrap();
                         let capture = crate::string::alloc_owned("slow transport capture");
                         capture_for_server.store(capture as usize, Ordering::Release);
@@ -10050,7 +10056,7 @@ mod tests {
     }
 
     #[test]
-    fn live_http2_slow_consumer_backpressures_the_zirk_sse_producer() {
+    fn live_http2_slow_consumer_backpressures_the_zirk_response_producer() {
         use crate::executor::{await_task, spawn};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName};
@@ -10120,7 +10126,7 @@ mod tests {
                     let _ = serve_http2_requests(stream, true, 1, move |_| {
                         let mut headers = Headers::new();
                         headers
-                            .append("content-type", b"text/event-stream; charset=utf-8")
+                            .append("content-type", b"application/octet-stream")
                             .unwrap();
                         let capture = crate::string::alloc_owned("slow HTTP/2 capture");
                         capture_for_server.store(capture as usize, Ordering::Release);
@@ -10192,7 +10198,7 @@ mod tests {
                         let driver = tokio::spawn(connection);
                         let mut request = Request::builder()
                             .method(hyper::Method::GET)
-                            .uri(format!("{client_origin}/events"));
+                            .uri(format!("{client_origin}/stream"));
                         request = request.header(
                             hyper::header::ACCEPT_ENCODING,
                             if compressed {
@@ -10210,6 +10216,16 @@ mod tests {
                         .unwrap()
                         .unwrap();
                         assert_eq!(response.status(), hyper::StatusCode::OK);
+                        assert_eq!(
+                            response
+                                .headers()
+                                .get(hyper::header::CONTENT_TYPE)
+                                .unwrap()
+                                .to_str()
+                                .unwrap(),
+                            "application/octet-stream",
+                            "generic streaming response must preserve its media type"
+                        );
                         assert_eq!(
                             response
                                 .headers()
