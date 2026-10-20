@@ -510,11 +510,11 @@ Safe-method retries are implemented. A compiled-Zirk E2E also verifies
 that canceling an active cooperative HTTP/1.1 handler does not send a late
 response and releases the accepted listener on macOS aarch64 and Linux ARM64.
 Generic response-producer slow-consumer stress beyond the existing bounded-demand
-and live SSE cases, concurrent admission across separate server connections,
-and debugger/snapshot/test-report secret sinks remain follow-up work. Handler
+concurrent admission across separate server connections and
+debugger/snapshot/test-report secret sinks remain follow-up work. Handler
 cancellation is cooperative by design: CPU-only code is not preempted. The full
 native target matrix is now green on macOS ARM64, Linux x86_64, Linux ARM64, and
-Windows x86_64 (run 39350666346). SSE slow-consumer transport tests cover identity and gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and Linux ARM64; configurable server heartbeats and automatic client reconnect are implemented. A demand-driven SSE client is also
+Windows x86_64 (run 39359107965). Generic response-producer backpressure tests cover HTTP/1.1 and TLS/HTTP/2 on Unix and TLS/HTTP/2 on Windows; SSE slow-consumer transport tests cover identity and gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and Linux ARM64. Configurable server heartbeats and automatic client reconnect are implemented. A demand-driven SSE client is also
 available and validated through compiled Zirk code; its parser retains bounded
 state and closes the response on EOF, cancellation, or error. The feature status
 catalog and module handbook chapters track the verified subset and current gaps.
@@ -593,8 +593,8 @@ Zirk using only the stdlib.
 ## 2026-10-20 native standard-library verification
 
 The implemented `std.environment`, `std.net`, and `std.http` preview passed the
-full serial workspace test suite in GitHub Actions run [39350666346](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39350666346),
-at compiler revision `854906dcc219c150ec01950d50a844ce08ce67ac`, on macOS
+full serial workspace test suite in GitHub Actions run [39359107965](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39359107965),
+at compiler revision `b28daa73379a527159c9c303509632bd3ecf413a`, on macOS
 ARM64, Linux x86_64, Linux ARM64, and Windows x86_64. Each target passed
 155/155 compiled-Zirk CLI E2E tests; runtime and runtime-core suites also
 passed. This replaces the target-execution status in the dated 2026-10-18

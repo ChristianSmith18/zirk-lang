@@ -38,6 +38,7 @@ fn dispatch(args: &[String]) -> i32 {
         Some("format") => format(&args[1..]),
         #[cfg(not(target_arch = "wasm32"))]
         Some("permissions") => permissions(&args[1..]),
+        Some("uninstall") => uninstall(&args[1..]),
 
         #[cfg(feature = "backend")]
         Some("build") => compile(&args[1..], Action::Build),
@@ -332,6 +333,140 @@ fn permissions(args: &[String]) -> i32 {
     }
 }
 
+fn uninstall(args: &[String]) -> i32 {
+    if !args.is_empty() {
+        return fail(
+            codes::INVALID_USAGE,
+            "`zirk uninstall` does not accept arguments",
+            "uninstallation removes the current user's managed Zirk toolchain",
+            Some("run `zirk uninstall` without arguments"),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        fail(
+            codes::NOT_IMPLEMENTED,
+            "`zirk uninstall` is currently available only for macOS user installations",
+            "this release manages the macOS `~/.local` installation layout",
+            Some("remove this installation using its platform-specific package instructions"),
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        match uninstall_macos_user_installation() {
+            Ok(()) => 0,
+            Err(message) => {
+                eprintln!("ERROR: {message}");
+                1
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_macos_user_installation() -> Result<(), String> {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn is_zirk_version(path: &Path) -> bool {
+        let manifest = path.join("manifest.json");
+        let Ok(contents) = fs::read_to_string(manifest) else {
+            return false;
+        };
+        contents.contains("\"name\": \"Zirk\"")
+            && contents.contains("\"compiler\": \"bin/zirk\"")
+            && path.join("bin/zirk").is_file()
+    }
+
+    let home =
+        std::env::var_os("HOME").ok_or("HOME is not set; cannot locate the user installation")?;
+    let home = PathBuf::from(home);
+    let data_root = home.join(".local/share/zirk");
+    let versions_root = data_root.join("versions");
+    let current_link = data_root.join("current");
+    let command_link = home.join(".local/bin/zirk");
+    let expected_command_target = Path::new("../share/zirk/current/bin/zirk");
+
+    println!("[1/3] Checking the active per-user Zirk installation...");
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate the running compiler: {error}"))?
+        .canonicalize()
+        .map_err(|error| format!("could not resolve the running compiler path: {error}"))?;
+    let versions_root_canonical = versions_root.canonicalize().map_err(|_| {
+        "no managed Zirk installation was found under ~/.local/share/zirk/versions".to_string()
+    })?;
+    if !executable.starts_with(&versions_root_canonical) {
+        return Err(
+            "this compiler is not running from the managed ~/.local Zirk installation".into(),
+        );
+    }
+
+    let current_target = current_link
+        .canonicalize()
+        .map_err(|_| "the active Zirk version link is missing or invalid".to_string())?;
+    if !current_target.starts_with(&versions_root_canonical) || !is_zirk_version(&current_target) {
+        return Err("the active version link does not point to a managed Zirk installation".into());
+    }
+    if !fs::read_link(&command_link)
+        .map(|target| target == expected_command_target)
+        .unwrap_or(false)
+    {
+        return Err("~/.local/bin/zirk is not the managed Zirk command link; refusing to remove an unrelated command".into());
+    }
+
+    let versions = fs::read_dir(&versions_root)
+        .map_err(|error| format!("could not list installed Zirk versions: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && is_zirk_version(path))
+        .collect::<Vec<_>>();
+    if versions.is_empty() {
+        return Err("no managed Zirk version directories were found; nothing was removed".into());
+    }
+
+    println!("      Found {} managed version(s).", versions.len());
+    println!("[2/3] Removing the active command and version links...");
+    fs::remove_file(&command_link)
+        .map_err(|error| format!("could not remove ~/.local/bin/zirk: {error}"))?;
+    println!("      Removed ~/.local/bin/zirk");
+    fs::remove_file(&current_link)
+        .map_err(|error| format!("could not remove ~/.local/share/zirk/current: {error}"))?;
+    println!("      Removed ~/.local/share/zirk/current");
+
+    println!("[3/3] Removing managed compiler and runtime versions...");
+    for version in versions {
+        fs::remove_dir_all(&version)
+            .map_err(|error| format!("could not remove {}: {error}", version.display()))?;
+        println!("      Removed {}", version.display());
+    }
+    if fs::read_dir(&versions_root)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+    {
+        fs::remove_dir(&versions_root)
+            .map_err(|error| format!("could not remove the empty versions directory: {error}"))?;
+    }
+    let security_root = data_root.join("security");
+    if let Ok(metadata) = fs::symlink_metadata(&security_root) {
+        if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&security_root).map_err(|error| {
+                format!("could not remove the Zirk permission approvals: {error}")
+            })?;
+        } else {
+            fs::remove_file(&security_root).map_err(|error| {
+                format!("could not remove the Zirk permission approval link: {error}")
+            })?;
+        }
+        println!("      Removed ~/.local/share/zirk/security (approval key and grants)");
+    }
+
+    println!("Zirk has been uninstalled from this user's ~/.local directory.");
+    println!("Release files in the Zirk repository were left untouched.");
+    Ok(())
+}
+
 fn help() {
     println!("zirk {VERSION}");
     println!();
@@ -342,6 +477,7 @@ fn help() {
     println!("  format [--check] [--diff] <target>...  canonicalize Zirk source files");
     #[cfg(not(target_arch = "wasm32"))]
     println!("  permissions approve|revoke <project>  manage exact .zkinit runtime scopes");
+    println!("  uninstall          remove the managed per-user Zirk installation");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");

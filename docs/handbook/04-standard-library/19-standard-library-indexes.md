@@ -15,15 +15,16 @@ the module chapter and its normative specification own the contract.
 > `std.environment`, `std.net`, and `std.http` now have bundled, compiler-owned
 > source packages with bounded native previews. The implemented subset passes
 > full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and
-> Windows x86_64 (run 39350666346, compiler revision 854906d); broader target
+> Windows x86_64 (run 39359107965, compiler revision b28daa7); broader target
 > contracts remain in progress. The delivered networking subset includes permission-
 > checked DNS, TCP, authenticated TLS, HTTP/1.1, and bounded multiplexed
 > HTTP/2; UDP, local sockets, and interface inspection remain deferred. HTTP
 > supports bounded requests and response streaming, pooling, cookies, proxies,
 > retries, caching, multipart resources, middleware cancellation, and SSE.
-> Remaining gaps include externally triggered long-lived server shutdown,
-> generic response-producer slow-consumer stress, and debugger/test/structured-
-> output secret redaction. TLS verification is
+> Remaining gaps include externally triggered long-lived server shutdown and
+> debugger/test/structured-output secret redaction. Generic response-producer
+> backpressure is covered by HTTP/1.1 and HTTP/2 Unix fixtures and HTTP/2 on
+> Windows; the Windows HTTP/1.1 slow-consumer fixture remains Unix-gated. TLS verification is
 > intentionally tied to the URL host; custom verifiers and hostname overrides
 > are not exposed, and public client-certificate authentication remains
 > unavailable. Consult each module

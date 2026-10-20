@@ -8,9 +8,9 @@ DNS resolution, TCP streams and listeners, and authenticated TLS connections.
 HTTP is a separate protocol layer documented in
 [`std.http`](12-std-http.md).
 
-The implemented network preview passes full-workspace native CI on macOS
-ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39350666346,
-compiler revision 854906d). UDP, local sockets, interface enumeration, and
+The implemented networking scope passes full-workspace native CI on macOS
+ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965,
+compiler revision b28daa7). UDP, local sockets, interface enumeration, and
 other deferred target APIs remain unavailable.
 
 The module follows the standard-library I/O contract: operations return typed

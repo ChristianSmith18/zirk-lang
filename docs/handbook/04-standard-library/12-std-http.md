@@ -81,7 +81,7 @@ behavior belong in packages built on this module.
 > Each timeout is validated from 1 ms through one hour, and the origin pool is
 > bounded from 1 through 32 entries. The options object is accepted by direct,
 > custom-trust-root, proxy, and combined proxy/custom-root client factories.
-> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or the explicitly supplied DER roots. The public API intentionally exposes no custom verifier or hostname override; mutual TLS client credentials are not yet public. The implemented HTTP preview passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39350666346, compiler revision 854906d); broader protocol and lifecycle contracts remain staged.
+> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or the explicitly supplied DER roots. The public API intentionally exposes no custom verifier or hostname override; mutual TLS client credentials are not yet public. The implemented HTTP scope passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965, compiler revision b28daa7). Generic response-producer backpressure is tested for HTTP/1.1 and HTTP/2 on Unix and HTTP/2 on Windows; the Windows HTTP/1.1 slow-consumer fixture remains Unix-gated. Broader standard-library capabilities remain staged.
 > `HTTPServer.bind`
 > applies the exact listener grant, and `HTTPFormData.parse(request)` parses
 > bounded `application/x-www-form-urlencoded` bodies with repeated-value access.

@@ -21,11 +21,11 @@ native/interpreter parity coverage includes the documented overflow edges.
 
 Current high-impact delivery limits include:
 
-- `std.environment`, `std.net`, and `std.http` are bundled native previews,
-  not a completed standard-library release. The implemented environment,
-  network, and HTTP preview passes full-workspace native CI on macOS ARM64,
-  Linux x86_64, Linux ARM64, and Windows x86_64 (run 39350666346, compiler
-  revision 854906d). Environment reads use explicit permissions; the current
+- `std.environment`, `std.net`, and `std.http` are bundled native previews;
+  their scoped delivery is complete, while the standard library as a whole is
+  still in progress. The implemented environment, network, and HTTP scope
+  passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64,
+  and Windows x86_64 (run 39359107965, compiler revision b28daa7). Environment reads use explicit permissions; the current
   network preview covers DNS, TCP, authenticated TLS, HTTP/1.1, bounded HTTP/2,
   QUERY, and the documented streaming/client/server features listed in the
   feature-status catalog. UDP, local sockets, interface enumeration,
