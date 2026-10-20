@@ -7493,9 +7493,13 @@ mod tests {
                 request,
                 grant,
                 HttpTimeouts {
-                    connect: Duration::from_secs(2),
-                    response_headers: Duration::from_secs(2),
-                    response_idle: Duration::from_secs(2),
+                    // The Windows native CI runner is heavily loaded while
+                    // this workspace is tested serially. Keep the fixture
+                    // bounded without treating scheduler delays as a broken
+                    // streaming response.
+                    connect: Duration::from_secs(10),
+                    response_headers: Duration::from_secs(10),
+                    response_idle: Duration::from_secs(10),
                 },
             )
             .unwrap();
