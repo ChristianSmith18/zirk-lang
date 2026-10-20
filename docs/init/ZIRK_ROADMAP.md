@@ -509,9 +509,12 @@ permission lookup; the proxy and WebSocket APIs own their tunnel flows.
 Safe-method retries are implemented. A compiled-Zirk E2E also verifies
 that canceling an active cooperative HTTP/1.1 handler does not send a late
 response and releases the accepted listener on macOS aarch64 and Linux ARM64.
-Generic response-producer slow-consumer stress, long-lived HTTP/2 listener
-admission, additional secret sinks and debugger redaction, and the full native
-target matrix remain work for this phase. SSE slow-consumer transport tests now cover identity and gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and Linux ARM64; configurable server heartbeats and automatic client reconnect are implemented. A demand-driven SSE client is also
+Generic response-producer slow-consumer stress beyond the existing bounded-demand
+and live SSE cases, concurrent admission across separate server connections,
+and debugger/snapshot/test-report secret sinks remain follow-up work. Handler
+cancellation is cooperative by design: CPU-only code is not preempted. The full
+native target matrix is now green on macOS ARM64, Linux x86_64, Linux ARM64, and
+Windows x86_64 (run 39350666346). SSE slow-consumer transport tests cover identity and gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and Linux ARM64; configurable server heartbeats and automatic client reconnect are implemented. A demand-driven SSE client is also
 available and validated through compiled Zirk code; its parser retains bounded
 state and closes the response on EOF, cancellation, or error. The feature status
 catalog and module handbook chapters track the verified subset and current gaps.
