@@ -81,7 +81,7 @@ behavior belong in packages built on this module.
 > Each timeout is validated from 1 ms through one hour, and the origin pool is
 > bounded from 1 through 32 entries. The options object is accepted by direct,
 > custom-trust-root, proxy, and combined proxy/custom-root client factories.
-> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or the explicitly supplied DER roots. The public API intentionally exposes no custom verifier or hostname override; mutual TLS client credentials are not yet public. Broader cross-target lifecycle coverage remains open.
+> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or the explicitly supplied DER roots. The public API intentionally exposes no custom verifier or hostname override; mutual TLS client credentials are not yet public. The implemented HTTP preview passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39350666346, compiler revision 854906d); broader protocol and lifecycle contracts remain staged.
 > `HTTPServer.bind`
 > applies the exact listener grant, and `HTTPFormData.parse(request)` parses
 > bounded `application/x-www-form-urlencoded` bodies with repeated-value access.
@@ -1292,17 +1292,19 @@ native WebSocket client negotiates HTTP/2 over TLS, waits for
 `SETTINGS_ENABLE_CONNECT_PROTOCOL`, validates the response and selected
 subprotocol, and ties the connection driver to the socket lifecycle. Runtime
 loopback tests verify text/binary exchange, automatic Ping/Pong, close cleanup,
-and that a peer without the setting receives no extended CONNECT request on
-macOS aarch64 and Linux ARM64; Linux x86_64 is covered under Docker emulation.
+and that a peer without the setting receives no extended CONNECT request. The
+full-workspace native matrix on 2026-10-20 also passes on Windows x86_64 and
+Linux x86_64, in addition to macOS ARM64 and Linux ARM64.
 `connect_with_trust_roots(url, roots_der, allow_tls12)` and
 `connect_with_options_and_trust_roots(url, origin, subprotocols, roots_der,
 allow_tls12)` allow applications to supply bounded DER trust roots instead of
 platform roots. A compiled-Zirk macOS loopback E2E verifies TLS certificate
 validation with a caller-provided root, ALPN negotiation, RFC 8441 extended
-CONNECT, Origin and subprotocol negotiation, text exchange, and close on
-macOS aarch64 and Linux aarch64; Linux x86_64 Docker emulation also passes
-this focused E2E. Native Linux x86_64 and Windows execution, plus broader
-hostile HTTP/2 conformance, remain open.
+CONNECT, Origin and subprotocol negotiation, text exchange, and close. The
+implemented preview passes the native full-workspace matrix on all four
+supported targets. Extended hostile HTTP/2 combinations beyond the recorded
+fixtures, mutual TLS client authentication, and other explicitly staged
+protocol contracts remain outside the current preview.
 
 `close()` sends a normal close handshake. `close_with(code, reason)` validates
 the application-selected close code and UTF-8 reason, sends the close frame,

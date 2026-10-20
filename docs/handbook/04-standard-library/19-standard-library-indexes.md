@@ -13,31 +13,31 @@ the module chapter and its normative specification own the contract.
 > status catalog](../../init/ZIRK_FEATURE_STATUS.md) for the current matrix.
 >
 > `std.environment`, `std.net`, and `std.http` now have bundled, compiler-owned
-> source packages with verified native previews. Their full target contracts
-> are still in progress. The delivered networking subset includes permission-
+> source packages with bounded native previews. The implemented subset passes
+> full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and
+> Windows x86_64 (run 39350666346, compiler revision 854906d); broader target
+> contracts remain in progress. The delivered networking subset includes permission-
 > checked DNS, TCP, authenticated TLS, HTTP/1.1, and bounded multiplexed
 > HTTP/2; UDP, local sockets, and interface inspection remain deferred. HTTP
 > supports bounded requests and response streaming, pooling, cookies, proxies,
 > retries, caching, multipart resources, middleware cancellation, and SSE.
 > Remaining gaps include externally triggered long-lived server shutdown,
-> generic response-producer slow-consumer stress, full native-target execution,
-> and debugger/test/structured-output secret redaction. TLS verification is
+> generic response-producer slow-consumer stress, and debugger/test/structured-
+> output secret redaction. TLS verification is
 > intentionally tied to the URL host; custom verifiers and hostname overrides
 > are not exposed, and public client-certificate authentication remains
 > unavailable. Consult each module
 > chapter before relying on a preview API. Managed multipart uploads have
 > bounded reads and task-exit cleanup. Server response streaming is available
-> through `HTTPResponse.from_stream`. Runtime tests cover SSE slow-consumer
-> backpressure under identity/gzip over HTTP/1.1 and TLS/HTTP/2 on macOS and
-> Linux ARM64; disconnect and task-cancellation root cleanup each pass an
-> eight-cycle runtime stress test on both targets.
+> through `HTTPResponse.from_stream`. Native runtime tests cover SSE
+> slow-consumer backpressure under identity/gzip over HTTP/1.1 and TLS/HTTP/2,
+> disconnect cleanup, and task-cancellation root cleanup on the four CI targets.
 > Caching is opt-in through `HTTP.get_cached`/`HTTP.request_cached` and currently
 > covers bounded fresh GET/HEAD/QUERY responses with `Vary` and conditional
 > revalidation. The preview `HTTPClient` provides bounded HTTP/1.1 per-origin
 > connection reuse, an opt-in in-memory cookie jar, HTTPS pooling with
 > platform trust roots or caller-supplied DER roots, and opt-in bounded retries
-> for safe methods on transport/timeout failures. Remaining client gaps include
-> cross-target proxy-policy verification. TLS identity is always checked
+> for safe methods on transport/timeout failures. TLS identity is always checked
 > against the URL host using platform roots or explicitly supplied DER roots;
 > custom verifiers and hostname overrides are not exposed, and public
 > client-certificate authentication remains unavailable.
@@ -195,8 +195,8 @@ project-level authorization model.
 | thread join | **Specified, not implemented:** intended task-aware join contract | no Zirk thread API is currently available |
 | mutex/lock acquisition | **Specified, not implemented:** intended synchronization contract | no Zirk lock API is currently available |
 | parallel collection work | **Delivered:** managed worker pool | stops scheduling, joins started work, preserves input order where specified |
-| DNS/connect/TLS | **Delivered preview:** bounded DNS/TCP/TLS work suspends the owning task and closes task-owned resources on supported targets; full native target conformance remains open | cancellation and transport cleanup follow the APIs documented in `std.net` |
-| HTTP body/pool/server | **Delivered preview:** bounded HTTP/1.1 and TLS HTTP/2 requests, streamed bodies, shared clients, finite listener scopes and cancellation paths are implemented; full target/policy coverage remains open | per-request backpressure and task-owned cleanup are tested on macOS and Linux ARM64; see `std.http` for scope-specific guarantees |
+| DNS/connect/TLS | **Delivered preview:** bounded DNS/TCP/TLS work suspends the owning task and closes task-owned resources; the implemented native subset passes full-workspace CI on all four supported targets | cancellation and transport cleanup follow the APIs documented in `std.net` |
+| HTTP body/pool/server | **Delivered preview:** bounded HTTP/1.1 and TLS HTTP/2 requests, streamed bodies, shared clients, finite listener scopes and cancellation paths are implemented; the implemented native subset passes full-workspace CI on all four supported targets | per-request backpressure and task-owned cleanup; see `std.http` for scope-specific guarantees |
 | timers/sleep | **Delivered:** cooperative timer service | cancellation removes the timer waiter |
 | filesystem watcher/signals | specified module contracts; current task-aware delivery is unavailable | no general watcher/signal event flow is exposed |
 | test case/fixture | target runner contract | runner-scoped timeout and leak handling are not general guarantees yet |

@@ -25,7 +25,11 @@ secret values remain redacted.
 >
 > The native preview provides generic `Env.get<T>` through the static
 > `EnvironmentParsable<T>` contract. `Env.get_int32` and `Env.get_float64`
-> remain available as explicit convenience methods.
+> remain available as explicit convenience methods. The implemented
+> environment subset passes full-workspace native CI on macOS ARM64, Linux
+> x86_64, Linux ARM64, and Windows x86_64 (run 39350666346, compiler revision
+> 854906d); debugger, snapshot, test-report, and additional reveal sinks remain
+> staged.
 
 ## Import and basic access
 
