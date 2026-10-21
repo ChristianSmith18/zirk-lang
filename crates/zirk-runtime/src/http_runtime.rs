@@ -6708,6 +6708,33 @@ mod tests {
     use zirk_runtime_core::http_values::{HttpMethod, HttpStatusCode, Url};
 
     #[test]
+    fn http3_proxy_policy_falls_back_only_in_auto_and_rejects_forced_http3() {
+        let proxy = HttpProxy::parse("http://127.0.0.1:8080").unwrap();
+        let auto = HttpClientPool::new_shared_with_protocol(
+            1,
+            HttpTimeouts::default(),
+            HttpProtocolPreference::Auto,
+            None,
+            Some(proxy.clone()),
+        )
+        .unwrap();
+        assert_eq!(auto.protocol, HttpProtocolPreference::Auto);
+        assert_eq!(auto.proxy, Some(proxy.clone()));
+
+        #[cfg(feature = "http3")]
+        assert!(matches!(
+            HttpClientPool::new_shared_with_protocol(
+                1,
+                HttpTimeouts::default(),
+                HttpProtocolPreference::Http3,
+                None,
+                Some(proxy),
+            ),
+            Err(HttpRuntimeError::Protocol)
+        ));
+    }
+
+    #[test]
     fn reusable_client_cookie_store_is_opt_in_and_can_be_cleared() {
         let outcome = Executor::new().run_with_root(|| {
             let timeouts = HttpTimeouts {

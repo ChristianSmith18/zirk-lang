@@ -111,7 +111,34 @@ covers their lifecycles.
 
 Configure independent maximums for accepted connections, concurrent QUIC handshakes, concurrent requests, handler tasks, per-connection streams, and queued response bytes. Admission uses bounded waiting or an explicit rejection result. The HTTP/3 listener cancels pending handshakes as soon as its request limit is reached. Each request owns its task and transport resources; a disconnect cancels only that request's work. Owner shutdown stops admission, drains for a configured grace period, requests cooperative cancellation, and closes TCP/TLS/UDP/QUIC resources exactly once. Preserve the fixed 128 KiB stack and keep protocol state on bounded heap allocations managed by the host runtime.
 
+Expose shutdown through a shareable `HTTPServerControl` with an idempotent
+`request_shutdown()` signal. A server consumes that signal while waiting on its
+listener, so shutdown wakes pending TCP/TLS accepts and QUIC handshakes without
+requiring callers to share a transport listener or cancel the serving task.
+An `HTTPServerOptions` value carries validated, independent bounds for
+connections, concurrent handshakes, requests, handler tasks, streams per
+connection, queued response bytes, and the cooperative drain deadline. The
+same options contract applies to TCP, TLS, and HTTP/3; protocol-specific
+capabilities remain explicit. A repeated shutdown request succeeds without
+duplicating work. Once shutdown is requested, the server stops admission,
+drains admitted work until the deadline, requests cooperative cancellation of
+remaining handlers, and closes transport resources. CPU-only handlers can
+finish after the deadline until they reach a cancellation safe point.
+
 **Why:** Raising the global stack is unnecessary and would multiply per-task memory; protocol state belongs in explicitly limited connection/stream buffers.
+
+On 2026-10-21, macOS ARM64 verification passed for cross-task TCP shutdown
+through the bundled Zirk API, idempotent control requests, option validation,
+TCP/TLS accept wakeup and listener release, and the public HTTP/3 binding. The
+HTTP/3 runtime suite passed 15 tests, including untrusted-peer rejection and a
+cooperative handler that observes cancellation after the configured drain
+deadline. `cargo check` with the HTTP/3 feature passed for the runtime, IR, LLVM
+backend, semantic analyzer, and CLI. The pinned
+`scripts/test-http3-websocket-public-api.py` suite also passed against
+independent `aioquic` 1.7.0 peers on macOS ARM64, covering HTTP/3 GET/QUERY,
+RFC 9220 WebSocket messages and close, Origin rejection, and Auto fallback.
+These are local macOS results; they do not replace the remaining cross-target
+requirements below.
 
 ### 7. Make secondary HTTP features opt-in and memory bounded
 
@@ -210,7 +237,7 @@ connect or listen access.
 | macOS ARM64 | Fresh `cargo test -q -p zirk-runtime --features http3 --lib -- --test-threads=1`; focused compiled-Zirk UDP, local IPC, and interface E2E filters; focused HTTP/3 adapter filter | Full runtime suite: 528 passed, 3 ignored; HTTP/3 adapter suite: 10 passed; UDP E2E: 2 passed; local IPC E2E: 2 passed; interface E2E: 2 passed |
 | Linux ARM64 | Fresh `cargo test -q -p zirk-runtime --features http3 --lib -- --test-threads=1` in the native ARM64 Docker image | Full runtime suite: 528 passed, 3 ignored; this includes UDP, local IPC, interface, TLS, and HTTP/3 adapter coverage |
 | Linux x86_64 | Fresh CI networking filters in `rust:1.94.1-bookworm` with `--platform=linux/amd64` | UDP: 6; local IPC: 5; interfaces: 2; TLS: 9; HTTP/3 adapter: 10; network policy: 14 passed. Full runtime suite and independent-peer script still require native x86_64 CI: the full-suite attempt under Docker Desktop terminated in Rosetta with `mmap_anonymous_rw_guard_page mprotect failed` |
-| Windows x86_64 | Fresh `cargo xwin check -p zirk-runtime --tests --features http3 --target x86_64-pc-windows-msvc` | Runtime, Windows named-pipe test code, and current HTTP/3 adapter/test code compile; named-pipe and HTTP/3 runtime tests still require a Windows runner |
+| Windows x86_64 | CI run 39558023426, step `Networking and HTTP/3 runtime conformance` | Native UDP, local IPC, interface, TLS, HTTP/3 adapter, and network-policy test commands passed; full workspace tests and independent-peer interoperability remain in progress |
 | Browser/WASM | `cargo check -p zirk-browser --target wasm32-unknown-unknown`; `cargo test -p zirk-interpreter`; `cargo test -p zirk-browser`; `scripts/test-browser-http-fetch.sh` | WASM package compiled; 65 interpreter tests and 41 browser tests passed, 1 browser test is ignored. The suspension test confirms output and trace sequence continue in the same interpreter; the WASM/Node Fetch adapter passed method/body/header forwarding, JSON POST and QUERY validation, default-deny and origin checks, request/response limits, CORS error mapping, and cancellation. Browser preflight tests cover every new UDP and local IPC instruction plus interface, DNS, TLS, TCP, and HTTP request/listener host boundaries with capability-specific diagnostics. |
 
 Fresh verification on 2026-10-21 reconfirmed the focused transport suites on
@@ -256,6 +283,15 @@ response vectors are capped at 128 MiB per listener, in addition to Quinn's
 transport windows. These loopback peers use the same Quinn/Hyperium stack, so
 the suite remains adapter runtime evidence rather than independent
 interoperability evidence.
+
+The macOS ARM64 regression test
+`http3_server_rejects_untrusted_peer_and_keeps_serving_valid_peer` confirms a
+client with an untrusted root is rejected during the QUIC TLS handshake and
+does not prevent a subsequent trusted peer from completing a request.
+`external_shutdown_cancels_http3_handler_after_cooperative_drain_deadline`
+confirms the listener requests cancellation of active handler tasks at the
+configured drain deadline and waits for cooperative completion before it
+returns. Both tests run against the same in-process Quinn/H3 stack.
 The client pool now retains one HTTP/3 session per normalized origin, bounded
 by its configured origin limit. It clones the HTTP/3 sender per request so
 concurrent tasks can use independent streams, and retires sessions on
@@ -452,28 +488,37 @@ check identified RUSTSEC-2026-0382 in locked `rustls-webpki` 0.103.15; the
 lockfile now selects fixed version 0.103.16. `cargo deny check licenses` and
 `cargo deny check advisories` both pass against the updated workspace lockfile.
 The current HTTP/3 adapter suite has ten tests and passes on macOS ARM64,
-Linux x86_64, and Linux ARM64; the full runtime suite passes on macOS ARM64 and
-Linux ARM64. The Windows runtime and test code compile with `cargo-xwin`, but
-native Windows execution remains pending. HTTP/3 client/server and RFC 9220
+Linux x86_64, and Linux ARM64. The native CI run 39558023426 has now also
+passed the focused UDP, local IPC, interface, TLS, HTTP/3 adapter, and
+network-policy conformance commands on Windows x86_64. The complete Windows
+workspace tests and independent-peer run remain in progress. HTTP/3 client/server and RFC 9220
 WebSocket APIs are implemented; independent-peer interoperability currently
-has fresh macOS ARM64 evidence, with other native targets pending CI. Automatic
-protocol selection and safe fallback remain unimplemented. Release
-archive size has been measured on macOS ARM64; final executable and other
-target sizes remain pending. The experimental upstream status is an explicit
-maintenance risk; the `http3` feature stays opt-in until the remaining gates
-pass.
+has fresh macOS ARM64 evidence, with other native targets pending CI. In
+`Auto` mode, HTTPS requests attempt HTTP/3 before application bytes are sent;
+transport, protocol, or timeout failures during QUIC connection establishment
+temporarily mark HTTP/3 unavailable for that origin and continue through the
+HTTP/2/HTTP/1.1 path. Once an HTTP/3 request may have been committed, its
+failure is returned and the request is not replayed. This implements the
+configured preference and safe establishment fallback; cross-target
+independent-peer interoperability outside macOS ARM64 remains pending until the
+current four-target workflow finishes. Release archive and representative
+executable sizes have been measured on macOS ARM64; target-specific sizes on
+other platforms remain unmeasured. The experimental upstream status is an
+explicit maintenance risk; the `http3` feature stays opt-in until the remaining
+gates pass.
 
 ### Release archive size measurement (macOS ARM64)
 
-On 2026-10-21, fresh `cargo build -p zirk-runtime --release` and
-`cargo build -p zirk-runtime --release --features http3` runs produced
-66,437,024-byte and 74,507,712-byte `libzirk_runtime.a` archives respectively.
-The opt-in QUIC/H3 stack adds 8,070,688 bytes (7.70 MiB, 12.15%) before final
-executable dead-code elimination. The same-day representative executable
-measurement is recorded in `docs/development/HTTP3_DEPENDENCY_REVIEW.md`.
-Archive size is not a measurement of the installed compiler or a linked Zirk
-program. Repeat per release target before deciding whether HTTP/3 should be
-enabled by default.
+On 2026-10-21, `scripts/measure-http3-binary-size.sh` built paired release
+artifacts on macOS ARM64 with HTTP/3 disabled and enabled. The runtime archive
+grew from 66,574,080 to 74,736,968 bytes (+8,162,888 bytes, 7.78 MiB, 12.3%);
+the `rlib` grew from 17,386,416 to 21,048,488 bytes (+3,662,072 bytes,
+3.49 MiB, 21.1%). A representative compiled Zirk application grew from
+6,592,104 to 7,781,288 bytes (+1,189,184 bytes, 1.13 MiB, 18.0%). The fixture
+and exact platform-specific measurements are recorded in
+`docs/development/HTTP3_DEPENDENCY_REVIEW.md`. These figures are not a measure
+of the installed compiler or a linked application on another release target;
+repeat target-specific size measurements before enabling HTTP/3 by default.
 
 ## Interface Enumeration Dependency Review (In Progress)
 
@@ -484,3 +529,82 @@ license. The crate metadata does not declare an MSRV and [docs.rs reports a
 failed documentation build](https://docs.rs/crate/if-addrs/0.15.0). Current macOS and Linux ARM64/x86_64 builds pass; the
 Windows target build and release-size impact remain unverified. Do not treat
 this dependency review as complete until those checks are recorded.
+
+## Fresh Verification on 2026-10-21
+
+On the current implementation commit, `cargo test -p zirk-sema` passed 688
+tests. Focused compiled-Zirk end-to-end tests passed for UDP (2), route
+validation and matching (2), and interface inspection including denial (2) on
+macOS ARM64. `cargo test -q -p zirk-runtime --features http3 --lib -- network_ --test-threads=1`
+passed 46 focused runtime tests. After installing the pinned test-only peer
+requirements into an isolated temporary Python environment,
+`scripts/test-http3-websocket-public-api.py` passed HTTP/3 client/server
+interoperability, RFC 9220 WebSocket echo and close in both directions, Origin
+rejection, and Auto fallback with independent `aioquic` peers. These are local
+macOS results, not evidence for other targets. CI run 39558023426 has passed
+the networking and HTTP/3 runtime-conformance step on all four native targets.
+The focused UDP conformance gate (task 1.2.4) and the reviewed dependency,
+license, target-build, and size gate (task 2.1) are complete. Full workspace
+tests and the CI independent-peer interoperability step are still in progress;
+the workflow run for the latest compiler commit is queued.
+
+On 2026-10-21, the browser/interpreter package gate was rerun after adding
+explicit preflight exclusions and capability diagnostics for the new shared
+HTTP server-control instructions. `cargo test -p zirk-interpreter -p
+zirk-browser -- --test-threads=1` passed (65 interpreter tests, 38 browser
+unit tests, 3 browser corpus tests; one browser test remains ignored), and
+`cargo check -p zirk-browser --target wasm32-unknown-unknown` passed. The two
+server-control instructions are now covered both as excluded executable IR
+and as official host-binding diagnostics. `cargo test -p zirk-sema` passed
+(688 tests). The compiled-Zirk HTTP server-control/options E2E passed. The
+legacy HTTP/3 official-binding E2E also passed after rebuilding the default
+runtime static archive; its initial `InvalidUrl` result came from a stale
+HTTP/3-enabled archive being linked into a default-feature compiler test and
+was not a source behavior failure. This completes package provenance,
+standard-import, and browser/native diagnostic verification (task 4.3).
+
+The latest completed CI run before this working-tree fix (run 39558631485,
+commit `f040b01`) passed macOS, both Linux targets, and Browser/WASM, but its
+Windows CLI unit suite failed in two standard-source packaging tests. Windows
+path components used backslashes while the package switch expects `/`; the
+loader now normalizes separators before matching, and both tests pass locally
+on macOS. A new Windows run is required to verify the fix and to close the
+current-revision matrix.
+
+The compiler/runtime host-boundary note now contains a family-by-family audit
+covering all 116 compiler-owned environment, network, and HTTP symbols. It
+records operation role, bounds, grant checks, suspension/cancellation, and
+owner/lifecycle behavior, and identifies the remaining pure helpers as bounded
+URL/router/form/multipart protocol parsers rather than OS authority. Portable
+request construction, form serialization, route conflict policy, multipart
+encoding, and header encoding remain in bundled Zirk. Focused current-tree
+review gates passed: `cargo test -p zirk-runtime --lib
+network_api::tests` (9), `cargo test -p zirk-runtime --lib
+environment::tests` (9), `cargo test -p zirk-runtime --features http3 --lib
+http_api::tests` (13), and the complete `cargo test -p zirk-cli --
+--test-threads=1` package suite (265 passed, 3 ignored). This closes task
+1.0.1; it does not imply that every implementation is written in Zirk source.
+
+The HTTP/3 client now sets the Hyperium `h3` decoder's field-section ceiling
+to the same bounded HTTP header limit used by HTTP/1.1, HTTP/2, and the Zirk
+server. A pinned independent `aioquic` peer sent 17 individually bounded
+4,000-byte response fields (over the aggregate limit); the compiled Zirk
+client rejected the response with typed `Protocol` instead of accepting an
+oversized field section. The same peer run still passed GET, QUERY, RFC 9220
+WebSocket exchange, Origin rejection, and Auto HTTP/1.1 fallback. The
+HTTP/3 client also reauthorizes the exact origin and current remote address
+before and after every QUIC send/receive boundary; a focused regression test
+allows the originally approved address while rejecting changed address and
+port values before data release. TLS 1.3/`h3` ALPN and disabled 0-RTT are
+covered by `http3_tls_forces_h3_alpn_and_disables_early_data`.
+
+Proxy policy is explicit: `Auto` uses the configured HTTP proxy over HTTP/2 or
+HTTP/1.1 and does not attempt direct QUIC; a forced HTTP/3 client with an
+ordinary HTTP(S) forward proxy returns typed `Protocol` because this runtime
+does not implement MASQUE/CONNECT-UDP. A focused runtime test verifies both
+branches. HTTP/3 WebSocket methods are likewise forced-version operations: an
+independent peer that rejects the RFC 9220 bootstrap returns typed `Protocol`
+with no transparent replay over another version. Callers can explicitly use
+the existing HTTP/1.1 or HTTP/2 WebSocket entry points when they choose those
+protocols. This closes adapter, client-parity-policy, and RFC 9220 behavior
+tasks 2.2, 2.4, and 2.7 on macOS ARM64; cross-target coverage remains task 2.8.

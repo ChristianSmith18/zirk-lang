@@ -592,15 +592,18 @@ Zirk using only the stdlib.
 
 ## 2026-10-20 native standard-library verification
 
-The implemented `std.environment`, `std.net`, and `std.http` preview passed the
+The baseline `std.environment`, `std.net`, and `std.http` preview passed the
 full serial workspace test suite in GitHub Actions run [39359107965](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39359107965),
 at compiler revision `b28daa73379a527159c9c303509632bd3ecf413a`, on macOS
 ARM64, Linux x86_64, Linux ARM64, and Windows x86_64. Each target passed
 155/155 compiled-Zirk CLI E2E tests; runtime and runtime-core suites also
-passed. This replaces the target-execution status in the dated 2026-10-18
-notes above. The wider Phase 7 library remains incomplete; UDP, local sockets,
-interface enumeration, HTTP/3/QUIC, and browser networking remain deferred or
-excluded.
+passed. The active `complete-stdlib-networking-and-http` change implements
+bounded UDP and local IPC, interface snapshots, extended TLS, optional HTTP/3
+client/server and RFC 9220 WebSocket paths, and browser Fetch injection. Its
+current working-tree lifecycle changes are verified locally on macOS ARM64,
+but still need the complete native CI matrix and cross-target independent-peer
+evidence. Browser sockets and listeners remain excluded. The wider Phase 7
+standard-library surface remains incomplete.
 
 ## Phase 7b — Functional style and generators
 

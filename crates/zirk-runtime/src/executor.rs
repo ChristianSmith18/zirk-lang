@@ -870,6 +870,7 @@ impl Executor {
         crate::http_api::close_task_streams(task);
         crate::http_api::close_task_uploads(task);
         crate::http_api::close_task_server_producers(task);
+        crate::http_api::close_task_server_controls(task);
         self.service_task_completed(task, state, &outcome);
         let was_nonterminal = self
             .registry
@@ -2445,6 +2446,17 @@ pub(crate) fn task_cancel_requested(task: TaskId) -> bool {
         exec.registry
             .get(task)
             .is_some_and(|tcb| tcb.cancel_requested)
+    })
+}
+
+/// Whether a task has completed and can be joined without suspending. This is
+/// used by bounded server drains to request cooperative cancellation when the
+/// grace period expires, while still waiting for the task's cleanup points.
+pub(crate) fn task_is_terminal(task: TaskId) -> bool {
+    with_exec(|exec| {
+        exec.registry
+            .get(task)
+            .is_none_or(|tcb| tcb.state.is_terminal())
     })
 }
 

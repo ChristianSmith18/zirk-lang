@@ -194,6 +194,12 @@ share class TCPListener implements Resource<TCPResourceError> {
         return TCPListener.accept_native(this.handle);
     }
 
+    // Used by the HTTP server adapter to race listener readiness with its
+    // shared shutdown signal without blocking a scheduler thread.
+    accept_until_shutdown(control_handle: UInt64): Result<TCPStream, TCPError> {
+        return TCPListener.accept_until_shutdown_native(this.handle, control_handle);
+    }
+
     close(): Result<Void, TCPResourceError> {
         return match TCPListener.close_listener_native(this.handle) {
             Ok(_) => TCPListener.close_ok();
@@ -210,6 +216,13 @@ share class TCPListener implements Resource<TCPResourceError> {
     }
 
     private static accept_native(handle: UInt64): Result<TCPStream, TCPError> {
+        return Error(TCPError.Closed);
+    }
+
+    private static accept_until_shutdown_native(
+        handle: UInt64,
+        control_handle: UInt64,
+    ): Result<TCPStream, TCPError> {
         return Error(TCPError.Closed);
     }
 

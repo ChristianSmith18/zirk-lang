@@ -138,6 +138,16 @@ behavior belong in packages built on this module.
 > other methods. Both server entry points require the program's explicit listen
 > permission. Handler cancellation is cooperative at task safe points; CPU-only
 > code is not preempted.
+> For controlled shutdown, create `HTTPServerControl` and a validated
+> `HTTPServerOptions` value, then use `HTTPServer.serve_until_shutdown` or
+> `serve_tls_until_shutdown`. `HTTPRouter` provides matching TCP, TLS, and
+> `serve_http3` wrappers. The control is shareable across structured tasks;
+> repeated `request_shutdown()` calls are idempotent. It wakes a pending TCP/TLS
+> accept and stops HTTP/3 admission, which drains active handler tasks up to
+> `drain_timeout_ms` before cooperative cancellation. The listener remains
+> owned by the task that creates and serves it, so bind inside that task rather
+> than trying to transfer a listener between tasks. The task stack remains
+> fixed at 128 KiB.
 > Canceling the owning `Job` while `serve_many` is waiting in `accept()` stops
 > admission and releases the listener when the task exits. A compiled-Zirk
 > HTTP/1.1 E2Es cancel a job while a route handler is suspended in
@@ -1384,9 +1394,11 @@ and opt-in bounded HTTP/3 listeners.
 accepted HTTP/2 TLS connection and gracefully shuts it down after the final
 response. Handlers run in separate Zirk tasks on the same executor, up to the
 eight-stream admission limit; a compiled-Zirk loopback test verifies two
-handlers overlap on macOS aarch64 and Linux ARM64. Long-lived listener
-admission, complete client interoperability, flow-control/reset conformance, and hostile pseudo-field
-coverage remain pending.
+handlers overlap on macOS aarch64 and Linux ARM64. Controlled long-lived
+listener admission is available through `HTTPServerControl`; the compatibility
+`serve_http3` entry point remains finite and stops after its configured request
+bound. Complete client interoperability, flow-control/reset conformance, and
+hostile pseudo-field coverage remain pending.
 
 HTTP/3 client and listener APIs are available only when the native runtime is
 built with the optional `http3` feature. An `HTTPClient` retains at most one
@@ -1395,17 +1407,27 @@ concurrent requests. Focused loopback tests verify concurrent streams share
 one connection and sequential requests reuse the same pool connection.
 Automatic HTTP/3 negotiation and pre-response fallback are implemented for
 direct HTTPS, and the independent-peer fixture covers automatic fallback to
-HTTP/1.1. Explicit HTTP/3 methods do not fall back. Externally requested
-graceful listener shutdown and per-stream disconnect cancellation remain
-limited by the current synchronous handler contract. Cross-target independent-
-peer interoperability and Windows runtime results are tracked separately in
-the feature-status catalog. The finite HTTP/3 listener
+HTTP/1.1. Explicit HTTP/3 methods do not fall back. `HTTPServerControl`
+supports externally requested listener shutdown; the server drains active
+handlers up to its configured deadline, then requests cooperative task
+cancellation. A CPU-only handler can exceed that deadline until it reaches a
+cancellation safe point. Per-stream disconnect cancellation remains limited
+by the current synchronous handler contract. Cross-target independent-peer
+interoperability and Windows runtime results are tracked separately in the
+feature-status catalog. The finite HTTP/3 listener
 admits connections concurrently with at most 16 QUIC handshakes in flight. It
 dispatches at most four active request streams across the listener to separate
 Zirk handler tasks on the owning executor and cancels pending handshakes when
 the configured request limit is reached. At the existing 16 MiB per-body
 limit, buffered request and response vectors are capped at 128 MiB per
 listener, in addition to Quinn's transport windows.
+
+HTTP/3 client sessions currently connect directly to the approved origin. In
+`Auto` mode, configuring an ordinary HTTP(S) forward proxy bypasses QUIC and
+uses the proxy through HTTP/2 or HTTP/1.1. Forcing `HTTP3` with that proxy
+returns `HTTPError.Protocol`; MASQUE and CONNECT-UDP proxying are not
+implemented. The independent-peer test also verifies that an oversized HTTP/3
+response field section is rejected with a typed protocol error.
 
 ## Browser execution
 

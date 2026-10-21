@@ -260,6 +260,7 @@ pub mod symbols {
         "zirk_network_tls_listen_with_client_auth";
     pub const NETWORK_TLS_LISTEN_HTTP: &str = "zirk_network_tls_listen_http";
     pub const NETWORK_TLS_ACCEPT: &str = "zirk_network_tls_accept";
+    pub const NETWORK_TLS_ACCEPT_UNTIL_SHUTDOWN: &str = "zirk_network_tls_accept_until_shutdown";
     pub const NETWORK_TLS_CLOSE_LISTENER: &str = "zirk_network_tls_close_listener";
     pub const NETWORK_TLS_LISTENER_IS_CLOSED: &str = "zirk_network_tls_listener_is_closed";
     pub const NETWORK_TLS_PEER_ADDRESS: &str = "zirk_network_tls_peer_address";
@@ -280,6 +281,7 @@ pub mod symbols {
     pub const NETWORK_TCP_PEER_ADDRESS: &str = "zirk_network_tcp_peer_address";
     pub const NETWORK_TCP_LISTEN: &str = "zirk_network_tcp_listen";
     pub const NETWORK_TCP_ACCEPT: &str = "zirk_network_tcp_accept";
+    pub const NETWORK_TCP_ACCEPT_UNTIL_SHUTDOWN: &str = "zirk_network_tcp_accept_until_shutdown";
     pub const NETWORK_TCP_CLOSE_LISTENER: &str = "zirk_network_tcp_close_listener";
     pub const NETWORK_TCP_LISTENER_IS_CLOSED: &str = "zirk_network_tcp_listener_is_closed";
     pub const HTTP_GET: &str = "zirk_http_get";
@@ -332,9 +334,11 @@ pub mod symbols {
     pub const HTTP_MULTIPART_PARSE: &str = "zirk_http_multipart_parse";
     pub const HTTP_UPLOAD_READ: &str = "zirk_http_upload_read";
     pub const HTTP_UPLOAD_CLOSE: &str = "zirk_http_upload_close";
-    pub const HTTP_MULTIPART_ENCODE: &str = "zirk_http_multipart_encode";
     pub const HTTP_SERVER_SERVE_ONCE: &str = "zirk_http_server_serve_once";
     pub const HTTP_SERVER_SERVE_HTTP3: &str = "zirk_http_server_serve_http3";
+    pub const HTTP_SERVER_CONTROL_CREATE: &str = "zirk_http_server_control_create";
+    pub const HTTP_SERVER_CONTROL_REQUEST_SHUTDOWN: &str =
+        "zirk_http_server_control_request_shutdown";
     pub const HTTP_SERVER_WEBSOCKET_SERVE_ONCE: &str = "zirk_http_server_websocket_serve_once";
     pub const HTTP_SERVER_WEBSOCKET_SERVE_HTTP3_ONCE: &str =
         "zirk_http_server_websocket_serve_http3_once";
@@ -709,6 +713,7 @@ pub struct Runtime<'ctx> {
     pub network_tls_listen_with_client_auth: FunctionValue<'ctx>,
     pub network_tls_listen_http: FunctionValue<'ctx>,
     pub network_tls_accept: FunctionValue<'ctx>,
+    pub network_tls_accept_until_shutdown: FunctionValue<'ctx>,
     pub network_tls_close_listener: FunctionValue<'ctx>,
     pub network_tls_listener_is_closed: FunctionValue<'ctx>,
     pub network_tls_peer_address: FunctionValue<'ctx>,
@@ -728,6 +733,7 @@ pub struct Runtime<'ctx> {
     pub network_tcp_peer_address: FunctionValue<'ctx>,
     pub network_tcp_listen: FunctionValue<'ctx>,
     pub network_tcp_accept: FunctionValue<'ctx>,
+    pub network_tcp_accept_until_shutdown: FunctionValue<'ctx>,
     pub network_tcp_close_listener: FunctionValue<'ctx>,
     pub network_tcp_listener_is_closed: FunctionValue<'ctx>,
     pub http_get: FunctionValue<'ctx>,
@@ -776,9 +782,10 @@ pub struct Runtime<'ctx> {
     pub http_multipart_parse: FunctionValue<'ctx>,
     pub http_upload_read: FunctionValue<'ctx>,
     pub http_upload_close: FunctionValue<'ctx>,
-    pub http_multipart_encode: FunctionValue<'ctx>,
     pub http_server_serve_once: FunctionValue<'ctx>,
     pub http_server_serve_http3: FunctionValue<'ctx>,
+    pub http_server_control_create: FunctionValue<'ctx>,
+    pub http_server_control_request_shutdown: FunctionValue<'ctx>,
     pub http_server_websocket_serve_once: FunctionValue<'ctx>,
     pub http_server_websocket_serve_http3_once: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
@@ -1204,6 +1211,10 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         symbols::CHAN_NEW,
         ptr.fn_type(
             &[
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
                 i64.into(),
                 i64.into(),
                 i64.into(),
@@ -1711,6 +1722,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[i64.into(), ptr.into()], false),
         external,
     );
+    let network_tls_accept_until_shutdown = module.add_function(
+        symbols::NETWORK_TLS_ACCEPT_UNTIL_SHUTDOWN,
+        void.fn_type(&[i64.into(), i64.into(), ptr.into()], false),
+        external,
+    );
     let network_tls_close_listener = module.add_function(
         symbols::NETWORK_TLS_CLOSE_LISTENER,
         void.fn_type(&[i64.into(), ptr.into()], false),
@@ -1804,6 +1820,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let network_tcp_accept = module.add_function(
         symbols::NETWORK_TCP_ACCEPT,
         void.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let network_tcp_accept_until_shutdown = module.add_function(
+        symbols::NETWORK_TCP_ACCEPT_UNTIL_SHUTDOWN,
+        void.fn_type(&[i64.into(), i64.into(), ptr.into()], false),
         external,
     );
     let network_tcp_close_listener = module.add_function(
@@ -2205,9 +2226,14 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             .fn_type(&[context.i64_type().into()], false),
         external,
     );
-    let http_multipart_encode = module.add_function(
-        symbols::HTTP_MULTIPART_ENCODE,
-        void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+    let http_server_control_create = module.add_function(
+        symbols::HTTP_SERVER_CONTROL_CREATE,
+        i64.fn_type(&[], false),
+        external,
+    );
+    let http_server_control_request_shutdown = module.add_function(
+        symbols::HTTP_SERVER_CONTROL_REQUEST_SHUTDOWN,
+        i32.fn_type(&[i64.into()], false),
         external,
     );
     let http_server_serve_once = module.add_function(
@@ -2233,6 +2259,12 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
                 ptr.into(),
                 ptr.into(),
                 ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
                 i64.into(),
                 i64.into(),
                 ptr.into(),
@@ -3039,6 +3071,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         network_tls_listen_with_client_auth,
         network_tls_listen_http,
         network_tls_accept,
+        network_tls_accept_until_shutdown,
         network_tls_close_listener,
         network_tls_listener_is_closed,
         network_tls_peer_address,
@@ -3058,6 +3091,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         network_tcp_peer_address,
         network_tcp_listen,
         network_tcp_accept,
+        network_tcp_accept_until_shutdown,
         network_tcp_close_listener,
         network_tcp_listener_is_closed,
         http_get,
@@ -3106,9 +3140,10 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         http_multipart_parse,
         http_upload_read,
         http_upload_close,
-        http_multipart_encode,
         http_server_serve_once,
         http_server_serve_http3,
+        http_server_control_create,
+        http_server_control_request_shutdown,
         http_server_websocket_serve_once,
         http_server_websocket_serve_http3_once,
         alloc,

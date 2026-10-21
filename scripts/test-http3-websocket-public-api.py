@@ -186,10 +186,47 @@ fn main(): Void {{
                             }}
                         }}
                     }}
+                    match URL.parse("{endpoint}/large-headers") {{
+                        Error(_) => stdout.println("large-header-url-error");
+                        Ok(url) => match client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{
+                            Error(error) => stdout.println("large-header-rejected:" + error.to_string());
+                            Ok(_) => stdout.println("large-header-accepted");
+                        }}
+                    }}
                     _ = client.close();
                     stdout.println("http-client-complete");
                 }}
             }}
+        }}
+    }}
+}}
+'''
+    (project / "src" / "main.zrk").write_text(source, encoding="utf-8")
+
+
+def make_unsupported_websocket_client(project: Path, port: int, root_certificate: bytes) -> None:
+    (project / "src").mkdir(parents=True)
+    endpoint = f"https://127.0.0.1:{port}"
+    (project / ".zkinit").write_text(
+        "project \"http3-unsupported-websocket-peer\"\n"
+        "kind application\nentry \"src/main.zrk\"\n"
+        "permissions {\nnetwork {\n"
+        f'connect: {{ origins: ["{endpoint}"]; during: runtime; }}\n'
+        "}\n}\n",
+        encoding="utf-8",
+    )
+    source = f'''import {{ HTTPWebSocket, URL }} from std.http;
+import {{ stdout }} from std.io;
+fn main(): Void {{
+    mut roots: Array<Array<Byte>> = [{byte_array(root_certificate)}];
+    mut protocols: List<String> = List();
+    match URL.parse("{endpoint}/unsupported") {{
+        Error(_) => stdout.println("url-error");
+        Ok(url) => match HTTPWebSocket.connect_http3_with_trust_roots(
+            url, "https://app.example", protocols, roots,
+        ) {{
+            Error(error) => stdout.println(error.to_string());
+            Ok(_) => stdout.println("unexpected-websocket-success");
         }}
     }}
 }}
@@ -382,6 +419,9 @@ class IndependentH3Server(QuicConnectionProtocol):
         elif method == b"GET" and path == b"/get":
             status = b"200"
             response_body = gzip.compress(b"aioquic-get")
+        elif method == b"GET" and path == b"/large-headers":
+            status = b"200"
+            response_body = b""
         else:
             status = b"405"
             response_body = b"method-not-allowed"
@@ -392,6 +432,11 @@ class IndependentH3Server(QuicConnectionProtocol):
         ]
         if method == b"GET" and path == b"/get":
             response_headers.append((b"content-encoding", b"gzip"))
+        if method == b"GET" and path == b"/large-headers":
+            response_headers.extend(
+                (f"x-oversized-{index}".encode(), b"x" * 4_000)
+                for index in range(17)
+            )
         self.http.send_headers(stream_id, response_headers)
         self.http.send_data(stream_id, response_body, True)
         self.transmit()
@@ -607,6 +652,8 @@ async def aioquic_server_with_zirk_client(
     websocket_env: dict[str, str],
     http_project: Path,
     http_env: dict[str, str],
+    unsupported_project: Path,
+    unsupported_env: dict[str, str],
     fallback_project: Path,
     fallback_home: Path,
     port: int,
@@ -655,6 +702,25 @@ async def aioquic_server_with_zirk_client(
                 "aioquic did not validate the RFC 9220 handshake, message, and close"
             )
 
+        unsupported_process = await asyncio.create_subprocess_exec(
+            str(zirk),
+            "run",
+            ".",
+            cwd=unsupported_project,
+            env=unsupported_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        unsupported_stdout, _ = await asyncio.wait_for(
+            unsupported_process.communicate(), timeout=60
+        )
+        unsupported_output = unsupported_stdout.decode(errors="replace")
+        if unsupported_process.returncode or "Protocol" not in unsupported_output:
+            raise RuntimeError(
+                "Zirk did not return a typed error for an unsupported HTTP/3 WebSocket peer:\n"
+                f"{unsupported_output}"
+            )
+
         http_process = await asyncio.create_subprocess_exec(
             str(zirk),
             "run",
@@ -672,6 +738,8 @@ async def aioquic_server_with_zirk_client(
             or http_output.count("protocol-http3") != 2
             or "aioquic-get" not in http_output
             or expected_query not in http_output
+            or "large-header-rejected:Protocol" not in http_output
+            or "large-header-accepted" in http_output
             or "200" not in http_output
         ):
             raise RuntimeError(f"Zirk HTTP/3 GET/QUERY exchange failed:\n{http_output}")
@@ -681,7 +749,11 @@ async def aioquic_server_with_zirk_client(
         ):
             raise RuntimeError("aioquic did not receive the exact QUERY body and content type")
         expected_user_agent = b"Zirk-http-client/0.0.0"
-        if IndependentH3Server.observed_user_agents != [expected_user_agent, expected_user_agent]:
+        if IndependentH3Server.observed_user_agents != [
+            expected_user_agent,
+            expected_user_agent,
+            expected_user_agent,
+        ]:
             raise RuntimeError(
                 "HTTP/3 requests did not use the versioned Zirk User-Agent: "
                 f"{IndependentH3Server.observed_user_agents!r}"
@@ -783,14 +855,17 @@ def main() -> int:
         server_project = temporary_root / "server"
         client_project = temporary_root / "client"
         http_client_project = temporary_root / "http-client"
+        unsupported_websocket_project = temporary_root / "unsupported-websocket-client"
         fallback_project = temporary_root / "http-fallback-client"
         server_home = temporary_root / "server-home"
         client_home = temporary_root / "client-home"
         http_client_home = temporary_root / "http-client-home"
+        unsupported_websocket_home = temporary_root / "unsupported-websocket-home"
         fallback_home = temporary_root / "http-fallback-home"
         server_home.mkdir()
         client_home.mkdir()
         http_client_home.mkdir()
+        unsupported_websocket_home.mkdir()
         fallback_home.mkdir()
 
         reservation = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -801,14 +876,19 @@ def main() -> int:
         make_server(server_project, port, certificate, private_key)
         make_client(client_project, port, root_certificate)
         make_http3_client(http_client_project, port, root_certificate)
+        make_unsupported_websocket_client(
+            unsupported_websocket_project, port, root_certificate
+        )
         make_auto_fallback_client(fallback_project, port, root_certificate)
         server_env = isolated_env(server_home)
         client_env = isolated_env(client_home)
         http_client_env = isolated_env(http_client_home)
+        unsupported_websocket_env = isolated_env(unsupported_websocket_home)
         fallback_env = isolated_env(fallback_home)
         approve(zirk, server_project, server_env)
         approve(zirk, client_project, client_env)
         approve(zirk, http_client_project, http_client_env)
+        approve(zirk, unsupported_websocket_project, unsupported_websocket_env)
         approve(zirk, fallback_project, fallback_env)
 
         server = subprocess.Popen(
@@ -860,6 +940,8 @@ def main() -> int:
                 client_env,
                 http_client_project,
                 http_client_env,
+                unsupported_websocket_project,
+                unsupported_websocket_env,
                 fallback_project,
                 fallback_home,
                 port,
@@ -868,7 +950,10 @@ def main() -> int:
             )
         )
 
-    print("HTTP/3 interoperability, Origin rejection, and Auto fallback passed with independent peers.")
+    print(
+        "HTTP/3 interoperability, unsupported WebSocket peer rejection, Origin rejection, "
+        "and Auto fallback passed with independent peers."
+    )
     return 0
 
 

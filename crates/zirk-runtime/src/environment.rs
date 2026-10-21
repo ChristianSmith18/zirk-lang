@@ -329,14 +329,11 @@ unsafe fn environment_get(name: *const c_void, out: *mut EnvironmentReadOut, sec
     let result = with_effective_grant(|grant| get(text, secret, grant));
     let outcome = match result {
         Ok(value) => {
-            let payload = if secret {
-                // The value must enter the managed heap as a Zirk String, but
-                // erase the separate native copy immediately after copying it.
-                let value = Zeroizing::new(value);
-                crate::string::alloc_owned(&value)
-            } else {
-                crate::string::alloc_owned(&value)
-            };
+            // The value must enter the managed heap as a Zirk String, but
+            // erase the separate native copy immediately after copying it for
+            // both ordinary and explicitly secret reads.
+            let value = Zeroizing::new(value);
+            let payload = crate::string::alloc_owned(&value);
             EnvironmentReadOut {
                 kind: 0,
                 error: 0,

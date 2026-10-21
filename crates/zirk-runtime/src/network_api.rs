@@ -1391,6 +1391,85 @@ pub unsafe extern "C" fn zirk_network_tls_accept(handle: u64, out: *mut NetworkO
     unsafe { set_out(out, outcome) };
 }
 
+/// Accepts a TLS peer on an owner-task listener while also waiting for an
+/// executor-scoped HTTP server shutdown control. A shutdown wake preserves the
+/// listener handle so the owning HTTP server can close it after draining.
+///
+/// # Safety
+/// `out` must point to writable `NetworkOut` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_network_tls_accept_until_shutdown(
+    handle: u64,
+    control_handle: u64,
+    out: *mut NetworkOut,
+) {
+    let owner = crate::executor::current_task();
+    let shutdown = crate::http_api::http_server_control_shutdown_receiver(control_handle);
+    let listener = {
+        let mut registry = tls_listeners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = registry.get_mut(&handle) else {
+            unsafe { set_out(out, empty_out(1, 15)) };
+            return;
+        };
+        if entry.owner != owner {
+            unsafe { set_out(out, empty_out(1, 16)) };
+            return;
+        }
+        let Some(shutdown) = shutdown else {
+            unsafe { set_out(out, empty_out(1, 13)) };
+            return;
+        };
+        let Some(listener) = entry.listener.take() else {
+            unsafe { set_out(out, empty_out(1, 13)) };
+            return;
+        };
+        (listener, shutdown)
+    };
+    let (listener, shutdown) = listener;
+    let accepted = listener.accept_until_shutdown(shutdown);
+    let mut registry = tls_listeners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(&accepted, Err(NetworkTransportError::Cancelled)) {
+        registry.remove(&handle);
+    } else if let Some(entry) = registry.get_mut(&handle)
+        && entry.owner == owner
+    {
+        entry.listener = Some(listener);
+    }
+    drop(registry);
+    let outcome = match accepted {
+        Ok(Some((stream, _peer))) => {
+            let stream_handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+            if stream_handle == 0 {
+                drop(stream);
+                empty_out(1, 13)
+            } else if insert_network_handle(
+                tls_server_streams(),
+                stream_handle,
+                OwnedTlsStream {
+                    owner,
+                    stream: TlsStreamKind::Server(stream),
+                },
+            ) {
+                NetworkOut {
+                    kind: 0,
+                    error: 0,
+                    scalar: stream_handle,
+                    payload: std::ptr::null_mut(),
+                }
+            } else {
+                empty_out(1, 13)
+            }
+        }
+        Ok(None) => empty_out(1, 12),
+        Err(error) => empty_out(1, tls_error_code(TcpApiError::Transport(error))),
+    };
+    unsafe { set_out(out, outcome) };
+}
+
 /// Closes an owner-task TLS listener; repeated close is harmless.
 ///
 /// # Safety
@@ -2674,6 +2753,82 @@ pub unsafe extern "C" fn zirk_network_tcp_accept(handle: u64, out: *mut NetworkO
                 empty_out(1, 9)
             }
         }
+        Err(error) => empty_out(1, error_code(TcpApiError::Transport(error))),
+    };
+    unsafe { set_out(out, outcome) };
+}
+
+/// Accepts a TCP peer while waiting on the HTTP server shutdown control.
+/// Shutdown returns the existing typed `Cancelled` outcome but leaves the
+/// listener registered so the server can close it deterministically.
+///
+/// # Safety
+/// `out` must point to writable `NetworkOut` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_network_tcp_accept_until_shutdown(
+    handle: u64,
+    control_handle: u64,
+    out: *mut NetworkOut,
+) {
+    let owner = crate::executor::current_task();
+    let shutdown = crate::http_api::http_server_control_shutdown_receiver(control_handle);
+    let listener = {
+        let mut registry = listeners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = registry.get_mut(&handle) else {
+            unsafe { set_out(out, empty_out(1, 7)) };
+            return;
+        };
+        if entry.owner != owner {
+            unsafe { set_out(out, empty_out(1, 8)) };
+            return;
+        }
+        let Some(shutdown) = shutdown else {
+            unsafe { set_out(out, empty_out(1, 7)) };
+            return;
+        };
+        let Some(listener) = entry.listener.take() else {
+            unsafe { set_out(out, empty_out(1, 7)) };
+            return;
+        };
+        (listener, shutdown)
+    };
+    let (listener, shutdown) = listener;
+    let accepted = listener.accept_until_shutdown(shutdown);
+    let mut registry = listeners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if matches!(&accepted, Err(NetworkTransportError::Cancelled)) {
+        registry.remove(&handle);
+    } else if let Some(entry) = registry.get_mut(&handle)
+        && entry.owner == owner
+    {
+        entry.listener = Some(listener);
+    }
+    drop(registry);
+    let outcome = match accepted {
+        Ok(Some((stream, _peer))) => {
+            let stream_handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+            if stream_handle == 0 {
+                drop(stream);
+                empty_out(1, 7)
+            } else if insert_network_handle(
+                streams(),
+                stream_handle,
+                OwnedTcpStream { owner, stream },
+            ) {
+                NetworkOut {
+                    kind: 0,
+                    error: 0,
+                    scalar: stream_handle,
+                    payload: std::ptr::null_mut(),
+                }
+            } else {
+                empty_out(1, 7)
+            }
+        }
+        Ok(None) => empty_out(1, 8),
         Err(error) => empty_out(1, error_code(TcpApiError::Transport(error))),
     };
     unsafe { set_out(out, outcome) };

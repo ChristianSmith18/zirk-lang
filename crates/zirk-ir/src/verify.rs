@@ -315,7 +315,8 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpMultipartParse { .. }
             | InstKind::HttpUploadRead { .. }
             | InstKind::HttpUploadClose { .. }
-            | InstKind::HttpMultipartEncode { .. }
+            | InstKind::HttpServerControlCreate
+            | InstKind::HttpServerControlRequestShutdown { .. }
             | InstKind::HttpRouteMatch { .. }
             | InstKind::HttpServerServeOnce { .. }
             | InstKind::HttpServerServeHttp3 { .. }
@@ -2912,6 +2913,7 @@ fn verify_instruction(
 
         InstKind::NetworkTcpAccept {
             handle,
+            shutdown_control,
             enum_id,
             stream_class_id,
         } => {
@@ -2928,6 +2930,13 @@ fn verify_instruction(
                 report(format!(
                     "{position}: NetworkTcpAccept receives {} for `handle`, expected UInt64",
                     value.as_str()
+                ));
+            }
+            if shutdown_control
+                .is_some_and(|control| type_of(&control) != Some(IrType::Int(IntWidth::U64)))
+            {
+                report(format!(
+                    "{position}: NetworkTcpAccept shutdown control must be UInt64"
                 ));
             }
             if *stream_class_id as usize >= module.objects.len() {
@@ -3197,6 +3206,7 @@ fn verify_instruction(
 
         InstKind::NetworkTlsAccept {
             handle,
+            shutdown_control,
             enum_id,
             stream_class_id,
         } => {
@@ -3213,6 +3223,13 @@ fn verify_instruction(
                 report(format!(
                     "{position}: NetworkTlsAccept receives {} for `handle`, expected UInt64",
                     actual.as_str()
+                ));
+            }
+            if shutdown_control
+                .is_some_and(|control| type_of(&control) != Some(IrType::Int(IntWidth::U64)))
+            {
+                report(format!(
+                    "{position}: NetworkTlsAccept shutdown control must be UInt64"
                 ));
             }
             if *stream_class_id as usize >= module.objects.len() {
@@ -4949,54 +4966,26 @@ fn verify_instruction(
                 report(format!("{position}: HttpUploadClose handle must be UInt64"));
             }
         }
-        InstKind::HttpMultipartEncode {
-            metadata,
-            bodies,
-            boundary,
-            enum_id,
-        } => {
-            let metadata_valid = matches!(type_of(metadata), Some(IrType::List(list_id))
-                if module.list_types.get(list_id as usize) == Some(&IrType::String));
-            let bodies_valid = matches!(type_of(bodies), Some(IrType::List(list_id))
-            if module.list_types.get(list_id as usize).is_some_and(|element| match element {
-                IrType::Array(array_id) => module.array_types.get(*array_id as usize)
-                    == Some(&IrType::Int(IntWidth::U8)),
-                _ => false,
-            }));
-            if !metadata_valid || !bodies_valid || type_of(boundary) != Some(IrType::String) {
-                report(format!(
-                    "{position}: HttpMultipartEncode expects metadata List<String>, bodies List<Array<Byte>>, and String boundary"
-                ));
-            }
+        InstKind::HttpServerControlCreate => {
             expect(
                 inst.ty,
-                IrType::Enum(*enum_id),
+                IrType::Int(IntWidth::U64),
                 position,
-                "HttpMultipartEncode",
+                "HttpServerControlCreate",
                 report,
             );
-            let success_is_byte_array = module
-                .enums
-                .get(*enum_id as usize)
-                .and_then(|layout| layout.variants.first())
-                .and_then(|success| success.first())
-                .and_then(|field| {
-                    module
-                        .enums
-                        .get(*enum_id as usize)?
-                        .fields
-                        .get(*field as usize)
-                })
-                .is_some_and(|field| match field.ty {
-                    IrType::Array(array_id) => {
-                        module.array_types.get(array_id as usize)
-                            == Some(&IrType::Int(IntWidth::U8))
-                    }
-                    _ => false,
-                });
-            if !success_is_byte_array {
+        }
+        InstKind::HttpServerControlRequestShutdown { handle } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "HttpServerControlRequestShutdown",
+                report,
+            );
+            if type_of(handle) != Some(IrType::Int(IntWidth::U64)) {
                 report(format!(
-                    "{position}: HttpMultipartEncode success must contain Array<Byte>"
+                    "{position}: HttpServerControlRequestShutdown handle must be UInt64"
                 ));
             }
         }
@@ -5074,6 +5063,12 @@ fn verify_instruction(
             private_key_der,
             max_requests,
             max_connections,
+            control_handle,
+            drain_timeout_ms,
+            max_handshakes,
+            max_handler_tasks,
+            max_streams_per_connection,
+            max_queued_response_bytes,
             callback,
             callback_layout,
             request_class_id,
@@ -5098,6 +5093,36 @@ fn verify_instruction(
                     *max_connections,
                     IrType::Int(IntWidth::U64),
                     "maximum connections",
+                ),
+                (
+                    *control_handle,
+                    IrType::Int(IntWidth::U64),
+                    "shutdown control handle",
+                ),
+                (
+                    *drain_timeout_ms,
+                    IrType::Int(IntWidth::U64),
+                    "drain timeout",
+                ),
+                (
+                    *max_handshakes,
+                    IrType::Int(IntWidth::U64),
+                    "maximum concurrent handshakes",
+                ),
+                (
+                    *max_handler_tasks,
+                    IrType::Int(IntWidth::U64),
+                    "maximum handler tasks",
+                ),
+                (
+                    *max_streams_per_connection,
+                    IrType::Int(IntWidth::U64),
+                    "maximum streams per connection",
+                ),
+                (
+                    *max_queued_response_bytes,
+                    IrType::Int(IntWidth::U64),
+                    "maximum queued response bytes",
                 ),
             ] {
                 if let Some(actual) = type_of(&operand)
@@ -7935,10 +7960,20 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::NetworkTlsPeerCertificateSha256 { handle, .. }
         | InstKind::NetworkTcpIsClosed { handle }
         | InstKind::NetworkTcpPeerAddress { handle, .. } => vec![*handle],
-        InstKind::NetworkTcpAccept { handle, .. }
-        | InstKind::NetworkTcpCloseListener { handle, .. }
+        InstKind::NetworkTcpAccept {
+            handle,
+            shutdown_control,
+            ..
+        }
+        | InstKind::NetworkTlsAccept {
+            handle,
+            shutdown_control,
+            ..
+        } => std::iter::once(*handle)
+            .chain(shutdown_control.iter().copied())
+            .collect(),
+        InstKind::NetworkTcpCloseListener { handle, .. }
         | InstKind::NetworkTcpListenerIsClosed { handle }
-        | InstKind::NetworkTlsAccept { handle, .. }
         | InstKind::NetworkTlsCloseListener { handle, .. } => vec![*handle],
         InstKind::HttpGet { url, .. } => vec![*url],
         InstKind::HttpRequest {
@@ -8128,12 +8163,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             ..
         } => vec![*handle, *offset, *max_bytes],
         InstKind::HttpUploadClose { handle } => vec![*handle],
-        InstKind::HttpMultipartEncode {
-            metadata,
-            bodies,
-            boundary,
-            ..
-        } => vec![*metadata, *bodies, *boundary],
+        InstKind::HttpServerControlCreate => vec![],
+        InstKind::HttpServerControlRequestShutdown { handle } => vec![*handle],
         InstKind::HttpServerServeOnce {
             stream_handle,
             max_requests,

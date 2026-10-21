@@ -284,6 +284,12 @@ share class TLSListener implements Resource<TLSResourceError> {
         return TLSListener.accept_native(this.handle);
     }
 
+    // HTTP server adapter: wakes an idle TLS accept when the shared server
+    // control requests shutdown; the listener remains caller-owned.
+    accept_until_shutdown(control_handle: UInt64): Result<TLSStream, TLSError> {
+        return TLSListener.accept_until_shutdown_native(this.handle, control_handle);
+    }
+
     close(): Result<Void, TLSResourceError> {
         return match TLSListener.close_listener_native(this.handle) {
             Ok(_) => TLSListener.close_ok();
@@ -324,6 +330,13 @@ share class TLSListener implements Resource<TLSResourceError> {
     }
 
     private static accept_native(handle: UInt64): Result<TLSStream, TLSError> {
+        return Error(TLSError.Closed);
+    }
+
+    private static accept_until_shutdown_native(
+        handle: UInt64,
+        control_handle: UInt64,
+    ): Result<TLSStream, TLSError> {
         return Error(TLSError.Closed);
     }
 

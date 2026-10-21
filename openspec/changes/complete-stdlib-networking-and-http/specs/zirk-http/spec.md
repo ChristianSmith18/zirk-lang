@@ -29,6 +29,15 @@ Native `std.http` clients and servers SHALL support HTTP/3 over QUIC version 1, 
 
 HTTP servers SHALL support separately configured limits for accepted connections, active requests, and concurrent handler tasks across HTTP/1.1, HTTP/2, and HTTP/3. Admission queues and response producers SHALL be bounded. Each request task SHALL retain owner-task resource rules and be independently cancellable; a peer disconnect SHALL cancel only its request work. Server shutdown SHALL expose an explicit owner-controlled signal, stop admission, drain admitted requests for a bounded grace period, cancel remaining cooperative work, and release TCP, TLS, UDP, and QUIC resources deterministically. CPU-only handlers remain cooperatively cancellable and SHALL NOT be described as preempted.
 
+The public lifecycle API SHALL provide a shareable `HTTPServerControl` whose
+`request_shutdown()` operation is idempotent and an `HTTPServerOptions` value
+that validates the independent connection, handshake, request, handler,
+per-connection stream, queued-response-byte, and drain-deadline limits.
+TCP, TLS, and HTTP/3 serving entry points SHALL accept this common control and
+options contract. Requesting shutdown SHALL wake a pending listener wait; it
+SHALL NOT require abrupt cancellation of the server task. Repeated requests
+SHALL return successfully and SHALL NOT enqueue duplicate shutdown work.
+
 #### Scenario: Serve independent connections concurrently
 - **WHEN** multiple clients connect within configured admission limits
 - **THEN** their independent requests can make progress concurrently without exceeding the connection or task bounds

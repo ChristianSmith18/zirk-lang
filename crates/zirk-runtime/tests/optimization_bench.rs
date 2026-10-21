@@ -49,6 +49,7 @@ mod network_api {
 }
 mod http_api {
     pub(crate) fn close_task_streams(_: crate::task::TaskId) {}
+    pub(crate) fn close_task_server_controls(_: crate::task::TaskId) {}
     pub(crate) fn close_task_server_producers(_: crate::task::TaskId) {}
     pub(crate) fn close_task_uploads(_: crate::task::TaskId) {}
     pub(crate) fn close_executor_clients(_: u64) {}

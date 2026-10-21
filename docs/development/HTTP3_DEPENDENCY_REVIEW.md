@@ -46,12 +46,12 @@ GET and QUERY client requests against aioquic, including the QUERY body and
 content type. The test-only peer and its resolver output are pinned in
 `scripts/requirements-http3-interop.txt` and are installed by the native CI
 workflow. An unapproved Origin receives `403` without invoking the Zirk
-handler. Windows x86_64 has
-cross-target compile evidence for the Rust feature, but still needs native
-runtime results. The
-successful remote CI run 39436415853 covered all four native jobs, but its
-commit predates the current uncommitted HTTP/3 conformance workflow step; it is
-not evidence that this feature passed on Windows.
+handler. CI run 39558023426 passed the focused HTTP/3 adapter, TLS, UDP, local
+IPC, interface, and network-policy runtime commands on Windows x86_64 as well
+as macOS ARM64 and both Linux targets. The complete workspace tests and
+independent-peer interoperability step are configured on all four targets;
+the focused Windows result is runtime evidence for the listed tests, not yet a
+full Windows acceptance result.
 
 Upstream `h3` describes the crate as experimental and warns that its API may
 change. It remains the narrowest fit among the currently integrated engines,
@@ -72,8 +72,8 @@ release profile. The `http3` feature changes the runtime outputs as follows:
 
 | Artifact | Without HTTP/3 | With HTTP/3 | Increase |
 | --- | ---: | ---: | ---: |
-| `libzirk_runtime.a` | 66,437,024 bytes | 74,507,712 bytes | 8,070,688 bytes (7.70 MiB) |
-| `libzirk_runtime.rlib` | 17,208,112 bytes | 20,747,152 bytes | 3,539,040 bytes (3.38 MiB) |
+| `libzirk_runtime.a` | 66,574,080 bytes | 74,736,968 bytes | 8,162,888 bytes (7.78 MiB) |
+| `libzirk_runtime.rlib` | 17,386,416 bytes | 21,048,488 bytes | 3,662,072 bytes (3.49 MiB) |
 
 The final linked executable was measured on macOS ARM64 with the workspace
 release profile using `scripts/measure-http3-binary-size.sh`. The fixture at
@@ -83,22 +83,22 @@ and compiler; only the runtime archive's `http3` feature changes.
 
 | Representative application | Without HTTP/3 | With HTTP/3 | Increase |
 | --- | ---: | ---: | ---: |
-| Compiled Zirk executable | 6,487,064 bytes (6.19 MiB) | 7,661,000 bytes (7.31 MiB) | 1,173,936 bytes (1.12 MiB, 18.1%) |
+| Compiled Zirk executable | 6,592,104 bytes (6.29 MiB) | 7,781,288 bytes (7.42 MiB) | 1,189,184 bytes (1.13 MiB, 18.0%) |
 
-These are raw executable sizes before packaging or compression. The result is
+These are raw executable sizes before packaging or compression, freshly
+measured on 2026-10-21 after the current implementation changes. The result is
 specific to this small HTTP client fixture and macOS ARM64; other applications
 may retain a different portion of the optional protocol engine after linking.
 
 ## Decision and remaining evidence
 
-Keep HTTP/3 optional and keep 0-RTT disabled. The current license and advisory
-checks, workspace MSRV, and macOS/Linux runtime results support continued
-development with this stack. They do not establish cross-target peer
-interoperability or Windows runtime support. The representative final linked
-application-size impact is now measured; Task 2.1 remains open until the
-HTTP/3-enabled matrix builds on all four native targets. Reassess the dependency
-choice if upstream `h3` remains experimental or its patch cannot be retired
-before release.
+Keep HTTP/3 optional and keep 0-RTT disabled. The license and advisory checks,
+workspace MSRV, release-size measurement, and successful HTTP/3-enabled
+conformance builds on all four native targets support this dependency choice
+for continued development. Independent-peer interoperability remains proven
+only on macOS ARM64 so far, and the complete native CI run is still in progress.
+Reassess the dependency choice if upstream `h3` remains experimental or its
+patch cannot be retired before release.
 
 ## Primary sources
 

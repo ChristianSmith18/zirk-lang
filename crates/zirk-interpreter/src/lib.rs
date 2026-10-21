@@ -1080,6 +1080,9 @@ fn excluded_feature(kind: &InstKind) -> (String, String) {
         "NetworkInterfacesSnapshot" => "network interface inspection",
         "NetworkIpAddressParse" => "IP address parsing",
         "NetworkTcpOriginNormalize" => "TCP endpoint normalization",
+        "HttpServerControlCreate" | "HttpServerControlRequestShutdown" => {
+            "native HTTP server lifecycle control"
+        }
         name if name.starts_with("NetworkUdp") => "native UDP sockets",
         name if name.starts_with("NetworkLocal") => "native local sockets",
         name if name.starts_with("NetworkTls") => "native TLS sockets",
@@ -6734,7 +6737,6 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpResponseHeaderValues { .. }
         | InstKind::HttpFormParse { .. }
         | InstKind::HttpMultipartParse { .. }
-        | InstKind::HttpMultipartEncode { .. }
         | InstKind::HttpUploadRead { .. }
         | InstKind::HttpUploadClose { .. }
         | InstKind::HttpRouteMatch { .. } => BrowserSupport::Excluded,
@@ -6746,7 +6748,9 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpPost { .. }
         | InstKind::HttpPostJson { .. }
         | InstKind::HttpPostBytes { .. } => BrowserSupport::BoundedHost,
-        InstKind::HttpServerServeOnce { .. } => BrowserSupport::Excluded,
+        InstKind::HttpServerServeOnce { .. }
+        | InstKind::HttpServerControlCreate
+        | InstKind::HttpServerControlRequestShutdown { .. } => BrowserSupport::Excluded,
         InstKind::HttpServerServeHttp3 { .. }
         | InstKind::HttpServerWebSocketServeHttp3Once { .. } => BrowserSupport::Excluded,
         InstKind::HttpServerWebSocketServeOnce { .. } => BrowserSupport::Excluded,
@@ -7715,6 +7719,8 @@ mod tests {
             "zirk_network_dns_resolve",
             "zirk_http_request",
             "zirk_http_server_serve_once",
+            "zirk_http_server_control_create",
+            "zirk_http_server_control_request_shutdown",
         ];
         let module = Module {
             externs: names
@@ -8045,6 +8051,8 @@ mod tests {
                 enum_id: 0,
             },
             InstKind::NetworkInterfacesSnapshot { enum_id: 0 },
+            InstKind::HttpServerControlCreate,
+            InstKind::HttpServerControlRequestShutdown { handle: value },
             InstKind::HttpServerWebSocketServeHttp3Once {
                 endpoint: value,
                 certificate_chain_der: value,
@@ -8091,6 +8099,7 @@ mod tests {
                 handle: value,
                 enum_id: 0,
                 stream_class_id: 0,
+                shutdown_control: None,
             },
             InstKind::NetworkTlsUpgradeTcp {
                 tcp_handle: value,
@@ -8234,12 +8243,6 @@ mod tests {
                 content_type: value,
                 enum_id: 0,
                 data_class_id: 0,
-            },
-            InstKind::HttpMultipartEncode {
-                metadata: value,
-                bodies: value,
-                boundary: value,
-                enum_id: 0,
             },
         ];
 

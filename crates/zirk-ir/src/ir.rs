@@ -1477,6 +1477,7 @@ pub enum InstKind {
     /// in the public TLSStream class.
     NetworkTlsAccept {
         handle: Operand,
+        shutdown_control: Option<Operand>,
         enum_id: u32,
         stream_class_id: u32,
     },
@@ -1574,6 +1575,7 @@ pub enum InstKind {
     /// `TCPStream` owned by the current Zirk task.
     NetworkTcpAccept {
         handle: Operand,
+        shutdown_control: Option<Operand>,
         enum_id: u32,
         stream_class_id: u32,
     },
@@ -2001,12 +2003,11 @@ pub enum InstKind {
     HttpUploadClose {
         handle: Operand,
     },
-    /// Encodes metadata and binary payload lists into bounded multipart bytes.
-    HttpMultipartEncode {
-        metadata: Operand,
-        bodies: Operand,
-        boundary: Operand,
-        enum_id: u32,
+    /// Allocates an executor-scoped, shareable HTTP server shutdown signal.
+    HttpServerControlCreate,
+    /// Requests idempotent shutdown through a previously created control.
+    HttpServerControlRequestShutdown {
+        handle: Operand,
     },
     /// Parses one request from an accepted TCP stream, invokes a generated
     /// Zirk handler on the owning task stack, and serializes its response.
@@ -2029,6 +2030,12 @@ pub enum InstKind {
         private_key_der: Operand,
         max_requests: Operand,
         max_connections: Operand,
+        control_handle: Operand,
+        drain_timeout_ms: Operand,
+        max_handshakes: Operand,
+        max_handler_tasks: Operand,
+        max_streams_per_connection: Operand,
+        max_queued_response_bytes: Operand,
         callback: Operand,
         callback_layout: u32,
         request_class_id: u32,

@@ -3299,6 +3299,192 @@ fn main(): Void {
 }
 
 #[test]
+fn bundled_http_server_control_is_shareable_idempotent_and_options_are_validated() {
+    let project = workspace("http_server_control_api");
+    let home = workspace("http_server_control_api_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project \"http.server.control.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nenvironment {\nread: { names: [\"HTTP_CONTROL_FIXTURE\"]; during: runtime; }\n}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        r#"import { HTTPServerControl, HTTPServerOptions } from std.http;
+import { stdout } from std.io;
+fn main(): Void {
+    match HTTPServerOptions.create(max_requests: 8, max_connections: 3, drain_timeout_ms: 500) {
+        Error(_) => stdout.println("options-error");
+        Ok(_) => stdout.println("options-ok");
+    }
+    match HTTPServerOptions.create(max_connections: 0) {
+        Error(_) => stdout.println("invalid-options-rejected");
+        Ok(_) => stdout.println("invalid-options-accepted");
+    }
+    match HTTPServerControl.create() {
+        Error(_) => stdout.println("control-error");
+        Ok(control) => {
+            match control.request_shutdown() {
+                Error(_) => stdout.println("shutdown-error");
+                Ok(_) => stdout.println("shutdown-requested");
+            }
+            match control.request_shutdown() {
+                Error(_) => stdout.println("repeat-error");
+                Ok(_) => stdout.println("shutdown-requested-again");
+            }
+        }
+    }
+}"#,
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .env("HTTP_CONTROL_FIXTURE", "ok")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "options-ok\ninvalid-options-rejected\nshutdown-requested\nshutdown-requested-again\n"
+    );
+}
+
+#[test]
+fn bundled_tcp_http_server_shutdown_honors_control_and_closes_resource() {
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap();
+    drop(reserved);
+
+    let project = workspace("http_server_tcp_shutdown");
+    let home = workspace("http_server_tcp_shutdown_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"http.server.tcp.shutdown.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlisten: {{ addresses: [\"{}\"]; during: runtime; }}\n}}\n}}\n",
+            address
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            r#"import {{ HTTPRequest, HTTPResponse, HTTPServer, HTTPServerControl, HTTPServerOptions }} from std.http;
+import {{ TCPListener }} from std.net::tcp;
+import {{ stdout }} from std.io;
+fn handle(request: HTTPRequest): HTTPResponse {{ return HTTPResponse.from_text(200, "ok"); }}
+fn request_stop(control: HTTPServerControl): Int32 {{
+    Timer.sleep(25ms);
+    _ = control.request_shutdown();
+    return 0;
+}}
+fn serve(control: HTTPServerControl, options: HTTPServerOptions): Int32 {{
+    return match TCPListener.bind("tcp://127.0.0.1:{}") {{
+        Error(_) => {{ stdout.println("listener-error"); 1; }}
+        Ok(listener) => match HTTPServer.serve_until_shutdown(listener, control, options, handle) {{
+            Ok(count) => {{ stdout.println("stopped:" + count.to_string()); 0; }}
+            Error(error) => {{ stdout.println("server-error:" + error.to_string()); 1; }}
+        }}
+    }};
+}}
+fn main(): Void {{
+    match HTTPServerControl.create() {{
+        Error(_) => stdout.println("control-error");
+        Ok(control) => match HTTPServerOptions.create() {{
+            Error(_) => stdout.println("options-error");
+            Ok(options) => {{
+                inmut::strict shared_control = control;
+                inmut::strict shared_options = options;
+                mut result = Concurrent.of(
+                    (): Int32 => request_stop(shared_control),
+                    (): Int32 => serve(shared_control, shared_options),
+                ).settled();
+                _ = result;
+                stdout.println("joined");
+            }}
+        }}
+    }}
+}}"#,
+            address.port()
+        ),
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "stopped:0\njoined\n"
+    );
+    std::net::TcpListener::bind(address).expect("controlled server shutdown closes its listener");
+}
+
+#[test]
 fn bundled_std_http3_websocket_server_fails_closed_without_runtime_feature() {
     let project = workspace("bundled_std_http3_websocket_server");
     std::fs::create_dir_all(project.join("src")).unwrap();
@@ -12440,9 +12626,13 @@ fn main(): Void {{
 fn bundled_http_multipart_builder_encodes_binary_parts_with_bounded_metadata() {
     let project = workspace("http_multipart_builder");
     let source = project.join("multipart.zrk");
-    std::fs::write(
-        &source,
-        r#"import { HTTP, HTTPError, HTTPMultipartBuilder, URL } from std.http;
+    let expected_body = b"--zirk-boundary\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"sample.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n\0\xff\r\n\r\n--zirk-boundary--\r\n";
+    let expected_bytes = expected_body
+        .iter()
+        .map(|byte| format!("{byte} as Byte"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let program = r#"import { HTTP, HTTPError, HTTPMultipartBuilder, URL } from std.http;
 import { stdout } from std.io;
 fn main(): Void {
     mut builder = HTTPMultipartBuilder.create();
@@ -12456,6 +12646,15 @@ fn main(): Void {
             stdout.println(body.length);
             stdout.println(body[0] as Int32);
             stdout.println(body[body.length - 1] as Int32);
+            mut expected: Array<Byte> = [EXPECTED_BYTES];
+            mut matches_wire = body.length == expected.length;
+            mut wire_index: UInt64 = 0;
+            while matches_wire && wire_index < body.length {
+                matches_wire = body[wire_index] == expected[wire_index];
+                wire_index += 1;
+            }
+            if matches_wire { stdout.println("wire exact"); }
+            else { stdout.println("wire mismatch"); }
         }
         Error(error) => stdout.println(error.to_string());
     }
@@ -12471,6 +12670,12 @@ fn main(): Void {
     match bad_boundary.encode("bad\r\nvalue") {
         Error(error) => stdout.println(error.to_string());
         Ok(_) => stdout.println("invalid boundary accepted");
+    }
+    mut bad_content_type = HTTPMultipartBuilder.create();
+    _ = bad_content_type.add("field", payload, null, "not a media type");
+    match bad_content_type.encode("safe") {
+        Error(error) => stdout.println(error.to_string());
+        Ok(_) => stdout.println("invalid content type accepted");
     }
     mut collision = HTTPMultipartBuilder.create();
     mut collision_body: Array<Byte> = [112 as Byte, 114 as Byte, 101 as Byte, 102 as Byte,
@@ -12506,15 +12711,15 @@ fn main(): Void {
         Error(error) => stdout.println(error.to_string());
         Ok(_) => stdout.println("part limit missing");
     }
-}"#,
-    )
-    .unwrap();
+}"#
+    .replace("EXPECTED_BYTES", &expected_bytes);
+    std::fs::write(&source, program).unwrap();
 
     let output = zirk("run", &source, "http_multipart_builder_run", &[]);
     assert_eq!(output.status, 0, "{}", output.stderr);
     assert_eq!(
         normalize(&output.stdout),
-        "added\n154\n45\n10\ninvalid metadata retained\nProtocol\nProtocol\nProtocol\nPermissionDenied\nTooManyParts\n"
+        "added\n154\n45\n10\nwire exact\ninvalid metadata retained\nProtocol\nProtocol\nProtocol\nProtocol\nPermissionDenied\nTooManyParts\n"
     );
 }
 

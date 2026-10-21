@@ -197,12 +197,12 @@ fn standard_package_roots() -> HashMap<String, PathBuf> {
 fn standard_source(path: &Path) -> Option<&'static str> {
     let directory =
         absolute_normalize(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std"));
-    match path
+    let relative = path
         .strip_prefix(&directory)
         .ok()?
         .to_string_lossy()
-        .as_ref()
-    {
+        .replace('\\', "/");
+    match relative.as_str() {
         "io/package.zrk" => Some(include_str!("../../../stdlib/std/io/package.zrk")),
         "io/stdin.zrk" => Some(include_str!("../../../stdlib/std/io/stdin.zrk")),
         "io/stdout.zrk" => Some(include_str!("../../../stdlib/std/io/stdout.zrk")),

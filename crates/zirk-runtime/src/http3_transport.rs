@@ -2,6 +2,7 @@
 //! engines. Request policy and permissions remain owned by `std.http` and the
 //! native runtime boundary.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +22,7 @@ use crate::network_transport::{NetworkTransportError, client_tls_config_for_http
 const MAX_QUIC_STREAMS: u32 = 16;
 #[allow(dead_code)] // Wired to the public listener lifecycle in the next step.
 const MAX_HTTP3_REQUESTS_PER_CONNECTION: usize = 1_024;
+const DEFAULT_HTTP3_STREAMS_PER_CONNECTION: usize = 16;
 const MAX_HTTP3_SERVER_CONNECTIONS: usize = 256;
 // Keep slow QUIC handshakes from serializing admission for valid peers.
 const MAX_HTTP3_SERVER_HANDSHAKES: usize = 16;
@@ -40,23 +42,64 @@ struct Http3ServerAdmission {
     admitted_requests: std::sync::atomic::AtomicUsize,
     request_limit: tokio::sync::watch::Sender<bool>,
     active_requests: std::sync::Arc<tokio::sync::Semaphore>,
+    response_queue_bytes: std::sync::Arc<tokio::sync::Semaphore>,
+    max_queued_response_bytes: usize,
+    active_handler_tasks: std::sync::Mutex<HashSet<crate::task::TaskId>>,
 }
 
 impl Http3ServerAdmission {
-    fn new(max_requests: usize) -> std::sync::Arc<Self> {
+    fn new(
+        max_requests: usize,
+        max_handler_tasks: usize,
+        max_queued_response_bytes: usize,
+    ) -> std::sync::Arc<Self> {
         let (request_limit, _) = tokio::sync::watch::channel(false);
         std::sync::Arc::new(Self {
             max_requests,
             admitted_requests: std::sync::atomic::AtomicUsize::new(0),
             request_limit,
-            active_requests: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                MAX_HTTP3_SERVER_CONCURRENT_REQUESTS,
+            active_requests: std::sync::Arc::new(tokio::sync::Semaphore::new(max_handler_tasks)),
+            response_queue_bytes: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                max_queued_response_bytes,
             )),
+            max_queued_response_bytes,
+            active_handler_tasks: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
     fn subscribe_to_limit(&self) -> tokio::sync::watch::Receiver<bool> {
         self.request_limit.subscribe()
+    }
+
+    fn request_shutdown(&self) {
+        self.request_limit.send_replace(true);
+    }
+
+    fn register_handler(&self, task: crate::task::TaskId) {
+        self.active_handler_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(task);
+    }
+
+    fn unregister_handler(&self, task: crate::task::TaskId) {
+        self.active_handler_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&task);
+    }
+
+    fn cancel_active_handlers(&self) {
+        let tasks = self
+            .active_handler_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for task in tasks {
+            crate::executor::cancel_current(task);
+        }
     }
 
     fn is_exhausted(&self) -> bool {
@@ -421,29 +464,81 @@ pub(crate) fn serve_endpoint(
     max_connections: usize,
     handler: impl Fn(Request<Vec<u8>>) -> Http3ServerResponse + Clone + Send + 'static,
 ) -> Result<usize, super::http_runtime::HttpRuntimeError> {
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    serve_endpoint_with_shutdown(
+        endpoint,
+        max_requests,
+        max_connections,
+        MAX_HTTP3_SERVER_HANDSHAKES,
+        MAX_HTTP3_SERVER_CONCURRENT_REQUESTS,
+        DEFAULT_HTTP3_STREAMS_PER_CONNECTION,
+        MAX_HTTP_BUFFERED_BODY_BYTES * 4,
+        Duration::from_secs(30),
+        shutdown_rx,
+        handler,
+    )
+}
+
+/// Serves HTTP/3 until the finite admission limit or an external shutdown
+/// signal. Shutdown stops new handshakes and streams immediately, then gives
+/// admitted Zirk handlers the configured cooperative drain interval.
+pub(crate) fn serve_endpoint_with_shutdown(
+    endpoint: Endpoint,
+    max_requests: usize,
+    max_connections: usize,
+    max_handshakes: usize,
+    max_handler_tasks: usize,
+    max_streams_per_connection: usize,
+    max_queued_response_bytes: usize,
+    drain_timeout: Duration,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    handler: impl Fn(Request<Vec<u8>>) -> Http3ServerResponse + Clone + Send + 'static,
+) -> Result<usize, super::http_runtime::HttpRuntimeError> {
     if max_requests == 0
         || max_requests > MAX_HTTP3_SERVER_REQUESTS
         || max_connections == 0
         || max_connections > MAX_HTTP3_SERVER_CONNECTIONS
+        || max_handshakes == 0
+        || max_handshakes > MAX_HTTP3_SERVER_CONNECTIONS
+        || max_handler_tasks == 0
+        || max_handler_tasks > 64
+        || max_streams_per_connection == 0
+        || max_streams_per_connection > MAX_HTTP3_REQUESTS_PER_CONNECTION
+        || max_queued_response_bytes < crate::http_api::MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES
+        || max_queued_response_bytes > 128 * 1024 * 1024
+        || drain_timeout > Duration::from_secs(3_600)
     {
         endpoint.close(VarInt::from_u32(0), HTTP3_CLOSE_REASON);
         return Err(super::http_runtime::HttpRuntimeError::InvalidRequest);
     }
-    let admission = Http3ServerAdmission::new(max_requests);
+    let admission =
+        Http3ServerAdmission::new(max_requests, max_handler_tasks, max_queued_response_bytes);
+    let _handler_cancellation = ServerHandlerCancellation(Arc::clone(&admission));
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let handshake_slots =
-        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_HTTP3_SERVER_HANDSHAKES));
+    let handshake_slots = std::sync::Arc::new(tokio::sync::Semaphore::new(max_handshakes));
     let mut accepted = 0;
     let mut connection_tasks = std::collections::VecDeque::new();
     while accepted < max_connections && !admission.is_exhausted() {
+        if *shutdown.borrow() {
+            admission.request_shutdown();
+            break;
+        }
         let accept_endpoint = endpoint.clone();
         let request_limit = admission.subscribe_to_limit();
-        let incoming =
-            crate::network_future::block_on_current(crate::network_future::spawn_on_reactor(
-                async move { accept_http3_connection(accept_endpoint, request_limit).await },
-            ))
-            .map_err(map_network_future_error)?
-            .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)??;
+        let accept_shutdown = shutdown.clone();
+        let incoming = crate::network_future::block_on_current(
+            crate::network_future::spawn_on_reactor(async move {
+                tokio::select! {
+                    incoming = accept_http3_connection(accept_endpoint, request_limit) => incoming,
+                    changed = wait_for_shutdown(accept_shutdown) => {
+                        changed?;
+                        Ok(None)
+                    }
+                }
+            }),
+        )
+        .map_err(map_network_future_error)?
+        .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)??;
         let Some(incoming) = incoming else { break };
         accepted += 1;
         let handler = handler.clone();
@@ -501,7 +596,8 @@ pub(crate) fn serve_endpoint(
             };
             match serve_connection(
                 connection,
-                MAX_HTTP3_REQUESTS_PER_CONNECTION,
+                max_streams_per_connection,
+                max_handler_tasks,
                 handler,
                 connection_admission,
             ) {
@@ -519,7 +615,21 @@ pub(crate) fn serve_endpoint(
         crate::executor::yield_now();
     }
 
+    // A shutdown signal can arrive while the listener's accept future is
+    // suspended. The listener helper then returns; publish the same stop
+    // state used for finite request admission so existing connections stop
+    // accepting streams as well.
+    if *shutdown.borrow() {
+        admission.request_shutdown();
+    }
+    let drain_deadline = std::time::Instant::now() + drain_timeout;
     while let Some(task) = connection_tasks.pop_front() {
+        while !crate::executor::task_is_terminal(task) {
+            if std::time::Instant::now() >= drain_deadline {
+                admission.cancel_active_handlers();
+            }
+            crate::executor::yield_now();
+        }
         crate::http_runtime::await_server_handler_task(task);
     }
     endpoint.close(VarInt::from_u32(0), HTTP3_CLOSE_REASON);
@@ -529,6 +639,30 @@ pub(crate) fn serve_endpoint(
     .map_err(map_network_future_error)?
     .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)?;
     Ok(served.load(std::sync::atomic::Ordering::Acquire))
+}
+
+/// Cancels child handlers if the listener task itself exits early. Without
+/// this guard, a cancelled connection dispatcher could leave independently
+/// scheduled handler tasks alive after its QUIC connection has been dropped.
+struct ServerHandlerCancellation(Arc<Http3ServerAdmission>);
+
+impl Drop for ServerHandlerCancellation {
+    fn drop(&mut self) {
+        self.0.cancel_active_handlers();
+    }
+}
+
+async fn wait_for_shutdown(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), super::http_runtime::HttpRuntimeError> {
+    if *shutdown.borrow() {
+        return Ok(());
+    }
+    shutdown
+        .changed()
+        .await
+        .map_err(|_| super::http_runtime::HttpRuntimeError::Cancelled)?;
+    Ok(())
 }
 
 async fn accept_http3_connection(
@@ -553,14 +687,14 @@ async fn accept_http3_connection(
 fn serve_connection(
     connection: quinn::Connection,
     max_requests: usize,
+    max_handler_tasks: usize,
     handler: impl Fn(Request<Vec<u8>>) -> Http3ServerResponse + Clone + Send + 'static,
     admission: std::sync::Arc<Http3ServerAdmission>,
 ) -> Result<usize, super::http_runtime::HttpRuntimeError> {
     if max_requests == 0 || max_requests > MAX_HTTP3_REQUESTS_PER_CONNECTION {
         return Err(super::http_runtime::HttpRuntimeError::InvalidRequest);
     }
-    let (request_tx, mut request_rx) =
-        tokio::sync::mpsc::channel(MAX_HTTP3_SERVER_CONCURRENT_REQUESTS);
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(max_handler_tasks);
     let connection_admission = std::sync::Arc::clone(&admission);
     let server = crate::network_future::spawn_on_reactor(async move {
         serve_connection_inner(connection, max_requests, request_tx, connection_admission).await
@@ -571,13 +705,15 @@ fn serve_connection(
         crate::network_future::block_on_current(request_rx.recv())
             .map_err(map_network_future_error)?
     {
-        if active_tasks.len() >= MAX_HTTP3_SERVER_CONCURRENT_REQUESTS
+        if active_tasks.len() >= max_handler_tasks
             && let Some(task) = active_tasks.pop_front()
         {
             crate::http_runtime::await_server_handler_task(task);
+            admission.unregister_handler(task);
         }
         let handler = handler.clone();
         let task_failure = std::sync::Arc::clone(&handler_failure);
+        let response_admission = std::sync::Arc::clone(&admission);
         let task = crate::executor::spawn(move || {
             let mut response = match crate::http_runtime::run_callback_with_deadline(
                 || handler(request),
@@ -595,7 +731,24 @@ fn serve_connection(
                 }
             };
             let producer = response.producer.take();
-            if response_tx.send(response.response).is_err() {
+            let queue_permit =
+                match reserve_http3_response_budget(&response_admission, &response.response) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        task_failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get_or_insert(error);
+                        return 0;
+                    }
+                };
+            if response_tx
+                .send(QueuedHttp3ServerResponse {
+                    response: response.response,
+                    _queue_permit: queue_permit,
+                })
+                .is_err()
+            {
                 return 0;
             }
             if let Some((producer, sender)) = producer
@@ -609,11 +762,13 @@ fn serve_connection(
             }
             1
         });
+        admission.register_handler(task);
         active_tasks.push_back(task);
         crate::executor::yield_now();
     }
     while let Some(task) = active_tasks.pop_front() {
         crate::http_runtime::await_server_handler_task(task);
+        admission.unregister_handler(task);
     }
     drop(request_rx);
     let served = crate::network_future::block_on_current(server)
@@ -631,8 +786,38 @@ fn serve_connection(
 
 type Http3ServerRequest = (
     Request<Vec<u8>>,
-    tokio::sync::oneshot::Sender<Response<Http3ResponseBody>>,
+    tokio::sync::oneshot::Sender<QueuedHttp3ServerResponse>,
 );
+
+struct QueuedHttp3ServerResponse {
+    response: Response<Http3ResponseBody>,
+    _queue_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+fn reserve_http3_response_budget(
+    admission: &Http3ServerAdmission,
+    response: &Response<Http3ResponseBody>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, super::http_runtime::HttpRuntimeError> {
+    let response_bytes = match response.body() {
+        Http3ResponseBody::Buffered(bytes) => bytes.len().max(1),
+        Http3ResponseBody::Stream(_) => crate::http_api::MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES,
+    };
+    if response_bytes > admission.max_queued_response_bytes {
+        return Err(super::http_runtime::HttpRuntimeError::BodyTooLarge);
+    }
+    let queue = std::sync::Arc::clone(&admission.response_queue_bytes);
+    crate::network_future::block_on_current(crate::network_future::spawn_on_reactor(async move {
+        tokio::time::timeout(
+            HTTP3_SERVER_IO_TIMEOUT,
+            queue.acquire_many_owned(response_bytes as u32),
+        )
+        .await
+        .map_err(|_| super::http_runtime::HttpRuntimeError::Timeout)?
+        .map_err(|_| super::http_runtime::HttpRuntimeError::Cancelled)
+    }))
+    .map_err(map_network_future_error)?
+    .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)?
+}
 
 #[allow(dead_code)] // Exercised by the local QUIC/H3 integration test.
 async fn serve_connection_inner(
@@ -772,10 +957,12 @@ async fn serve_h3_request_stream(
         .send((incoming, response_tx))
         .await
         .map_err(|_| super::http_runtime::HttpRuntimeError::Cancelled)?;
-    let outgoing = tokio::time::timeout(HTTP3_SERVER_IO_TIMEOUT, response_rx)
+    let queued = tokio::time::timeout(HTTP3_SERVER_IO_TIMEOUT, response_rx)
         .await
         .map_err(|_| super::http_runtime::HttpRuntimeError::Timeout)?
         .map_err(|_| super::http_runtime::HttpRuntimeError::Cancelled)?;
+    let _response_queue_permit = queued._queue_permit;
+    let outgoing = queued.response;
     if outgoing.headers().len() > MAX_HTTP_HEADER_COUNT
         || outgoing
             .headers()
@@ -1229,8 +1416,16 @@ fn authorize_remote_path(
     origin: &NetworkOrigin,
     grant: &EffectiveNetworkGrant,
 ) -> Result<(), super::http_runtime::HttpRuntimeError> {
+    authorize_remote_address(origin, grant, connection.remote_address())
+}
+
+fn authorize_remote_address(
+    origin: &NetworkOrigin,
+    grant: &EffectiveNetworkGrant,
+    remote_address: SocketAddr,
+) -> Result<(), super::http_runtime::HttpRuntimeError> {
     grant
-        .authorize_connect(origin.as_str(), connection.remote_address())
+        .authorize_connect(origin.as_str(), remote_address)
         .map_err(NetworkTransportError::from)?;
     Ok(())
 }
@@ -1285,7 +1480,10 @@ impl Http3ClientSession {
                     .await?;
             authorize_remote_path(&connection, &origin, &grant)?;
             let h3_connection = h3_quinn::Connection::new(connection.clone());
-            let (mut driver, sender) = h3::client::new(h3_connection)
+            let mut builder = h3::client::builder();
+            builder.max_field_section_size(MAX_HTTP_HEADER_BYTES as u64);
+            let (mut driver, sender) = builder
+                .build::<_, _, Bytes>(h3_connection)
                 .await
                 .map_err(|_| super::http_runtime::HttpRuntimeError::Protocol)?;
             let driver_task = tokio::spawn(async move {
@@ -1486,6 +1684,141 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn external_shutdown_wakes_an_idle_http3_listener() {
+        let outcome = Executor::new().run_with_root(|| {
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = reservation.local_addr().unwrap();
+            drop(reservation);
+            let grant = EffectiveNetworkGrant::from_verified_datagram_scopes(
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                [address.to_string()],
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                false,
+            )
+            .unwrap();
+            let (endpoint, _) =
+                bind_server_endpoint(address, &grant, test_http3_server_config()).unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = crate::executor::spawn(move || {
+                serve_endpoint_with_shutdown(
+                    endpoint,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    crate::http_api::MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES,
+                    Duration::from_millis(100),
+                    shutdown_rx,
+                    |_| panic!("the handler must not run without a connection"),
+                )
+                .unwrap()
+            });
+            crate::executor::yield_now();
+            shutdown_tx.send_replace(true);
+            assert_eq!(crate::executor::await_task(server), 0);
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
+    fn external_shutdown_cancels_http3_handler_after_cooperative_drain_deadline() {
+        let _gc_guard = crate::collector::test_support::test_guard();
+        let outcome = Executor::new().run_with_root(|| {
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = reservation.local_addr().unwrap();
+            drop(reservation);
+            let grant = EffectiveNetworkGrant::from_verified_datagram_scopes(
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                [address.to_string()],
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                false,
+            )
+            .unwrap();
+            let (endpoint, address) =
+                bind_server_endpoint(address, &grant, test_http3_server_config()).unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handler_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handler_started_for_server = Arc::clone(&handler_started);
+            let handler_cancelled_for_server = Arc::clone(&handler_cancelled);
+            let server = crate::executor::spawn(move || {
+                serve_endpoint_with_shutdown(
+                    endpoint,
+                    8,
+                    1,
+                    1,
+                    1,
+                    1,
+                    crate::http_api::MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES,
+                    Duration::from_millis(20),
+                    shutdown_rx,
+                    move |_| {
+                        handler_started_for_server
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        while !crate::executor::current_task_cancel_requested() {
+                            crate::executor::yield_now();
+                        }
+                        handler_cancelled_for_server
+                            .store(true, std::sync::atomic::Ordering::Release);
+                        Http3ServerResponse {
+                            response: Response::builder()
+                                .status(200)
+                                .body(Http3ResponseBody::Buffered(b"late".to_vec()))
+                                .unwrap(),
+                            producer: None,
+                        }
+                    },
+                )
+                .unwrap()
+            });
+
+            let origin =
+                NetworkOrigin::parse(&Url::parse(&format!("https://{address}")).unwrap().origin())
+                    .unwrap();
+            let tls = crate::network_transport::client_tls_config_with_trust_roots(
+                vec![include_bytes!("../testdata/tls-loopback-root.der").to_vec()],
+                false,
+            )
+            .unwrap();
+            let client = crate::executor::spawn(move || {
+                let result = crate::network_future::block_on_current(
+                    crate::network_future::spawn_on_reactor(async move {
+                        test_http3_get(origin, tls, "/drain").await
+                    }),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(result.is_err());
+                1
+            });
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !handler_started.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(std::time::Instant::now() < deadline);
+                crate::executor::yield_now();
+            }
+            shutdown_tx.send_replace(true);
+            assert_eq!(crate::executor::await_task(server), 0);
+            assert_eq!(crate::executor::await_task(client), 1);
+            assert!(handler_cancelled.load(std::sync::atomic::Ordering::Acquire));
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
     async fn test_http3_get(
         origin: NetworkOrigin,
         tls: Arc<crate::network_transport::RustlsClientConfig>,
@@ -1570,6 +1903,23 @@ mod tests {
 
         assert_eq!(config.alpn_protocols, [b"h3".to_vec()]);
         assert!(!config.enable_early_data);
+    }
+
+    #[test]
+    fn http3_reauthorizes_a_changed_remote_path_before_releasing_data() {
+        let origin = NetworkOrigin::parse("https://127.0.0.1:443").unwrap();
+        let grant =
+            EffectiveNetworkGrant::from_verified_scopes(["https://127.0.0.1:443".to_owned()], [])
+                .unwrap();
+        assert!(
+            authorize_remote_address(&origin, &grant, "127.0.0.1:443".parse().unwrap(),).is_ok()
+        );
+        assert!(
+            authorize_remote_address(&origin, &grant, "127.0.0.2:443".parse().unwrap(),).is_err()
+        );
+        assert!(
+            authorize_remote_address(&origin, &grant, "127.0.0.1:444".parse().unwrap(),).is_err()
+        );
     }
 
     #[test]
@@ -2440,6 +2790,81 @@ mod tests {
             }));
             assert_eq!(second_started.load(Ordering::Acquire), 2);
             assert_eq!(crate::executor::await_task(server_task), 2);
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
+    fn http3_server_rejects_untrusted_peer_and_keeps_serving_valid_peer() {
+        let _gc_guard = crate::collector::test_support::test_guard();
+        let outcome = Executor::new().run_with_root(|| {
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = reservation.local_addr().unwrap();
+            drop(reservation);
+            let grant = EffectiveNetworkGrant::from_verified_datagram_scopes(
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                [address.to_string()],
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                false,
+            )
+            .unwrap();
+            let (endpoint, address) =
+                bind_server_endpoint(address, &grant, test_http3_server_config()).unwrap();
+            let server = crate::executor::spawn(move || {
+                serve_endpoint(endpoint, 1, 2, |request| Http3ServerResponse {
+                    response: Response::builder()
+                        .status(200)
+                        .body(Http3ResponseBody::Buffered(
+                            request.uri().path().as_bytes().to_vec(),
+                        ))
+                        .unwrap(),
+                    producer: None,
+                })
+                .unwrap()
+            });
+
+            let origin =
+                NetworkOrigin::parse(&Url::parse(&format!("https://{address}")).unwrap().origin())
+                    .unwrap();
+            let untrusted_tls = crate::network_transport::client_tls_config_with_trust_roots(
+                vec![include_bytes!("../testdata/mtls-client-ca.der").to_vec()],
+                false,
+            )
+            .unwrap();
+            let untrusted_origin = origin.clone();
+            let untrusted = crate::executor::spawn(move || {
+                let result = crate::network_future::block_on_current(
+                    crate::network_future::spawn_on_reactor(async move {
+                        test_http3_get(untrusted_origin, untrusted_tls, "/untrusted").await
+                    }),
+                )
+                .unwrap()
+                .unwrap();
+                assert!(result.is_err());
+                1
+            });
+            assert_eq!(crate::executor::await_task(untrusted), 1);
+
+            let trusted_tls = crate::network_transport::client_tls_config_with_trust_roots(
+                vec![include_bytes!("../testdata/tls-loopback-root.der").to_vec()],
+                false,
+            )
+            .unwrap();
+            let response =
+                crate::network_future::block_on_current(crate::network_future::spawn_on_reactor(
+                    async move { test_http3_get(origin, trusted_tls, "/trusted").await },
+                ))
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(response, b"/trusted");
+            assert_eq!(crate::executor::await_task(server), 1);
             0
         });
         assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));

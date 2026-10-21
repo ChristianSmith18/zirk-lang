@@ -1541,7 +1541,19 @@ impl TlsServerConfig {
     pub(crate) fn into_http3_quic_config(
         self,
     ) -> Result<quinn::ServerConfig, NetworkTransportError> {
+        self.into_http3_quic_config_with_stream_limit(16)
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) fn into_http3_quic_config_with_stream_limit(
+        self,
+        max_streams_per_connection: usize,
+    ) -> Result<quinn::ServerConfig, NetworkTransportError> {
         use quinn::crypto::rustls::QuicServerConfig;
+
+        if !(1..=1_024).contains(&max_streams_per_connection) {
+            return Err(NetworkTransportError::InvalidServerIdentity);
+        }
 
         let mut tls = (*self.0).clone();
         tls.alpn_protocols = vec![b"h3".to_vec()];
@@ -1551,7 +1563,7 @@ impl TlsServerConfig {
         let mut server = quinn::ServerConfig::with_crypto(Arc::new(crypto));
         let mut transport = quinn::TransportConfig::default();
         transport
-            .max_concurrent_bidi_streams(quinn::VarInt::from_u32(16))
+            .max_concurrent_bidi_streams(quinn::VarInt::from_u32(max_streams_per_connection as u32))
             .max_concurrent_uni_streams(quinn::VarInt::from_u32(16))
             .stream_receive_window(
                 quinn::VarInt::from_u64(
@@ -1613,6 +1625,46 @@ impl TlsListener {
             .map_err(|_| NetworkTransportError::TlsHandshake)?
         }))??;
         Ok((TlsServerStream { inner, peer }, peer))
+    }
+
+    /// Accepts a TLS connection or wakes when the server control requests
+    /// shutdown. A pending TCP accept and its TLS handshake are both
+    /// cancellation-safe; shutdown does not consume the listener.
+    pub fn accept_until_shutdown(
+        &self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<(TlsServerStream, SocketAddr)>, NetworkTransportError> {
+        if *shutdown.borrow() {
+            return Ok(None);
+        }
+        let accepted = map_wait(crate::network_future::block_on_current(async {
+            tokio::select! {
+                accepted = self.inner.accept() => accepted
+                    .map(|(stream, peer)| Some((stream, peer)))
+                    .map_err(|_| NetworkTransportError::Io),
+                _ = shutdown.changed() => Ok(None),
+            }
+        }))??;
+        let Some((stream, peer)) = accepted else {
+            return Ok(None);
+        };
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&self.config.0));
+        let handshake = map_wait(crate::network_future::block_on_current(async move {
+            crate::network_future::spawn_on_reactor(async move {
+                tokio::select! {
+                    result = tokio::time::timeout(DEFAULT_NETWORK_TIMEOUT, acceptor.accept(stream)) => {
+                        result
+                            .map_err(|_| NetworkTransportError::Timeout)?
+                            .map_err(|_| NetworkTransportError::TlsHandshake)
+                            .map(Some)
+                    }
+                    _ = shutdown.changed() => Ok(None),
+                }
+            })
+            .await
+            .map_err(|_| NetworkTransportError::TlsHandshake)?
+        }))??;
+        Ok(handshake.map(|inner| (TlsServerStream { inner, peer }, peer)))
     }
 }
 
@@ -1740,6 +1792,27 @@ impl TcpListener {
                 .map_err(|_| NetworkTransportError::Io)?;
             Ok((TcpStream { inner, peer }, peer))
         }))?
+    }
+
+    /// Accepts one peer or returns `None` when the HTTP server's shutdown
+    /// signal wakes the pending listener. The listener remains usable until
+    /// the serving API closes it after draining admitted work.
+    pub fn accept_until_shutdown(
+        &self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Option<(TcpStream, SocketAddr)>, NetworkTransportError> {
+        if *shutdown.borrow() {
+            return Ok(None);
+        }
+        let accepted = map_wait(crate::network_future::block_on_current(async {
+            tokio::select! {
+                accepted = self.inner.accept() => accepted
+                    .map(|(stream, peer)| Some((stream, peer)))
+                    .map_err(|_| NetworkTransportError::Io),
+                _ = shutdown.changed() => Ok(None),
+            }
+        }))??;
+        Ok(accepted.map(|(inner, peer)| (TcpStream { inner, peer }, peer)))
     }
 }
 
@@ -2893,6 +2966,85 @@ mod tests {
             });
             assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
         }
+    }
+
+    #[test]
+    fn shutdown_wakes_pending_tcp_accept_without_cancelling_the_task() {
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let grant = Arc::new(
+            EffectiveNetworkGrant::from_verified_scopes(
+                std::iter::empty::<String>(),
+                [address.to_string()],
+            )
+            .unwrap(),
+        );
+
+        let outcome = Executor::new().run_with_root(move || {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server_grant = Arc::clone(&grant);
+            let server = spawn(move || {
+                let listener = TcpListener::bind(address, &server_grant).unwrap();
+                assert!(
+                    listener
+                        .accept_until_shutdown(shutdown_rx)
+                        .unwrap()
+                        .is_none()
+                );
+                29
+            });
+            // Give the child task a chance to bind and park inside accept.
+            yield_now();
+            shutdown_tx.send(true).unwrap();
+            assert_eq!(await_task(server), 29);
+            let rebound = std::net::TcpListener::bind(address)
+                .expect("controlled shutdown must release the listening socket");
+            drop(rebound);
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
+    fn shutdown_wakes_pending_tls_accept_and_releases_listener() {
+        let certificate = include_bytes!("../testdata/tls-loopback-cert.der").to_vec();
+        let private_key = include_bytes!("../testdata/tls-loopback-key.der").to_vec();
+        let server_config =
+            TlsServerConfig::from_der(vec![certificate], private_key, false).unwrap();
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let grant = Arc::new(
+            EffectiveNetworkGrant::from_verified_scopes(
+                [format!("https://127.0.0.1:{}", address.port())],
+                [address.to_string()],
+            )
+            .unwrap(),
+        );
+
+        let outcome = Executor::new().run_with_root(move || {
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server_grant = Arc::clone(&grant);
+            let server = spawn(move || {
+                let listener = TlsListener::bind(address, &server_grant, server_config).unwrap();
+                assert!(
+                    listener
+                        .accept_until_shutdown(shutdown_rx)
+                        .unwrap()
+                        .is_none()
+                );
+                37
+            });
+            yield_now();
+            shutdown_tx.send(true).unwrap();
+            assert_eq!(await_task(server), 37);
+            let rebound = std::net::TcpListener::bind(address)
+                .expect("controlled TLS shutdown must release the listening socket");
+            drop(rebound);
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
     }
 
     #[test]

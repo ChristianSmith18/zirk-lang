@@ -8993,7 +8993,7 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
-                        "std.net.tls.accept" => {
+                        "std.net.tls.accept" | "std.net.tls.accept_until_shutdown" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("TLS accept returns a typed Result enum")
                             };
@@ -9006,9 +9006,19 @@ impl<'a> FunctionLowering<'a> {
                             };
                             let handle =
                                 self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let shutdown_control =
+                                if binding == "std.net.tls.accept_until_shutdown" {
+                                    Some(self.lower_expr_as(
+                                        &e.args[1].value,
+                                        IrType::Int(IntWidth::U64),
+                                    ))
+                                } else {
+                                    None
+                                };
                             self.emit(
                                 InstKind::NetworkTlsAccept {
                                     handle,
+                                    shutdown_control,
                                     enum_id,
                                     stream_class_id,
                                 },
@@ -9192,7 +9202,7 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
-                        "std.net.tcp.accept" => {
+                        "std.net.tcp.accept" | "std.net.tcp.accept_until_shutdown" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("TCP accept returns a typed Result enum")
                             };
@@ -9205,9 +9215,19 @@ impl<'a> FunctionLowering<'a> {
                             };
                             let handle =
                                 self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let shutdown_control =
+                                if binding == "std.net.tcp.accept_until_shutdown" {
+                                    Some(self.lower_expr_as(
+                                        &e.args[1].value,
+                                        IrType::Int(IntWidth::U64),
+                                    ))
+                                } else {
+                                    None
+                                };
                             self.emit(
                                 InstKind::NetworkTcpAccept {
                                     handle,
+                                    shutdown_control,
                                     enum_id,
                                     stream_class_id,
                                 },
@@ -10578,20 +10598,14 @@ impl<'a> FunctionLowering<'a> {
                                 self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
                             self.emit(InstKind::HttpUploadClose { handle }, returns, span)
                         }
-                        "std.http.multipart_encode" => {
-                            let IrType::Enum(enum_id) = returns else {
-                                unreachable!("HTTP multipart encoding returns a typed Result enum")
-                            };
-                            let metadata = self.lower_expr(&e.args[0].value);
-                            let bodies = self.lower_expr(&e.args[1].value);
-                            let boundary = self.lower_expr_as(&e.args[2].value, IrType::String);
+                        "std.http.server.control_create" => {
+                            self.emit(InstKind::HttpServerControlCreate, returns, span)
+                        }
+                        "std.http.server.control_request_shutdown" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
                             self.emit(
-                                InstKind::HttpMultipartEncode {
-                                    metadata,
-                                    bodies,
-                                    boundary,
-                                    enum_id,
-                                },
+                                InstKind::HttpServerControlRequestShutdown { handle },
                                 returns,
                                 span,
                             )
@@ -10600,14 +10614,34 @@ impl<'a> FunctionLowering<'a> {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("HTTP/3 server dispatch returns a typed Result enum")
                             };
-                            let endpoint = self.lower_expr_as(&e.args[0].value, IrType::String);
-                            let certificate_chain_der = self.lower_expr(&e.args[1].value);
-                            let private_key_der = self.lower_expr(&e.args[2].value);
-                            let max_requests =
-                                self.lower_expr_as(&e.args[3].value, IrType::Int(IntWidth::U64));
-                            let max_connections =
-                                self.lower_expr_as(&e.args[4].value, IrType::Int(IntWidth::U64));
-                            let callback = self.lower_expr(&e.args[5].value);
+                            // The callback lambda gets its type from the value
+                            // it lowers to, so hold all preceding arguments
+                            // across its closure construction explicitly.
+                            let mut held = e.args[..11]
+                                .iter()
+                                .map(|arg| {
+                                    let ty = self.type_of(&arg.value, arg.span);
+                                    self.lower_and_hold_as(&arg.value, ty, true)
+                                })
+                                .collect::<Vec<_>>();
+                            let callback = self.lower_expr(&e.args[11].value);
+                            let args = held
+                                .drain(..)
+                                .zip(&e.args[..11])
+                                .map(|(value, arg)| self.reload(value, arg.span))
+                                .chain(std::iter::once(callback))
+                                .collect::<Vec<_>>();
+                            let endpoint = args[0];
+                            let certificate_chain_der = args[1];
+                            let private_key_der = args[2];
+                            let max_requests = args[3];
+                            let max_connections = args[4];
+                            let control_handle = args[5];
+                            let drain_timeout_ms = args[6];
+                            let max_handshakes = args[7];
+                            let max_handler_tasks = args[8];
+                            let max_streams_per_connection = args[9];
+                            let max_queued_response_bytes = args[10];
                             let IrType::Callable(callback_layout) = self.type_of_operand(callback)
                             else {
                                 unreachable!("HTTP/3 server handler is a callable")
@@ -10630,6 +10664,12 @@ impl<'a> FunctionLowering<'a> {
                                     private_key_der,
                                     max_requests,
                                     max_connections,
+                                    control_handle,
+                                    drain_timeout_ms,
+                                    max_handshakes,
+                                    max_handler_tasks,
+                                    max_streams_per_connection,
+                                    max_queued_response_bytes,
                                     callback,
                                     callback_layout,
                                     request_class_id: *request_class_id,

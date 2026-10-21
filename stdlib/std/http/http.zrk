@@ -1825,23 +1825,289 @@ share class HTTPMultipartBuilder {
     }
 
     encode(boundary: String): Result<Array<Byte>, HTTPError> {
-        return HTTPMultipartBuilder.encode_native(this.metadata, this.bodies, boundary);
+        mut boundary_bytes = boundary.bytes();
+        if ! HTTPMultipartBuilder.valid_boundary(boundary_bytes) {
+            return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+        }
+        if this.bodies.length > 256 {
+            return HTTPMultipartBuilder.encode_error(HTTPError.TooManyParts);
+        }
+        if this.metadata.length != this.bodies.length * 5 {
+            return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+        }
+
+        // Validate every part and calculate the exact output size before
+        // allocating or emitting the wire body. The final array is capped at
+        // 1 MiB even when quoting expands the caller-provided metadata.
+        mut encoded_size: UInt64 = 0;
+        mut part_index: UInt64 = 0;
+        while part_index < this.bodies.length {
+            mut metadata_index = part_index * 5;
+            mut name = this.metadata[metadata_index];
+            mut filename = this.metadata[metadata_index + 1];
+            mut filename_present = this.metadata[metadata_index + 2];
+            mut content_type = this.metadata[metadata_index + 3];
+            mut content_type_present = this.metadata[metadata_index + 4];
+            mut body = this.bodies[part_index];
+            if filename_present != "0" && filename_present != "1" {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            if content_type_present != "0" && content_type_present != "1" {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            if ! HTTPMultipartBuilder.valid_quoted_parameter(name, false) {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            if filename_present == "1"
+            && ! HTTPMultipartBuilder.valid_quoted_parameter(filename, true) {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            if content_type_present == "1"
+            && ! HTTPMultipartBuilder.valid_content_type(content_type) {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            if HTTPMultipartBuilder.contains_next_part_delimiter(body, boundary_bytes) {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+
+            mut header_size: UInt64 = 39 + name.bytes().length
+                + HTTPMultipartBuilder.quoted_escape_count(name);
+            if filename_present == "1" {
+                header_size += 13 + filename.bytes().length
+                    + HTTPMultipartBuilder.quoted_escape_count(filename);
+            }
+            if content_type_present == "1" {
+                header_size += 16 + content_type.bytes().length;
+            }
+            if header_size > 16384 {
+                return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+            }
+            mut part_size: UInt64 = 2 + boundary_bytes.length + 2
+                + header_size + 4 + body.length + 2;
+            if part_size > 1048576 - encoded_size {
+                return HTTPMultipartBuilder.encode_error(HTTPError.BodyTooLarge);
+            }
+            encoded_size += part_size;
+            part_index += 1;
+        }
+
+        mut final_size: UInt64 = 2 + boundary_bytes.length + 4;
+        if final_size > 1048576 - encoded_size {
+            return HTTPMultipartBuilder.encode_error(HTTPError.BodyTooLarge);
+        }
+        encoded_size += final_size;
+
+        mut encoded: Array<Byte> = Array(encoded_size);
+        mut offset: UInt64 = 0;
+        part_index = 0;
+        while part_index < this.bodies.length {
+            mut metadata_index = part_index * 5;
+            mut name = this.metadata[metadata_index];
+            mut filename = this.metadata[metadata_index + 1];
+            mut filename_present = this.metadata[metadata_index + 2];
+            mut content_type = this.metadata[metadata_index + 3];
+            mut content_type_present = this.metadata[metadata_index + 4];
+            mut body = this.bodies[part_index];
+            offset = HTTPMultipartBuilder.append_text(encoded, offset, "--");
+            offset = HTTPMultipartBuilder.append_byte_list(encoded, offset, boundary_bytes);
+            offset = HTTPMultipartBuilder.append_text(encoded, offset, "\r\nContent-Disposition: form-data; name=\"");
+            offset = HTTPMultipartBuilder.append_quoted(encoded, offset, name);
+            offset = HTTPMultipartBuilder.append_text(encoded, offset, "\"");
+            if filename_present == "1" {
+                offset = HTTPMultipartBuilder.append_text(encoded, offset, "; filename=\"");
+                offset = HTTPMultipartBuilder.append_quoted(encoded, offset, filename);
+                offset = HTTPMultipartBuilder.append_text(encoded, offset, "\"");
+            }
+            if content_type_present == "1" {
+                offset = HTTPMultipartBuilder.append_text(encoded, offset, "\r\nContent-Type: ");
+                offset = HTTPMultipartBuilder.append_text(encoded, offset, content_type);
+            }
+            offset = HTTPMultipartBuilder.append_text(encoded, offset, "\r\n\r\n");
+            offset = HTTPMultipartBuilder.append_byte_array(encoded, offset, body);
+            offset = HTTPMultipartBuilder.append_text(encoded, offset, "\r\n");
+            part_index += 1;
+        }
+        offset = HTTPMultipartBuilder.append_text(encoded, offset, "--");
+        offset = HTTPMultipartBuilder.append_byte_list(encoded, offset, boundary_bytes);
+        offset = HTTPMultipartBuilder.append_text(encoded, offset, "--\r\n");
+        if offset != encoded_size {
+            return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+        }
+        return HTTPMultipartBuilder.encode_ok(encoded);
     }
 
-    private static encode_native(
-        metadata: List<String>,
-        bodies: List<Array<Byte >>,
-        boundary: String,
-    ): Result<Array<Byte>, HTTPError> {
-        return HTTPMultipartBuilder.multipart_encode_intrinsic(metadata, bodies, boundary);
+    private static valid_boundary(bytes: List<UInt8>): Boolean {
+        if bytes.length == 0 || bytes.length > 70 { return false; }
+        mut index: UInt64 = 0;
+        while index < bytes.length {
+            mut value = bytes[index];
+            mut alpha_numeric = (value >= 48 && value <= 57)
+                || (value >= 65 && value <= 90) || (value >= 97 && value <= 122);
+            mut punctuation = value == 39 || value == 40 || value == 41 || value == 43
+                || value == 95 || value == 44 || value == 45 || value == 46
+                || value == 47 || value == 58 || value == 61 || value == 63;
+            if ! alpha_numeric && ! punctuation
+                && !(value == 32 && index + 1 < bytes.length) {
+                return false;
+            }
+            index += 1;
+        }
+        return true;
     }
 
-    private static multipart_encode_intrinsic(
-        metadata: List<String>,
-        bodies: List<Array<Byte >>,
-        boundary: String,
-    ): Result<Array<Byte>, HTTPError> {
-        return HTTPMultipartBuilder.encode_error(HTTPError.Protocol);
+    private static valid_quoted_parameter(value: String, allow_empty: Boolean): Boolean {
+        mut bytes = value.bytes();
+        if (! allow_empty && bytes.length == 0) { return false; }
+        for byte in bytes {
+            if byte < 32 || byte == 127 { return false; }
+        }
+        return true;
+    }
+
+    private static valid_content_type(value: String): Boolean {
+        mut bytes = value.bytes();
+        mut length = bytes.length;
+        if length == 0 { return false; }
+        mut index: UInt64 = 0;
+        mut type_length: UInt64 = 0;
+        while index < length && HTTPMultipartBuilder.is_mime_token(bytes[index]) {
+            type_length += 1;
+            index += 1;
+        }
+        if type_length == 0 || index >= length || bytes[index] != 47 { return false; }
+        index += 1;
+        mut subtype_length: UInt64 = 0;
+        while index < length && HTTPMultipartBuilder.is_mime_token(bytes[index]) {
+            subtype_length += 1;
+            index += 1;
+        }
+        if subtype_length == 0 { return false; }
+        while index < length {
+            while index < length && (bytes[index] == 32 || bytes[index] == 9) { index += 1; }
+            if index >= length || bytes[index] != 59 { return false; }
+            index += 1;
+            while index < length && (bytes[index] == 32 || bytes[index] == 9) { index += 1; }
+            mut parameter_length: UInt64 = 0;
+            while index < length && HTTPMultipartBuilder.is_mime_token(bytes[index]) {
+                parameter_length += 1;
+                index += 1;
+            }
+            if parameter_length == 0 { return false; }
+            while index < length && (bytes[index] == 32 || bytes[index] == 9) { index += 1; }
+            if index >= length || bytes[index] != 61 { return false; }
+            index += 1;
+            while index < length && (bytes[index] == 32 || bytes[index] == 9) { index += 1; }
+            if index < length && bytes[index] == 34 {
+                index += 1;
+                mut closed = false;
+                while index < length {
+                    mut byte = bytes[index];
+                    if byte == 34 { closed = true; index += 1; break; }
+                    if byte == 92 {
+                        index += 1;
+                        if index >= length || bytes[index] < 32 || bytes[index] == 127 {
+                            return false;
+                        }
+                    } else if (byte < 32 && byte != 9) || byte == 127 {
+                        return false;
+                    }
+                    index += 1;
+                }
+                if ! closed { return false; }
+            } else {
+                mut parameter_value_length: UInt64 = 0;
+                while index < length && HTTPMultipartBuilder.is_mime_token(bytes[index]) {
+                    parameter_value_length += 1;
+                    index += 1;
+                }
+                if parameter_value_length == 0 { return false; }
+            }
+            while index < length && (bytes[index] == 32 || bytes[index] == 9) { index += 1; }
+            if index < length && bytes[index] != 59 { return false; }
+        }
+        return true;
+    }
+
+    private static is_mime_token(value: UInt8): Boolean {
+        return (value >= 48 && value <= 57) || (value >= 65 && value <= 90)
+            || (value >= 97 && value <= 122) || value == 33 || value == 35
+            || value == 36 || value == 37 || value == 38 || value == 39
+            || value == 42 || value == 43 || value == 45 || value == 46
+            || value == 94 || value == 95 || value == 96 || value == 124 || value == 126;
+    }
+
+    private static quoted_escape_count(value: String): UInt64 {
+        mut count: UInt64 = 0;
+        for byte in value.bytes() {
+            if byte == 34 || byte == 92 { count += 1; }
+        }
+        return count;
+    }
+
+    private static contains_next_part_delimiter(body: Array<Byte>, boundary: List<UInt8>): Boolean {
+        mut marker_length = boundary.length + 6;
+        if body.length < marker_length { return false; }
+        mut start: UInt64 = 0;
+        while start <= body.length - marker_length {
+            mut matches = body[start] == 13 && body[start + 1] == 10
+                && body[start + 2] == 45 && body[start + 3] == 45;
+            mut index: UInt64 = 0;
+            while matches && index < boundary.length {
+                matches = body[start + 4 + index] == boundary[index] as Byte;
+                index += 1;
+            }
+            if matches {
+                matches = body[start + 4 + boundary.length] == 13
+                    && body[start + 5 + boundary.length] == 10;
+            }
+            if matches { return true; }
+            start += 1;
+        }
+        return false;
+    }
+
+    private static append_text(encoded: Array<Byte>, offset: UInt64, value: String): UInt64 {
+        return HTTPMultipartBuilder.append_byte_list(encoded, offset, value.bytes());
+    }
+
+    private static append_byte_list(
+        encoded: Array<Byte>,
+        offset: UInt64,
+        bytes: List<UInt8>,
+    ): UInt64 {
+        mut index: UInt64 = 0;
+        while index < bytes.length {
+            encoded[offset + index] = bytes[index] as Byte;
+            index += 1;
+        }
+        return offset + bytes.length;
+    }
+
+    private static append_byte_array(
+        encoded: Array<Byte>,
+        offset: UInt64,
+        bytes: Array<Byte>,
+    ): UInt64 {
+        mut index: UInt64 = 0;
+        while index < bytes.length {
+            encoded[offset + index] = bytes[index];
+            index += 1;
+        }
+        return offset + bytes.length;
+    }
+
+    private static append_quoted(encoded: Array<Byte>, offset: UInt64, value: String): UInt64 {
+        mut bytes = value.bytes();
+        mut output_offset = offset;
+        for byte in bytes {
+            if byte == 34 || byte == 92 {
+                encoded[output_offset] = 92 as Byte;
+                output_offset += 1;
+            }
+            encoded[output_offset] = byte as Byte;
+            output_offset += 1;
+        }
+        return output_offset;
     }
 
     private static optional_length(value: String?): UInt64 {
@@ -1856,12 +2122,162 @@ share class HTTPMultipartBuilder {
     private static encode_error(error: HTTPError): Result<Array<Byte>, HTTPError> { return Error(
             error,
         ); }
+    private static encode_ok(value: Array<Byte>): Result<Array<Byte>, HTTPError> { return Ok(value); }
     private static unit(): Void { return; }
 }
 
 import { TCPError, TCPListener, TCPStream } from std.net::tcp;
 import { TLSError, TLSListener, TLSStream } from std.net::tls;
 import { SecretString } from std.environment;
+
+// Shareable, project-scoped signal used to stop a listening HTTP server from
+// another task. Owner-task exit revokes the native capability and signals
+// shutdown automatically.
+share class HTTPServerControl {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static create(): Result<HTTPServerControl, HTTPError> {
+        mut handle: UInt64 = HTTPServerControl.server_control_create_native();
+        if handle == 0 {
+            return Error<HTTPServerControl, HTTPError>(HTTPError.Transport);
+        }
+        return Ok<HTTPServerControl, HTTPError>(HTTPServerControl(handle));
+    }
+
+    // Repeated requests are successful and do not schedule duplicate work.
+    request_shutdown(): Result<Void, HTTPError> {
+        if HTTPServerControl.server_control_request_shutdown_native(this.handle) {
+            return HTTPServerControl.control_unit_ok();
+        }
+        return Error<Void, HTTPError>(HTTPError.Transport);
+    }
+
+    // Opaque runtime capability forwarded only to std.net listener adapters.
+    // Applications should retain this object and call request_shutdown().
+    listener_shutdown_handle(): UInt64 { return this.handle; }
+
+    static serve_http3(
+        control: HTTPServerControl,
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        options: HTTPServerOptions,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        return HTTPServerControl.server_control_serve_http3_native(
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            options.max_requests(),
+            options.max_connections(),
+            control.handle,
+            options.drain_timeout_ms(),
+            options.max_handshakes(),
+            options.max_handler_tasks(),
+            options.max_streams_per_connection(),
+            options.max_queued_response_bytes(),
+            handler,
+        );
+    }
+
+    private static server_control_create_native(): UInt64 { return 0; }
+
+    private static server_control_request_shutdown_native(handle: UInt64): Boolean {
+        return false;
+    }
+
+    private static server_control_serve_http3_native(
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        max_requests: UInt64,
+        max_connections: UInt64,
+        control_handle: UInt64,
+        drain_timeout_ms: UInt64,
+        max_handshakes: UInt64,
+        max_handler_tasks: UInt64,
+        max_streams_per_connection: UInt64,
+        max_queued_response_bytes: UInt64,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        return Error(HTTPError.Protocol);
+    }
+
+    private static control_unit_ok(): Result<Void, HTTPError> {
+        return Ok<Void, HTTPError>(HTTPServerControl.control_unit());
+    }
+
+    private static control_unit(): Void { return; }
+}
+
+// Validated independent bounds shared by TCP, TLS, and HTTP/3 server entry
+// points. Values are intentionally explicit so callers can size each queue.
+share class HTTPServerOptions {
+    private inmut connection_limit: UInt64;
+    private inmut handshake_limit: UInt64;
+    private inmut request_limit: UInt64;
+    private inmut handler_limit: UInt64;
+    private inmut stream_limit: UInt64;
+    private inmut response_queue_bytes: UInt64;
+    private inmut drain_timeout: UInt64;
+
+    private construct(
+        connections: UInt64,
+        handshakes: UInt64,
+        requests: UInt64,
+        handlers: UInt64,
+        streams: UInt64,
+        queued_response_bytes: UInt64,
+        drain_timeout_ms: UInt64,
+    ) {
+        this.connection_limit = connections;
+        this.handshake_limit = handshakes;
+        this.request_limit = requests;
+        this.handler_limit = handlers;
+        this.stream_limit = streams;
+        this.response_queue_bytes = queued_response_bytes;
+        this.drain_timeout = drain_timeout_ms;
+    }
+
+    static create(
+        max_connections: UInt64 = 128,
+        max_handshakes: UInt64 = 16,
+        max_requests: UInt64 = 65536,
+        max_handler_tasks: UInt64 = 4,
+        max_streams_per_connection: UInt64 = 16,
+        max_queued_response_bytes: UInt64 = 67108864,
+        drain_timeout_ms: UInt64 = 30000,
+    ): Result<HTTPServerOptions, HTTPError> {
+        if max_connections < 1 || max_connections > 256 ||
+        max_handshakes < 1 || max_handshakes > 256 ||
+        max_requests < 1 || max_requests > 65536 ||
+        max_handler_tasks < 1 || max_handler_tasks > 64 ||
+        max_streams_per_connection < 1 || max_streams_per_connection > 1024 ||
+        max_queued_response_bytes < 65536 || max_queued_response_bytes > 134217728 ||
+        drain_timeout_ms > 3600000 {
+            return Error<HTTPServerOptions, HTTPError>(HTTPError.InvalidArgument);
+        }
+        return Ok<HTTPServerOptions, HTTPError>(HTTPServerOptions(
+            max_connections,
+            max_handshakes,
+            max_requests,
+            max_handler_tasks,
+            max_streams_per_connection,
+            max_queued_response_bytes,
+            drain_timeout_ms,
+        ));
+    }
+
+    max_connections(): UInt64 { return this.connection_limit; }
+    max_handshakes(): UInt64 { return this.handshake_limit; }
+    max_requests(): UInt64 { return this.request_limit; }
+    max_handler_tasks(): UInt64 { return this.handler_limit; }
+    max_streams_per_connection(): UInt64 { return this.stream_limit; }
+    max_queued_response_bytes(): UInt64 { return this.response_queue_bytes; }
+    drain_timeout_ms(): UInt64 { return this.drain_timeout; }
+}
 
 share class HTTPServer {
     // Binds through std.net's exact listen-grant check and maps transport
@@ -1898,12 +2314,16 @@ share class HTTPServer {
     }
 
     private static bind_tls_error(error: TLSError): Result<TLSListener, HTTPError> {
+        return HTTPServer.bind_tls_error_code(HTTPServer.map_tls_error_value(error));
+    }
+
+    private static map_tls_error_value(error: TLSError): HTTPError {
         return match error {
-            TLSError.PermissionDenied => HTTPServer.bind_tls_error_code(HTTPError.PermissionDenied);
-            TLSError.AddressNotAllowed => HTTPServer.bind_tls_error_code(HTTPError.PermissionDenied);
-            TLSError.Timeout => HTTPServer.bind_tls_error_code(HTTPError.Timeout);
-            TLSError.Cancelled => HTTPServer.bind_tls_error_code(HTTPError.Cancelled);
-            _ => HTTPServer.bind_tls_error_code(HTTPError.Transport);
+            TLSError.PermissionDenied => HTTPError.PermissionDenied;
+            TLSError.AddressNotAllowed => HTTPError.PermissionDenied;
+            TLSError.Timeout => HTTPError.Timeout;
+            TLSError.Cancelled => HTTPError.Cancelled;
+            _ => HTTPError.Transport;
         };
     }
 
@@ -1960,6 +2380,12 @@ share class HTTPServer {
             private_key_der,
             max_requests,
             max_connections,
+            0,
+            30000,
+            16,
+            4,
+            16,
+            67108864,
             (request: HTTPRequest): HTTPResponse =>
             HTTPServer.invoke_handler(handler, request),
         );
@@ -1971,6 +2397,12 @@ share class HTTPServer {
         private_key_der: Array<Byte>,
         max_requests: UInt64,
         max_connections: UInt64,
+        control_handle: UInt64,
+        drain_timeout_ms: UInt64,
+        max_handshakes: UInt64,
+        max_handler_tasks: UInt64,
+        max_streams_per_connection: UInt64,
+        max_queued_response_bytes: UInt64,
         handler: Fn(HTTPRequest) => HTTPResponse,
     ): Result<UInt64, HTTPError> {
         return HTTPServer.serve_http3_error(HTTPError.Protocol);
@@ -1978,6 +2410,111 @@ share class HTTPServer {
 
     private static serve_http3_error(error: HTTPError): Result<UInt64, HTTPError> {
         return Error(error);
+    }
+
+    // Sequential TCP service loop that observes the shared control while
+    // waiting for admission, drains the current request, and closes the
+    // listener after shutdown or the configured connection/request bound.
+    static serve_until_shutdown(
+        listener: TCPListener,
+        control: HTTPServerControl,
+        options: HTTPServerOptions,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        mut completed: UInt64 = 0;
+        mut accepted: UInt64 = 0;
+        mut stopped: Boolean = false;
+        mut failed: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while ! stopped && ! failed && completed < options.max_requests() &&
+        accepted < options.max_connections() {
+            match listener.accept_until_shutdown(control.listener_shutdown_handle()) {
+                Ok(stream) => {
+                    accepted += 1;
+                    match HTTPServer.serve_once(stream, handler) {
+                        Ok(_) => { completed += 1; true; }
+                        Error(error) => {
+                            if error == HTTPError.Cancelled {
+                                stopped = true;
+                                failure = error;
+                            } else {
+                                completed += 1;
+                            }
+                            true;
+                        }
+                    }
+                }
+                Error(error) => {
+                    if error == TCPError.Cancelled {
+                        stopped = true;
+                    } else {
+                        failed = true;
+                        failure = HTTPServer.map_accept_error_value(error);
+                    }
+                    true;
+                }
+            }
+        }
+        mut close_outcome = listener.close();
+        if failed || failure == HTTPError.Cancelled {
+            return HTTPServer.serve_many_error(failure);
+        }
+        return match close_outcome {
+            Ok(_) => Ok<UInt64, HTTPError>(completed);
+            Error(_) => HTTPServer.serve_many_error(HTTPError.Transport);
+        };
+    }
+
+    // TLS counterpart. The accept adapter wakes both its TCP wait and a
+    // pending handshake when shutdown is requested.
+    static serve_tls_until_shutdown(
+        listener: TLSListener,
+        control: HTTPServerControl,
+        options: HTTPServerOptions,
+        handler: Fn(HTTPRequest) => HTTPResponse,
+    ): Result<UInt64, HTTPError> {
+        mut completed: UInt64 = 0;
+        mut accepted: UInt64 = 0;
+        mut stopped: Boolean = false;
+        mut failed: Boolean = false;
+        mut failure: HTTPError = HTTPError.Transport;
+        while ! stopped && ! failed && completed < options.max_requests() &&
+        accepted < options.max_connections() {
+            match listener.accept_until_shutdown(control.listener_shutdown_handle()) {
+                Ok(stream) => {
+                    accepted += 1;
+                    match HTTPServer.serve_tls_once(stream, handler) {
+                        Ok(_) => { completed += 1; true; }
+                        Error(error) => {
+                            if error == HTTPError.Cancelled {
+                                stopped = true;
+                                failure = error;
+                            } else {
+                                completed += 1;
+                            }
+                            true;
+                        }
+                    }
+                }
+                Error(error) => {
+                    if error == TLSError.Cancelled {
+                        stopped = true;
+                    } else {
+                        failed = true;
+                        failure = HTTPServer.map_tls_error_value(error);
+                    }
+                    true;
+                }
+            }
+        }
+        mut close_outcome = listener.close();
+        if failed || failure == HTTPError.Cancelled {
+            return HTTPServer.serve_many_error(failure);
+        }
+        return match close_outcome {
+            Ok(_) => Ok<UInt64, HTTPError>(completed);
+            Error(_) => HTTPServer.serve_many_error(HTTPError.Transport);
+        };
     }
 
     // Accepts one RFC 6455 upgrade on an already accepted TCP stream. Origins
@@ -2558,6 +3095,22 @@ share class HTTPRouter {
         );
     }
 
+    // Controlled service loop for applications that need to request shutdown
+    // from another task. HTTPServerOptions bounds admission and drain policy.
+    serve_until_shutdown(
+        listener: TCPListener,
+        control: HTTPServerControl,
+        options: HTTPServerOptions,
+    ): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_until_shutdown(
+            listener,
+            control,
+            options,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
     // Serves a bounded number of accepted TLS connections through this route
     // table. Each connection handles one request; TLS ALPN selects HTTP/2 or
     // HTTP/1.1 while the listener remains owned by the caller.
@@ -2630,6 +3183,43 @@ share class HTTPRouter {
             }
         }
         return HTTPRouter.serve_tls_error(failure);
+    }
+
+    // TLS counterpart to serve_until_shutdown; shutdown also interrupts a
+    // pending TCP accept or TLS handshake before the listener is released.
+    serve_tls_until_shutdown(
+        listener: TLSListener,
+        control: HTTPServerControl,
+        options: HTTPServerOptions,
+    ): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServer.serve_tls_until_shutdown(
+            listener,
+            control,
+            options,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
+    }
+
+    // HTTP/3 counterpart routed through this router's immutable route table.
+    // The control owns shutdown; all listener, handshake, stream, handler,
+    // response-queue, and drain bounds come from the validated options value.
+    serve_http3(
+        control: HTTPServerControl,
+        endpoint: String,
+        certificate_chain_der: Array<Array<Byte >>,
+        private_key_der: Array<Byte>,
+        options: HTTPServerOptions,
+    ): Result<UInt64, HTTPError> {
+        mut router: HTTPRouter = this;
+        return HTTPServerControl.serve_http3(
+            control,
+            endpoint,
+            certificate_chain_der,
+            private_key_der,
+            options,
+            (request: HTTPRequest): HTTPResponse => router.dispatch(request),
+        );
     }
 
     // Handles up to max_requests multiplexed HTTP/2 streams on one accepted

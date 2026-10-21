@@ -244,8 +244,8 @@ native backend is delivered.
 | `Regex` (literals, `matches`, `find`, `replace`) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex` plus `native-type-member-surface`; includes `re'...'`, `matches`, `find`, `replace`, `split`, `find_all`, `Regex.parse`, and `match` integration. Runtime cache is bounded to 128 entries, 16 KiB per source pattern, and 256 KiB total retained source; compiled regex size is capped at 256 KiB. New patterns are rejected when limits are reached; entries are not evicted because handles may refer to them. |
 | `std.testing` package and `zirk test` runner | no | no | no | no | no | no | The handbook defines a target contract only; no bundled `std.testing` package or test reporter exists, and the CLI returns `NOT_IMPLEMENTED` for `zirk test`. Secret redaction in test reports is not implemented or verified. |
 | `std.environment` | partial | partial | partial | partial | partial | partial | The scoped `deliver-std-http-and-environment` feature is complete: bundled `Env`/`Environment` provide exact-grant reads and queries, lexicographically ordered names, compile-time `EnvironmentParsable<T>` parsing, and redacted `SecretString`. Approved reads fail closed on stale grants. GitHub Actions run 39359107965 passes the full native workspace matrix on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; each target passes 155/155 CLI E2Es. Secret values have explicit HTTPS-header and authenticated-proxy sinks; debugger views, snapshots, test reports, and other future reveal sinks remain outside this delivery. The overall standard library is still partial. See [the environment handbook](../handbook/04-standard-library/18-std-environment.md) and archived `deliver-std-http-and-environment` evidence. |
-| `std.net` | partial | partial | partial | partial | partial | partial | The scoped feature delivers bundled IP/address values, bounded DNS, TCP streams/listeners, and authenticated TLS client/server APIs with exact grants, peer identity validation, cancellation, and owner-task cleanup. Native transport and application tests pass on all four native targets in CI run 39359107965. UDP, local sockets, interface enumeration, and browser networking remain deferred or excluded; the overall standard library is still partial. See [the network handbook](../handbook/04-standard-library/11-std-net.md). |
-| `std.http` | partial | partial | partial | partial | partial | partial | The scoped feature delivers bundled HTTP/1.1 and TLS HTTP/2 clients/servers, QUERY (RFC 10008), bounded bodies and streaming, redirects, cookies, caching, retries, proxies, routing/middleware, SSE, and HTTP/1.1 plus HTTP/2 WebSocket paths. CI run 39359107965 passes on all four native targets, with 155/155 compiled-Zirk CLI E2Es per target. Generic response-producer backpressure is covered by HTTP/1.1 and HTTP/2 Unix fixtures and HTTP/2 on Windows; the Windows HTTP/1.1 slow-consumer fixture remains Unix-gated. Server connections are admitted serially; HTTP/2 multiplexes up to eight request tasks per connection, and handler cancellation is cooperative at safe points. HTTP/3/QUIC and browser networking are excluded; future secret-redaction sinks remain follow-up work. The overall standard library is still partial. See [the HTTP handbook](../handbook/04-standard-library/12-std-http.md). |
+| `std.net` | partial | partial | partial | partial | partial | partial | The baseline feature delivers bundled IP/address values, bounded DNS, TCP streams/listeners, and authenticated TLS client/server APIs with exact grants, peer identity validation, cancellation, and owner-task cleanup. The active `complete-stdlib-networking-and-http` change also implements bounded UDP, local IPC, interface snapshots, extended TLS, and wakeable TCP/TLS listener shutdown. Focused target evidence is recorded in the change design; this working-tree iteration has not passed the complete native CI matrix. Browser socket APIs remain excluded and the overall standard library is still partial. See [the network handbook](../handbook/04-standard-library/11-std-net.md). |
+| `std.http` | partial | partial | partial | partial | partial | partial | The baseline includes HTTP/1.1 and TLS HTTP/2 clients/servers, QUERY (RFC 10008), bounded bodies and streaming, redirects, cookies, caching, retries, proxies, routing/middleware, SSE, and HTTP/1.1 plus HTTP/2 WebSocket paths. The active `complete-stdlib-networking-and-http` change adds optional native HTTP/3/QUIC client and server paths, RFC 9220 WebSocket, validated server options, and shareable controlled shutdown across TCP/TLS/HTTP/3. macOS lifecycle tests pass locally; the full current-revision native CI matrix and cross-target independent-peer evidence remain open. Browser HTTP requires an injected host capability; browser listeners and sockets are excluded. The overall standard library is still partial. See [the HTTP handbook](../handbook/04-standard-library/12-std-http.md). |
 
 ## Native standard-library target verification (2026-10-20)
 
@@ -253,7 +253,7 @@ GitHub Actions run [39359107965](https://github.com/ChristianSmith18/zirk-lang/a
 
 This closes the native execution gates for the archived `deliver-std-http-and-environment` baseline: exact-grant environment access, TCP/DNS/TLS, HTTP/1.1, TLS HTTP/2, QUERY, streaming and the listed server protocols. The UDP, local sockets, interface enumeration, HTTP/3/QUIC, browser networking, and secret-redaction follow-ups below describe the separate active extension; the broader Phase 7 standard-library surface remains incomplete.
 
-## Current networking extension evidence (working tree, 2026-10-20)
+## Current networking extension evidence (working tree, 2026-10-21)
 
 The active OpenSpec change `complete-stdlib-networking-and-http` adds UDP, local
 IPC, interface snapshots, extended TLS, optional HTTP/3 and HTTP/3 WebSocket,
@@ -269,7 +269,19 @@ passed the complete native CI matrix. Evidence gathered on macOS ARM64:
   QUERY against aioquic, with the peer validating the query body and content
   type and the client confirming the negotiated HTTP/3 response protocol.
 - `cargo test -p zirk-runtime --features http3 --lib
-  http3_transport::tests -- --test-threads=1`: 10 HTTP/3 transport tests passed.
+  http3_transport::tests -- --test-threads=1`: 15 HTTP/3 transport tests passed,
+  including HTTP/3 handler cancellation after the configured drain deadline.
+- The independent `aioquic` peer also verifies HTTP/3 response QPACK limits:
+  17 bounded response fields exceeding the aggregate limit produce a typed
+  `Protocol` error. It verifies that an unsupported RFC 9220 WebSocket peer
+  returns `Protocol` without cross-version replay. A focused runtime test
+  verifies proxy policy: `Auto` retains its ordinary proxy configuration while
+  forced HTTP/3 refuses an unsupported non-MASQUE proxy.
+- `cargo check -p zirk-runtime --features http3 -p zirk-ir
+  -p zirk-codegen-llvm -p zirk-sema -p zirk-cli` passed. Compiled-Zirk E2Es
+  passed for cross-task TCP shutdown, idempotent shutdown/options validation,
+  and the official HTTP/3 server binding. TCP and TLS accept-wakeup runtime
+  tests also passed and confirmed listener-port release.
 - `scripts/test-browser-http-fetch.sh`: the `wasm32-unknown-unknown` build and
   injected-Fetch checks passed, including GET, POST, QUERY, origin denial,
   body limits, CORS failure, and cancellation.
@@ -279,11 +291,32 @@ passed the complete native CI matrix. Evidence gathered on macOS ARM64:
   x86_64-pc-windows-msvc` could not run on this Mac because the Windows C
   compiler/SDK is unavailable (`assert.h` was not found). This is not Windows
   build evidence; the configured Windows CI runner must provide it.
+- CI run 39558631485 failed in the Windows CLI unit suite because two bundled
+  standard-package tests compared Windows `\\` path separators with `/`-based
+  package-relative names. The loader now normalizes the relative path before
+  matching; both affected tests pass locally on macOS. The current fix still
+  requires a new Windows CI run.
 
-Linux runtime results, Windows runtime results, the full four-target feature
-matrix, cross-target independent HTTP/3 peer conformance, final linked
-application size, and website synchronization remain pending. These local
-results do not close OpenSpec tasks 1.2.4, 1.4, 1.6.4, 2.1-2.8, or 4.3-4.6.
+The follow-up browser preflight suite now also covers both shared HTTP server
+control instructions as explicit native-only capabilities. On 2026-10-21,
+`cargo test -p zirk-interpreter -p zirk-browser -- --test-threads=1` passed
+(65 interpreter tests, 38 browser unit tests, 3 browser corpus tests; one
+browser test ignored), `cargo check -p zirk-browser --target
+wasm32-unknown-unknown` passed, and `cargo test -p zirk-sema` passed 688 tests.
+Compiled-Zirk E2Es passed for validated server options, cross-task shutdown,
+and the official HTTP/3 server binding after rebuilding the default-feature
+runtime archive. An initial standalone CLI failure came from the previous
+HTTP/3-enabled static archive being linked into the default-feature compiler;
+the rebuilt default archive produced the expected result.
+
+The new server-lifecycle code has only been verified locally on macOS ARM64.
+The full four-target feature matrix, cross-target independent HTTP/3 peer
+conformance for this revision, final linked application size, and website
+synchronization remain pending. These local results do not close OpenSpec tasks
+2.8, 4.5, or 4.6. Tasks 1.0.1, 2.2, 2.4, 2.7, 4.3, and 4.4 are complete based
+on package/import/preflight verification and the updated handbook/status
+evidence; website synchronization remains pending until the compiler docs are
+committed.
 
 ## Phase 7b — Functional style
 

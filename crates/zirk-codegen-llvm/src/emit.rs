@@ -5470,12 +5470,20 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::NetworkTlsAccept {
                 handle,
+                shutdown_control,
                 enum_id,
                 stream_class_id,
             } => {
                 let handle = self.operand(*handle);
-                let (kind, error, stream, _) =
-                    self.call_network_out(self.runtime.network_tls_accept, &[handle.into()]);
+                let (kind, error, stream, _) = if let Some(control) = shutdown_control {
+                    let control = self.operand(*control);
+                    self.call_network_out(
+                        self.runtime.network_tls_accept_until_shutdown,
+                        &[handle.into(), control.into()],
+                    )
+                } else {
+                    self.call_network_out(self.runtime.network_tls_accept, &[handle.into()])
+                };
                 Some(self.build_u64_object_tagged_outcome(
                     *enum_id,
                     *stream_class_id,
@@ -5692,12 +5700,20 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::NetworkTcpAccept {
                 handle,
+                shutdown_control,
                 enum_id,
                 stream_class_id,
             } => {
                 let handle = self.operand(*handle);
-                let (kind, error, scalar, _) =
-                    self.call_network_out(self.runtime.network_tcp_accept, &[handle.into()]);
+                let (kind, error, scalar, _) = if let Some(control) = shutdown_control {
+                    let control = self.operand(*control);
+                    self.call_network_out(
+                        self.runtime.network_tcp_accept_until_shutdown,
+                        &[handle.into(), control.into()],
+                    )
+                } else {
+                    self.call_network_out(self.runtime.network_tcp_accept, &[handle.into()])
+                };
                 Some(self.build_u64_object_tagged_outcome(
                     *enum_id,
                     *stream_class_id,
@@ -8538,53 +8554,42 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("HTTP upload close returns Boolean"),
                 )
             }
-            ir::InstKind::HttpMultipartEncode {
-                metadata,
-                bodies,
-                boundary,
-                enum_id,
-            } => {
-                let metadata = self.operand(*metadata);
-                let bodies = self.operand(*bodies);
-                let boundary = self.operand(*boundary);
-                let ptr = self.context.ptr_type(AddressSpace::default());
-                let out_ty = self.context.struct_type(
-                    &[
-                        self.context.i32_type().into(),
-                        self.context.i32_type().into(),
-                        ptr.into(),
-                    ],
-                    false,
-                );
-                let out = self.aligned_alloca(out_ty.into(), "http.multipart.encode.out");
+            ir::InstKind::HttpServerControlCreate => Some(
                 self.builder
                     .build_call(
-                        self.runtime.http_multipart_encode,
-                        &[metadata.into(), bodies.into(), boundary.into(), out.into()],
-                        "http.multipart.encode",
+                        self.runtime.http_server_control_create,
+                        &[],
+                        "http.server.control.create",
                     )
-                    .expect("encode HTTP multipart data");
-                let value = self
+                    .expect("create HTTP server shutdown control")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("HTTP server control creation returns UInt64"),
+            ),
+            ir::InstKind::HttpServerControlRequestShutdown { handle } => {
+                let result = self
                     .builder
-                    .build_load(out_ty, out, "http.multipart.encode.out.load")
-                    .expect("load HTTP multipart encoding outcome")
-                    .into_struct_value();
-                let kind = self
-                    .builder
-                    .build_extract_value(value, 0, "http.multipart.encode.kind")
-                    .expect("extract HTTP multipart result tag")
+                    .build_call(
+                        self.runtime.http_server_control_request_shutdown,
+                        &[self.operand(*handle).into()],
+                        "http.server.control.shutdown",
+                    )
+                    .expect("request HTTP server shutdown")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("HTTP server shutdown request returns i32")
                     .into_int_value();
-                let error = self
-                    .builder
-                    .build_extract_value(value, 1, "http.multipart.encode.error")
-                    .expect("extract HTTP multipart error")
-                    .into_int_value();
-                let bytes = self
-                    .builder
-                    .build_extract_value(value, 2, "http.multipart.encode.bytes")
-                    .expect("extract encoded HTTP multipart bytes")
-                    .into_pointer_value();
-                Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
+                Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::NE,
+                            result,
+                            self.context.i32_type().const_zero(),
+                            "http.server.control.shutdown.accepted",
+                        )
+                        .expect("convert HTTP server shutdown result to Boolean")
+                        .into(),
+                )
             }
             ir::InstKind::HttpRouteMatch { pattern, path } => {
                 let pattern = self.operand(*pattern);
@@ -8779,6 +8784,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 private_key_der,
                 max_requests,
                 max_connections,
+                control_handle,
+                drain_timeout_ms,
+                max_handshakes,
+                max_handler_tasks,
+                max_streams_per_connection,
+                max_queued_response_bytes,
                 callback,
                 callback_layout,
                 request_class_id,
@@ -8863,6 +8874,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             self.operand(*private_key_der).into(),
                             self.operand(*max_requests).into(),
                             self.operand(*max_connections).into(),
+                            self.operand(*control_handle).into(),
+                            self.operand(*drain_timeout_ms).into(),
+                            self.operand(*max_handshakes).into(),
+                            self.operand(*max_handler_tasks).into(),
+                            self.operand(*max_streams_per_connection).into(),
+                            self.operand(*max_queued_response_bytes).into(),
                             thunk.as_global_value().as_pointer_value().into(),
                             context.into(),
                             out.into(),

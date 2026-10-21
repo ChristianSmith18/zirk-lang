@@ -304,6 +304,7 @@ pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&
             "bind_with_client_auth_native" => Some("std.net.tls.listen_with_client_auth"),
             "bind_http_native" => Some("std.net.tls.listen_http"),
             "accept_native" => Some("std.net.tls.accept"),
+            "accept_until_shutdown_native" => Some("std.net.tls.accept_until_shutdown"),
             "close_listener_native" => Some("std.net.tls.close_listener"),
             "is_listener_closed_native" => Some("std.net.tls.is_listener_closed"),
             "read_native" => Some("std.net.tls.read"),
@@ -332,6 +333,7 @@ pub fn compiler_binding_for_network_member(module: &str, name: &str) -> Option<&
         "is_closed_native" => Some("std.net.tcp.is_closed"),
         "bind_native" => Some("std.net.tcp.listen"),
         "accept_native" => Some("std.net.tcp.accept"),
+        "accept_until_shutdown_native" => Some("std.net.tcp.accept_until_shutdown"),
         "close_listener_native" => Some("std.net.tcp.close_listener"),
         "is_listener_closed_native" => Some("std.net.tcp.listener_is_closed"),
         _ => None,
@@ -374,7 +376,11 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
         "multipart_parse_intrinsic" => Some("std.http.multipart_parse"),
         "read_upload_native" => Some("std.http.upload_read"),
         "close_upload_native" => Some("std.http.upload_close"),
-        "multipart_encode_intrinsic" => Some("std.http.multipart_encode"),
+        "server_control_create_native" => Some("std.http.server.control_create"),
+        "server_control_request_shutdown_native" => {
+            Some("std.http.server.control_request_shutdown")
+        }
+        "server_control_serve_http3_native" => Some("std.http.server.serve_http3"),
         "serve_once_native" => Some("std.http.server.serve_once"),
         "serve_http3_native" => Some("std.http.server.serve_http3"),
         "serve_http3_websocket_once_native" => Some("std.http.server.websocket_serve_http3_once"),

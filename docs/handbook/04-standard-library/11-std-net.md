@@ -10,16 +10,15 @@ connections.
 HTTP is a separate protocol layer documented in
 [`std.http`](12-std-http.md).
 
-Focused UDP, local IPC, and interface-enumeration runtime tests pass on macOS
-ARM64, Linux ARM64, and Linux x86_64. The public interface API has approved and
-denied end-to-end tests on macOS ARM64. Windows verification for these additions
-remains pending. Client TLS configuration, client and server mutual TLS,
-negotiated-peer metadata, and upgrading an existing TCP stream to TLS have
-compiled-Zirk loopback evidence on macOS ARM64. Their cross-target verification
-and HTTP/3 remain pending.
-The full `zirk-runtime` library suite also passes in a Linux ARM64 container
-(517 passed, 3 ignored); this is runtime-library evidence and does not establish
-compiled-Zirk CLI behavior on that target.
+Focused UDP, local IPC, interface, TLS, and HTTP/3 runtime tests have native
+evidence on macOS ARM64, Linux ARM64, Linux x86_64, and Windows x86_64; the
+Windows result is limited to the CI commands recorded in the OpenSpec evidence.
+The full `zirk-runtime` library suite passed in a Linux ARM64 container (528
+passed, 3 ignored). The optional native HTTP/3 feature and public client/server
+entry points are implemented; independent-peer HTTP/3 and RFC 9220 WebSocket
+verification is documented separately and remains incomplete on Linux and
+Windows. These runtime-library results do not establish compiled-Zirk CLI
+behavior on every target.
 
 The module follows the standard-library I/O contract: operations return typed
 `Result` values, waiting suspends the current task rather than occupying a
@@ -29,7 +28,8 @@ permissions.
 
 > **Implementation status:** this chapter documents the public API currently
 > available in the native preview. Target-level evidence is listed above;
-> Windows runtime behavior for UDP, local IPC, and interface inspection is
+> Windows runtime evidence for UDP, local IPC, and interface inspection comes
+> from the focused native CI commands; the full current-revision matrix remains
 > pending. Unsupported operations must preserve the documented permissions,
 > cancellation, and resource limits.
 >

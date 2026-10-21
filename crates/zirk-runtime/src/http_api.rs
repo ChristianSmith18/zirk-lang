@@ -592,114 +592,6 @@ pub extern "C" fn zirk_http_upload_close(handle: u64) -> bool {
     close_http_upload(handle, crate::executor::current_task())
 }
 
-/// Encodes bounded multipart metadata and binary payload lists.
-///
-/// # Safety
-/// `metadata` must be a live List<String> with five entries per part,
-/// `bodies` a live List<Array<Byte>>, `boundary` a live Zirk String, and `out`
-/// writable HttpTextOut storage.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_http_multipart_encode(
-    metadata: *mut c_void,
-    bodies: *mut c_void,
-    boundary: *const c_void,
-    out: *mut HttpTextOut,
-) {
-    if out.is_null() {
-        return;
-    }
-    let result = (|| {
-        if metadata.is_null() || bodies.is_null() {
-            return Err(3);
-        }
-        let Some(boundary) = (unsafe { crate::string::borrow(boundary) }) else {
-            return Err(3);
-        };
-        let boundary = unsafe { boundary.as_str() }.to_owned();
-        let part_count = unsafe { crate::list::zirk_rt_list_length(bodies) };
-        let metadata_count = unsafe { crate::list::zirk_rt_list_length(metadata) };
-        if part_count > zirk_runtime_core::http_multipart::MAX_MULTIPART_PARTS {
-            return Err(13);
-        }
-        if metadata_count != part_count.saturating_mul(5) {
-            return Err(3);
-        }
-        let list_element_size = std::mem::size_of::<*mut c_void>();
-        let mut parts = Vec::with_capacity(part_count);
-        let mut retained_payload_bytes = 0usize;
-        for index in 0..part_count {
-            let get_text = |offset: usize| -> Result<String, i32> {
-                let slot = unsafe {
-                    crate::list::zirk_rt_list_element(
-                        metadata,
-                        (index * 5 + offset) as i64,
-                        list_element_size,
-                    )
-                };
-                let handle = unsafe { *slot.cast::<*mut c_void>() };
-                let Some(value) = (unsafe { crate::string::borrow(handle) }) else {
-                    return Err(3);
-                };
-                Ok(unsafe { value.as_str() }.to_owned())
-            };
-            let name = get_text(0)?;
-            let filename = get_text(1)?;
-            let filename_present = get_text(2)?;
-            let content_type = get_text(3)?;
-            let content_type_present = get_text(4)?;
-            let filename = match filename_present.as_str() {
-                "0" => None,
-                "1" => Some(filename),
-                _ => return Err(3),
-            };
-            let content_type = match content_type_present.as_str() {
-                "0" => None,
-                "1" => Some(content_type),
-                _ => return Err(3),
-            };
-            let body_slot = unsafe {
-                crate::list::zirk_rt_list_element(bodies, index as i64, list_element_size)
-            };
-            let body_handle = unsafe { *body_slot.cast::<*mut c_void>() };
-            if body_handle.is_null() {
-                return Err(3);
-            }
-            let body_length = unsafe { crate::array::zirk_rt_array_length(body_handle) };
-            if body_length
-                > zirk_runtime_core::http_multipart::MAX_MULTIPART_ENCODED_BYTES
-                    .saturating_sub(retained_payload_bytes)
-            {
-                return Err(4);
-            }
-            retained_payload_bytes += body_length;
-            let body =
-                unsafe { crate::array::copy_byte_array(body_handle, body_length) }.ok_or(4)?;
-            parts.push(zirk_runtime_core::http_multipart::MultipartPart {
-                name,
-                filename,
-                content_type,
-                body,
-            });
-        }
-        let bytes = zirk_runtime_core::http_multipart::encode_multipart(&parts, &boundary)
-            .map_err(|error| match error {
-                zirk_runtime_core::http_multipart::MultipartError::BodyTooLarge => 4,
-                zirk_runtime_core::http_multipart::MultipartError::TooManyParts => 13,
-                _ => 3,
-            })?;
-        Ok(crate::array::alloc_byte_array(&bytes))
-    })();
-    let outcome = match result {
-        Ok(bytes) => HttpTextOut {
-            kind: 0,
-            error: 0,
-            value: bytes,
-        },
-        Err(error) => text_failure(error),
-    };
-    unsafe { out.write(outcome) };
-}
-
 /// Request values borrowed only for the duration of a generated HTTP handler
 /// thunk. Every pointer names a rooted managed Zirk value.
 #[repr(C)]
@@ -745,7 +637,112 @@ pub type HttpUploadProducerCallback = unsafe extern "C" fn(
 ) -> i32;
 
 const MAX_HTTP_SERVER_PRODUCERS: usize = 1_024;
+const MAX_HTTP_SERVER_CONTROLS: usize = 256;
 pub(crate) const MAX_HTTP_SERVER_PRODUCER_CHUNK_BYTES: usize = 64 * 1024;
+
+struct OwnedHttpServerControl {
+    owner: TaskId,
+    executor_id: u64,
+    project_id: String,
+    manifest_digest: String,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+static NEXT_HTTP_SERVER_CONTROL: AtomicU64 = AtomicU64::new(1);
+static HTTP_SERVER_CONTROLS: OnceLock<Mutex<HashMap<u64, OwnedHttpServerControl>>> =
+    OnceLock::new();
+
+fn http_server_controls() -> &'static Mutex<HashMap<u64, OwnedHttpServerControl>> {
+    HTTP_SERVER_CONTROLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn http_server_control_matches(control: &OwnedHttpServerControl) -> bool {
+    crate::permissions::verified_grant().is_some_and(|verified| {
+        control.executor_id == crate::executor::current_executor_id()
+            && control.project_id == verified.project_id()
+            && control.manifest_digest == verified.manifest_digest()
+    })
+}
+
+/// Creates an executor-scoped shutdown signal. The returned handle is a
+/// shareable capability within that executor, but cannot be used by a
+/// different project grant or executor.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn zirk_http_server_control_create() -> u64 {
+    let Some(verified) = crate::permissions::verified_grant() else {
+        return 0;
+    };
+    let mut controls = http_server_controls()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if controls.len() >= MAX_HTTP_SERVER_CONTROLS {
+        return 0;
+    }
+    let handle = NEXT_HTTP_SERVER_CONTROL.fetch_add(1, Ordering::Relaxed);
+    if handle == 0 {
+        return 0;
+    }
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    controls.insert(
+        handle,
+        OwnedHttpServerControl {
+            owner: crate::executor::current_task(),
+            executor_id: crate::executor::current_executor_id(),
+            project_id: verified.project_id().to_owned(),
+            manifest_digest: verified.manifest_digest().to_owned(),
+            shutdown,
+        },
+    );
+    handle
+}
+
+/// Requests listener shutdown idempotently. Returns false for a stale or
+/// cross-executor handle.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn zirk_http_server_control_request_shutdown(handle: u64) -> i32 {
+    let controls = http_server_controls()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(control) = controls.get(&handle) else {
+        return 0;
+    };
+    if !http_server_control_matches(control) {
+        return 0;
+    }
+    control.shutdown.send_replace(true);
+    1
+}
+
+pub(crate) fn http_server_control_shutdown_receiver(
+    handle: u64,
+) -> Option<tokio::sync::watch::Receiver<bool>> {
+    let controls = http_server_controls()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let control = controls.get(&handle)?;
+    http_server_control_matches(control).then(|| control.shutdown.subscribe())
+}
+
+/// Owner-task exit is also a shutdown request. Other tasks can continue to
+/// hold copies of the public value, but its capability is then revoked.
+pub(crate) fn close_task_server_controls(owner: TaskId) {
+    let removed = {
+        let mut controls = http_server_controls()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let handles = controls
+            .iter()
+            .filter_map(|(handle, control)| (control.owner == owner).then_some(*handle))
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| controls.remove(&handle))
+            .collect::<Vec<_>>()
+    };
+    for control in removed {
+        control.shutdown.send_replace(true);
+    }
+}
 
 /// Stable two-word generated closure representation copied at registration.
 /// The capture pointer is also retained through the collector root handle.
@@ -1041,6 +1038,12 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
     private_key_der: *mut c_void,
     max_requests: u64,
     max_connections: u64,
+    control_handle: u64,
+    drain_timeout_ms: u64,
+    max_handshakes: u64,
+    max_handler_tasks: u64,
+    max_streams_per_connection: u64,
+    max_queued_response_bytes: u64,
     callback: Option<HttpServerCallback>,
     context: *mut c_void,
     out: *mut HttpServerServeHttp3Out,
@@ -1054,6 +1057,12 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
                 private_key_der,
                 max_requests,
                 max_connections,
+                control_handle,
+                drain_timeout_ms,
+                max_handshakes,
+                max_handler_tasks,
+                max_streams_per_connection,
+                max_queued_response_bytes,
                 callback,
                 context,
             );
@@ -1079,6 +1088,23 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
                 .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
             let max_connections = usize::try_from(max_connections)
                 .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let drain_timeout = std::time::Duration::from_millis(drain_timeout_ms);
+            if drain_timeout > std::time::Duration::from_secs(3_600)
+                || !(1..=256).contains(&max_handshakes)
+                || !(1..=64).contains(&max_handler_tasks)
+                || !(1..=1_024).contains(&max_streams_per_connection)
+                || !(65_536..=134_217_728).contains(&max_queued_response_bytes)
+            {
+                return Err(crate::http_runtime::HttpRuntimeError::InvalidRequest);
+            }
+            let max_handshakes = usize::try_from(max_handshakes)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let max_handler_tasks = usize::try_from(max_handler_tasks)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let max_streams_per_connection = usize::try_from(max_streams_per_connection)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
+            let max_queued_response_bytes = usize::try_from(max_queued_response_bytes)
+                .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
             let callback = callback.ok_or(crate::http_runtime::HttpRuntimeError::Protocol)?;
             let grant = crate::permissions::current_network_grant()
                 .map_err(|_| crate::http_runtime::HttpRuntimeError::PermissionDenied)?;
@@ -1087,15 +1113,36 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
                 private_key,
                 false,
             )
-            .and_then(crate::network_transport::TlsServerConfig::into_http3_quic_config)
+            .and_then(|config| {
+                config.into_http3_quic_config_with_stream_limit(max_streams_per_connection)
+            })
             .map_err(|_| crate::http_runtime::HttpRuntimeError::Protocol)?;
             let (endpoint, _) =
                 crate::http3_transport::bind_server_endpoint(address, &grant, server_config)?;
+            let (_shutdown_keepalive, shutdown) = if control_handle == 0 {
+                // The legacy finite-server API has no external control
+                // capability; retain its sender until serve_endpoint returns
+                // so a closed watch channel cannot be mistaken for shutdown.
+                let (sender, receiver) = tokio::sync::watch::channel(false);
+                (Some(sender), receiver)
+            } else {
+                (
+                    None,
+                    crate::http_api::http_server_control_shutdown_receiver(control_handle)
+                        .ok_or(crate::http_runtime::HttpRuntimeError::InvalidRequest)?,
+                )
+            };
             let context = context as usize;
-            crate::http3_transport::serve_endpoint(
+            crate::http3_transport::serve_endpoint_with_shutdown(
                 endpoint,
                 max_requests,
                 max_connections,
+                max_handshakes,
+                max_handler_tasks,
+                max_streams_per_connection,
+                max_queued_response_bytes,
+                drain_timeout,
+                shutdown,
                 move |request| {
                     let request = match http3_request_values(request) {
                         Ok(request) => request,
