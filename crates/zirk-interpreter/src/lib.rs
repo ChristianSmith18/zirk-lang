@@ -418,49 +418,6 @@ fn decode_interpreter_http_headers(encoded: &[u8]) -> Result<Vec<(String, Vec<u8
     Ok(fields)
 }
 
-fn encode_interpreter_http_headers(names: &[String], values: &[String]) -> Option<Vec<u8>> {
-    use zirk_runtime_core::http_values::{Headers, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_COUNT};
-
-    if names.len() != values.len() || names.len() > MAX_HTTP_HEADER_COUNT {
-        return None;
-    }
-    let mut encoded = Vec::with_capacity(4);
-    encoded.extend_from_slice(&u32::try_from(names.len()).ok()?.to_le_bytes());
-    let mut headers = Headers::new();
-    for (name, value) in names.iter().zip(values) {
-        let sensitive = name.starts_with('\t');
-        let name = name.strip_prefix('\t').unwrap_or(name);
-        let name_bytes = name.as_bytes();
-        let value_bytes = value.as_bytes();
-        let next_size = encoded
-            .len()
-            .checked_add(6)?
-            .checked_add(name_bytes.len())?
-            .checked_add(value_bytes.len())?;
-        if name_bytes.is_empty()
-            || name_bytes.len() > 0x7fff
-            || value_bytes.len() > u32::MAX as usize
-            || next_size > MAX_HTTP_HEADER_BYTES + 6 * MAX_HTTP_HEADER_COUNT + 4
-        {
-            return None;
-        }
-        let result = if sensitive {
-            headers.append_sensitive(name, value_bytes)
-        } else {
-            headers.append(name, value_bytes)
-        };
-        if result.is_err() {
-            return None;
-        }
-        let name_length = name_bytes.len() as u16 | if sensitive { 0x8000 } else { 0 };
-        encoded.extend_from_slice(&name_length.to_le_bytes());
-        encoded.extend_from_slice(&u32::try_from(value_bytes.len()).ok()?.to_le_bytes());
-        encoded.extend_from_slice(name_bytes);
-        encoded.extend_from_slice(value_bytes);
-    }
-    Some(encoded)
-}
-
 /// Bounds for the opt-in execution trace. Exhausting any of them stops
 /// recording and marks the trace truncated; it never fails the program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2230,13 +2187,6 @@ impl<'module> Interpreter<'module> {
                         .build_tagged_outcome(*enum_id, 1, 0, None, 0, 1)
                         .map(Some),
                 }
-            }
-            InstKind::HttpHeadersEncode { names, values } => {
-                let names = self.string_list_operand(frame_index, *names)?;
-                let values = self.string_list_operand(frame_index, *values)?;
-                let encoded = encode_interpreter_http_headers(&names, &values)
-                    .unwrap_or_else(|| 1u32.to_le_bytes().to_vec());
-                self.allocate_byte_array(encoded).map(Some)
             }
             InstKind::HttpResponseReadAll { handle, enum_id } => {
                 let handle = self.uint_operand(frame_index, *handle)?;
@@ -6839,7 +6789,6 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::GraphemeSlice { .. }
         | InstKind::HttpUrlNormalize { .. }
         | InstKind::HttpUrlResolve { .. }
-        | InstKind::HttpHeadersEncode { .. }
         | InstKind::HttpResponseReadAll { .. }
         | InstKind::HttpResponseText { .. }
         | InstKind::Alloc(_)
@@ -8395,13 +8344,6 @@ mod tests {
                 BrowserSupport::BoundedHost
             );
         }
-        assert_eq!(
-            instruction_support(&InstKind::HttpHeadersEncode {
-                names: value,
-                values: value,
-            }),
-            BrowserSupport::RuntimeCore
-        );
         assert_eq!(
             instruction_support(&InstKind::HttpResponseText {
                 body: value,

@@ -178,6 +178,18 @@ connect or listen access.
 | Windows x86_64 | Fresh `cargo xwin check -p zirk-runtime --tests --features http3 --target x86_64-pc-windows-msvc` | Runtime, Windows named-pipe test code, and current HTTP/3 adapter/test code compile; named-pipe and HTTP/3 runtime tests still require a Windows runner |
 | Browser/WASM | `cargo check -p zirk-browser --target wasm32-unknown-unknown`; `cargo test -p zirk-interpreter`; `cargo test -p zirk-browser`; `scripts/test-browser-http-fetch.sh` | WASM package compiled; 65 interpreter tests and 41 browser tests passed, 1 browser test is ignored. The suspension test confirms output and trace sequence continue in the same interpreter; the WASM/Node Fetch adapter passed method/body/header forwarding, JSON POST and QUERY validation, default-deny and origin checks, request/response limits, CORS error mapping, and cancellation. Browser preflight tests cover every new UDP and local IPC instruction plus interface, DNS, TLS, TCP, and HTTP request/listener host boundaries with capability-specific diagnostics. |
 
+Fresh verification on 2026-10-21 reconfirmed the focused transport suites on
+macOS ARM64 (UDP 6/6, local IPC 5/5, interfaces 2/2) and Linux ARM64 in the
+native `rust:1.94.1-bookworm` container (UDP 6/6, local IPC 5/5). The Windows
+compile check was rerun with `--locked` and passed, still as compile-only
+evidence. After rebuilding the compiler-paired default `libzirk_runtime.a`,
+the complete compiled-Zirk CLI E2E suite passed 168/168 on macOS ARM64; an
+earlier local run had linked an older HTTP/3-enabled archive and was discarded.
+The pinned independent-peer fixture was also rerun after moving HTTP header
+serialization into Zirk and passed HTTP/3 interoperability, Origin rejection,
+and Auto fallback. Windows native runtime execution and the full four-target
+CI matrix remain required before closing the cross-target tasks.
+
 On 2026-10-20, fresh macOS ARM64 runs of `scripts/test-browser-http-fetch.sh`
 and `scripts/test-http3-websocket-public-api.py` passed. The latter used pinned
 `aioquic` as an independent peer and verified Zirk HTTP/3 GET and QUERY, both

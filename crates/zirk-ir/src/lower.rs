@@ -10513,11 +10513,6 @@ impl<'a> FunctionLowering<'a> {
                             let path = self.lower_expr_as(&e.args[1].value, IrType::String);
                             self.emit(InstKind::HttpRouteMatch { pattern, path }, returns, span)
                         }
-                        "std.http.headers_encode" => {
-                            let names = self.lower_expr(&e.args[0].value);
-                            let values = self.lower_expr(&e.args[1].value);
-                            self.emit(InstKind::HttpHeadersEncode { names, values }, returns, span)
-                        }
                         "std.http.form_parse" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("HTTP form parsing returns a typed Result enum")

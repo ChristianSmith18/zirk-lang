@@ -8724,22 +8724,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("select HTTP route match list"),
                 )
             }
-            ir::InstKind::HttpHeadersEncode { names, values } => {
-                let names = self.operand(*names);
-                let values = self.operand(*values);
-                let encoded = self
-                    .builder
-                    .build_call(
-                        self.runtime.http_headers_encode,
-                        &[names.into(), values.into()],
-                        "http.headers.encoded",
-                    )
-                    .expect("encode HTTP response headers")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("HTTP header encoder returns Array<Byte>");
-                Some(encoded)
-            }
             ir::InstKind::HttpServerServeOnce {
                 stream_handle,
                 secure,

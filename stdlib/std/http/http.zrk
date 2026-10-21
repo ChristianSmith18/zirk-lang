@@ -163,33 +163,132 @@ share class HTTPHeaders {
         return copy;
     }
 
-    // Encodes validated fields for the bounded native HTTP transport. The
-    // transport validates this block again before exposing it to a peer.
+    // Encodes validated fields for the bounded transport. The wire block uses
+    // a little-endian count followed by name/value lengths and UTF-8 bytes.
+    // Bit 15 of the name length carries the source-level sensitive marker.
     encode_for_transport(): Array<Byte> {
-        mut names = this.fields.map(
-            (field: HTTPHeaderField): String => {
-            mut name = field.name();
-            if this.is_sensitive_name(name) {
-                return "\t" + name;
-            }
-            return name;
-        },
+        mut fields = this.fields;
+        mut sensitive_names = this.sensitive_names;
+        mut encoded_size: UInt64 = 4;
+        for field in fields {
+            encoded_size = encoded_size + HTTPHeaders.encoded_field_size(field);
+        }
+        mut encoded: Array<Byte> = Array(encoded_size);
+        mut count = fields.length;
+        mut count_byte_0 = (count % 256) as Byte;
+        mut count_byte_1 = ((count / 256) % 256) as Byte;
+        mut count_byte_2 = ((count / 65536) % 256) as Byte;
+        mut count_byte_3 = ((count / 16777216) % 256) as Byte;
+        _ = HTTPHeaders.write_byte(encoded, 0, count_byte_0);
+        _ = HTTPHeaders.write_byte(encoded, 1, count_byte_1);
+        _ = HTTPHeaders.write_byte(encoded, 2, count_byte_2);
+        _ = HTTPHeaders.write_byte(encoded, 3, count_byte_3);
+        mut cursor: UInt64 = 4;
+        for field in fields {
+            mut sensitive = HTTPHeaders.contains_sensitive_name(sensitive_names, field.name());
+            cursor = HTTPHeaders.append_encoded_field(encoded, cursor, field, sensitive);
+        }
+        return encoded;
+    }
+
+    private static encoded_field_size(field: HTTPHeaderField): UInt64 {
+        return 6 + field.name().bytes().length + field.value().bytes().length;
+    }
+
+    private static contains_sensitive_name(names: List<String>, candidate: String): Boolean {
+        for name in names {
+            if name == candidate { return true; }
+        }
+        return false;
+    }
+
+    private static write_byte(encoded: Array<Byte>, index: UInt64, value: Byte): Void {
+        encoded[index] = value;
+    }
+
+    private static append_encoded_field(
+        encoded: Array<Byte>,
+        cursor: UInt64,
+        field: HTTPHeaderField,
+        sensitive: Boolean,
+    ): UInt64 {
+        if sensitive {
+            return HTTPHeaders.append_encoded_sensitive_field(encoded, cursor, field);
+        }
+        return HTTPHeaders.append_encoded_plain_field(encoded, cursor, field);
+    }
+
+    private static append_encoded_sensitive_field(
+        encoded: Array<Byte>,
+        cursor: UInt64,
+        field: HTTPHeaderField,
+    ): UInt64 {
+        return HTTPHeaders.append_encoded_field_data(
+            encoded,
+            cursor,
+            field.name().bytes().length + 32768,
+            field.name().bytes(),
+            field.value().bytes(),
         );
-        mut values = this.fields.map((field: HTTPHeaderField): String => field.value());
-        return HTTPHeaders.encode_native(names, values);
     }
 
-    private static encode_native(names: List<String>, values: List<String>): Array<Byte> {
-        return HTTPHeaders.encode_native_intrinsic(names, values);
+    private static append_encoded_plain_field(
+        encoded: Array<Byte>,
+        cursor: UInt64,
+        field: HTTPHeaderField,
+    ): UInt64 {
+        return HTTPHeaders.append_encoded_field_data(
+            encoded,
+            cursor,
+            field.name().bytes().length,
+            field.name().bytes(),
+            field.value().bytes(),
+        );
     }
 
-    private static encode_native_intrinsic(names: List<String>, values: List<String>): Array<Byte> {
-        return [];
+    private static append_encoded_field_data(
+        encoded: Array<Byte>,
+        cursor: UInt64,
+        name_length: UInt64,
+        name_bytes: List<UInt8>,
+        value_bytes: List<UInt8>,
+    ): UInt64 {
+        mut value_length = value_bytes.length;
+        mut name_byte_0 = (name_length % 256) as Byte;
+        mut name_byte_1 = ((name_length / 256) % 256) as Byte;
+        _ = HTTPHeaders.write_byte(encoded, cursor, name_byte_0);
+        _ = HTTPHeaders.write_byte(encoded, cursor + 1, name_byte_1);
+        mut offset = cursor + 2;
+        mut value_byte_0 = (value_length % 256) as Byte;
+        mut value_byte_1 = ((value_length / 256) % 256) as Byte;
+        mut value_byte_2 = ((value_length / 65536) % 256) as Byte;
+        mut value_byte_3 = ((value_length / 16777216) % 256) as Byte;
+        _ = HTTPHeaders.write_byte(encoded, offset, value_byte_0);
+        _ = HTTPHeaders.write_byte(encoded, offset + 1, value_byte_1);
+        _ = HTTPHeaders.write_byte(encoded, offset + 2, value_byte_2);
+        _ = HTTPHeaders.write_byte(encoded, offset + 3, value_byte_3);
+        offset = HTTPHeaders.append_bytes(encoded, offset + 4, name_bytes);
+        return HTTPHeaders.append_bytes(encoded, offset, value_bytes);
+    }
+
+    private static append_bytes(
+        encoded: Array<Byte>,
+        offset: UInt64,
+        value: List<UInt8>,
+    ): UInt64 {
+        mut index: UInt64 = 0;
+        while index < value.length {
+            encoded[offset + index] = value[index];
+            index = index + 1;
+        }
+        return offset + value.length;
     }
 
     private static validate(name: String, value: String): Result<Void, HTTPHeaderError> {
         mut name_bytes = name.bytes();
-        if name_bytes.length == 0 { return HTTPHeaders.header_error(HTTPHeaderError.InvalidName); }
+        if name_bytes.length == 0 || name_bytes.length > 32767 {
+            return HTTPHeaders.header_error(HTTPHeaderError.InvalidName);
+        }
         mut normalized_name = name.to_lowercase();
         if normalized_name == "content-length" || normalized_name == "transfer-encoding"
         || normalized_name == "connection" || normalized_name == "keep-alive"

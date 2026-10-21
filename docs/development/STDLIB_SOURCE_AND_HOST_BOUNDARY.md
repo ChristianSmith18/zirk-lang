@@ -18,17 +18,19 @@ This is the same visibility model as `std.io`: users can review the Zirk-facing 
 
 ## Current compiler-owned host binding inventory
 
-The LLVM runtime registry currently contains 117 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
+The LLVM runtime registry currently contains 116 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
 
 This symbol list is not yet a completed per-binding security/ownership review.
 The active OpenSpec task `1.0.1` requires each binding to document its host or
 protocol-engine role, input bounds, permission checks, cancellation behavior,
 and resource ownership. The current HTTP registry includes portable helper
 operations that still need this review and may need to move into the bundled
-Zirk sources: form parsing/encoding, header encoding, route validation and
-matching, URL normalization/resolution, response text decoding, and cached
-request policy. Until that task is complete, the external binding boundary
-must not be described as limited to OS operations and audited protocol engines.
+Zirk sources: form parsing/encoding, route validation and matching, URL
+normalization/resolution, response text decoding, and cached request policy.
+`HTTPHeaders.encode_for_transport` now builds its bounded wire block in Zirk;
+the host decoder still validates that block before using it. Until the full
+task is complete, the external binding boundary must not be described as
+limited to OS operations and audited protocol engines.
 Same-method route conflict detection and `Allow`-header policy are now
 implemented in `HTTPRouteMatcher` as bundled Zirk code; their compiler-owned
 ABI symbols and lowering paths have been removed. This is progress on the
@@ -102,7 +104,7 @@ broader audit, not its completion.
 - `zirk_network_udp_send_multicast`
 - `zirk_network_udp_send_to`
 
-### HTTP (55)
+### HTTP (54)
 
 - `zirk_http_client_clear_cookies`
 - `zirk_http_client_close`
@@ -122,7 +124,6 @@ broader audit, not its completion.
 - `zirk_http_get_cached`
 - `zirk_http_get_stream`
 - `zirk_http_head`
-- `zirk_http_headers_encode`
 - `zirk_http_multipart_encode`
 - `zirk_http_multipart_parse`
 - `zirk_http_post`

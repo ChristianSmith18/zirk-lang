@@ -1980,11 +1980,6 @@ pub enum InstKind {
         pattern: Operand,
         path: Operand,
     },
-    /// Encodes bounded parallel HTTP header name and value lists.
-    HttpHeadersEncode {
-        names: Operand,
-        values: Operand,
-    },
     /// Strictly parses a bounded URL-encoded form and returns a flat
     /// List<String> of alternating field names and values.
     HttpFormParse {

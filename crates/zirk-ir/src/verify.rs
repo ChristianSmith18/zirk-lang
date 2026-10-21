@@ -320,7 +320,6 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpMultipartEncode { .. }
             | InstKind::HttpRoutePatternValidate { .. }
             | InstKind::HttpRouteMatch { .. }
-            | InstKind::HttpHeadersEncode { .. }
             | InstKind::HttpServerServeOnce { .. }
             | InstKind::HttpServerServeHttp3 { .. }
             | InstKind::HttpServerWebSocketServeOnce { .. }
@@ -4782,34 +4781,6 @@ fn verify_instruction(
             }
         }
 
-        InstKind::HttpHeadersEncode { names, values } => {
-            if let IrType::Array(array_id) = inst.ty {
-                if module.array_types.get(array_id as usize).copied()
-                    != Some(IrType::Int(IntWidth::U8))
-                {
-                    report(format!(
-                        "{position}: HttpHeadersEncode must return Array<Byte>"
-                    ));
-                }
-            } else {
-                report(format!(
-                    "{position}: HttpHeadersEncode must return Array<Byte>"
-                ));
-            }
-            for (label, operand) in [("names", names), ("values", values)] {
-                if let Some(IrType::List(list_id)) = type_of(operand) {
-                    if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
-                        report(format!(
-                            "{position}: HttpHeadersEncode `{label}` must be List<String>"
-                        ));
-                    }
-                } else if type_of(operand).is_some() {
-                    report(format!(
-                        "{position}: HttpHeadersEncode `{label}` must be List<String>"
-                    ));
-                }
-            }
-        }
         InstKind::HttpFormParse {
             body,
             content_type,
@@ -8235,7 +8206,6 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::HttpResponseHeaderValues { headers, name, .. } => vec![*headers, *name],
         InstKind::HttpRoutePatternValidate { pattern } => vec![*pattern],
         InstKind::HttpRouteMatch { pattern, path } => vec![*pattern, *path],
-        InstKind::HttpHeadersEncode { names, values } => vec![*names, *values],
         InstKind::HttpFormParse {
             body, content_type, ..
         } => vec![*body, *content_type],
