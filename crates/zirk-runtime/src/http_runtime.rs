@@ -44,8 +44,6 @@ type HttpClientRequestBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 
 const DEFAULT_HTTP_USER_AGENT: &str = concat!("Zirk-http-client/", env!("CARGO_PKG_VERSION"));
 #[cfg(feature = "http3")]
-const AUTO_HTTP3_CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
-#[cfg(feature = "http3")]
 const AUTO_HTTP3_UNAVAILABLE_TTL: Duration = Duration::from_secs(60);
 
 fn buffered_client_request_body(bytes: Vec<u8>) -> HttpClientRequestBody {
@@ -2933,15 +2931,10 @@ impl HttpClientPool {
         }
         let parsed_origin = zirk_runtime_core::network_policy::NetworkOrigin::parse(&origin)
             .map_err(|_| HttpRuntimeError::InvalidRequest)?;
-        let connect_timeout = if automatic {
-            self.timeouts.connect.min(AUTO_HTTP3_CONNECT_PROBE_TIMEOUT)
-        } else {
-            self.timeouts.connect
-        };
         let session = match crate::http3_transport::Http3ClientSession::connect(
             parsed_origin,
             Arc::clone(grant),
-            connect_timeout,
+            self.timeouts.connect,
             self.tls_config.clone(),
         ) {
             Ok(session) => session,

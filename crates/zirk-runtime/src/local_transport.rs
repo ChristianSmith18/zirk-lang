@@ -272,9 +272,9 @@ impl LocalListener {
                 .create(&self.path)
                 .map_err(map_io_error)?;
             self.listener = Some(next);
-            return Ok(LocalStream {
+            Ok(LocalStream {
                 inner: LocalStreamKind::PipeServer(server),
-            });
+            })
         }
     }
 }
@@ -283,8 +283,8 @@ impl LocalListener {
 struct SocketPathIdentity {
     parent: std::fs::File,
     name: std::ffi::CString,
-    device: u64,
-    inode: u64,
+    device: libc::dev_t,
+    inode: libc::ino_t,
 }
 
 #[cfg(unix)]
@@ -307,8 +307,8 @@ impl SocketPathIdentity {
         Ok(Self {
             parent,
             name,
-            device: metadata.st_dev as u64,
-            inode: metadata.st_ino as u64,
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
         })
     }
 }
@@ -322,7 +322,7 @@ impl Drop for SocketPathIdentity {
             return;
         };
         if metadata.st_mode & libc::S_IFMT == libc::S_IFSOCK
-            && metadata.st_dev as u64 == self.device
+            && metadata.st_dev == self.device
             && metadata.st_ino == self.inode
         {
             // `unlinkat` removes the directory entry itself. It never follows

@@ -288,22 +288,22 @@ import { UDPSocket } from std.net::udp;
 import { stdout } from std.io;
 
 fn main(): Void {
-match UDPSocket.bind("udp://127.0.0.1:9000") {
-    Ok(socket) => {
-        match socket.receive(65507 as UInt64) {
-            Ok(datagram) => {
-                stdout.println(datagram.peer());
-                match socket.send_to(datagram.bytes(), datagram.peer()) {
-                    Ok(_) => stdout.println("reply sent");
-                    Error(error) => stdout.println(error.to_string());
+    match UDPSocket.bind("udp://127.0.0.1:9000") {
+        Ok(socket) => {
+            match socket.receive(65507 as UInt64) {
+                Ok(datagram) => {
+                    stdout.println(datagram.peer());
+                    match socket.send_to(datagram.bytes(), datagram.peer()) {
+                        Ok(_) => stdout.println("reply sent");
+                        Error(error) => stdout.println(error.to_string());
+                    }
                 }
+                Error(error) => stdout.println(error.to_string());
             }
-            Error(error) => stdout.println(error.to_string());
+            _ = socket.close();
         }
-        _ = socket.close();
+        Error(error) => stdout.println(error.to_string());
     }
-    Error(error) => stdout.println(error.to_string());
-}
 }
 ```
 

@@ -13192,6 +13192,97 @@ fn bundled_std_net_local_streams_run_an_approved_unix_socket_exchange() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn bundled_std_net_local_streams_run_an_approved_named_pipe_exchange() {
+    let project = workspace("approved_std_net_local_named_pipe");
+    let home = workspace("approved_std_net_local_named_pipe_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let endpoint = format!("npipe://./pipe/zirk-local-e2e-{}", std::process::id());
+    std::fs::write(
+        project.join(".zkinit"),
+        format!(
+            "project \"std.net.local.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlocal_connect: {{ endpoints: [\"{endpoint}\"]; during: runtime; }}\nlocal_listen: {{ endpoints: [\"{endpoint}\"]; during: runtime; }}\n}}\n}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("src/main.zrk"),
+        format!(
+            "import {{ LocalListener, LocalReadResult, LocalStaleEndpointPolicy, LocalStream }} from std.net::local;\n\
+             import {{ stdout }} from std.io;\n\
+             fn main(): Void {{\n\
+                 match LocalListener.bind(\"{endpoint}\", LocalStaleEndpointPolicy.RejectExisting) {{\n\
+                     Ok(listener) => {{\n\
+                         match LocalStream.connect(\"{endpoint}\") {{\n\
+                             Ok(client) => {{\n\
+                                 match listener.accept() {{\n\
+                                     Ok(server) => {{\n\
+                                         match client.write_all([112 as Byte, 105 as Byte, 110 as Byte, 103 as Byte]) {{\n\
+                                             Ok(_) => {{\n\
+                                                 match server.read(4 as UInt64) {{\n\
+                                                     LocalReadResult.Value(bytes) => stdout.println(bytes.length.to_string());\n\
+                                                     LocalReadResult.End => stdout.println(\"eof\");\n\
+                                                     LocalReadResult.Error(error) => stdout.println(error.to_string());\n\
+                                                 }}\n\
+                                             }}\n\
+                                             Error(error) => stdout.println(error.to_string());\n\
+                                         }}\n\
+                                         _ = client.close();\n\
+                                         _ = server.close();\n\
+                                     }}\n\
+                                     Error(error) => stdout.println(error.to_string());\n\
+                                 }}\n\
+                             }}\n\
+                             Error(error) => stdout.println(error.to_string());\n\
+                         }}\n\
+                         _ = listener.close();\n\
+                     }}\n\
+                     Error(error) => stdout.println(error.to_string());\n\
+                 }}\n\
+             }}"
+        ),
+    )
+    .unwrap();
+
+    let mut approval = Command::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start explicit named pipe permission approval");
+    approval
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"approve\n")
+        .unwrap();
+    let approval = approval.wait_with_output().unwrap();
+    assert!(
+        approval.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&approval.stdout),
+        String::from_utf8_lossy(&approval.stderr)
+    );
+
+    let run = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run approved named pipe program");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(normalize(&String::from_utf8_lossy(&run.stdout)), "4\n");
+}
+
 #[cfg(unix)]
 #[test]
 fn bundled_std_net_local_listener_denies_missing_authority_before_path_creation() {
