@@ -156,6 +156,28 @@ Rollback consists of disabling HTTP/3 auto-selection and browser capability inje
 
 ## Validation Evidence (In Progress)
 
+On 2026-10-21, portable URL-encoded form serialization and repeated-field
+selection were moved from compiler-owned host bindings into bundled Zirk
+source. The compiled-Zirk form-builder wire test verifies space and reserved
+byte encoding, UTF-8 encoding, repeated-field order, and the content type;
+the HTTP server end-to-end test verifies `HTTPFormData.get_all` returns both
+repeated values in order. Focused interpreter (65), IR (14), and runtime (517,
+3 ignored) suites passed, as did formatting, diff checks, and
+`cargo check -p zirk-cli --all-targets`. A separate 1 MiB boundary probe
+initially exposed that `String.bytes()` did not root its input string or the
+partially built byte list across allocations. The runtime now registers both
+as GC roots; after rebuilding the default static runtime, the compiled-Zirk
+probe passes the exact 1 MiB boundary and rejects a percent-expanded body with
+`BodyTooLarge`.
+
+The follow-up `cargo test -p zirk-cli` run passed 262 tests with 3 ignored;
+`cargo test -p zirk-runtime --lib` passed 517 with 3 ignored. Workspace Clippy
+passed with warnings denied, and the Windows x86_64 HTTP/3 runtime test target
+cross-compiled with `cargo xwin check --locked -p zirk-runtime --tests
+--features http3 --target x86_64-pc-windows-msvc`. The Windows result is
+compile evidence only; native target execution and the full CI matrix remain
+open.
+
 The focused UDP, local IPC, and native interface-enumeration runtime suites
 pass on macOS ARM64 and have now been rerun on both Linux architectures. The
 HTTP/3 adapter suite also passes on those three targets. On macOS, the bundled

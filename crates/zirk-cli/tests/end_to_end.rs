@@ -9869,7 +9869,7 @@ fn bundled_http_server_invokes_handler_on_accepted_stream() {
                  Ok(response) => {{ stdout.println(response.status_code()); response; }}\n\
                  Error(_) => {{ mut failure_body: Array<Byte> = Array(0); HTTPResponse.from_bytes(500, failure_body); }}\n\
              }};\n\
-                             }}) {{ Ok(_) => match router.route(HTTPMethod.Post, \"/captured/:id\", (request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse => match HTTPFormData.parse(request) {{ Ok(form) => {{ stdout.println(form.get(\"q\") ?? \"missing q\"); stdout.println(form.get_all(\"tag\").length); HTTPResponse.from_bytes(202, [0x6f as Byte]); }} Error(error) => {{ stdout.println(error.to_string()); mut empty_form_body: Array<Byte> = Array(0); HTTPResponse.from_bytes(400, empty_form_body); }} }}) {{ Ok(_) => match router.serve_and_close(listener, 6) {{ Ok(count) => stdout.println(count); Error(error) => stdout.println(error.to_string()); }}; Error(error) => stdout.println(error.to_string()); }}; Error(error) => stdout.println(error.to_string()); }}\n\
+                             }}) {{ Ok(_) => match router.route(HTTPMethod.Post, \"/captured/:id\", (request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse => match HTTPFormData.parse(request) {{ Ok(form) => {{ stdout.println(form.get(\"q\") ?? \"missing q\"); mut tags = form.get_all(\"tag\"); stdout.println(tags.length); stdout.println(tags[0]); stdout.println(tags[1]); HTTPResponse.from_bytes(202, [0x6f as Byte]); }} Error(error) => {{ stdout.println(error.to_string()); mut empty_form_body: Array<Byte> = Array(0); HTTPResponse.from_bytes(400, empty_form_body); }} }}) {{ Ok(_) => match router.serve_and_close(listener, 6) {{ Ok(count) => stdout.println(count); Error(error) => stdout.println(error.to_string()); }}; Error(error) => stdout.println(error.to_string()); }}; Error(error) => stdout.println(error.to_string()); }}\n\
                      }}\n\
                      Error(_) => stdout.println(\"listen failed\");\n\
                  }}\n\
@@ -10010,7 +10010,7 @@ fn bundled_http_server_invokes_handler_on_accepted_stream() {
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "outer-before\ninner-before\n/captured/41\n41\n41\nabsent\n2\nfirst\nsecond\n201\ninner-after\nouter-after\nhello world\n2\nProtocol\nTooManyFields\n6\n"
+        "outer-before\ninner-before\n/captured/41\n41\n41\nabsent\n2\nfirst\nsecond\n201\ninner-after\nouter-after\nhello world\n2\na\nb\nProtocol\nTooManyFields\n6\n"
     );
     assert!(
         std::net::TcpStream::connect(address).is_err(),
@@ -11607,6 +11607,47 @@ fn main(): Void {{
         "TooManyFields\n200\n201\n"
     );
     server.join().unwrap();
+}
+
+#[test]
+fn standard_http_form_encoder_checks_the_expanded_body_limit() {
+    let source = r#"import { HTTPFormData } from std.http;
+import { stdout } from std.io;
+fn main(): Void {
+    mut exact = HTTPFormData.create();
+    match exact.add("a" * 1048575, "") {
+        Error(error) => { stdout.println(error.to_string()); return; }
+        Ok(_) => { }
+    }
+    stdout.println("exact added");
+    match exact.encode_urlencoded() {
+        Ok(bytes) => stdout.println(bytes.length);
+        Error(error) => stdout.println(error.to_string());
+    }
+    stdout.println("exact encoded");
+
+    mut expanded = HTTPFormData.create();
+    match expanded.add("/" * 349526, "") {
+        Error(error) => { stdout.println(error.to_string()); return; }
+        Ok(_) => { }
+    }
+    stdout.println("expanded added");
+    match expanded.encode_urlencoded() {
+        Ok(_) => stdout.println("expanded limit missing");
+        Error(error) => stdout.println(error.to_string());
+    }
+}"#;
+    let output = crate_of("http_form_encoder_expanded_limit", &[("main.zrk", source)]);
+
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(
+        normalize(&output.stdout),
+        "exact added\n1048576\nexact encoded\nexpanded added\nBodyTooLarge\n"
+    );
 }
 
 #[test]

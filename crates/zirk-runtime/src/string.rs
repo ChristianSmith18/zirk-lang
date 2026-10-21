@@ -967,12 +967,21 @@ pub unsafe extern "C" fn zirk_str_chars(handle: *const c_void) -> *mut c_void {
 /// `handle` must come from this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_str_bytes(handle: *const c_void) -> *mut c_void {
-    let text = unsafe { borrow(handle) }
+    // Appending can trigger collection; keep both the source string and the
+    // partially materialized list live until the result leaves this frame.
+    let mut rooted_handle = handle.cast_mut();
+    let mut list = std::ptr::null_mut();
+    let mut roots = [
+        (&mut rooted_handle as *mut *mut c_void).cast(),
+        (&mut list as *mut *mut c_void).cast(),
+    ];
+    unsafe { crate::zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+    let text = unsafe { borrow(rooted_handle) }
         .map(|string| unsafe { string.as_str() })
         .unwrap_or("");
     let elem_size = std::mem::size_of::<u8>();
     let elem_align = std::mem::align_of::<u8>();
-    let list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, false) };
+    list = unsafe { crate::list::zirk_rt_list_new(elem_size, elem_align, false) };
     for byte in text.bytes() {
         unsafe {
             crate::list::zirk_rt_list_add(
@@ -984,6 +993,7 @@ pub unsafe extern "C" fn zirk_str_bytes(handle: *const c_void) -> *mut c_void {
             )
         };
     }
+    crate::zirk_rt_pop_frame();
     list
 }
 

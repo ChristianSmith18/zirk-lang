@@ -1401,7 +1401,8 @@ share class HTTPFormData {
     // is bounded before it is retained; encode_urlencoded also checks the
     // larger percent-encoded representation against the 1 MiB wire limit.
     add(name: String, value: String): Result<Void, HTTPError> {
-        if this.fields.length / 2 >= 256 {
+        mut fields = this.fields;
+        if fields.length / 2 >= 256 {
             return HTTPFormData.form_error(HTTPError.TooManyFields);
         }
         mut byte_limit: UInt64 = 1048576;
@@ -1415,8 +1416,8 @@ share class HTTPFormData {
             return HTTPFormData.form_error(HTTPError.BodyTooLarge);
         }
         mut new_input_bytes = after_name + value_bytes;
-        this.fields.add(name);
-        this.fields.add(value);
+        fields.add(name);
+        fields.add(value);
         this.encoded_input_bytes = new_input_bytes;
         return HTTPFormData.form_ok();
     }
@@ -1424,7 +1425,7 @@ share class HTTPFormData {
     // Returns application/x-www-form-urlencoded bytes with UTF-8 percent
     // encoding, '+' spaces, and stable repeated-field ordering.
     encode_urlencoded(): Result<Array<Byte>, HTTPError> {
-        return HTTPFormData.encode_fields_native(this.fields);
+        return HTTPFormData.encode_fields(this.fields);
     }
 
     static parse(request: HTTPRequest): Result<HTTPFormData, HTTPError> {
@@ -1450,7 +1451,7 @@ share class HTTPFormData {
     }
 
     get_all(name: String): List<String> {
-        return HTTPFormData.values_native(this.fields, name);
+        return HTTPFormData.values_for_name(this.fields, name);
     }
 
     private static decode_fields_native(
@@ -1467,20 +1468,128 @@ share class HTTPFormData {
         return HTTPFormData.parse_error_fields();
     }
 
-    private static values_native(fields: List<String>, name: String): List<String> {
-        return HTTPFormData.values_intrinsic(fields, name);
+    private static values_for_name(fields: List<String>, name: String): List<String> {
+        mut values: List<String> = List();
+        if fields.length % 2 != 0 || fields.length > 512 {
+            return values;
+        }
+        mut is_name: Boolean = true;
+        mut matches = false;
+        for field in fields {
+            if is_name {
+                matches = field == name;
+                is_name = false;
+            } else {
+                if matches {
+                    values.add(field);
+                }
+                is_name = true;
+            }
+        }
+        return values;
     }
 
-    private static values_intrinsic(fields: List<String>, name: String): List<String> {
-        return List();
+    private static encode_fields(fields: List<String>): Result<Array<Byte>, HTTPError> {
+        if fields.length % 2 != 0 {
+            return HTTPFormData.encode_error(HTTPError.Protocol);
+        }
+        if fields.length > 512 {
+            return HTTPFormData.encode_error(HTTPError.TooManyFields);
+        }
+
+        mut encoded_size: UInt64 = 0;
+        mut field_count = fields.length / 2;
+        mut field_index: UInt64 = 0;
+        while field_index < field_count {
+            if field_index > 0 { encoded_size += 1; }
+            mut name_bytes = fields[field_index * 2].bytes();
+            mut value_bytes = fields[field_index * 2 + 1].bytes();
+            encoded_size += HTTPFormData.encoded_component_size(name_bytes) + 1
+                + HTTPFormData.encoded_component_size(value_bytes);
+            if encoded_size > 1048576 {
+                return HTTPFormData.encode_error(HTTPError.BodyTooLarge);
+            }
+            field_index += 1;
+        }
+
+        mut encoded: Array<Byte> = Array(encoded_size);
+        mut offset: UInt64 = 0;
+        field_index = 0;
+        while field_index < field_count {
+            if field_index > 0 {
+                _ = HTTPFormData.write_form_byte(encoded, offset, 38 as Byte);
+                offset += 1;
+            }
+            mut name_bytes = fields[field_index * 2].bytes();
+            mut value_bytes = fields[field_index * 2 + 1].bytes();
+            offset = HTTPFormData.append_form_component(encoded, offset, name_bytes);
+            _ = HTTPFormData.write_form_byte(encoded, offset, 61 as Byte);
+            offset += 1;
+            offset = HTTPFormData.append_form_component(encoded, offset, value_bytes);
+            field_index += 1;
+        }
+        return HTTPFormData.encode_ok(encoded);
     }
 
-    private static encode_fields_native(fields: List<String>): Result<Array<Byte>, HTTPError> {
-        return HTTPFormData.encode_fields_intrinsic(fields);
+    private static encoded_component_size(bytes: List<UInt8>): UInt64 {
+        mut size: UInt64 = 0;
+        for byte in bytes {
+            if HTTPFormData.is_form_safe(byte) || byte == 32 as UInt8 { size += 1; }
+            else { size += 3; }
+        }
+        return size;
     }
 
-    private static encode_fields_intrinsic(fields: List<String>): Result<Array<Byte>, HTTPError> {
-        return HTTPFormData.encode_error(HTTPError.Protocol);
+    private static is_form_safe(byte: UInt8): Boolean {
+        return byte >= 48 as UInt8 && byte <= 57 as UInt8
+            || byte >= 65 as UInt8 && byte <= 90 as UInt8
+            || byte >= 97 as UInt8 && byte <= 122 as UInt8
+            || byte == 42 as UInt8 || byte == 45 as UInt8
+            || byte == 46 as UInt8 || byte == 95 as UInt8;
+    }
+
+    private static append_form_component(
+        encoded: Array<Byte>,
+        offset: UInt64,
+        bytes: List<UInt8>,
+    ): UInt64 {
+        mut cursor = offset;
+        mut index: UInt64 = 0;
+        while index < bytes.length {
+            mut byte = bytes[index];
+            if HTTPFormData.is_form_safe(byte) {
+                _ = HTTPFormData.write_form_byte(encoded, cursor, byte as Byte);
+                cursor += 1;
+            } else if byte == 32 as UInt8 {
+                _ = HTTPFormData.write_form_byte(encoded, cursor, 43 as Byte);
+                cursor += 1;
+            } else {
+                mut wide_byte = byte as UInt64;
+                mut high_index = (wide_byte / 16) as UInt8;
+                mut low_index = (wide_byte % 16) as UInt8;
+                mut high = HTTPFormData.form_hex_digit(high_index);
+                mut low = HTTPFormData.form_hex_digit(low_index);
+                _ = HTTPFormData.write_form_byte(encoded, cursor, 37 as Byte);
+                _ = HTTPFormData.write_form_byte(encoded, cursor + 1, high);
+                _ = HTTPFormData.write_form_byte(encoded, cursor + 2, low);
+                cursor += 3;
+            }
+            index += 1;
+        }
+        return cursor;
+    }
+
+    private static form_hex_digit(value: UInt8): Byte {
+        if value < 10 as UInt8 { return (value + 48 as UInt8) as Byte; }
+        return (value + 55 as UInt8) as Byte;
+    }
+
+    private static write_form_byte(encoded: Array<Byte>, index: UInt64, value: Byte): Void {
+        encoded[index] = value;
+    }
+
+    private static encode_ok(value: Array<Byte>): Result<Array<Byte>, HTTPError> {
+        return Ok(value);
     }
 
     private static form_ok(): Result<Void, HTTPError> {

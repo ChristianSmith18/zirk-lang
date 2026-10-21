@@ -376,8 +376,6 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
         "read_upload_native" => Some("std.http.upload_read"),
         "close_upload_native" => Some("std.http.upload_close"),
         "multipart_encode_intrinsic" => Some("std.http.multipart_encode"),
-        "values_intrinsic" => Some("std.http.form_values"),
-        "encode_fields_intrinsic" => Some("std.http.form_encode"),
         "serve_once_native" => Some("std.http.server.serve_once"),
         "serve_http3_native" => Some("std.http.server.serve_http3"),
         "serve_http3_websocket_once_native" => Some("std.http.server.websocket_serve_http3_once"),

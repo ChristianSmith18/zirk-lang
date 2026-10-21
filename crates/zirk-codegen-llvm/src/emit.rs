@@ -8538,63 +8538,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("HTTP upload close returns Boolean"),
                 )
             }
-            ir::InstKind::HttpFormValues { fields, name } => {
-                let fields = self.operand(*fields);
-                let name = self.operand(*name);
-                Some(
-                    self.builder
-                        .build_call(
-                            self.runtime.http_form_values,
-                            &[fields.into(), name.into()],
-                            "http.form.values",
-                        )
-                        .expect("select HTTP form values")
-                        .try_as_basic_value()
-                        .basic()
-                        .expect("HTTP form values return a list"),
-                )
-            }
-            ir::InstKind::HttpFormEncode { fields, enum_id } => {
-                let fields = self.operand(*fields);
-                let ptr = self.context.ptr_type(AddressSpace::default());
-                let out_ty = self.context.struct_type(
-                    &[
-                        self.context.i32_type().into(),
-                        self.context.i32_type().into(),
-                        ptr.into(),
-                    ],
-                    false,
-                );
-                let out = self.aligned_alloca(out_ty.into(), "http.form.encode.out");
-                self.builder
-                    .build_call(
-                        self.runtime.http_form_encode,
-                        &[fields.into(), out.into()],
-                        "http.form.encode",
-                    )
-                    .expect("encode HTTP form data");
-                let value = self
-                    .builder
-                    .build_load(out_ty, out, "http.form.encode.out.load")
-                    .expect("load HTTP form encoding outcome")
-                    .into_struct_value();
-                let kind = self
-                    .builder
-                    .build_extract_value(value, 0, "http.form.encode.kind")
-                    .expect("extract HTTP form result tag")
-                    .into_int_value();
-                let error = self
-                    .builder
-                    .build_extract_value(value, 1, "http.form.encode.error")
-                    .expect("extract HTTP form error")
-                    .into_int_value();
-                let bytes = self
-                    .builder
-                    .build_extract_value(value, 2, "http.form.encode.bytes")
-                    .expect("extract encoded HTTP form bytes")
-                    .into_pointer_value();
-                Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
-            }
             ir::InstKind::HttpMultipartEncode {
                 metadata,
                 bodies,

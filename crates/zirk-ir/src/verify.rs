@@ -315,8 +315,6 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpMultipartParse { .. }
             | InstKind::HttpUploadRead { .. }
             | InstKind::HttpUploadClose { .. }
-            | InstKind::HttpFormValues { .. }
-            | InstKind::HttpFormEncode { .. }
             | InstKind::HttpMultipartEncode { .. }
             | InstKind::HttpRoutePatternValidate { .. }
             | InstKind::HttpRouteMatch { .. }
@@ -4970,75 +4968,6 @@ fn verify_instruction(
                 report(format!("{position}: HttpUploadClose handle must be UInt64"));
             }
         }
-        InstKind::HttpFormValues { fields, name } => {
-            if let Some(IrType::List(list_id)) = type_of(fields) {
-                if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
-                    report(format!(
-                        "{position}: HttpFormValues fields must be List<String>"
-                    ));
-                }
-            } else if type_of(fields).is_some() {
-                report(format!(
-                    "{position}: HttpFormValues fields must be List<String>"
-                ));
-            }
-            if let Some(actual) = type_of(name)
-                && actual != IrType::String
-            {
-                report(format!("{position}: HttpFormValues name must be String"));
-            }
-            if let IrType::List(list_id) = inst.ty {
-                if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
-                    report(format!(
-                        "{position}: HttpFormValues must return List<String>"
-                    ));
-                }
-            } else {
-                report(format!(
-                    "{position}: HttpFormValues must return List<String>"
-                ));
-            }
-        }
-        InstKind::HttpFormEncode { fields, enum_id } => {
-            let fields_are_flat_strings = matches!(type_of(fields), Some(IrType::List(list_id))
-                if module.list_types.get(list_id as usize) == Some(&IrType::String));
-            if !fields_are_flat_strings {
-                report(format!(
-                    "{position}: HttpFormEncode fields must be List<String>"
-                ));
-            }
-            expect(
-                inst.ty,
-                IrType::Enum(*enum_id),
-                position,
-                "HttpFormEncode",
-                report,
-            );
-            let success_is_byte_array = module
-                .enums
-                .get(*enum_id as usize)
-                .and_then(|layout| layout.variants.first())
-                .and_then(|success| success.first())
-                .and_then(|field| {
-                    module
-                        .enums
-                        .get(*enum_id as usize)?
-                        .fields
-                        .get(*field as usize)
-                })
-                .is_some_and(|field| match field.ty {
-                    IrType::Array(array_id) => {
-                        module.array_types.get(array_id as usize)
-                            == Some(&IrType::Int(IntWidth::U8))
-                    }
-                    _ => false,
-                });
-            if !success_is_byte_array {
-                report(format!(
-                    "{position}: HttpFormEncode success must contain Array<Byte>"
-                ));
-            }
-        }
         InstKind::HttpMultipartEncode {
             metadata,
             bodies,
@@ -8219,8 +8148,6 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             ..
         } => vec![*handle, *offset, *max_bytes],
         InstKind::HttpUploadClose { handle } => vec![*handle],
-        InstKind::HttpFormValues { fields, name } => vec![*fields, *name],
-        InstKind::HttpFormEncode { fields, .. } => vec![*fields],
         InstKind::HttpMultipartEncode {
             metadata,
             bodies,

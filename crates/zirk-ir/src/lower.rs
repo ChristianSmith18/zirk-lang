@@ -10586,18 +10586,6 @@ impl<'a> FunctionLowering<'a> {
                                 self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
                             self.emit(InstKind::HttpUploadClose { handle }, returns, span)
                         }
-                        "std.http.form_values" => {
-                            let fields = self.lower_expr(&e.args[0].value);
-                            let name = self.lower_expr_as(&e.args[1].value, IrType::String);
-                            self.emit(InstKind::HttpFormValues { fields, name }, returns, span)
-                        }
-                        "std.http.form_encode" => {
-                            let IrType::Enum(enum_id) = returns else {
-                                unreachable!("HTTP form encoding returns a typed Result enum")
-                            };
-                            let fields = self.lower_expr(&e.args[0].value);
-                            self.emit(InstKind::HttpFormEncode { fields, enum_id }, returns, span)
-                        }
                         "std.http.multipart_encode" => {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("HTTP multipart encoding returns a typed Result enum")

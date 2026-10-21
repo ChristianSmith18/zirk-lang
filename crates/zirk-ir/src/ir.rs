@@ -2006,17 +2006,6 @@ pub enum InstKind {
     HttpUploadClose {
         handle: Operand,
     },
-    /// Selects values for one name from an alternating bounded form list.
-    HttpFormValues {
-        fields: Operand,
-        name: Operand,
-    },
-    /// Encodes a bounded alternating name/value form list into URL-encoded
-    /// bytes and returns a typed Result<Array<Byte>, HTTPError>.
-    HttpFormEncode {
-        fields: Operand,
-        enum_id: u32,
-    },
     /// Encodes metadata and binary payload lists into bounded multipart bytes.
     HttpMultipartEncode {
         metadata: Operand,

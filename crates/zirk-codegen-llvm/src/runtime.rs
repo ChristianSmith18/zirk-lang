@@ -333,8 +333,6 @@ pub mod symbols {
     pub const HTTP_MULTIPART_PARSE: &str = "zirk_http_multipart_parse";
     pub const HTTP_UPLOAD_READ: &str = "zirk_http_upload_read";
     pub const HTTP_UPLOAD_CLOSE: &str = "zirk_http_upload_close";
-    pub const HTTP_FORM_VALUES: &str = "zirk_http_form_values";
-    pub const HTTP_FORM_ENCODE: &str = "zirk_http_form_encode";
     pub const HTTP_MULTIPART_ENCODE: &str = "zirk_http_multipart_encode";
     pub const HTTP_SERVER_SERVE_ONCE: &str = "zirk_http_server_serve_once";
     pub const HTTP_SERVER_SERVE_HTTP3: &str = "zirk_http_server_serve_http3";
@@ -780,8 +778,6 @@ pub struct Runtime<'ctx> {
     pub http_multipart_parse: FunctionValue<'ctx>,
     pub http_upload_read: FunctionValue<'ctx>,
     pub http_upload_close: FunctionValue<'ctx>,
-    pub http_form_values: FunctionValue<'ctx>,
-    pub http_form_encode: FunctionValue<'ctx>,
     pub http_multipart_encode: FunctionValue<'ctx>,
     pub http_server_serve_once: FunctionValue<'ctx>,
     pub http_server_serve_http3: FunctionValue<'ctx>,
@@ -2216,16 +2212,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             .fn_type(&[context.i64_type().into()], false),
         external,
     );
-    let http_form_values = module.add_function(
-        symbols::HTTP_FORM_VALUES,
-        ptr.fn_type(&[ptr.into(), ptr.into()], false),
-        external,
-    );
-    let http_form_encode = module.add_function(
-        symbols::HTTP_FORM_ENCODE,
-        void.fn_type(&[ptr.into(), ptr.into()], false),
-        external,
-    );
     let http_multipart_encode = module.add_function(
         symbols::HTTP_MULTIPART_ENCODE,
         void.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
@@ -3128,8 +3114,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         http_multipart_parse,
         http_upload_read,
         http_upload_close,
-        http_form_values,
-        http_form_encode,
         http_multipart_encode,
         http_server_serve_once,
         http_server_serve_http3,

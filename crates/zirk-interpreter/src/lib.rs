@@ -3865,35 +3865,6 @@ impl<'module> Interpreter<'module> {
         ExecutionResult::HttpSuspended { request }
     }
 
-    fn string_list_operand(
-        &self,
-        frame_index: usize,
-        operand: zirk_ir::Operand,
-    ) -> Result<Vec<String>, ExecutionFault> {
-        let id = self.heap_operand(frame_index, operand)?;
-        let Some(HeapEntry::List(values) | HeapEntry::Array(values)) = self.heap.get(id) else {
-            return Err(ExecutionFault::Internal(
-                "HTTP header names or values are not a string list".into(),
-            ));
-        };
-        values
-            .iter()
-            .map(|value| {
-                let Value::Heap(id) = value else {
-                    return Err(ExecutionFault::Internal(
-                        "HTTP header name or value is not a string".into(),
-                    ));
-                };
-                match self.heap.get(*id) {
-                    Some(HeapEntry::String(text)) => Ok(text.clone()),
-                    _ => Err(ExecutionFault::Internal(
-                        "HTTP header name or value is not a string".into(),
-                    )),
-                }
-            })
-            .collect()
-    }
-
     fn integer_operand(
         &self,
         frame_index: usize,
@@ -6763,8 +6734,6 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpResponseHeaderValues { .. }
         | InstKind::HttpFormParse { .. }
         | InstKind::HttpMultipartParse { .. }
-        | InstKind::HttpFormValues { .. }
-        | InstKind::HttpFormEncode { .. }
         | InstKind::HttpMultipartEncode { .. }
         | InstKind::HttpUploadRead { .. }
         | InstKind::HttpUploadClose { .. }
@@ -8266,14 +8235,6 @@ mod tests {
                 content_type: value,
                 enum_id: 0,
                 data_class_id: 0,
-            },
-            InstKind::HttpFormValues {
-                fields: value,
-                name: value,
-            },
-            InstKind::HttpFormEncode {
-                fields: value,
-                enum_id: 0,
             },
             InstKind::HttpMultipartEncode {
                 metadata: value,
