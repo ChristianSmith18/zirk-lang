@@ -18,7 +18,7 @@ This is the same visibility model as `std.io`: users can review the Zirk-facing 
 
 ## Current compiler-owned host binding inventory
 
-The LLVM runtime registry currently contains 119 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
+The LLVM runtime registry currently contains 118 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
 
 This symbol list is not yet a completed per-binding security/ownership review.
 The active OpenSpec task `1.0.1` requires each binding to document its host or
@@ -29,6 +29,9 @@ Zirk sources: form parsing/encoding, header encoding, route validation and
 matching, URL normalization/resolution, response text decoding, and cached
 request policy. Until that task is complete, the external binding boundary
 must not be described as limited to OS operations and audited protocol engines.
+Same-method route conflict detection is now implemented in `HTTPRouteMatcher`
+as bundled Zirk code; its compiler-owned ABI symbol and lowering path have been
+removed. This is one completed migration, not completion of the broader audit.
 
 ### Environment (4)
 
@@ -98,7 +101,7 @@ must not be described as limited to OS operations and audited protocol engines.
 - `zirk_network_udp_send_multicast`
 - `zirk_network_udp_send_to`
 
-### HTTP (57)
+### HTTP (56)
 
 - `zirk_http_client_clear_cookies`
 - `zirk_http_client_close`
@@ -135,7 +138,6 @@ must not be described as limited to OS operations and audited protocol engines.
 - `zirk_http_response_to_stream`
 - `zirk_http_route_allow_header`
 - `zirk_http_route_match`
-- `zirk_http_route_pattern_conflict`
 - `zirk_http_route_pattern_validate`
 - `zirk_http_server_producer_register`
 - `zirk_http_server_serve_http3`

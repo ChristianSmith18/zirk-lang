@@ -8658,27 +8658,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("route validation returns status");
                 Some(status)
             }
-            ir::InstKind::HttpRoutePatternConflict {
-                method,
-                first,
-                second,
-            } => {
-                let method = self.operand(*method);
-                let first = self.operand(*first);
-                let second = self.operand(*second);
-                let status = self
-                    .builder
-                    .build_call(
-                        self.runtime.http_route_pattern_conflict,
-                        &[method.into(), first.into(), second.into()],
-                        "http.route.pattern.conflict",
-                    )
-                    .expect("check HTTP route conflict")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("route conflict check returns status");
-                Some(status)
-            }
             ir::InstKind::HttpRouteMatch { pattern, path } => {
                 let pattern = self.operand(*pattern);
                 let path = self.operand(*path);

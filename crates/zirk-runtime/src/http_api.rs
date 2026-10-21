@@ -130,50 +130,6 @@ pub unsafe extern "C" fn zirk_http_route_pattern_validate(pattern: *const c_void
         .unwrap_or(1)
 }
 
-/// Returns zero for no conflict, one for a duplicate, two for an ambiguous
-/// pair, and three for invalid inputs.
-///
-/// # Safety
-///
-/// Each argument must be null or a live managed Zirk `String` handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_http_route_pattern_conflict(
-    method: *const c_void,
-    first: *const c_void,
-    second: *const c_void,
-) -> i32 {
-    let (Some(method), Some(first), Some(second)) = (
-        unsafe { crate::string::borrow(method) },
-        unsafe { crate::string::borrow(first) },
-        unsafe { crate::string::borrow(second) },
-    ) else {
-        return 3;
-    };
-    let method = match unsafe { method.as_str() } {
-        "GET" => HttpMethod::Get,
-        "HEAD" => HttpMethod::Head,
-        "POST" => HttpMethod::Post,
-        "PUT" => HttpMethod::Put,
-        "PATCH" => HttpMethod::Patch,
-        "DELETE" => HttpMethod::Delete,
-        "OPTIONS" => HttpMethod::Options,
-        "CONNECT" => HttpMethod::Connect,
-        "TRACE" => HttpMethod::Trace,
-        "QUERY" => HttpMethod::Query,
-        _ => return 3,
-    };
-    match zirk_runtime_core::http_router::validate_route_pair(
-        method,
-        unsafe { first.as_str() },
-        unsafe { second.as_str() },
-    ) {
-        Ok(()) => 0,
-        Err(zirk_runtime_core::http_router::HttpRouteError::DuplicateRoute) => 1,
-        Err(zirk_runtime_core::http_router::HttpRouteError::AmbiguousRoute) => 2,
-        Err(_) => 3,
-    }
-}
-
 /// Returns an empty list for no match; a match is encoded as an empty marker
 /// followed by alternating parameter names and decoded values.
 ///

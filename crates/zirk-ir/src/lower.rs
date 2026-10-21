@@ -10508,20 +10508,6 @@ impl<'a> FunctionLowering<'a> {
                                 span,
                             )
                         }
-                        "std.http.route_pattern_conflict" => {
-                            let method = self.lower_expr_as(&e.args[0].value, IrType::String);
-                            let first = self.lower_expr_as(&e.args[1].value, IrType::String);
-                            let second = self.lower_expr_as(&e.args[2].value, IrType::String);
-                            self.emit(
-                                InstKind::HttpRoutePatternConflict {
-                                    method,
-                                    first,
-                                    second,
-                                },
-                                returns,
-                                span,
-                            )
-                        }
                         "std.http.route_match" => {
                             let pattern = self.lower_expr_as(&e.args[0].value, IrType::String);
                             let path = self.lower_expr_as(&e.args[1].value, IrType::String);

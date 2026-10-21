@@ -319,7 +319,6 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpFormEncode { .. }
             | InstKind::HttpMultipartEncode { .. }
             | InstKind::HttpRoutePatternValidate { .. }
-            | InstKind::HttpRoutePatternConflict { .. }
             | InstKind::HttpRouteMatch { .. }
             | InstKind::HttpRouteAllowHeader { .. }
             | InstKind::HttpHeadersEncode { .. }
@@ -4754,34 +4753,6 @@ fn verify_instruction(
             }
         }
 
-        InstKind::HttpRoutePatternConflict {
-            method,
-            first,
-            second,
-        } => {
-            expect(
-                inst.ty,
-                IrType::Int(IntWidth::I32),
-                position,
-                "HttpRoutePatternConflict",
-                report,
-            );
-            for (label, operand) in [
-                ("method", method),
-                ("first pattern", first),
-                ("second pattern", second),
-            ] {
-                if let Some(actual) = type_of(operand)
-                    && actual != IrType::String
-                {
-                    report(format!(
-                        "{position}: HttpRoutePatternConflict receives {} for `{label}`, expected String",
-                        actual.as_str()
-                    ));
-                }
-            }
-        }
-
         InstKind::HttpRouteMatch { pattern, path } => {
             if !matches!(inst.ty, IrType::List(_)) {
                 report(format!(
@@ -8316,11 +8287,6 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::HttpResponseText { body, .. } => vec![*body],
         InstKind::HttpResponseHeaderValues { headers, name, .. } => vec![*headers, *name],
         InstKind::HttpRoutePatternValidate { pattern } => vec![*pattern],
-        InstKind::HttpRoutePatternConflict {
-            method,
-            first,
-            second,
-        } => vec![*method, *first, *second],
         InstKind::HttpRouteMatch { pattern, path } => vec![*pattern, *path],
         InstKind::HttpRouteAllowHeader {
             patterns,

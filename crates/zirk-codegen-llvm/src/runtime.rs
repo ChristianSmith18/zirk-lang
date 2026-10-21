@@ -328,7 +328,6 @@ pub mod symbols {
     pub const HTTP_RESPONSE_TEXT: &str = "zirk_http_response_text";
     pub const HTTP_RESPONSE_HEADER_VALUES: &str = "zirk_http_response_header_values";
     pub const HTTP_ROUTE_PATTERN_VALIDATE: &str = "zirk_http_route_pattern_validate";
-    pub const HTTP_ROUTE_PATTERN_CONFLICT: &str = "zirk_http_route_pattern_conflict";
     pub const HTTP_ROUTE_MATCH: &str = "zirk_http_route_match";
     pub const HTTP_ROUTE_ALLOW_HEADER: &str = "zirk_http_route_allow_header";
     pub const HTTP_HEADERS_ENCODE: &str = "zirk_http_headers_encode";
@@ -778,7 +777,6 @@ pub struct Runtime<'ctx> {
     pub http_response_text: FunctionValue<'ctx>,
     pub http_response_header_values: FunctionValue<'ctx>,
     pub http_route_pattern_validate: FunctionValue<'ctx>,
-    pub http_route_pattern_conflict: FunctionValue<'ctx>,
     pub http_route_match: FunctionValue<'ctx>,
     pub http_route_allow_header: FunctionValue<'ctx>,
     pub http_headers_encode: FunctionValue<'ctx>,
@@ -2187,13 +2185,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         context.i32_type().fn_type(&[ptr.into()], false),
         external,
     );
-    let http_route_pattern_conflict = module.add_function(
-        symbols::HTTP_ROUTE_PATTERN_CONFLICT,
-        context
-            .i32_type()
-            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
-        external,
-    );
     let http_route_match = module.add_function(
         symbols::HTTP_ROUTE_MATCH,
         void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
@@ -3146,7 +3137,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         http_response_text,
         http_response_header_values,
         http_route_pattern_validate,
-        http_route_pattern_conflict,
         http_route_match,
         http_route_allow_header,
         http_headers_encode,

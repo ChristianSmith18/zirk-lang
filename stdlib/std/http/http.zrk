@@ -2488,7 +2488,48 @@ class HTTPRouteMatcher {
     }
 
     static conflict(method: String, first: String, second: String): Int32 {
-        return HTTPRouteMatcher.route_pattern_conflict_native(method, first, second);
+        if ! HTTPRouteMatcher.supported_method(method)
+        || HTTPRouteMatcher.validate_pattern(first) != 0
+        || HTTPRouteMatcher.validate_pattern(second) != 0 {
+            return 3;
+        }
+
+        mut first_parts = first.split("/");
+        mut second_parts = second.split("/");
+        mut first_count = first_parts.length - 1;
+        mut second_count = second_parts.length - 1;
+        if first == "/" { first_count = 0; }
+        if second == "/" { second_count = 0; }
+        if first_count != second_count { return 0; }
+
+        mut same_shape = true;
+        mut first_static_count: UInt64 = 0;
+        mut second_static_count: UInt64 = 0;
+        mut index: UInt64 = 0;
+        while index < first_count {
+            mut first_segment = first_parts[index + 1];
+            mut second_segment = second_parts[index + 1];
+            mut first_parameter = first_segment.starts_with(":");
+            mut second_parameter = second_segment.starts_with(":");
+            if ! first_parameter && ! second_parameter && first_segment != second_segment {
+                return 0;
+            }
+            if first_parameter != second_parameter { same_shape = false; }
+            if ! first_parameter { first_static_count += 1; }
+            if ! second_parameter { second_static_count += 1; }
+            index += 1;
+        }
+
+        if same_shape { return 1; }
+        if first_static_count == second_static_count { return 2; }
+        return 0;
+    }
+
+    private static supported_method(method: String): Boolean {
+        return method == "GET" || method == "HEAD" || method == "POST"
+        || method == "PUT" || method == "PATCH" || method == "DELETE"
+        || method == "OPTIONS" || method == "CONNECT" || method == "TRACE"
+        || method == "QUERY";
     }
 
     static route_match(pattern: String, path: String): List<String> {
@@ -2500,7 +2541,6 @@ class HTTPRouteMatcher {
     }
 
     private static route_pattern_validate_native(pattern: String): Int32 { return 1; }
-    private static route_pattern_conflict_native(method: String, first: String, second: String): Int32 { return 3; }
     private static route_match_native(pattern: String, path: String): List<String> { return List(); }
     private static route_allow_header_native(
         patterns: List<String>,

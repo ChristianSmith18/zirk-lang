@@ -1974,12 +1974,6 @@ pub enum InstKind {
     HttpRoutePatternValidate {
         pattern: Operand,
     },
-    /// Checks a same-method pair for duplicate or ambiguous route patterns.
-    HttpRoutePatternConflict {
-        method: Operand,
-        first: Operand,
-        second: Operand,
-    },
     /// Matches one route pattern and returns a List<String> encoded as an
     /// empty list for no match or ["", name, value, ...] for a match.
     HttpRouteMatch {
