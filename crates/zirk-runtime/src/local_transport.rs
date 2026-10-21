@@ -58,10 +58,10 @@ impl LocalStream {
         #[cfg(windows)]
         if let Some(name) = endpoint.strip_prefix("npipe://./pipe/") {
             let path = named_pipe_path(name);
-            let client = tokio::task::spawn_blocking(move || {
-                tokio::net::windows::named_pipe::ClientOptions::new().open(path)
-            });
             let client = block_on(async {
+                let client = tokio::task::spawn_blocking(move || {
+                    tokio::net::windows::named_pipe::ClientOptions::new().open(path)
+                });
                 tokio::time::timeout(timeout, client)
                     .await
                     .map_err(|_| NetworkTransportError::Timeout)?

@@ -4,7 +4,8 @@
 It includes immutable URLs, validated headers, typed methods and status codes,
 streaming bodies, connection pooling, cookies, redirects, middleware, and
 Server-Sent Events (SSE), and bounded WebSocket client/server previews.
-HTTP operations support HTTP/1.1 and HTTP/2 through one application API.
+HTTP operations share one application API across HTTP/1.1 and HTTP/2, with an
+optional native HTTP/3 client and bounded HTTP/3 server/WebSocket endpoints.
 
 All waiting operations suspend cooperative branches, body flow applies backpressure, disconnects
 cancel their structured work, and network permissions are revalidated at every
@@ -61,12 +62,15 @@ behavior belong in packages built on this module.
 > It keeps at most one
 > HTTP/1.1 or HTTP/2 connection per origin in a bounded LRU pool.
 > `HTTPClientOptions.create_with_protocol(protocol, ...)` accepts
-> `HTTPProtocolPreference.Auto`, `HTTP1`, `HTTP2`, or `HTTP3`. `Auto` currently
-> negotiates HTTP/2 or HTTP/1.1 through TLS ALPN; it does not try HTTP/3 until
-> safe pre-commit fallback and independent-peer conformance are complete.
-> Explicit `HTTP3` uses the native QUIC/H3 client when the Zirk runtime is
-> built with its `http3` feature. It requires direct HTTPS, uses TLS 1.3 and
-> `h3` ALPN, disables 0-RTT, and currently rejects configured proxies.
+> `HTTPProtocolPreference.Auto`, `HTTP1`, `HTTP2`, or `HTTP3`. With the native
+> runtime's optional `http3` feature, `Auto` tries HTTP/3 first for direct HTTPS
+> requests. If establishing the QUIC connection fails with a transport,
+> protocol, or timeout error, that origin is temporarily marked unavailable
+> for HTTP/3 and the request uses HTTP/2/HTTP/1.1. Once an HTTP/3 session is
+> established, request errors are returned and the request is never replayed.
+> The bounded unavailable-origin cache expires after 60 seconds. Proxy clients use
+> HTTP/2/HTTP/1.1. Explicit `HTTP3` requires direct HTTPS, TLS 1.3 and `h3`
+> ALPN, disables 0-RTT, and rejects configured proxies.
 > `HTTPResponse.protocol()` reports `HTTP1`, `HTTP2`, `HTTP3`, or `Unknown`.
 > Integration tests verify HTTP/1.1 and HTTP/2 reporting against independent
 > peers. A client may be shared by tasks in the same
@@ -91,7 +95,7 @@ behavior belong in packages built on this module.
 > Each timeout is validated from 1 ms through one hour, and the origin pool is
 > bounded from 1 through 32 entries. The options object is accepted by direct,
 > custom-trust-root, proxy, and combined proxy/custom-root client factories.
-> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or the explicitly supplied DER roots. The public API intentionally exposes no custom verifier or hostname override; mutual TLS client credentials are not yet public. The implemented HTTP scope passes full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965, compiler revision b28daa7). Generic response-producer backpressure is tested for HTTP/1.1 and HTTP/2 on Unix and HTTP/2 on Windows; the Windows HTTP/1.1 slow-consumer fixture remains Unix-gated. Broader standard-library capabilities remain staged.
+> TLS identity validation always uses the URL host for SNI and certificate-name verification with either platform roots or explicitly supplied DER roots. The public HTTP client API exposes no custom verifier, hostname override, or client identity; `std.net::tls` separately supports mutual TLS. The first HTTP/environment delivery passed full-workspace CI on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965). The networking extension adds UDP, local IPC, interface snapshots, extended TLS, native HTTP/3, and injected browser Fetch; see the dated evidence in the feature-status catalog for its target-by-target status. Generic response-producer backpressure remains covered by HTTP/1.1 and HTTP/2 Unix fixtures and HTTP/2 on Windows; the Windows HTTP/1.1 slow-consumer fixture remains Unix-gated.
 > `HTTPServer.bind`
 > applies the exact listener grant, and `HTTPFormData.parse(request)` parses
 > bounded `application/x-www-form-urlencoded` bodies with repeated-value access.
@@ -1374,7 +1378,8 @@ pending.
 
 ## Protocol versions
 
-The current server preview supports HTTP/1.1 and TLS ALPN negotiation of HTTP/2.
+The current server preview supports HTTP/1.1, TLS ALPN negotiation of HTTP/2,
+and opt-in bounded HTTP/3 listeners.
 `serve_tls_many` handles a caller-bounded number of multiplexed streams on one
 accepted HTTP/2 TLS connection and gracefully shuts it down after the final
 response. Handlers run in separate Zirk tasks on the same executor, up to the
@@ -1388,10 +1393,13 @@ built with the optional `http3` feature. An `HTTPClient` retains at most one
 HTTP/3 session per configured origin and uses independent streams for
 concurrent requests. Focused loopback tests verify concurrent streams share
 one connection and sequential requests reuse the same pool connection.
-Automatic HTTP/3 negotiation and fallback, externally requested graceful
-listener shutdown, per-stream disconnect cancellation, cross-target
-independent-peer interoperability, and Windows runtime verification remain in
-progress. The finite HTTP/3 listener
+Automatic HTTP/3 negotiation and pre-response fallback are implemented for
+direct HTTPS, and the independent-peer fixture covers automatic fallback to
+HTTP/1.1. Explicit HTTP/3 methods do not fall back. Externally requested
+graceful listener shutdown and per-stream disconnect cancellation remain
+limited by the current synchronous handler contract. Cross-target independent-
+peer interoperability and Windows runtime results are tracked separately in
+the feature-status catalog. The finite HTTP/3 listener
 admits connections concurrently with at most 16 QUIC handshakes in flight. It
 dispatches at most four active request streams across the listener to separate
 Zirk handler tasks on the owning executor and cancels pending handshakes when
