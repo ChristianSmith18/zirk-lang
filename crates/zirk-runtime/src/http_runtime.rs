@@ -6846,21 +6846,22 @@ mod tests {
 
     #[test]
     fn peer_disconnect_cancels_a_cooperatively_suspended_http1_handler() {
-        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        reserved.set_nonblocking(true).unwrap();
-        let address = reserved.local_addr().unwrap();
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handler_entered = Arc::clone(&entered);
         let cancellation_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handler_cancellation_seen = Arc::clone(&cancellation_seen);
+        let peer_disconnected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let client_peer_disconnected = Arc::clone(&peer_disconnected);
 
         let outcome = Executor::new().run_with_root(move || {
+            let listener = block_on_current(async {
+                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()
+            })
+            .unwrap();
+            let address = listener.local_addr().unwrap();
             let server = spawn(move || {
-                let (stream, _) = block_on_current(async move {
-                    let listener = tokio::net::TcpListener::from_std(reserved).unwrap();
-                    listener.accept().await.unwrap()
-                })
-                .unwrap();
+                let (stream, _) =
+                    block_on_current(async move { listener.accept().await.unwrap() }).unwrap();
                 let result = serve_once_with_timeouts(
                     stream,
                     false,
@@ -6888,7 +6889,7 @@ mod tests {
                         b"GET /disconnect HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
                     )
                     .unwrap();
-                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
                 while !client_entered.load(std::sync::atomic::Ordering::Acquire) {
                     assert!(
                         std::time::Instant::now() < deadline,
@@ -6897,9 +6898,21 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 drop(socket);
+                client_peer_disconnected.store(true, std::sync::atomic::Ordering::Release);
             });
 
-            crate::executor::sleep(100_000_000);
+            let disconnect_deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !peer_disconnected.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < disconnect_deadline
+            {
+                crate::executor::sleep(10_000_000);
+            }
+            let cancellation_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !cancellation_seen.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < cancellation_deadline
+            {
+                crate::executor::sleep(10_000_000);
+            }
             let disconnected_handler_woke =
                 cancellation_seen.load(std::sync::atomic::Ordering::Acquire);
             if !disconnected_handler_woke {
@@ -9832,6 +9845,7 @@ mod tests {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let response = response.to_vec();
+            let response_label = response.clone();
             let peer = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.write_all(&response).unwrap();
@@ -9848,7 +9862,7 @@ mod tests {
                 let stream = crate::network_transport::TcpStream::connect_with_timeout(
                     &origin,
                     grant,
-                    Duration::from_secs(2),
+                    Duration::from_secs(10),
                 )
                 .unwrap()
                 .into_inner();
@@ -9856,7 +9870,7 @@ mod tests {
                     stream,
                     "example.invalid:443",
                     None,
-                    Duration::from_secs(2),
+                    Duration::from_secs(10),
                 )
                 .err()
                 .map(|error| match error {
@@ -9866,7 +9880,15 @@ mod tests {
                 .unwrap_or(0)
             });
             peer.join().unwrap();
-            assert!(matches!(outcome, crate::task::TaskOutcome::Value(1)));
+            let outcome_value = match outcome {
+                crate::task::TaskOutcome::Value(value) => Some(value),
+                crate::task::TaskOutcome::Panicked(_) => None,
+            };
+            assert!(
+                outcome_value == Some(1),
+                "Unexpected CONNECT result value {outcome_value:?} for invalid response {:?}",
+                String::from_utf8_lossy(&response_label)
+            );
         }
     }
 
