@@ -58,15 +58,25 @@ impl LocalStream {
         #[cfg(windows)]
         if let Some(name) = endpoint.strip_prefix("npipe://./pipe/") {
             let path = named_pipe_path(name);
-            let client = block_on(async {
-                let client = tokio::task::spawn_blocking(move || {
-                    tokio::net::windows::named_pipe::ClientOptions::new().open(path)
-                });
-                tokio::time::timeout(timeout, client)
-                    .await
-                    .map_err(|_| NetworkTransportError::Timeout)?
-                    .map_err(|_| NetworkTransportError::Io)?
-                    .map_err(map_io_error)
+            let client = block_on(async move {
+                let deadline = tokio::time::Instant::now() + timeout;
+                loop {
+                    match tokio::net::windows::named_pipe::ClientOptions::new().open(&path) {
+                        Ok(client) => return Ok(client),
+                        Err(error)
+                            if error.raw_os_error()
+                                == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+                        {
+                            tokio::time::timeout_at(
+                                deadline,
+                                tokio::time::sleep(Duration::from_millis(10)),
+                            )
+                            .await
+                            .map_err(|_| NetworkTransportError::Timeout)?;
+                        }
+                        Err(error) => return Err(map_io_error(error)),
+                    }
+                }
             })?;
             return Ok(Self {
                 inner: LocalStreamKind::PipeClient(client),
