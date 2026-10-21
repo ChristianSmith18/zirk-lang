@@ -1980,12 +1980,6 @@ pub enum InstKind {
         pattern: Operand,
         path: Operand,
     },
-    /// Encodes a bounded, deduplicated Allow field block for HTTP responses.
-    HttpRouteAllowHeader {
-        patterns: Operand,
-        methods: Operand,
-        path: Operand,
-    },
     /// Encodes bounded parallel HTTP header name and value lists.
     HttpHeadersEncode {
         names: Operand,

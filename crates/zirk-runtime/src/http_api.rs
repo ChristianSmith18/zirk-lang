@@ -205,93 +205,6 @@ pub unsafe extern "C" fn zirk_http_route_match(
     unsafe { *out = outcome };
 }
 
-/// Serializes a bounded, validated set of standard method names as one
-/// response `Allow` field in the managed header-block encoding.
-///
-/// # Safety
-///
-/// `patterns` and `methods` must be null or live managed `List<String>`
-/// handles with matching lengths, and `path` must be null or a live managed
-/// Zirk `String` handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_http_route_allow_header(
-    patterns: *mut c_void,
-    methods: *mut c_void,
-    path: *mut c_void,
-) -> *mut c_void {
-    const ORDERED_METHODS: [&str; 10] = [
-        "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE", "QUERY",
-    ];
-    let encoded = (|| {
-        if patterns.is_null() || methods.is_null() || path.is_null() {
-            return None;
-        }
-        let count = unsafe { crate::list::zirk_rt_list_length(methods) };
-        if count == 0
-            || count > zirk_runtime_core::http_router::MAX_HTTP_ROUTES
-            || unsafe { crate::list::zirk_rt_list_length(patterns) } != count
-        {
-            return None;
-        }
-        let path_value = unsafe { crate::string::borrow(path) }?;
-        let mut selected = [false; ORDERED_METHODS.len()];
-        for index in 0..count {
-            let pattern_item = unsafe {
-                crate::list::zirk_rt_list_element(
-                    patterns,
-                    index as i64,
-                    std::mem::size_of::<usize>(),
-                )
-            };
-            let pattern_handle = unsafe { *(pattern_item as *mut *mut c_void) };
-            let pattern = unsafe { crate::string::borrow(pattern_handle) }?;
-            if zirk_runtime_core::http_router::match_route_pattern(
-                HttpMethod::Get,
-                unsafe { pattern.as_str() },
-                unsafe { path_value.as_str() },
-            )
-            .ok()?
-            .is_none()
-            {
-                continue;
-            }
-            let method_item = unsafe {
-                crate::list::zirk_rt_list_element(
-                    methods,
-                    index as i64,
-                    std::mem::size_of::<usize>(),
-                )
-            };
-            let handle = unsafe { *(method_item as *mut *mut c_void) };
-            let value = unsafe { crate::string::borrow(handle) }?;
-            let method = unsafe { value.as_str() };
-            let index = ORDERED_METHODS
-                .iter()
-                .position(|candidate| *candidate == method)?;
-            selected[index] = true;
-        }
-        if !selected.iter().any(|allowed| *allowed) {
-            return None;
-        }
-        let value = ORDERED_METHODS
-            .iter()
-            .enumerate()
-            .filter_map(|(index, method)| selected[index].then_some(*method))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let name = b"allow";
-        let mut block = Vec::with_capacity(4 + 6 + name.len() + value.len());
-        block.extend_from_slice(&1u32.to_le_bytes());
-        block.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        block.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        block.extend_from_slice(name);
-        block.extend_from_slice(value.as_bytes());
-        Some(block)
-    })()
-    .unwrap_or_else(|| 0u32.to_le_bytes().to_vec());
-    crate::array::alloc_byte_array(&encoded)
-}
-
 /// Encodes parallel, validated managed header name/value lists into the
 /// bounded response-header block consumed by the server transport.
 ///
@@ -5179,7 +5092,6 @@ mod tests {
         ClientCloseAttempt, OwnedHttpClient, client_identity_matches_values, create_http_upload,
         decode_all_headers, decode_header_values, decode_response_text, http_uploads,
         serialize_request_headers, serialize_response_headers, validate_json_document,
-        zirk_http_route_allow_header,
     };
     use crate::executor::Executor;
     use std::sync::{Mutex, atomic::AtomicBool};
@@ -5412,67 +5324,6 @@ mod tests {
         invalid_utf8.extend_from_slice(b"x-test");
         invalid_utf8.push(0xff);
         assert_eq!(decode_header_values(&invalid_utf8, "x-test"), Err(5));
-    }
-
-    #[test]
-    fn route_allow_header_matches_path_deduplicates_and_orders_standard_methods() {
-        let _guard = crate::collector::test_support::test_guard();
-        crate::collector::reset_state_for_tests();
-        let element_size = std::mem::size_of::<*mut std::ffi::c_void>();
-        let element_align = std::mem::align_of::<*mut std::ffi::c_void>();
-        let mut patterns =
-            unsafe { crate::list::zirk_rt_list_new(element_size, element_align, true) };
-        let mut methods =
-            unsafe { crate::list::zirk_rt_list_new(element_size, element_align, true) };
-        let mut current = std::ptr::null_mut();
-        let mut path = crate::string::alloc_owned("/items/special");
-        let mut roots = [
-            (&mut patterns as *mut *mut std::ffi::c_void).cast(),
-            (&mut methods as *mut *mut std::ffi::c_void).cast(),
-            (&mut current as *mut *mut std::ffi::c_void).cast(),
-            (&mut path as *mut *mut std::ffi::c_void).cast(),
-        ];
-        unsafe { crate::zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
-        for (pattern, method) in [
-            ("/items/:id", "GET"),
-            ("/items/special", "GET"),
-            ("/items/:id", "POST"),
-            ("/other", "DELETE"),
-        ] {
-            current = crate::string::alloc_owned(pattern);
-            unsafe {
-                crate::list::zirk_rt_list_add(
-                    patterns,
-                    (&current as *const *mut std::ffi::c_void).cast(),
-                    element_size,
-                    element_align,
-                    true,
-                )
-            };
-            current = crate::string::alloc_owned(method);
-            unsafe {
-                crate::list::zirk_rt_list_add(
-                    methods,
-                    (&current as *const *mut std::ffi::c_void).cast(),
-                    element_size,
-                    element_align,
-                    true,
-                )
-            };
-        }
-        let header = unsafe { zirk_http_route_allow_header(patterns, methods, path) };
-        let encoded = unsafe {
-            crate::array::copy_byte_array(
-                header,
-                zirk_runtime_core::http_values::MAX_HTTP_HEADER_BYTES,
-            )
-        }
-        .unwrap();
-        assert_eq!(
-            decode_header_values(&encoded, "allow").unwrap(),
-            ["GET, POST"]
-        );
-        crate::zirk_rt_pop_frame();
     }
 
     #[test]

@@ -10513,20 +10513,6 @@ impl<'a> FunctionLowering<'a> {
                             let path = self.lower_expr_as(&e.args[1].value, IrType::String);
                             self.emit(InstKind::HttpRouteMatch { pattern, path }, returns, span)
                         }
-                        "std.http.route_allow_header" => {
-                            let patterns = self.lower_expr(&e.args[0].value);
-                            let methods = self.lower_expr(&e.args[1].value);
-                            let path = self.lower_expr_as(&e.args[2].value, IrType::String);
-                            self.emit(
-                                InstKind::HttpRouteAllowHeader {
-                                    patterns,
-                                    methods,
-                                    path,
-                                },
-                                returns,
-                                span,
-                            )
-                        }
                         "std.http.headers_encode" => {
                             let names = self.lower_expr(&e.args[0].value);
                             let values = self.lower_expr(&e.args[1].value);

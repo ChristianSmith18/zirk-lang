@@ -2537,16 +2537,48 @@ class HTTPRouteMatcher {
     }
 
     static allow_header(patterns: List<String>, methods: List<String>, path: String): Array<Byte> {
-        return HTTPRouteMatcher.route_allow_header_native(patterns, methods, path);
+        if patterns.length == 0 || patterns.length > 1024 || patterns.length != methods.length {
+            return [0, 0, 0, 0];
+        }
+        mut selected: Array<Boolean> = [false, false, false, false, false, false, false, false, false, false];
+        mut index: UInt64 = 0;
+        while index < patterns.length {
+            mut match_values = HTTPRouteMatcher.route_match(patterns[index], path);
+            if match_values.length > 0 {
+                mut method = methods[index];
+                if method == "GET" { selected[0] = true; }
+                else if method == "HEAD" { selected[1] = true; }
+                else if method == "POST" { selected[2] = true; }
+                else if method == "PUT" { selected[3] = true; }
+                else if method == "PATCH" { selected[4] = true; }
+                else if method == "DELETE" { selected[5] = true; }
+                else if method == "OPTIONS" { selected[6] = true; }
+                else if method == "CONNECT" { selected[7] = true; }
+                else if method == "TRACE" { selected[8] = true; }
+                else if method == "QUERY" { selected[9] = true; }
+                else { return [0, 0, 0, 0]; }
+            }
+            index += 1;
+        }
+
+        mut value = "";
+        mut names: Array<String> = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "CONNECT", "TRACE", "QUERY"];
+        index = 0;
+        while index < selected.length {
+            if selected[index] {
+                if ! value.is_empty() { value = value + ", "; }
+                value = value + names[index];
+            }
+            index += 1;
+        }
+        if value.is_empty() { return [0, 0, 0, 0]; }
+        mut headers = HTTPHeaders.create();
+        _ = headers.add("allow", value);
+        return headers.encode_for_transport();
     }
 
     private static route_pattern_validate_native(pattern: String): Int32 { return 1; }
     private static route_match_native(pattern: String, path: String): List<String> { return List(); }
-    private static route_allow_header_native(
-        patterns: List<String>,
-        methods: List<String>,
-        path: String,
-    ): Array<Byte> { return [0, 0, 0, 0]; }
 }
 
 // A single-consumption response body. The owning native task holds the

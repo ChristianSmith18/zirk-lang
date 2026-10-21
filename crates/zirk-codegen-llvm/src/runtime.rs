@@ -329,7 +329,6 @@ pub mod symbols {
     pub const HTTP_RESPONSE_HEADER_VALUES: &str = "zirk_http_response_header_values";
     pub const HTTP_ROUTE_PATTERN_VALIDATE: &str = "zirk_http_route_pattern_validate";
     pub const HTTP_ROUTE_MATCH: &str = "zirk_http_route_match";
-    pub const HTTP_ROUTE_ALLOW_HEADER: &str = "zirk_http_route_allow_header";
     pub const HTTP_HEADERS_ENCODE: &str = "zirk_http_headers_encode";
     pub const HTTP_FORM_PARSE: &str = "zirk_http_form_parse";
     pub const HTTP_MULTIPART_PARSE: &str = "zirk_http_multipart_parse";
@@ -778,7 +777,6 @@ pub struct Runtime<'ctx> {
     pub http_response_header_values: FunctionValue<'ctx>,
     pub http_route_pattern_validate: FunctionValue<'ctx>,
     pub http_route_match: FunctionValue<'ctx>,
-    pub http_route_allow_header: FunctionValue<'ctx>,
     pub http_headers_encode: FunctionValue<'ctx>,
     pub http_form_parse: FunctionValue<'ctx>,
     pub http_multipart_parse: FunctionValue<'ctx>,
@@ -2190,11 +2188,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
         external,
     );
-    let http_route_allow_header = module.add_function(
-        symbols::HTTP_ROUTE_ALLOW_HEADER,
-        ptr.fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
-        external,
-    );
     let http_headers_encode = module.add_function(
         symbols::HTTP_HEADERS_ENCODE,
         ptr.fn_type(&[ptr.into(), ptr.into()], false),
@@ -3138,7 +3131,6 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         http_response_header_values,
         http_route_pattern_validate,
         http_route_match,
-        http_route_allow_header,
         http_headers_encode,
         http_form_parse,
         http_multipart_parse,

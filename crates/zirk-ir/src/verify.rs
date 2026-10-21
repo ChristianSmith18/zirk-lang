@@ -320,7 +320,6 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpMultipartEncode { .. }
             | InstKind::HttpRoutePatternValidate { .. }
             | InstKind::HttpRouteMatch { .. }
-            | InstKind::HttpRouteAllowHeader { .. }
             | InstKind::HttpHeadersEncode { .. }
             | InstKind::HttpServerServeOnce { .. }
             | InstKind::HttpServerServeHttp3 { .. }
@@ -4783,58 +4782,6 @@ fn verify_instruction(
             }
         }
 
-        InstKind::HttpRouteAllowHeader {
-            patterns,
-            methods,
-            path,
-        } => {
-            if let IrType::Array(array_id) = inst.ty {
-                if module.array_types.get(array_id as usize).copied()
-                    != Some(IrType::Int(IntWidth::U8))
-                {
-                    report(format!(
-                        "{position}: HttpRouteAllowHeader returns Array<{}>, expected Array<Byte>",
-                        module
-                            .array_types
-                            .get(array_id as usize)
-                            .map(|ty| ty.as_str())
-                            .unwrap_or("<missing>"),
-                    ));
-                }
-            } else {
-                report(format!(
-                    "{position}: HttpRouteAllowHeader returns {}, expected Array<Byte>",
-                    inst.ty.as_str()
-                ));
-            }
-            for (label, operand) in [("patterns", patterns), ("methods", methods)] {
-                if let Some(IrType::List(list_id)) = type_of(operand) {
-                    if module.list_types.get(list_id as usize).copied() != Some(IrType::String) {
-                        report(format!(
-                            "{position}: HttpRouteAllowHeader receives List<{}> for `{label}`, expected List<String>",
-                            module
-                                .list_types
-                                .get(list_id as usize)
-                                .map(|ty| ty.as_str())
-                                .unwrap_or("<missing>"),
-                        ));
-                    }
-                } else if let Some(actual) = type_of(operand) {
-                    report(format!(
-                        "{position}: HttpRouteAllowHeader receives {} for `{label}`, expected List<String>",
-                        actual.as_str()
-                    ));
-                }
-            }
-            if let Some(actual) = type_of(path)
-                && actual != IrType::String
-            {
-                report(format!(
-                    "{position}: HttpRouteAllowHeader receives {} for `path`, expected String",
-                    actual.as_str()
-                ));
-            }
-        }
         InstKind::HttpHeadersEncode { names, values } => {
             if let IrType::Array(array_id) = inst.ty {
                 if module.array_types.get(array_id as usize).copied()
@@ -8288,11 +8235,6 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::HttpResponseHeaderValues { headers, name, .. } => vec![*headers, *name],
         InstKind::HttpRoutePatternValidate { pattern } => vec![*pattern],
         InstKind::HttpRouteMatch { pattern, path } => vec![*pattern, *path],
-        InstKind::HttpRouteAllowHeader {
-            patterns,
-            methods,
-            path,
-        } => vec![*patterns, *methods, *path],
         InstKind::HttpHeadersEncode { names, values } => vec![*names, *values],
         InstKind::HttpFormParse {
             body, content_type, ..

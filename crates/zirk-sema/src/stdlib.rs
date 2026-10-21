@@ -371,7 +371,6 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
         "request_header_values_native" => Some("std.http.request_header_values"),
         "route_pattern_validate_native" => Some("std.http.route_pattern_validate"),
         "route_match_native" => Some("std.http.route_match"),
-        "route_allow_header_native" => Some("std.http.route_allow_header"),
         "encode_native_intrinsic" => Some("std.http.headers_encode"),
         "decode_fields_intrinsic" => Some("std.http.form_parse"),
         "multipart_parse_intrinsic" => Some("std.http.multipart_parse"),

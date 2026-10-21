@@ -6819,8 +6819,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpUploadRead { .. }
         | InstKind::HttpUploadClose { .. }
         | InstKind::HttpRoutePatternValidate { .. }
-        | InstKind::HttpRouteMatch { .. }
-        | InstKind::HttpRouteAllowHeader { .. } => BrowserSupport::Excluded,
+        | InstKind::HttpRouteMatch { .. } => BrowserSupport::Excluded,
         InstKind::HttpGet { .. }
         | InstKind::HttpRequest { .. }
         | InstKind::HttpHead { .. }
