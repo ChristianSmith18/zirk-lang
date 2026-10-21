@@ -1953,6 +1953,206 @@ mod tests {
     }
 
     #[test]
+    fn auto_http3_falls_back_to_authenticated_http1_before_request_commit() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+        let _gc_guard = crate::collector::test_support::test_guard();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Reserve the matching UDP port without speaking QUIC. Auto must
+        // abandon protocol setup before sending the application request.
+        let udp_reservation = std::net::UdpSocket::bind(address).unwrap();
+        let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(
+                    include_bytes!("../testdata/tls-loopback-cert.der").to_vec(),
+                )],
+                PrivateKeyDer::try_from(
+                    include_bytes!("../testdata/tls-loopback-key.der").to_vec(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let server_accepted = Arc::clone(&accepted);
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let tls = tokio_rustls::rustls::StreamOwned::new(
+                tokio_rustls::rustls::ServerConnection::new(Arc::new(server_config)).unwrap(),
+                socket,
+            );
+            let mut reader = BufReader::new(tls);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            assert_eq!(request_line, "GET /fallback HTTP/1.1\r\n");
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+            }
+            reader
+                .get_mut()
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfallback",
+                )
+                .unwrap();
+        });
+
+        let origin = format!("https://127.0.0.1:{}", address.port());
+        let grant =
+            Arc::new(EffectiveNetworkGrant::from_verified_scopes([origin.clone()], []).unwrap());
+        let outcome = Executor::new().run_with_root(move || {
+            let mut client = crate::http_runtime::HttpClientPool::new_shared_with_protocol(
+                1,
+                crate::http_runtime::HttpTimeouts {
+                    connect: Duration::from_secs(2),
+                    response_headers: Duration::from_secs(2),
+                    response_idle: Duration::from_secs(2),
+                },
+                crate::http_runtime::HttpProtocolPreference::Auto,
+                Some(crate::network_transport::loopback_test_client_tls_config()),
+                None,
+            )
+            .unwrap();
+            let response = client
+                .request(
+                    zirk_runtime_core::http_values::HttpRequestValues::new(
+                        zirk_runtime_core::http_values::HttpMethod::Get,
+                        Url::parse(&format!("{origin}/fallback")).unwrap(),
+                    ),
+                    grant,
+                )
+                .unwrap();
+            assert_eq!(
+                response.protocol,
+                crate::http_runtime::HttpProtocolVersion::Http1
+            );
+            assert_eq!(response.body, b"fallback");
+            client.close();
+            0
+        });
+
+        drop(udp_reservation);
+        server.join().unwrap();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
+    fn auto_http3_does_not_replay_after_the_h3_request_is_committed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _gc_guard = crate::collector::test_support::test_guard();
+        let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = tcp_listener.local_addr().unwrap();
+        tcp_listener.set_nonblocking(true).unwrap();
+        let listen_grant = EffectiveNetworkGrant::from_verified_datagram_scopes(
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            [address.to_string()],
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+            false,
+        )
+        .unwrap();
+        let received = Arc::new(AtomicUsize::new(0));
+        let origin = format!("https://127.0.0.1:{}", address.port());
+        let grant =
+            Arc::new(EffectiveNetworkGrant::from_verified_scopes([origin.clone()], []).unwrap());
+        let received_after = Arc::clone(&received);
+        let outcome = Executor::new().run_with_root(move || {
+            let (endpoint, _) =
+                bind_server_endpoint(address, &listen_grant, test_http3_server_config()).unwrap();
+            let server_received = Arc::clone(&received);
+            let server_task = crate::executor::spawn(move || {
+                let endpoint = endpoint.clone();
+                crate::network_future::block_on_current(crate::network_future::spawn_on_reactor(
+                    async move {
+                        let incoming = endpoint
+                            .accept()
+                            .await
+                            .ok_or(super::super::http_runtime::HttpRuntimeError::Transport)?;
+                        let connection = incoming
+                            .await
+                            .map_err(|_| super::super::http_runtime::HttpRuntimeError::Transport)?;
+                        let mut h3: h3::server::Connection<_, Bytes> = h3::server::Connection::new(
+                            h3_quinn::Connection::new(connection.clone()),
+                        )
+                        .await
+                        .map_err(|_| super::super::http_runtime::HttpRuntimeError::Protocol)?;
+                        let resolver = h3
+                            .accept()
+                            .await
+                            .map_err(|_| super::super::http_runtime::HttpRuntimeError::Protocol)?
+                            .ok_or(super::super::http_runtime::HttpRuntimeError::Protocol)?;
+                        let (request, _stream) = resolver
+                            .resolve_request()
+                            .await
+                            .map_err(|_| super::super::http_runtime::HttpRuntimeError::Protocol)?;
+                        assert_eq!(request.uri().path(), "/committed");
+                        server_received.fetch_add(1, Ordering::SeqCst);
+                        // Drop the response path after observing the request. Auto
+                        // must report the H3 failure, never resend over TCP.
+                        connection.close(VarInt::from_u32(0), b"response deliberately dropped");
+                        drop(endpoint);
+                        Ok::<(), super::super::http_runtime::HttpRuntimeError>(())
+                    },
+                ))
+                .unwrap()
+                .unwrap()
+                .unwrap();
+                0
+            });
+            let mut client = crate::http_runtime::HttpClientPool::new_shared_with_protocol(
+                1,
+                crate::http_runtime::HttpTimeouts {
+                    connect: Duration::from_secs(2),
+                    response_headers: Duration::from_secs(2),
+                    response_idle: Duration::from_secs(2),
+                },
+                crate::http_runtime::HttpProtocolPreference::Auto,
+                Some(crate::network_transport::loopback_test_client_tls_config()),
+                None,
+            )
+            .unwrap();
+            let result = client.request(
+                zirk_runtime_core::http_values::HttpRequestValues::new(
+                    zirk_runtime_core::http_values::HttpMethod::Get,
+                    Url::parse(&format!("{origin}/committed")).unwrap(),
+                ),
+                grant,
+            );
+            assert!(matches!(
+                result,
+                Err(crate::http_runtime::HttpRuntimeError::Protocol)
+                    | Err(crate::http_runtime::HttpRuntimeError::Transport)
+            ));
+            client.close();
+            crate::http_runtime::await_server_handler_task(server_task);
+            0
+        });
+
+        assert_eq!(received_after.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(tcp_listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+    }
+
+    #[test]
     fn http3_client_session_multiplexes_concurrent_requests_on_one_connection() {
         let _gc_guard = crate::collector::test_support::test_guard();
         let outcome = Executor::new().run_with_root(|| {
