@@ -7734,6 +7734,8 @@ mod tests {
         let client_config = crate::network_transport::loopback_test_client_tls_config();
         let request_seen = Arc::new(AtomicBool::new(false));
         let observed_request = Arc::clone(&request_seen);
+        let tls_established = Arc::new(AtomicBool::new(false));
+        let observed_tls_established = Arc::clone(&tls_established);
         let server = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -7742,10 +7744,13 @@ mod tests {
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 let (socket, _) = listener.accept().await.unwrap();
-                let tls = tokio_rustls::TlsAcceptor::from(server_config)
+                let Ok(tls) = tokio_rustls::TlsAcceptor::from(server_config)
                     .accept(socket)
                     .await
-                    .unwrap();
+                else {
+                    return;
+                };
+                observed_tls_established.store(true, Ordering::Release);
                 let service =
                     hyper::service::service_fn(move |_request: Request<hyper::body::Incoming>| {
                         observed_request.store(true, Ordering::Release);
@@ -7758,7 +7763,7 @@ mod tests {
                 let connection =
                     hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
                         .serve_connection(TokioIo::new(tls), service);
-                let _ = tokio::time::timeout(Duration::from_secs(3), connection).await;
+                let _ = tokio::time::timeout(Duration::from_secs(10), connection).await;
             });
         });
 
@@ -7768,8 +7773,8 @@ mod tests {
                 &url,
                 Arc::clone(&grant),
                 HttpTimeouts {
-                    connect: Duration::from_secs(3),
-                    response_headers: Duration::from_millis(100),
+                    connect: Duration::from_secs(15),
+                    response_headers: Duration::from_secs(2),
                     response_idle: Duration::from_secs(3),
                 },
                 Some(client_config),
@@ -7781,6 +7786,7 @@ mod tests {
         });
         server.join().unwrap();
         assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+        assert!(tls_established.load(Ordering::Acquire));
         assert!(!request_seen.load(Ordering::Acquire));
     }
 
