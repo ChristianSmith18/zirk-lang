@@ -115,21 +115,6 @@ fn http_websockets() -> &'static Mutex<HashMap<u64, OwnedHttpWebSocket>> {
     HTTP_WEBSOCKETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Returns zero for a valid route pattern and one for malformed input.
-///
-/// # Safety
-///
-/// `pattern` must be null or a live managed Zirk `String` handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn zirk_http_route_pattern_validate(pattern: *const c_void) -> i32 {
-    let Some(pattern) = (unsafe { crate::string::borrow(pattern) }) else {
-        return 1;
-    };
-    zirk_runtime_core::http_router::validate_route_pattern(unsafe { pattern.as_str() })
-        .map(|_| 0)
-        .unwrap_or(1)
-}
-
 /// Returns an empty list for no match; a match is encoded as an empty marker
 /// followed by alternating parameter names and decoded values.
 ///

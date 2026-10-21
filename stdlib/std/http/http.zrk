@@ -2692,7 +2692,125 @@ share class HTTPRouter {
 
 class HTTPRouteMatcher {
     static validate_pattern(pattern: String): Int32 {
-        return HTTPRouteMatcher.route_pattern_validate_native(pattern);
+        mut bytes = pattern.bytes();
+        if bytes.length > 2048 || bytes.length == 0 || bytes[0] != 47 as UInt8 {
+            return 1;
+        }
+
+        mut index: UInt64 = 0;
+        while index < bytes.length {
+            mut byte = bytes[index];
+            if byte == 63 as UInt8 || byte == 35 as UInt8 || byte == 92 as UInt8
+            || byte < 32 as UInt8 || byte == 127 as UInt8 {
+                return 1;
+            }
+            if byte == 37 as UInt8 {
+                if index + 2 >= bytes.length
+                || ! HTTPRouteMatcher.is_hex(bytes[index + 1])
+                || ! HTTPRouteMatcher.is_hex(bytes[index + 2]) {
+                    return 1;
+                }
+                index += 3;
+            } else {
+                index += 1;
+            }
+        }
+
+        if pattern == "/" { return 0; }
+        mut segments = pattern.split("/");
+        mut parameter_names: List<String> = List();
+        mut segment_index: UInt64 = 1;
+        while segment_index < segments.length {
+            mut segment = segments[segment_index];
+            if segment.is_empty() { return 1; }
+            mut segment_bytes = segment.bytes();
+            for byte in segment_bytes {
+                if byte > 127 as UInt8 { return 1; }
+            }
+            if HTTPRouteMatcher.has_unsafe_encoded_segment(segment_bytes) {
+                return 1;
+            }
+            if segment.starts_with(":") {
+                mut name = segment.substring(1, segment.length);
+                if ! HTTPRouteMatcher.valid_parameter_name(name)
+                || parameter_names.contains(name)
+                || parameter_names.length >= 32 {
+                    return 1;
+                }
+                parameter_names.add(name);
+            } else if segment.starts_with("*") {
+                return 1;
+            }
+            segment_index += 1;
+        }
+        return 0;
+    }
+
+    private static is_hex(byte: UInt8): Boolean {
+        return byte >= 48 as UInt8 && byte <= 57 as UInt8
+            || byte >= 65 as UInt8 && byte <= 70 as UInt8
+            || byte >= 97 as UInt8 && byte <= 102 as UInt8;
+    }
+
+    private static hex_value(byte: UInt8): UInt64 {
+        if byte >= 48 as UInt8 && byte <= 57 as UInt8 {
+            return (byte - 48 as UInt8) as UInt64;
+        }
+        if byte >= 65 as UInt8 && byte <= 70 as UInt8 {
+            return (byte - 55 as UInt8) as UInt64;
+        }
+        return (byte - 87 as UInt8) as UInt64;
+    }
+
+    private static has_unsafe_encoded_segment(bytes: List<UInt8>): Boolean {
+        mut index: UInt64 = 0;
+        mut decoded_length: UInt64 = 0;
+        mut only_dots = true;
+        while index < bytes.length {
+            mut decoded = bytes[index];
+            if decoded == 37 as UInt8 {
+                if index + 2 >= bytes.length
+                || ! HTTPRouteMatcher.is_hex(bytes[index + 1])
+                || ! HTTPRouteMatcher.is_hex(bytes[index + 2]) {
+                    return true;
+                }
+                decoded = (HTTPRouteMatcher.hex_value(bytes[index + 1]) * 16
+                    + HTTPRouteMatcher.hex_value(bytes[index + 2])) as UInt8;
+                index += 3;
+            } else {
+                index += 1;
+            }
+            if decoded == 47 as UInt8 || decoded == 92 as UInt8
+            || decoded < 32 as UInt8 || decoded == 127 as UInt8 {
+                return true;
+            }
+            if decoded != 46 as UInt8 { only_dots = false; }
+            decoded_length += 1;
+        }
+        return only_dots && (decoded_length == 1 || decoded_length == 2);
+    }
+
+    private static valid_parameter_name(name: String): Boolean {
+        mut bytes = name.bytes();
+        if bytes.length == 0 { return false; }
+        mut first = bytes[0];
+        if first != 95 as UInt8
+        && ! (first >= 65 as UInt8 && first <= 90 as UInt8)
+        && ! (first >= 97 as UInt8 && first <= 122 as UInt8) {
+            return false;
+        }
+        mut index: UInt64 = 1;
+        while index < bytes.length {
+            mut byte = bytes[index];
+            if byte != 95 as UInt8
+            && ! (byte >= 48 as UInt8 && byte <= 57 as UInt8)
+            && ! (byte >= 65 as UInt8 && byte <= 90 as UInt8)
+            && ! (byte >= 97 as UInt8 && byte <= 122 as UInt8) {
+                return false;
+            }
+            index += 1;
+        }
+        return true;
     }
 
     static conflict(method: String, first: String, second: String): Int32 {
@@ -2785,7 +2903,6 @@ class HTTPRouteMatcher {
         return headers.encode_for_transport();
     }
 
-    private static route_pattern_validate_native(pattern: String): Int32 { return 1; }
     private static route_match_native(pattern: String, path: String): List<String> { return List(); }
 }
 

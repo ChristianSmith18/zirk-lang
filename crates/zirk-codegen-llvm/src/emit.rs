@@ -8586,21 +8586,6 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .into_pointer_value();
                 Some(self.build_tagged_outcome(*enum_id, kind, error, bytes, 0, 1))
             }
-            ir::InstKind::HttpRoutePatternValidate { pattern } => {
-                let pattern = self.operand(*pattern);
-                let status = self
-                    .builder
-                    .build_call(
-                        self.runtime.http_route_pattern_validate,
-                        &[pattern.into()],
-                        "http.route.pattern.validate",
-                    )
-                    .expect("validate HTTP route pattern")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("route validation returns status");
-                Some(status)
-            }
             ir::InstKind::HttpRouteMatch { pattern, path } => {
                 let pattern = self.operand(*pattern);
                 let path = self.operand(*path);

@@ -316,7 +316,6 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::HttpUploadRead { .. }
             | InstKind::HttpUploadClose { .. }
             | InstKind::HttpMultipartEncode { .. }
-            | InstKind::HttpRoutePatternValidate { .. }
             | InstKind::HttpRouteMatch { .. }
             | InstKind::HttpServerServeOnce { .. }
             | InstKind::HttpServerServeHttp3 { .. }
@@ -4731,24 +4730,6 @@ fn verify_instruction(
             }
         }
 
-        InstKind::HttpRoutePatternValidate { pattern } => {
-            expect(
-                inst.ty,
-                IrType::Int(IntWidth::I32),
-                position,
-                "HttpRoutePatternValidate",
-                report,
-            );
-            if let Some(actual) = type_of(pattern)
-                && actual != IrType::String
-            {
-                report(format!(
-                    "{position}: HttpRoutePatternValidate receives {} for `pattern`, expected String",
-                    actual.as_str()
-                ));
-            }
-        }
-
         InstKind::HttpRouteMatch { pattern, path } => {
             if !matches!(inst.ty, IrType::List(_)) {
                 report(format!(
@@ -8133,7 +8114,6 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         } => vec![*base, *reference],
         InstKind::HttpResponseText { body, .. } => vec![*body],
         InstKind::HttpResponseHeaderValues { headers, name, .. } => vec![*headers, *name],
-        InstKind::HttpRoutePatternValidate { pattern } => vec![*pattern],
         InstKind::HttpRouteMatch { pattern, path } => vec![*pattern, *path],
         InstKind::HttpFormParse {
             body, content_type, ..

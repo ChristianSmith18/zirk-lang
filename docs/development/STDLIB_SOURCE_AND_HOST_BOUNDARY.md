@@ -18,18 +18,18 @@ This is the same visibility model as `std.io`: users can review the Zirk-facing 
 
 ## Current compiler-owned host binding inventory
 
-The LLVM runtime registry currently contains 114 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
+The LLVM runtime registry currently contains 113 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
 
 This symbol list is not yet a completed per-binding security/ownership review.
 The active OpenSpec task `1.0.1` requires each binding to document its host or
 protocol-engine role, input bounds, permission checks, cancellation behavior,
 and resource ownership. The current HTTP registry includes helper operations
-that still need this review and may need to move into bundled Zirk sources: form parsing, route
-validation and matching, URL normalization/resolution, response text decoding,
-and cached request policy. URL-encoded form serialization and repeated-field
-selection have already moved into Zirk.
-`HTTPHeaders.encode_for_transport`, URL-encoded form serialization, and
-`HTTPFormData.get_all` now run in bundled Zirk; the host still validates the
+that still need this review and may need to move into bundled Zirk sources:
+form parsing, route matching, URL normalization/resolution, response text
+decoding, and cached request policy. URL-encoded form serialization,
+repeated-field selection, and route-pattern validation now run in bundled
+Zirk. `HTTPHeaders.encode_for_transport` also runs in Zirk, while the host
+still validates the
 encoded header block before using it. Until the full
 task is complete, the external binding boundary must not be described as
 limited to OS operations and audited protocol engines.
@@ -106,7 +106,7 @@ broader audit, not its completion.
 - `zirk_network_udp_send_multicast`
 - `zirk_network_udp_send_to`
 
-### HTTP (52)
+### HTTP (51)
 
 - `zirk_http_client_clear_cookies`
 - `zirk_http_client_close`
@@ -139,7 +139,6 @@ broader audit, not its completion.
 - `zirk_http_response_text`
 - `zirk_http_response_to_stream`
 - `zirk_http_route_match`
-- `zirk_http_route_pattern_validate`
 - `zirk_http_server_producer_register`
 - `zirk_http_server_serve_http3`
 - `zirk_http_server_serve_once`

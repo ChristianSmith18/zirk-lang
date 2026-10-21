@@ -170,7 +170,20 @@ as GC roots; after rebuilding the default static runtime, the compiled-Zirk
 probe passes the exact 1 MiB boundary and rejects a percent-expanded body with
 `BodyTooLarge`.
 
-The follow-up `cargo test -p zirk-cli` run passed 262 tests with 3 ignored;
+Route-pattern validation has also moved into `HTTPRouteMatcher` Zirk source;
+its compiler-owned symbol and dedicated IR instruction were removed. The
+compiled-Zirk route test covers valid patterns, duplicate parameter names,
+malformed percent escapes, encoded separators and dot segments, control
+bytes, query/fragment syntax, empty segments, and invalid parameter names.
+Route matching itself remains host-backed because it must percent-decode
+captured path segments into validated UTF-8 strings.
+
+After the route-pattern migration, `cargo test -p zirk-cli` passed 263 tests
+with 3 ignored. Workspace Clippy passed again with warnings denied; formatting,
+diff checks, and strict OpenSpec validation also passed.
+
+Before the route-pattern migration, `cargo test -p zirk-cli` passed 262 tests
+with 3 ignored;
 `cargo test -p zirk-runtime --lib` passed 517 with 3 ignored. Workspace Clippy
 passed with warnings denied, and the Windows x86_64 HTTP/3 runtime test target
 cross-compiled with `cargo xwin check --locked -p zirk-runtime --tests

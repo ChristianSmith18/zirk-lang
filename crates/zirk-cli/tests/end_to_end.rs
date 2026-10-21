@@ -10404,6 +10404,45 @@ fn bundled_http_router_rejects_duplicate_and_ambiguous_route_registrations() {
 }
 
 #[test]
+fn bundled_http_route_validation_runs_in_zirk_and_rejects_unsafe_patterns() {
+    let source = r#"import { HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter } from std.http;
+import { stdout } from std.io;
+fn handler(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return HTTPResponse.from_bytes(200, [0x6f as Byte]);
+}
+fn check(router: HTTPRouter, pattern: String): Void {
+    match router.route(HTTPMethod.Get, pattern, handler) {
+        Ok(_) => stdout.println("valid");
+        Error(_) => stdout.println("invalid");
+    }
+}
+fn main(): Void {
+    mut router: HTTPRouter = HTTPRouter();
+    check(router, "/");
+    check(router, "/users/:user_id");
+    check(router, "/users/%20");
+    check(router, "users");
+    check(router, "/users/");
+    check(router, "/:id/:id");
+    check(router, "/%2F");
+    check(router, "/%2e%2e");
+    check(router, "/:9id");
+    check(router, "/bad?query");
+    check(router, "/bad%GG");
+    check(router, "/a//b");
+    check(router, "/foo%00");
+    check(router, "/foo%2fbar");
+}"#;
+    let output = crate_of("http_route_validation_source", &[("main.zrk", source)]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "valid\nvalid\nvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\ninvalid\n"
+    );
+}
+
+#[test]
 fn standard_input_line_is_read_by_the_native_backend() {
     let output = crate_of_with_input(
         "standard_input_native",

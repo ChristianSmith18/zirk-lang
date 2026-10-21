@@ -6737,7 +6737,6 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::HttpMultipartEncode { .. }
         | InstKind::HttpUploadRead { .. }
         | InstKind::HttpUploadClose { .. }
-        | InstKind::HttpRoutePatternValidate { .. }
         | InstKind::HttpRouteMatch { .. } => BrowserSupport::Excluded,
         InstKind::HttpGet { .. }
         | InstKind::HttpRequest { .. }

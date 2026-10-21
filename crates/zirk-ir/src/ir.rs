@@ -1969,11 +1969,6 @@ pub enum InstKind {
         name: Operand,
         enum_id: u32,
     },
-    /// Validates one bundled HTTP route pattern. Returns zero when valid or a
-    /// stable route-validation code otherwise.
-    HttpRoutePatternValidate {
-        pattern: Operand,
-    },
     /// Matches one route pattern and returns a List<String> encoded as an
     /// empty list for no match or ["", name, value, ...] for a match.
     HttpRouteMatch {
