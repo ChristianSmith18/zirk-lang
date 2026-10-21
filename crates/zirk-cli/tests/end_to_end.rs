@@ -6711,6 +6711,7 @@ fn bundled_std_net_tls_client_identity_completes_approved_mutual_authentication(
                 Err(error) => return Err(format!("mTLS client did not connect: {error}")),
             }
         };
+        socket.set_nonblocking(true).map_err(|error| error.to_string())?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
