@@ -228,14 +228,13 @@ fn with_udp_socket_mut<T>(
     };
     let result = operation(&mut socket);
     let cancelled = matches!(result, Err(NetworkTransportError::Cancelled));
-    if !cancelled {
-        if let Some(entry) = udp_sockets()
+    if !cancelled
+        && let Some(entry) = udp_sockets()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&handle)
-        {
-            entry.socket = Some(socket);
-        }
+    {
+        entry.socket = Some(socket);
     }
     result.map_err(TcpApiError::Transport)
 }
@@ -261,14 +260,13 @@ fn with_local_stream_mut<T>(
         stream
     };
     let result = operation(&mut stream);
-    if !matches!(result, Err(NetworkTransportError::Cancelled)) {
-        if let Some(entry) = local_streams()
+    if !matches!(result, Err(NetworkTransportError::Cancelled))
+        && let Some(entry) = local_streams()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&handle)
-        {
-            entry.stream = Some(stream);
-        }
+    {
+        entry.stream = Some(stream);
     }
     result.map_err(TcpApiError::Transport)
 }
@@ -294,14 +292,13 @@ fn with_local_listener_mut<T>(
         listener
     };
     let result = operation(&mut listener);
-    if !matches!(result, Err(NetworkTransportError::Cancelled)) {
-        if let Some(entry) = local_listeners()
+    if !matches!(result, Err(NetworkTransportError::Cancelled))
+        && let Some(entry) = local_listeners()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&handle)
-        {
-            entry.listener = Some(listener);
-        }
+    {
+        entry.listener = Some(listener);
     }
     result.map_err(TcpApiError::Transport)
 }
@@ -1817,6 +1814,9 @@ pub unsafe extern "C" fn zirk_network_udp_send_to(
 }
 
 /// Sends to the limited broadcast address under both explicit UDP grants.
+///
+/// # Safety
+/// `bytes`, `endpoint`, and `out` must be valid Zirk ABI values for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_network_udp_send_broadcast(
     handle: u64,
@@ -1859,6 +1859,9 @@ pub unsafe extern "C" fn zirk_network_udp_send_broadcast(
 }
 
 /// Sends to an explicitly authorized multicast group and port.
+///
+/// # Safety
+/// `bytes`, `endpoint`, and `out` must be valid Zirk ABI values for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_network_udp_send_multicast(
     handle: u64,
@@ -1901,6 +1904,9 @@ pub unsafe extern "C" fn zirk_network_udp_send_multicast(
 }
 
 /// Joins a multicast group after the exact group grant has been checked.
+///
+/// # Safety
+/// `group` and `out` must be valid Zirk ABI values for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_network_udp_join_multicast(
     handle: u64,
@@ -1927,6 +1933,9 @@ pub unsafe extern "C" fn zirk_network_udp_join_multicast(
 }
 
 /// Leaves a multicast group previously joined by this socket.
+///
+/// # Safety
+/// `group` and `out` must be valid Zirk ABI values for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_network_udp_leave_multicast(
     handle: u64,

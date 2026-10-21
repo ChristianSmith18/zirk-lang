@@ -192,6 +192,8 @@ impl EffectiveNetworkGrant {
 
     /// Builds the complete UDP authority, including separately approved
     /// limited-broadcast destinations and multicast groups.
+    // Keep every disjoint authority explicit at this verified-grant boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_verified_datagram_scopes(
         connect_origins: impl IntoIterator<Item = String>,
         listen_addresses: impl IntoIterator<Item = String>,

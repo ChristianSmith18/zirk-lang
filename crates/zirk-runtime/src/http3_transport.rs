@@ -540,9 +540,7 @@ async fn accept_http3_connection(
     }
     tokio::select! {
         accepted = tokio::time::timeout(HTTP3_SERVER_IO_TIMEOUT, endpoint.accept()) => {
-            accepted
-                .map_err(|_| super::http_runtime::HttpRuntimeError::Timeout)
-                .map(|incoming| incoming)
+            accepted.map_err(|_| super::http_runtime::HttpRuntimeError::Timeout)
         }
         _ = request_limit.changed() => Ok(None),
     }
@@ -631,14 +629,16 @@ fn serve_connection(
     Ok(served)
 }
 
+type Http3ServerRequest = (
+    Request<Vec<u8>>,
+    tokio::sync::oneshot::Sender<Response<Http3ResponseBody>>,
+);
+
 #[allow(dead_code)] // Exercised by the local QUIC/H3 integration test.
 async fn serve_connection_inner(
     connection: quinn::Connection,
     max_requests: usize,
-    request_tx: tokio::sync::mpsc::Sender<(
-        Request<Vec<u8>>,
-        tokio::sync::oneshot::Sender<Response<Http3ResponseBody>>,
-    )>,
+    request_tx: tokio::sync::mpsc::Sender<Http3ServerRequest>,
     admission: std::sync::Arc<Http3ServerAdmission>,
 ) -> Result<usize, super::http_runtime::HttpRuntimeError> {
     let mut builder = h3::server::builder();
@@ -705,10 +705,7 @@ async fn serve_connection_inner(
 
 async fn serve_h3_request_stream(
     resolver: h3::server::RequestResolver<h3_quinn::Connection, Bytes>,
-    request_tx: tokio::sync::mpsc::Sender<(
-        Request<Vec<u8>>,
-        tokio::sync::oneshot::Sender<Response<Http3ResponseBody>>,
-    )>,
+    request_tx: tokio::sync::mpsc::Sender<Http3ServerRequest>,
     admission: std::sync::Arc<Http3ServerAdmission>,
 ) -> Result<bool, super::http_runtime::HttpRuntimeError> {
     let (request, mut stream) =
@@ -959,6 +956,7 @@ async fn perform_request(
     method: http::Method,
     headers: HeaderMap,
     body: Vec<u8>,
+    mut upload_body: Option<crate::http_runtime::HttpUploadBody>,
     grant: Arc<EffectiveNetworkGrant>,
     response_headers_timeout: Duration,
     response_idle_timeout: Duration,
@@ -973,15 +971,23 @@ async fn perform_request(
         .body(())
         .map_err(|_| super::http_runtime::HttpRuntimeError::InvalidRequest)?;
     *outgoing.headers_mut() = headers;
-    authorize_remote_path(&connection, &origin, &grant)?;
+    authorize_remote_path(connection, &origin, &grant)?;
     let mut stream = sender.send_request(outgoing).await.map_err(|_error| {
         #[cfg(test)]
         eprintln!("HTTP/3 test request send failed: {_error:?}");
         super::http_runtime::HttpRuntimeError::Protocol
     })?;
-    authorize_remote_path(&connection, &origin, &grant)?;
-    if !body.is_empty() {
-        authorize_remote_path(&connection, &origin, &grant)?;
+    authorize_remote_path(connection, &origin, &grant)?;
+    if let Some(upload_body) = upload_body.as_mut() {
+        while let Some(chunk) = upload_body.next_chunk().await {
+            authorize_remote_path(connection, &origin, &grant)?;
+            stream
+                .send_data(chunk)
+                .await
+                .map_err(|_| super::http_runtime::HttpRuntimeError::Protocol)?;
+        }
+    } else if !body.is_empty() {
+        authorize_remote_path(connection, &origin, &grant)?;
         stream
             .send_data(Bytes::from(body))
             .await
@@ -990,14 +996,14 @@ async fn perform_request(
                 eprintln!("HTTP/3 test request body send failed: {_error:?}");
                 super::http_runtime::HttpRuntimeError::Protocol
             })?;
-        authorize_remote_path(&connection, &origin, &grant)?;
+        authorize_remote_path(connection, &origin, &grant)?;
     }
     stream.finish().await.map_err(|_error| {
         #[cfg(test)]
         eprintln!("HTTP/3 test request finish failed: {_error:?}");
         super::http_runtime::HttpRuntimeError::Protocol
     })?;
-    authorize_remote_path(&connection, &origin, &grant)?;
+    authorize_remote_path(connection, &origin, &grant)?;
 
     let response = tokio::time::timeout(response_headers_timeout, stream.recv_response())
         .await
@@ -1007,7 +1013,7 @@ async fn perform_request(
             eprintln!("HTTP/3 test response headers failed: {_error:?}");
             super::http_runtime::HttpRuntimeError::Protocol
         })?;
-    authorize_remote_path(&connection, &origin, &grant)?;
+    authorize_remote_path(connection, &origin, &grant)?;
     let (parts, ()) = response.into_parts();
     let mut body = Vec::new();
     loop {
@@ -1019,7 +1025,7 @@ async fn perform_request(
                 eprintln!("HTTP/3 test response data failed: {_error:?}");
                 super::http_runtime::HttpRuntimeError::Protocol
             })?;
-        authorize_remote_path(&connection, &origin, &grant)?;
+        authorize_remote_path(connection, &origin, &grant)?;
         let Some(mut chunk) = next else { break };
         let size = chunk.remaining();
         if body
@@ -1343,12 +1349,107 @@ impl Http3ClientSession {
                 method,
                 headers,
                 body,
+                None,
                 grant,
                 response_headers_timeout,
                 response_idle_timeout,
             )
             .await
         });
+        crate::network_future::block_on_current(future)
+            .map_err(map_network_future_error)?
+            .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)?
+    }
+
+    pub(crate) fn request_streaming(
+        self: &Arc<Self>,
+        request: Request<()>,
+        grant: Arc<EffectiveNetworkGrant>,
+        response_headers_timeout: Duration,
+        response_idle_timeout: Duration,
+        producer: &mut impl FnMut() -> Result<Option<Vec<u8>>, super::http_runtime::HttpRuntimeError>,
+    ) -> Result<Response<Vec<u8>>, super::http_runtime::HttpRuntimeError> {
+        let url = Url::parse(&request.uri().to_string())
+            .map_err(|_| super::http_runtime::HttpRuntimeError::InvalidRequest)?;
+        if url.scheme() != "https" {
+            return Err(super::http_runtime::HttpRuntimeError::Transport);
+        }
+        let origin = NetworkOrigin::parse(&url.origin())
+            .map_err(|_| super::http_runtime::HttpRuntimeError::InvalidRequest)?;
+        grant
+            .authorize_origin(origin.as_str())
+            .map_err(NetworkTransportError::from)?;
+        authorize_remote_path(&self.connection, &origin, &grant)?;
+        validate_request_headers(request.headers())?;
+
+        let first_chunk = producer()?;
+        if crate::executor::current_task_cancel_requested() {
+            return Err(super::http_runtime::HttpRuntimeError::Cancelled);
+        }
+        if first_chunk
+            .as_ref()
+            .is_some_and(|chunk| chunk.len() > super::http_runtime::HTTP_UPLOAD_CHUNK_LIMIT)
+        {
+            return Err(super::http_runtime::HttpRuntimeError::BodyTooLarge);
+        }
+
+        let sender = self
+            .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let url_text = url.as_str().to_owned();
+        let method = request.method().clone();
+        let headers = request.headers().clone();
+        let owner = crate::executor::current_task();
+        let (mut upload, body) = crate::http_runtime::HttpUploadBody::channel(owner);
+        let session = Arc::clone(self);
+        let future = crate::network_future::spawn_on_reactor(async move {
+            perform_request(
+                session,
+                sender,
+                url_text,
+                origin,
+                method,
+                headers,
+                Vec::new(),
+                Some(body),
+                grant,
+                response_headers_timeout,
+                response_idle_timeout,
+            )
+            .await
+        });
+
+        let mut next_chunk = first_chunk;
+        loop {
+            let chunk = match next_chunk.take() {
+                Some(chunk) => chunk,
+                None => {
+                    let chunk = producer()?;
+                    if crate::executor::current_task_cancel_requested() {
+                        drop(future);
+                        return Err(super::http_runtime::HttpRuntimeError::Cancelled);
+                    }
+                    match chunk {
+                        Some(chunk) => chunk,
+                        None => break,
+                    }
+                }
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            if chunk.len() > super::http_runtime::HTTP_UPLOAD_CHUNK_LIMIT {
+                drop(future);
+                return Err(super::http_runtime::HttpRuntimeError::BodyTooLarge);
+            }
+            if let Err(error) = upload.write_chunk(&chunk) {
+                drop(future);
+                return Err(error);
+            }
+        }
+        upload.finish()?;
         crate::network_future::block_on_current(future)
             .map_err(map_network_future_error)?
             .map_err(|_| super::http_runtime::HttpRuntimeError::Transport)?
@@ -1519,8 +1620,7 @@ mod tests {
                             .unwrap()
                             .unwrap();
                     assert_eq!(selected.as_deref(), Some("echo.v1"));
-                    let mut frame = Vec::new();
-                    frame.resize(11, 0);
+                    let mut frame = vec![0; 11];
                     tokio::io::AsyncReadExt::read_exact(&mut websocket_io, &mut frame)
                         .await
                         .unwrap();
@@ -1690,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn http3_client_uses_authenticated_quic_and_returns_a_bounded_response() {
+    fn auto_http3_streams_a_bounded_request_body_and_returns_a_bounded_response() {
         let _gc_guard = crate::collector::test_support::test_guard();
         let outcome = Executor::new().run_with_root(|| {
             let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1721,6 +1821,14 @@ mod tests {
                     assert_eq!(crate::executor::current_executor_id(), owner_executor);
                     assert_eq!(request.method(), http::Method::POST);
                     assert_eq!(request.body(), b"ping");
+                    assert_eq!(
+                        request.headers().get(http::header::USER_AGENT),
+                        Some(&http::HeaderValue::from_static("Zirk-http-client/0.0.0"))
+                    );
+                    assert_eq!(
+                        request.headers().get(http::header::ACCEPT_ENCODING),
+                        Some(&http::HeaderValue::from_static("br, gzip, deflate"))
+                    );
                     let capture = crate::string::alloc_owned("http3 response producer");
                     let context = crate::http_api::HttpServerProducerContext {
                         function: 0,
@@ -1806,7 +1914,6 @@ mod tests {
                 .headers
                 .insert("content-type", b"text/plain")
                 .unwrap();
-            request.set_body(b"ping".to_vec()).unwrap();
             let mut client = crate::http_runtime::HttpClientPool::new_shared_with_protocol(
                 1,
                 crate::http_runtime::HttpTimeouts {
@@ -1814,12 +1921,19 @@ mod tests {
                     response_headers: Duration::from_secs(5),
                     response_idle: Duration::from_secs(5),
                 },
-                crate::http_runtime::HttpProtocolPreference::Http3,
+                crate::http_runtime::HttpProtocolPreference::Auto,
                 Some(tls),
                 None,
             )
             .unwrap();
-            let response = client.request(request, grant).unwrap();
+            let mut chunks = std::collections::VecDeque::from([
+                Some(b"pi".to_vec()),
+                Some(b"ng".to_vec()),
+                None,
+            ]);
+            let response = client
+                .request_streaming(request, grant, || Ok(chunks.pop_front().unwrap()))
+                .unwrap();
 
             assert_eq!(
                 response.protocol,
@@ -2139,8 +2253,7 @@ mod tests {
             &EffectiveNetworkGrant::default(),
             test_http3_server_config(),
         )
-        .err()
-        .expect("an unapproved QUIC listener must be rejected");
+        .expect_err("an unapproved QUIC listener must be rejected");
         assert_eq!(
             error,
             super::super::http_runtime::HttpRuntimeError::PermissionDenied

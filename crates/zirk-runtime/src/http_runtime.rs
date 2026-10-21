@@ -13,6 +13,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+#[cfg(feature = "http3")]
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 use async_compression::tokio::bufread::{
@@ -41,6 +43,10 @@ use crate::network_transport::{
 type HttpClientRequestBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
 
 const DEFAULT_HTTP_USER_AGENT: &str = concat!("Zirk-http-client/", env!("CARGO_PKG_VERSION"));
+#[cfg(feature = "http3")]
+const AUTO_HTTP3_CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+#[cfg(feature = "http3")]
+const AUTO_HTTP3_UNAVAILABLE_TTL: Duration = Duration::from_secs(60);
 
 fn buffered_client_request_body(bytes: Vec<u8>) -> HttpClientRequestBody {
     Full::new(Bytes::from(bytes)).boxed_unsync()
@@ -713,6 +719,56 @@ fn decode_response_body(
     ))
 }
 
+#[cfg(feature = "http3")]
+fn decode_buffered_http3_response(
+    response: http::Response<Vec<u8>>,
+    accepted: &AcceptEncoding,
+) -> Result<HttpResponseValues, HttpRuntimeError> {
+    let (parts, bytes) = response.into_parts();
+    let mut headers = Headers::new();
+    for (name, value) in &parts.headers {
+        headers
+            .append(name.as_str(), value.as_bytes())
+            .map_err(|_| HttpRuntimeError::Protocol)?;
+    }
+    let (headers, body, decoder) = decode_response_body(
+        headers,
+        HttpStreamingBody::Buffered {
+            bytes: Bytes::from(bytes),
+            offset: 0,
+        },
+        accepted,
+    )?;
+    let body = match body {
+        HttpStreamingBody::Buffered { bytes, .. } => bytes.to_vec(),
+        HttpStreamingBody::Chunks(mut chunks) => {
+            crate::network_future::block_on_current(async move {
+                let mut decoded = Vec::new();
+                while let Some(chunk) = chunks.recv().await {
+                    let chunk = chunk?;
+                    if decoded.len().saturating_add(chunk.len()) > MAX_HTTP_BUFFERED_BODY_BYTES {
+                        return Err(HttpRuntimeError::BodyTooLarge);
+                    }
+                    decoded.extend_from_slice(&chunk);
+                }
+                Ok(decoded)
+            })
+            .map_err(map_network_future_error)??
+        }
+        HttpStreamingBody::Http1(_) => unreachable!("HTTP/3 response body is buffered"),
+    };
+    drop(decoder);
+    Ok(HttpResponseValues {
+        status: HttpStatusCode::new(parts.status.as_u16())
+            .map_err(|_| HttpRuntimeError::Protocol)?,
+        headers,
+        body,
+        body_stream: None,
+        body_producer: None,
+        protocol: HttpProtocolVersion::Http3,
+    })
+}
+
 /// Negotiates and compresses buffered and streamed server representations.
 /// Streaming codecs use bounded queues, and generated handler callbacks remain
 /// on their owning Zirk task.
@@ -1049,7 +1105,7 @@ pub(crate) struct HttpUploadWriter {
 }
 
 impl HttpUploadBody {
-    fn channel(owner: crate::task::TaskId) -> (HttpUploadWriter, Self) {
+    pub(crate) fn channel(owner: crate::task::TaskId) -> (HttpUploadWriter, Self) {
         let (sender, receiver) = tokio::sync::mpsc::channel(HTTP_UPLOAD_QUEUE_CAPACITY);
         (
             HttpUploadWriter {
@@ -1059,6 +1115,11 @@ impl HttpUploadBody {
             },
             Self { receiver },
         )
+    }
+
+    #[cfg(feature = "http3")]
+    pub(crate) async fn next_chunk(&mut self) -> Option<Bytes> {
+        self.receiver.recv().await
     }
 }
 
@@ -2457,6 +2518,8 @@ pub struct HttpClientPool {
     connections: HashMap<String, (HttpReusableConnection, u64)>,
     #[cfg(feature = "http3")]
     http3_connections: HashMap<String, (Arc<crate::http3_transport::Http3ClientSession>, u64)>,
+    #[cfg(feature = "http3")]
+    http3_unavailable_until: HashMap<String, Instant>,
     cookies: Option<CookieJar>,
 }
 
@@ -2522,6 +2585,8 @@ impl HttpClientPool {
             connections: HashMap::new(),
             #[cfg(feature = "http3")]
             http3_connections: HashMap::new(),
+            #[cfg(feature = "http3")]
+            http3_unavailable_until: HashMap::new(),
             cookies: None,
         })
     }
@@ -2736,6 +2801,32 @@ impl HttpClientPool {
             #[cfg(not(feature = "http3"))]
             return Err(HttpRuntimeError::Protocol);
         }
+        #[cfg(feature = "http3")]
+        if self.protocol == HttpProtocolPreference::Auto
+            && self.proxy.is_none()
+            && request.url.scheme() == "https"
+            && let Some(session) = self.prepare_shared_http3(&mut request, &grant)?
+        {
+            let response = match Self::request_http3_session(
+                request,
+                grant,
+                Arc::clone(&session),
+                self.timeouts,
+            ) {
+                Ok(response) => response,
+                Err(error) => {
+                    if matches!(
+                        error,
+                        HttpRuntimeError::Transport | HttpRuntimeError::Protocol
+                    ) {
+                        self.discard_shared_http3(&origin);
+                    }
+                    return Err(error);
+                }
+            };
+            self.store_response_cookies(&response.headers, &request_url, SystemTime::now());
+            return Ok(response);
+        }
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let sequence = self.sequence;
         if let Some((mut connection, _)) = self.connections.remove(&origin) {
@@ -2778,7 +2869,10 @@ impl HttpClientPool {
         request: &mut HttpRequestValues,
         grant: &Arc<EffectiveNetworkGrant>,
     ) -> Result<Option<Arc<crate::http3_transport::Http3ClientSession>>, HttpRuntimeError> {
-        if self.protocol != HttpProtocolPreference::Http3 {
+        let automatic = self.protocol == HttpProtocolPreference::Auto
+            && self.proxy.is_none()
+            && request.url.scheme() == "https";
+        if self.protocol != HttpProtocolPreference::Http3 && !automatic {
             return Ok(None);
         }
         if self.proxy.is_some() {
@@ -2808,12 +2902,24 @@ impl HttpClientPool {
                 .map_err(|_| HttpRuntimeError::InvalidRequest)?;
         }
         let origin = request.url.origin();
-        self.sequence = self.sequence.wrapping_add(1).max(1);
-        if let Some((session, last_used)) = self.http3_connections.get_mut(&origin) {
-            if !session.is_closed() {
-                *last_used = self.sequence;
-                return Ok(Some(Arc::clone(session)));
+        if automatic {
+            let now = Instant::now();
+            self.http3_unavailable_until
+                .retain(|_, unavailable_until| *unavailable_until > now);
+            if self
+                .http3_unavailable_until
+                .get(&origin)
+                .is_some_and(|unavailable_until| *unavailable_until > now)
+            {
+                return Ok(None);
             }
+        }
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        if let Some((session, last_used)) = self.http3_connections.get_mut(&origin)
+            && !session.is_closed()
+        {
+            *last_used = self.sequence;
+            return Ok(Some(Arc::clone(session)));
         }
         self.http3_connections.remove(&origin);
         if self.http3_connections.len() >= self.max_origins
@@ -2827,12 +2933,32 @@ impl HttpClientPool {
         }
         let parsed_origin = zirk_runtime_core::network_policy::NetworkOrigin::parse(&origin)
             .map_err(|_| HttpRuntimeError::InvalidRequest)?;
-        let session = crate::http3_transport::Http3ClientSession::connect(
+        let connect_timeout = if automatic {
+            self.timeouts.connect.min(AUTO_HTTP3_CONNECT_PROBE_TIMEOUT)
+        } else {
+            self.timeouts.connect
+        };
+        let session = match crate::http3_transport::Http3ClientSession::connect(
             parsed_origin,
             Arc::clone(grant),
-            self.timeouts.connect,
+            connect_timeout,
             self.tls_config.clone(),
-        )?;
+        ) {
+            Ok(session) => session,
+            Err(error)
+                if automatic
+                    && matches!(
+                        error,
+                        HttpRuntimeError::Transport
+                            | HttpRuntimeError::Protocol
+                            | HttpRuntimeError::Timeout
+                    ) =>
+            {
+                self.mark_http3_unavailable(&origin);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         self.http3_connections
             .insert(origin, (Arc::clone(&session), self.sequence));
         Ok(Some(session))
@@ -2850,15 +2976,51 @@ impl HttpClientPool {
     #[cfg(feature = "http3")]
     pub(crate) fn discard_shared_http3(&mut self, origin: &str) {
         self.http3_connections.remove(origin);
+        if self.protocol == HttpProtocolPreference::Auto {
+            self.mark_http3_unavailable(origin);
+        }
+    }
+
+    #[cfg(feature = "http3")]
+    fn mark_http3_unavailable(&mut self, origin: &str) {
+        let now = Instant::now();
+        self.http3_unavailable_until
+            .retain(|_, unavailable_until| *unavailable_until > now);
+        if self.http3_unavailable_until.len() >= self.max_origins
+            && !self.http3_unavailable_until.contains_key(origin)
+            && let Some(oldest) = self
+                .http3_unavailable_until
+                .iter()
+                .min_by_key(|(_, unavailable_until)| *unavailable_until)
+                .map(|(origin, _)| origin.clone())
+        {
+            self.http3_unavailable_until.remove(&oldest);
+        }
+        self.http3_unavailable_until
+            .insert(origin.to_owned(), now + AUTO_HTTP3_UNAVAILABLE_TTL);
     }
 
     #[cfg(feature = "http3")]
     pub(crate) fn request_http3_session(
-        request: HttpRequestValues,
+        mut request: HttpRequestValues,
         grant: Arc<EffectiveNetworkGrant>,
         session: Arc<crate::http3_transport::Http3ClientSession>,
         timeouts: HttpTimeouts,
     ) -> Result<HttpResponseValues, HttpRuntimeError> {
+        if request.headers.get("user-agent").is_none() {
+            request
+                .headers
+                .insert("user-agent", DEFAULT_HTTP_USER_AGENT.as_bytes())
+                .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        if request.headers.get("accept-encoding").is_none() {
+            request
+                .headers
+                .insert("accept-encoding", b"br, gzip, deflate")
+                .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        let accepted = AcceptEncoding::parse(&request.headers)
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
         let mut builder = http::Request::builder()
             .method(
                 http::Method::from_bytes(request.method_token.as_bytes())
@@ -2867,6 +3029,9 @@ impl HttpClientPool {
             .uri(request.url.as_str())
             .version(http::Version::HTTP_3);
         for (name, _) in request.headers.iter() {
+            if name == "host" || name == "connection" {
+                continue;
+            }
             for value in request.headers.get_all(name.as_str()).into_iter().flatten() {
                 builder = builder.header(name, value.as_bytes());
             }
@@ -2880,23 +3045,57 @@ impl HttpClientPool {
             timeouts.response_headers,
             timeouts.response_idle,
         )?;
-        let mut headers = Headers::new();
-        for name in response.headers().keys() {
-            for value in response.headers().get_all(name).iter() {
-                headers
-                    .append(name.as_str(), value.as_bytes())
-                    .map_err(|_| HttpRuntimeError::Protocol)?;
+        decode_buffered_http3_response(response, &accepted)
+    }
+
+    #[cfg(feature = "http3")]
+    fn request_http3_streaming_session(
+        mut request: HttpRequestValues,
+        grant: Arc<EffectiveNetworkGrant>,
+        session: Arc<crate::http3_transport::Http3ClientSession>,
+        timeouts: HttpTimeouts,
+        producer: &mut impl FnMut() -> Result<Option<Vec<u8>>, HttpRuntimeError>,
+    ) -> Result<HttpResponseValues, HttpRuntimeError> {
+        if request.headers.get("user-agent").is_none() {
+            request
+                .headers
+                .insert("user-agent", DEFAULT_HTTP_USER_AGENT.as_bytes())
+                .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        if request.headers.get("accept-encoding").is_none() {
+            request
+                .headers
+                .insert("accept-encoding", b"br, gzip, deflate")
+                .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        let accepted = AcceptEncoding::parse(&request.headers)
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        let mut builder = http::Request::builder()
+            .method(
+                http::Method::from_bytes(request.method_token.as_bytes())
+                    .map_err(|_| HttpRuntimeError::InvalidRequest)?,
+            )
+            .uri(request.url.as_str())
+            .version(http::Version::HTTP_3);
+        for (name, _) in request.headers.iter() {
+            if name == "host" || name == "connection" {
+                continue;
+            }
+            for value in request.headers.get_all(name.as_str()).into_iter().flatten() {
+                builder = builder.header(name, value.as_bytes());
             }
         }
-        Ok(HttpResponseValues {
-            status: HttpStatusCode::new(response.status().as_u16())
-                .map_err(|_| HttpRuntimeError::Protocol)?,
-            headers,
-            body: response.into_body(),
-            body_stream: None,
-            body_producer: None,
-            protocol: HttpProtocolVersion::Http3,
-        })
+        let request = builder
+            .body(())
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        let response = session.request_streaming(
+            request,
+            grant,
+            timeouts.response_headers,
+            timeouts.response_idle,
+            producer,
+        )?;
+        decode_buffered_http3_response(response, &accepted)
     }
 
     /// Sends a bounded one-pass producer body through this client's pooled
@@ -2911,6 +3110,17 @@ impl HttpClientPool {
         if self
             .owner
             .is_some_and(|owner| crate::executor::current_task() != owner)
+        {
+            return Err(HttpRuntimeError::InvalidRequest);
+        }
+        validate_client_request(&request)?;
+        request
+            .headers
+            .validate_message_framing()
+            .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        if request.headers.get("content-length").is_some()
+            || request.headers.get("transfer-encoding").is_some()
+            || !request.body.is_empty()
         {
             return Err(HttpRuntimeError::InvalidRequest);
         }
@@ -2948,6 +3158,38 @@ impl HttpClientPool {
                 .headers
                 .insert("cookie", cookie_header.as_str().as_bytes())
                 .map_err(|_| HttpRuntimeError::InvalidRequest)?;
+        }
+        #[cfg(feature = "http3")]
+        if self.protocol == HttpProtocolPreference::Http3
+            || (self.protocol == HttpProtocolPreference::Auto
+                && self.proxy.is_none()
+                && request.url.scheme() == "https")
+        {
+            if self.proxy.is_some() {
+                return Err(HttpRuntimeError::Protocol);
+            }
+            if let Some(session) = self.prepare_shared_http3(&mut request, &grant)? {
+                let response = match Self::request_http3_streaming_session(
+                    request,
+                    grant,
+                    session,
+                    self.timeouts,
+                    &mut producer,
+                ) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        if matches!(
+                            error,
+                            HttpRuntimeError::Transport | HttpRuntimeError::Protocol
+                        ) {
+                            self.discard_shared_http3(&origin);
+                        }
+                        return Err(error);
+                    }
+                };
+                self.store_response_cookies(&response.headers, &request_url, SystemTime::now());
+                return Ok(response);
+            }
         }
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let sequence = self.sequence;

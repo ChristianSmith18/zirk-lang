@@ -1395,6 +1395,10 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_once(
 /// `endpoint`, certificate/key arrays, callback/context, and `out` must satisfy
 /// their declared Zirk ABI layouts for the duration of this call.
 #[unsafe(no_mangle)]
+// The fallible body uses `?` in the HTTP/3 feature build; the disabled build
+// compiles only its typed unsupported result, which makes Clippy see an
+// otherwise redundant closure.
+#[allow(clippy::redundant_closure_call)]
 pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
     endpoint: *const c_void,
     certificate_chain_der: *mut c_void,
@@ -1417,7 +1421,7 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
                 callback,
                 context,
             );
-            return Err(crate::http_runtime::HttpRuntimeError::Protocol);
+            Err(crate::http_runtime::HttpRuntimeError::Protocol)
         }
         #[cfg(feature = "http3")]
         {
@@ -1733,6 +1737,9 @@ pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_once(
 /// Managed strings/lists, callback/context, and `out` must satisfy their Zirk
 /// ABI layouts and remain live for the duration of this call.
 #[unsafe(no_mangle)]
+// Keep one result-producing body across feature configurations so that `?`
+// maps directly to the public ABI error codes when HTTP/3 is enabled.
+#[allow(clippy::redundant_closure_call)]
 pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_http3_once(
     endpoint: *const c_void,
     certificate_chain_der: *mut c_void,
@@ -1766,7 +1773,7 @@ pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_http3_once(
                 callback,
                 context,
             );
-            return Err(3);
+            Err(3)
         }
         #[cfg(feature = "http3")]
         {

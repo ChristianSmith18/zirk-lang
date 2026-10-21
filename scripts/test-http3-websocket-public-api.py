@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import os
 from pathlib import Path
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -152,7 +154,7 @@ def make_http3_client(project: Path, port: int, root_certificate: bytes) -> None
 import {{ stdout }} from std.io;
 fn main(): Void {{
     mut roots: Array<Array<Byte>> = [{byte_array(root_certificate)}];
-    match HTTPClientOptions.create_with_protocol(HTTPProtocolPreference.HTTP3, 5000, 10000, 10000, 1) {{
+    match HTTPClientOptions.create_with_protocol(HTTPProtocolPreference.Auto, 5000, 10000, 10000, 1) {{
         Error(_) => stdout.println("options-error");
         Ok(options) => match HTTPClient.create_with_options_and_trust_roots(options, roots) {{
             Error(_) => stdout.println("client-error");
@@ -186,6 +188,51 @@ fn main(): Void {{
                     }}
                     _ = client.close();
                     stdout.println("http-client-complete");
+                }}
+            }}
+        }}
+    }}
+}}
+'''
+    (project / "src" / "main.zrk").write_text(source, encoding="utf-8")
+
+
+def make_auto_fallback_client(project: Path, port: int, root_certificate: bytes) -> None:
+    (project / "src").mkdir(parents=True)
+    endpoint = f"https://127.0.0.1:{port}"
+    (project / ".zkinit").write_text(
+        'project "http-auto-fallback-client-test"\n'
+        "kind application\nentry \"src/main.zrk\"\n"
+        "permissions {\nnetwork {\n"
+        f'connect: {{ origins: ["{endpoint}"]; during: runtime; }}\n'
+        "}\n}\n",
+        encoding="utf-8",
+    )
+    query_body = byte_array(b'{"fallback":true}')
+    source = f'''import {{ HTTPClient, HTTPClientOptions, HTTPHeaders, HTTPMethod, HTTPProtocolPreference, HTTPProtocolVersion, URL }} from std.http;
+import {{ stdout }} from std.io;
+fn main(): Void {{
+    mut roots: Array<Array<Byte>> = [{byte_array(root_certificate)}];
+    match HTTPClientOptions.create_with_protocol(HTTPProtocolPreference.Auto, 5000, 10000, 10000, 1) {{
+        Error(_) => stdout.println("options-error");
+        Ok(options) => match HTTPClient.create_with_options_and_trust_roots(options, roots) {{
+            Error(_) => stdout.println("client-error");
+            Ok(client) => match URL.parse("{endpoint}/query") {{
+                Error(_) => stdout.println("url-error");
+                Ok(url) => {{
+                    mut headers = HTTPHeaders.create();
+                    _ = headers.add("content-type", "application/query+json");
+                    mut body: Array<Byte> = {query_body};
+                    match client.request(HTTPMethod.Query, url, body, headers) {{
+                        Error(error) => stdout.println(error.to_string());
+                        Ok(response) => {{
+                            if response.protocol() == HTTPProtocolVersion.HTTP1 {{ stdout.println("fallback-http1"); }}
+                            stdout.println(response.status_code().to_string());
+                            match response.text() {{ Ok(text) => stdout.println(text); Error(_) => stdout.println("fallback-body-error"); }}
+                        }}
+                    }}
+                    _ = client.close();
+                    stdout.println("fallback-complete");
                 }}
             }}
         }}
@@ -244,6 +291,7 @@ class IndependentH3Server(QuicConnectionProtocol):
     last_close_received = False
     last_query_body: bytes | None = None
     last_query_content_type: bytes | None = None
+    observed_user_agents: list[bytes | None] = []
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -318,6 +366,7 @@ class IndependentH3Server(QuicConnectionProtocol):
 
     def respond_http_request(self, stream_id: int) -> None:
         headers = self.requests.pop(stream_id)
+        type(self).observed_user_agents.append(headers.get(b"user-agent"))
         method = headers.get(b":method", b"")
         path = headers.get(b":path", b"")
         body = bytes(self.buffers.pop(stream_id))
@@ -332,18 +381,18 @@ class IndependentH3Server(QuicConnectionProtocol):
                 response_body = b"aioquic-query:" + body
         elif method == b"GET" and path == b"/get":
             status = b"200"
-            response_body = b"aioquic-get"
+            response_body = gzip.compress(b"aioquic-get")
         else:
             status = b"405"
             response_body = b"method-not-allowed"
-        self.http.send_headers(
-            stream_id,
-            [
-                (b":status", status),
-                (b"content-type", b"text/plain"),
-                (b"content-length", str(len(response_body)).encode()),
-            ],
-        )
+        response_headers = [
+            (b":status", status),
+            (b"content-type", b"text/plain"),
+            (b"content-length", str(len(response_body)).encode()),
+        ]
+        if method == b"GET" and path == b"/get":
+            response_headers.append((b"content-encoding", b"gzip"))
+        self.http.send_headers(stream_id, response_headers)
         self.http.send_data(stream_id, response_body, True)
         self.transmit()
 
@@ -558,6 +607,8 @@ async def aioquic_server_with_zirk_client(
     websocket_env: dict[str, str],
     http_project: Path,
     http_env: dict[str, str],
+    fallback_project: Path,
+    fallback_home: Path,
     port: int,
     certificate_der: bytes,
     private_key_der: bytes,
@@ -567,6 +618,7 @@ async def aioquic_server_with_zirk_client(
     IndependentH3Server.last_close_received = False
     IndependentH3Server.last_query_body = None
     IndependentH3Server.last_query_content_type = None
+    IndependentH3Server.observed_user_agents = []
     configuration = QuicConfiguration(
         is_client=False,
         alpn_protocols=H3_ALPN,
@@ -628,8 +680,87 @@ async def aioquic_server_with_zirk_client(
             or IndependentH3Server.last_query_content_type != b"application/query+json"
         ):
             raise RuntimeError("aioquic did not receive the exact QUERY body and content type")
+        expected_user_agent = b"Zirk-http-client/0.0.0"
+        if IndependentH3Server.observed_user_agents != [expected_user_agent, expected_user_agent]:
+            raise RuntimeError(
+                "HTTP/3 requests did not use the versioned Zirk User-Agent: "
+                f"{IndependentH3Server.observed_user_agents!r}"
+            )
     finally:
         server.close()
+    await auto_fallback_to_http1(
+        zirk,
+        fallback_project,
+        fallback_home,
+        port,
+        certificate_der,
+        private_key_der,
+    )
+
+
+async def auto_fallback_to_http1(
+    zirk: Path,
+    project: Path,
+    home: Path,
+    port: int,
+    certificate: bytes,
+    private_key: bytes,
+) -> None:
+    certificate_path = home / "server-cert.pem"
+    key_path = home / "server-key.pem"
+    certificate_path.write_bytes(
+        x509.load_der_x509_certificate(certificate).public_bytes(serialization.Encoding.PEM)
+    )
+    private_key_path = serialization.load_der_private_key(private_key, password=None)
+    key_path.write_bytes(
+        private_key_path.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(certificate_path, key_path)
+    tls.set_alpn_protocols(["http/1.1"])
+    requests: list[tuple[bytes, bytes]] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            headers = head.split(b"\r\n")
+            content_length = next(
+                (
+                    int(line.split(b":", 1)[1].strip())
+                    for line in headers[1:]
+                    if line.lower().startswith(b"content-length:")
+                ),
+                0,
+            )
+            body = await reader.readexactly(content_length) if content_length else b""
+            requests.append((headers[0], body))
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nfallback-ok"
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", port, ssl=tls)
+    try:
+        output = await asyncio.to_thread(
+            run,
+            [str(zirk), "run", "."],
+            cwd=project,
+            env=isolated_env(home),
+        )
+        if "fallback-http1" not in output or "fallback-ok" not in output:
+            raise RuntimeError(f"Auto did not fall back to HTTP/1.1:\n{output}")
+        if requests != [(b"QUERY /query HTTP/1.1", b'{"fallback":true}')]:
+            raise RuntimeError(f"HTTP/1.1 fallback received an unexpected request: {requests!r}")
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 def main() -> int:
@@ -652,12 +783,15 @@ def main() -> int:
         server_project = temporary_root / "server"
         client_project = temporary_root / "client"
         http_client_project = temporary_root / "http-client"
+        fallback_project = temporary_root / "http-fallback-client"
         server_home = temporary_root / "server-home"
         client_home = temporary_root / "client-home"
         http_client_home = temporary_root / "http-client-home"
+        fallback_home = temporary_root / "http-fallback-home"
         server_home.mkdir()
         client_home.mkdir()
         http_client_home.mkdir()
+        fallback_home.mkdir()
 
         reservation = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         reservation.bind(("127.0.0.1", 0))
@@ -667,12 +801,15 @@ def main() -> int:
         make_server(server_project, port, certificate, private_key)
         make_client(client_project, port, root_certificate)
         make_http3_client(http_client_project, port, root_certificate)
+        make_auto_fallback_client(fallback_project, port, root_certificate)
         server_env = isolated_env(server_home)
         client_env = isolated_env(client_home)
         http_client_env = isolated_env(http_client_home)
+        fallback_env = isolated_env(fallback_home)
         approve(zirk, server_project, server_env)
         approve(zirk, client_project, client_env)
         approve(zirk, http_client_project, http_client_env)
+        approve(zirk, fallback_project, fallback_env)
 
         server = subprocess.Popen(
             [str(zirk), "run", "."],
@@ -723,13 +860,15 @@ def main() -> int:
                 client_env,
                 http_client_project,
                 http_client_env,
+                fallback_project,
+                fallback_home,
                 port,
                 certificate,
                 private_key,
             )
         )
 
-    print("HTTP/3 WebSocket interoperability and Origin rejection passed with independent aioquic peers.")
+    print("HTTP/3 interoperability, Origin rejection, and Auto fallback passed with independent peers.")
     return 0
 
 

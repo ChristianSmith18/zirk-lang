@@ -226,7 +226,6 @@ mod tests {
             network_local_connect: ["unix:///tmp/zirk.sock".into()].into(),
             network_local_listen: ["npipe://./pipe/zirk".into()].into(),
             network_inspect_interfaces: true,
-            ..PermissionScopes::default()
         }
     }
 

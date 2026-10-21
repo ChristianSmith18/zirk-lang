@@ -12252,6 +12252,9 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             .into()
     }
 
+    // This mirrors the HTTP result layout fields; keeping them explicit makes
+    // the GC-rooting and protocol metadata writes visible at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn build_http_get_result_with_protocol(
         &mut self,
         enum_id: u32,

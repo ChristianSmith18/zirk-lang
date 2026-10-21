@@ -246,9 +246,9 @@ impl LocalListener {
                     .map_err(|_| NetworkTransportError::Timeout)?
                     .map_err(map_io_error)
             })?;
-            return Ok(LocalStream {
+            Ok(LocalStream {
                 inner: LocalStreamKind::Unix(stream),
-            });
+            })
         }
 
         #[cfg(windows)]
@@ -323,7 +323,7 @@ impl Drop for SocketPathIdentity {
         };
         if metadata.st_mode & libc::S_IFMT == libc::S_IFSOCK
             && metadata.st_dev as u64 == self.device
-            && metadata.st_ino as u64 == self.inode
+            && metadata.st_ino == self.inode
         {
             // `unlinkat` removes the directory entry itself. It never follows
             // a replacement symlink, and the open parent descriptor prevents

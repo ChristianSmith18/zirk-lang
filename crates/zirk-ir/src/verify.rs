@@ -3500,7 +3500,7 @@ fn verify_instruction(
                 }
             }
             if !matches!(
-                type_of(&private_key_der),
+                type_of(private_key_der),
                 Some(IrType::Array(inner))
                     if module.array_types.get(inner as usize) == Some(&IrType::Int(IntWidth::U8))
             ) {
@@ -3509,7 +3509,7 @@ fn verify_instruction(
                 ));
             }
             if !matches!(
-                type_of(&protocols),
+                type_of(protocols),
                 Some(IrType::Array(inner))
                     if module.array_types.get(inner as usize) == Some(&IrType::String)
             ) {
