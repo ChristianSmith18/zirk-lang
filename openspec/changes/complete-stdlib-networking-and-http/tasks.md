@@ -19,7 +19,7 @@
 
 - [ ] 2.1 Select and pin maintained QUIC, HTTP/3, QPACK, and WebSocket-over-HTTP/3 dependencies after documenting license, security, MSRV, target-support, and release-binary-size review; verify the allowlist and CI builds for all four native targets.
 - [ ] 2.2 Implement the QUIC adapter with async task suspension, cancellation-safe ownership, bounded buffers, TLS 1.3/`h3` ALPN, exact-origin address checks, migration revalidation, and 0-RTT disabled by default; verify each boundary with instrumented peers.
-- [ ] 2.3 Add validated HTTP protocol selection (`Auto`, `HTTP1`, `HTTP2`, `HTTP3`) and negotiated-version metadata to `HTTPClientOptions`; verify fallback never replays a possibly committed non-replayable request.
+- [x] 2.3 Add validated HTTP protocol selection (`Auto`, `HTTP1`, `HTTP2`, `HTTP3`) and negotiated-version metadata to `HTTPClientOptions`; verify fallback never replays a possibly committed non-replayable request.
 - [ ] 2.4 Implement HTTP/3 client request/response framing, QPACK limits, stream/connection flow control, typed protocol errors, cancellation, proxy policy, redirects, cookies, QUERY, and existing `HTTPBody` variants; verify against independent HTTP/3 peers.
 - [ ] 2.5 Implement HTTP/3 server listener and routing with bounded connections, streams, handlers, and response queues; verify listener grants, malformed peer rejection, request isolation, and resource cleanup.
 - [ ] 2.6 Add owner-controlled graceful shutdown across TCP/TLS/UDP/QUIC, bounded drain, cooperative handler cancellation, and deterministic resource release; verify server restart and shutdown behavior without changing the 128 KiB stack.
