@@ -260,15 +260,26 @@ jobs:
 
           $toolchain = & cmd.exe /d /s /c "call `"$vcvars`" >nul && set"
           if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed with exit code $LASTEXITCODE" }
-          $required = @('PATH', 'INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCIDEInstallDir', 'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'UniversalCRTSdkDir', 'UCRTVersion', 'VisualStudioVersion', 'VSCMD_VER', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_app_plat', 'DevEnvDir')
+          $required = @('INCLUDE', 'LIB', 'LIBPATH', 'VSINSTALLDIR', 'VCINSTALLDIR', 'VCIDEInstallDir', 'VCToolsInstallDir', 'VCToolsVersion', 'WindowsSdkDir', 'UniversalCRTSdkDir', 'UCRTVersion', 'VisualStudioVersion', 'VSCMD_VER', 'VSCMD_ARG_HOST_ARCH', 'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_app_plat', 'DevEnvDir')
           foreach ($line in $toolchain) {
             $separator = $line.IndexOf('=')
             if ($separator -le 0) { continue }
             $name = $line.Substring(0, $separator)
             if ($required -contains $name) {
-              "$name=$($line.Substring($separator + 1))" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              $value = $line.Substring($separator + 1)
+              "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Set-Item -Path "Env:$name" -Value $value
             }
           }
+
+          $msvcBin = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64'
+          $msvcLinker = Join-Path $msvcBin 'link.exe'
+          if (-not (Test-Path $msvcLinker)) { throw "MSVC linker was not found at $msvcLinker" }
+          $env:PATH = "$msvcBin;$env:PATH"
+          $msvcBin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLinker" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $resolvedLinker = (Get-Command link.exe).Source
+          if ($resolvedLinker -ne $msvcLinker) { throw "Expected MSVC linker '$msvcLinker', resolved '$resolvedLinker'" }
 
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
       # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma

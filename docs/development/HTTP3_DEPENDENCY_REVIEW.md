@@ -1,6 +1,6 @@
 # HTTP/3 Dependency Review
 
-Review date: 2026-10-20
+Review date: 2026-10-21
 
 This review covers the optional native HTTP/3 feature in `zirk-runtime`. The
 feature is opt-in through Cargo's `http3` feature and is not part of the
@@ -75,21 +75,30 @@ release profile. The `http3` feature changes the runtime outputs as follows:
 | `libzirk_runtime.a` | 66,419,208 bytes | 73,936,416 bytes | 7,517,208 bytes (7.17 MiB) |
 | `libzirk_runtime.rlib` | 17,174,680 bytes | 19,934,464 bytes | 2,759,784 bytes (2.63 MiB) |
 
-These are Cargo runtime library artifacts, not final application executables.
-The final linked binary's size depends on linker dead-code elimination and
-reachable HTTP/3 symbols; measure representative release executables before
-making a distribution-size claim or enabling HTTP/3 by default.
+The final linked executable was measured on macOS ARM64 with the workspace
+release profile using `scripts/measure-http3-binary-size.sh`. The fixture at
+`scripts/fixtures/http3-size/main.zrk` builds an application that calls the
+public `HTTPClient` API with HTTP/3 selected. Both variants use the same source
+and compiler; only the runtime archive's `http3` feature changes.
+
+| Representative application | Without HTTP/3 | With HTTP/3 | Increase |
+| --- | ---: | ---: | ---: |
+| Compiled Zirk executable | 6,487,080 bytes (6.19 MiB) | 7,661,032 bytes (7.31 MiB) | 1,173,952 bytes (1.12 MiB, 18.1%) |
+
+These are raw executable sizes before packaging or compression. The result is
+specific to this small HTTP client fixture and macOS ARM64; other applications
+may retain a different portion of the optional protocol engine after linking.
 
 ## Decision and remaining evidence
 
 Keep HTTP/3 optional and keep 0-RTT disabled. The current license and advisory
 checks, workspace MSRV, and macOS/Linux runtime results support continued
 development with this stack. They do not establish cross-target peer
-interoperability or Windows runtime support. Task 2.1 remains open until the
-HTTP/3-enabled matrix builds on all four native targets and final linked
-application-size impact is measured. Reassess the dependency choice if
-upstream `h3` remains experimental or its patch cannot be retired before
-release.
+interoperability or Windows runtime support. The representative final linked
+application-size impact is now measured; Task 2.1 remains open until the
+HTTP/3-enabled matrix builds on all four native targets. Reassess the dependency
+choice if upstream `h3` remains experimental or its patch cannot be retired
+before release.
 
 ## Primary sources
 

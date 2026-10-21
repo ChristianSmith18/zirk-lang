@@ -1,0 +1,31 @@
+import { HTTPClient, HTTPClientOptions, HTTPHeaders, HTTPMethod, HTTPProtocolPreference, URL } from std.http;
+
+fn main(): Void {
+    mut empty_body: Array<Byte> = [];
+    match HTTPClientOptions.create_with_protocol(HTTPProtocolPreference.HTTP3) {
+        Ok(options) => {
+            match HTTPClient.create_with_options(options) {
+                Ok(client) => {
+                    match URL.parse("https://127.0.0.1:9") {
+                        Ok(url) => {
+                            match client.request(
+                                HTTPMethod.Get,
+                                url,
+                                empty_body,
+                                HTTPHeaders.create(),
+                            ) {
+                                Ok(response) => { _ = response.status_code(); 0 as Int32; }
+                                Error(_) => 0 as Int32;
+                            }
+                        }
+                        Error(_) => 0 as Int32;
+                    }
+                    _ = client.close();
+                    0 as Int32
+                }
+                Error(_) => 0 as Int32;
+            }
+        }
+        Error(_) => 0 as Int32;
+    };
+}

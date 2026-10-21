@@ -18,7 +18,7 @@ This is the same visibility model as `std.io`: users can review the Zirk-facing 
 
 ## Current compiler-owned host binding inventory
 
-The LLVM runtime registry currently contains 118 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
+The LLVM runtime registry currently contains 119 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
 
 ### Environment (4)
 
@@ -88,7 +88,7 @@ The LLVM runtime registry currently contains 118 distinct `zirk_environment_*`, 
 - `zirk_network_udp_send_multicast`
 - `zirk_network_udp_send_to`
 
-### HTTP (56)
+### HTTP (57)
 
 - `zirk_http_client_clear_cookies`
 - `zirk_http_client_close`
