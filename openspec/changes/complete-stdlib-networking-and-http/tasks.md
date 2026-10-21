@@ -1,6 +1,7 @@
 ## 1. Permission and API contracts
 
-- [x] 1.0 Keep public APIs and portable policy in official `.zrk` sources; inventory every proposed compiler/runtime host binding with its OS/protocol-engine need, limits, permissions, cancellation, and ownership contract; verify no source-level native/ABI markers are added.
+- [x] 1.0 Keep public APIs and portable policy in official `.zrk` sources, inventory the compiler-owned symbols, and verify no source-level native/ABI markers are added.
+- [ ] 1.0.1 Audit every host binding for its OS/protocol-engine role, input bounds, permission checks, cancellation behavior, and resource ownership; move portable HTTP helpers out of the host ABI unless they are part of an audited protocol engine.
 - [x] 1.1 Add manifest parsing, normalization, display, fingerprints, signed approval, and denial diagnostics for UDP send/bind, local endpoint connect/listen, and interface-inspection scopes; verify existing TCP/HTTP grants do not imply the new scopes.
 - [x] 1.2.1 Implement the bounded task-aware native UDP transport for connected and bound sockets, with destination/listen authorization and no silent receive truncation; verify connected send/receive, unconnected receive/reply, denial, and limit outcomes.
 - [x] 1.2.2 Add owner-task UDP handle lifecycle and compiler-owned ABI/IR lowering for socket construction, send, receive, close, and closed-state checks; verify wrong-owner, cancellation, and deterministic task-exit cleanup.

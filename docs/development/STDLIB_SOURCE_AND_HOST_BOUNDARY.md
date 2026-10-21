@@ -20,6 +20,16 @@ This is the same visibility model as `std.io`: users can review the Zirk-facing 
 
 The LLVM runtime registry currently contains 119 distinct `zirk_environment_*`, `zirk_network_*`, and `zirk_http_*` symbols. The exact registered names are listed below by subsystem. This includes utility and resource-lifecycle calls as well as transport calls; a symbol name alone does not imply that its operation is a direct OS syscall.
 
+This symbol list is not yet a completed per-binding security/ownership review.
+The active OpenSpec task `1.0.1` requires each binding to document its host or
+protocol-engine role, input bounds, permission checks, cancellation behavior,
+and resource ownership. The current HTTP registry includes portable helper
+operations that still need this review and may need to move into the bundled
+Zirk sources: form parsing/encoding, header encoding, route validation and
+matching, URL normalization/resolution, response text decoding, and cached
+request policy. Until that task is complete, the external binding boundary
+must not be described as limited to OS operations and audited protocol engines.
+
 ### Environment (4)
 
 - `zirk_environment_contains`

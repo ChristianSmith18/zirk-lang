@@ -277,10 +277,12 @@ impl LocalListener {
                 .listener
                 .take()
                 .ok_or(NetworkTransportError::CapacityExceeded)?;
-            let next = tokio::net::windows::named_pipe::ServerOptions::new()
-                .first_pipe_instance(false)
-                .create(&self.path)
-                .map_err(map_io_error)?;
+            let next = block_on(async {
+                tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(false)
+                    .create(&self.path)
+                    .map_err(map_io_error)
+            })?;
             self.listener = Some(next);
             Ok(LocalStream {
                 inner: LocalStreamKind::PipeServer(server),

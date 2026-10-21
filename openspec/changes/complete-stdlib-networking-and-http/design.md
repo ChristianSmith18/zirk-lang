@@ -418,14 +418,15 @@ pass.
 
 ### Release archive size measurement (macOS ARM64)
 
-On 2026-10-20, `cargo build -p zirk-runtime --release` produced a 66,195,408
-byte `libzirk_runtime.a`; rebuilding with `--features http3` produced a
-72,279,216 byte archive. The opt-in QUIC/H3 dependency stack therefore adds
-6,083,808 bytes (about 5.80 MiB, or 9.19%) to the release static archive on
-this target. This is archive size before final executable dead-code elimination
-and is not a measurement of the installed compiler or a linked Zirk program.
-Repeat for each release target and measure the shipped executable before
-deciding whether HTTP/3 should be enabled by default.
+On 2026-10-21, fresh `cargo build -p zirk-runtime --release` and
+`cargo build -p zirk-runtime --release --features http3` runs produced
+66,437,024-byte and 74,507,712-byte `libzirk_runtime.a` archives respectively.
+The opt-in QUIC/H3 stack adds 8,070,688 bytes (7.70 MiB, 12.15%) before final
+executable dead-code elimination. The same-day representative executable
+measurement is recorded in `docs/development/HTTP3_DEPENDENCY_REVIEW.md`.
+Archive size is not a measurement of the installed compiler or a linked Zirk
+program. Repeat per release target before deciding whether HTTP/3 should be
+enabled by default.
 
 ## Interface Enumeration Dependency Review (In Progress)
 

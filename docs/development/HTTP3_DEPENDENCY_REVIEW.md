@@ -72,8 +72,8 @@ release profile. The `http3` feature changes the runtime outputs as follows:
 
 | Artifact | Without HTTP/3 | With HTTP/3 | Increase |
 | --- | ---: | ---: | ---: |
-| `libzirk_runtime.a` | 66,419,208 bytes | 73,936,416 bytes | 7,517,208 bytes (7.17 MiB) |
-| `libzirk_runtime.rlib` | 17,174,680 bytes | 19,934,464 bytes | 2,759,784 bytes (2.63 MiB) |
+| `libzirk_runtime.a` | 66,437,024 bytes | 74,507,712 bytes | 8,070,688 bytes (7.70 MiB) |
+| `libzirk_runtime.rlib` | 17,208,112 bytes | 20,747,152 bytes | 3,539,040 bytes (3.38 MiB) |
 
 The final linked executable was measured on macOS ARM64 with the workspace
 release profile using `scripts/measure-http3-binary-size.sh`. The fixture at
@@ -83,7 +83,7 @@ and compiler; only the runtime archive's `http3` feature changes.
 
 | Representative application | Without HTTP/3 | With HTTP/3 | Increase |
 | --- | ---: | ---: | ---: |
-| Compiled Zirk executable | 6,487,080 bytes (6.19 MiB) | 7,661,032 bytes (7.31 MiB) | 1,173,952 bytes (1.12 MiB, 18.1%) |
+| Compiled Zirk executable | 6,487,064 bytes (6.19 MiB) | 7,661,000 bytes (7.31 MiB) | 1,173,936 bytes (1.12 MiB, 18.1%) |
 
 These are raw executable sizes before packaging or compression. The result is
 specific to this small HTTP client fixture and macOS ARM64; other applications
