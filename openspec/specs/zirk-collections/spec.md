@@ -58,11 +58,31 @@ Every collection `length` member SHALL return a non-negative integer type that p
 - **THEN** they declare `length` with a consistent signedness across all four families
 
 ### Requirement: Indexing and safe access
-String, Tuple, Array, and List SHALL accept normalized negative indexes. Direct missing index/key access SHALL produce a typed controlled exception. Safe `get` on Array/List SHALL return `Result<T, IndexOutOfBoundsError>` and on Map SHALL return `Result<V, LookupError>`; these SHALL be the sole safe lookup APIs. Nullable value contexts MAY project the Result to its value or null, while explicit Result contexts and `match` preserve the typed lookup error. `get_or_null` SHALL NOT be exposed.
+String, Tuple, Array, and List SHALL accept normalized negative indexes. Direct missing index/key access SHALL produce a typed controlled exception. Safe `get` on Array/List SHALL return `Result<T, IndexOutOfBoundsError>` and safe `get` on Map SHALL return `Result<V, LookupError>`. These SHALL be the sole safe lookup methods for those operations; `get_or_null` SHALL NOT be published. In a nullable value context, `get` SHALL follow the language-wide Result projection rule and produce `T?` or `V?`; an explicit Result context or `match` SHALL preserve the typed lookup error.
 
 #### Scenario: Dynamic heterogeneous tuple index
 - **WHEN** a nonconstant variable indexes a heterogeneous Tuple
 - **THEN** compilation fails because one result type cannot be selected
+
+#### Scenario: A safe sequence lookup finds an element
+- **WHEN** `items.get(index)` addresses an element within the normalized bounds
+- **THEN** the operation produces `Ok(element)` and a nullable value context receives that element
+
+#### Scenario: A safe sequence lookup is out of bounds
+- **WHEN** `items.get(index)` addresses no element
+- **THEN** an explicit Result context receives `Error(IndexOutOfBoundsError)` and a nullable value context receives `null`
+
+#### Scenario: A safe map lookup misses
+- **WHEN** `map.get(key)` has no matching key
+- **THEN** an explicit Result context receives `Error(LookupError)` and a nullable value context receives `null`
+
+#### Scenario: Collection lookup preserves its error on request
+- **WHEN** a caller matches `items.get(index)` or stores it as `Result<T, IndexOutOfBoundsError>`
+- **THEN** the original lookup success or typed error remains available
+
+#### Scenario: Removed nullable lookup alias
+- **WHEN** source calls `items.get_or_null(index)` or `map.get_or_null(key)`
+- **THEN** compilation reports that the member is unavailable and recommends `get`, nullable projection, `??`, or `match`
 
 ### Requirement: Python-style slice components with strict bounds
 String, Array, and List slices SHALL accept `[start:end:step]` with omitted positive defaults `(0,length,1)` and omitted negative defaults `(last,before-first,negative step)`. End SHALL be exclusive, zero step and explicitly out-of-range bounds SHALL fail, and slices SHALL deep-copy independent results. Tuple, Map, and Set SHALL not slice.

@@ -15,4 +15,4 @@
 - [x] 3.1 Add ADR-025 and update collection, HTTP, networking, and standard-library OpenSpecs; strict OpenSpec validation passes.
 - [x] 3.2 Update core and standard-library semantic owners, handbook API tables/examples, and feature status; normative API guidance no longer recommends the removed aliases or describes the old public multi-state signatures.
 - [x] 3.3 Run focused `cargo check` for sema, IR, CLI, and LLVM codegen; compile public API signatures and projection with `zirk check` and lower the representative API program with `zirk build`. Runtime behavior is tracked separately and remains unverified.
-- [ ] 3.4 After the repository documentation is committed, synchronize `../zirk-lang-site`, review its generated diff and run its content validation; if status evidence changes, review its status catalog and use an explicit reviewed audit date.
+- [x] 3.4 After committing the repository documentation, synchronize `../zirk-lang-site`, review its generated diff, and validate its content. The reviewed status catalog remains accurate; sync completed with audit date 2026-10-22 and validated 372 documents/routes.
