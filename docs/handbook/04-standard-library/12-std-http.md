@@ -1382,9 +1382,12 @@ test-only peer and runs it on each native matrix target.
 The runtime loopback test also covers the server codec, bidirectional messages,
 and close lifecycle through the adapter. The independent peer test verifies
 that an unapproved Origin receives `403` before the Zirk handler runs.
-Independent-peer results are currently verified only on macOS ARM64;
-Linux/Windows runtime results and broader adversarial peer cases remain
-pending.
+CI run 39739088146 passes independent-peer results on macOS ARM64, Linux
+x86_64, and Linux ARM64, including the checked-in adversarial cases. Windows
+passed full-workspace and independent-peer steps in run 39702042337 at
+`634179a`; only the test harness changed in current commit `2c06c67`, and its
+focused Windows regression test passes in run 39748669844. A redundant Windows
+full-suite rerun remains active in 39739088146.
 
 ## Protocol versions
 
@@ -1397,8 +1400,9 @@ eight-stream admission limit; a compiled-Zirk loopback test verifies two
 handlers overlap on macOS aarch64 and Linux ARM64. Controlled long-lived
 listener admission is available through `HTTPServerControl`; the compatibility
 `serve_http3` entry point remains finite and stops after its configured request
-bound. Complete client interoperability, flow-control/reset conformance, and
-hostile pseudo-field coverage remain pending.
+bound. Runs 39739088146 and 39702042337 pass the complete interoperability
+fixture on macOS, Linux, and Windows respectively; the latter's production
+sources are unchanged in current commit 2c06c67.
 
 HTTP/3 client and listener APIs are available only when the native runtime is
 built with the optional `http3` feature. An `HTTPClient` retains at most one
@@ -1412,9 +1416,10 @@ supports externally requested listener shutdown; the server drains active
 handlers up to its configured deadline, then requests cooperative task
 cancellation. A CPU-only handler can exceed that deadline until it reaches a
 cancellation safe point. Per-stream disconnect cancellation remains limited
-by the current synchronous handler contract. Cross-target independent-peer
-interoperability and Windows runtime results are tracked separately in the
-feature-status catalog. The finite HTTP/3 listener
+by the current synchronous handler contract. Independent-peer interoperability
+passes on macOS and Linux in CI run 39739088146 and Windows in run 39702042337;
+the redundant full Windows rerun remains active. The finite
+HTTP/3 listener
 admits connections concurrently with at most 16 QUIC handshakes in flight. It
 dispatches at most four active request streams across the listener to separate
 Zirk handler tasks on the owning executor and cancels pending handshakes when

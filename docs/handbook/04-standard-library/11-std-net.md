@@ -15,10 +15,12 @@ evidence on macOS ARM64, Linux ARM64, Linux x86_64, and Windows x86_64; the
 Windows result is limited to the CI commands recorded in the OpenSpec evidence.
 The full `zirk-runtime` library suite passed in a Linux ARM64 container (528
 passed, 3 ignored). The optional native HTTP/3 feature and public client/server
-entry points are implemented; independent-peer HTTP/3 and RFC 9220 WebSocket
-verification is documented separately and remains incomplete on Linux and
-Windows. These runtime-library results do not establish compiled-Zirk CLI
-behavior on every target.
+entry points are implemented. CI run 39739088146 passed the complete workspace
+suite and independent-peer HTTP/3/RFC 9220 WebSocket verification on macOS
+ARM64, Linux x86_64, and Linux ARM64. Windows passed the same full suite in run
+39702042337; current commit 2c06c67 changes only the regression test, which
+passes in focused Windows run 39748669844. The redundant Windows full rerun in
+39739088146 remains active and is not counted as evidence.
 
 The module follows the standard-library I/O contract: operations return typed
 `Result` values, waiting suspends the current task rather than occupying a
@@ -29,8 +31,9 @@ permissions.
 > **Implementation status:** this chapter documents the public API currently
 > available in the native preview. Target-level evidence is listed above;
 > Windows runtime evidence for UDP, local IPC, and interface inspection comes
-> from the focused native CI commands; the full current-revision matrix remains
-> pending. Unsupported operations must preserve the documented permissions,
+> from focused native CI commands. Complete per-target suite evidence is green
+> across runs 39702042337 and 39739088146; a redundant Windows rerun remains
+> active. Unsupported operations must preserve the documented permissions,
 > cancellation, and resource limits.
 >
 > The current native preview exposes `std.net::tcp.TCPStream` and

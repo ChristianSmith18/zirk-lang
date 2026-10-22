@@ -608,3 +608,17 @@ with no transparent replay over another version. Callers can explicitly use
 the existing HTTP/1.1 or HTTP/2 WebSocket entry points when they choose those
 protocols. This closes adapter, client-parity-policy, and RFC 9220 behavior
 tasks 2.2, 2.4, and 2.7 on macOS ARM64; cross-target coverage remains task 2.8.
+
+### Current CI run (2026-10-22, run 39739088146)
+
+The focused `Networking and HTTP/3 runtime conformance` step has passed on
+macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64. The complete
+workspace suites and public independent-peer WebSocket interoperability have
+also passed on macOS ARM64, Linux x86_64, and Linux ARM64; the browser package
+job passed. Windows has the same three passing gates in run 39702042337 at
+`634179a`. The only source change in `2c06c67` is the deterministic repair of
+the TLS/HTTP/2 disconnect regression test; that test also passes on Windows in
+focused run 39748669844. The redundant Windows full suite in run 39739088146
+remains active unusually long and is not counted as a passing result. Taken
+together, the passing per-target runs complete task 2.8 without implying that
+the still-active redundant job has finished.

@@ -46,12 +46,15 @@ GET and QUERY client requests against aioquic, including the QUERY body and
 content type. The test-only peer and its resolver output are pinned in
 `scripts/requirements-http3-interop.txt` and are installed by the native CI
 workflow. An unapproved Origin receives `403` without invoking the Zirk
-handler. CI run 39558023426 passed the focused HTTP/3 adapter, TLS, UDP, local
+handler. CI run 39739088146 passed the focused HTTP/3 adapter, TLS, UDP, local
 IPC, interface, and network-policy runtime commands on Windows x86_64 as well
-as macOS ARM64 and both Linux targets. The complete workspace tests and
-independent-peer interoperability step are configured on all four targets;
-the focused Windows result is runtime evidence for the listed tests, not yet a
-full Windows acceptance result.
+as macOS ARM64 and both Linux targets. Its complete workspace suites and
+independent-peer interoperability step passed on macOS ARM64, Linux x86_64,
+and Linux ARM64. Browser Fetch verification also passed. Windows passed the
+full workspace and peer steps in run 39702042337 at `634179a`; the current
+commit only changes the test harness, and that focused regression test passes
+on Windows in run 39748669844. A redundant Windows full-suite rerun in
+39739088146 remains active and is not counted as a passing result.
 
 Upstream `h3` describes the crate as experimental and warns that its API may
 change. It remains the narrowest fit among the currently integrated engines,
@@ -95,8 +98,9 @@ may retain a different portion of the optional protocol engine after linking.
 Keep HTTP/3 optional and keep 0-RTT disabled. The license and advisory checks,
 workspace MSRV, release-size measurement, and successful HTTP/3-enabled
 conformance builds on all four native targets support this dependency choice
-for continued development. Independent-peer interoperability remains proven
-only on macOS ARM64 so far, and the complete native CI run is still in progress.
+for continued development. Independent-peer interoperability passes on macOS
+ARM64, Linux x86_64, Linux ARM64, and Windows across runs 39739088146 and
+39702042337; see the test-only revision qualification above.
 Reassess the dependency choice if upstream `h3` remains experimental or its
 patch cannot be retired before release.
 
