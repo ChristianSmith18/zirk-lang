@@ -521,10 +521,14 @@ catalog and module handbook chapters track the verified subset and current gaps.
 
 Current target evidence (2026-10-18): the full compiled-Zirk CLI E2E suite passes
 155/155 on native macOS ARM64 and 155/155 on Linux ARM64 Docker on the
-immediately preceding source revision. After the typed `Env.get_or<T>` addition,
-the signed environment E2E passes 1/1 in Linux ARM64 Docker, but the full-suite
-rerun is inconclusive: the container exhausted disk while linking fixtures
-(57 passed, 98 failed from storage exhaustion). This is not a product test pass.
+immediately preceding source revision. The subsequent typed `Env.get_or<T>`
+evidence is historical: that API was removed by `contextual-result-value-projection`
+and does not validate the current source. The focused signed approval E2E passes
+after rebuilding the runtime static archive, and the fail-closed environment
+E2E passes. A focused parity case confirms Result projection across native LLVM
+and the browser interpreter. Linux/Windows native parity remains unverified;
+the full current-source `cargo test -p zirk-cli` run was interrupted after
+producing no output for several minutes and remains inconclusive.
 The earlier Linux run was rebuilt with the current runtime archive and included
 the QUERY wildcard rejection and structured runtime-diagnostic cases. The combined native
 macOS runtime/runtime-core package run passes 1,019 tests with 12 ignored across

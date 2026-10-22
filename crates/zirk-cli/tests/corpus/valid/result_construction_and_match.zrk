@@ -1,9 +1,5 @@
 import { stdout } from std.io;
 
-// `Result<T,E>` (roadmap Phase 4a, `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
-// section 2): construction (`Ok(...)`/`Error(...)`), destructuring
-// `match`, and the seven in-scope methods (`get_or_else` and the four
-// generic combinators are out of scope for this pass).
 fn divide(a: Int32, b: Int32): Result<Int32, String> {
     if b == 0 {
         return Error("division by zero");
@@ -18,6 +14,11 @@ fn describe(r: Result<Int32, String>): String {
     };
 }
 
+fn nested(): Result<Result<Int32, String>, String> {
+    mut inner: Result<Int32, String> = Ok(7);
+    return Ok(inner);
+}
+
 fn main(): Void {
     mut ok: Result<Int32, String> = divide(10, 2);
     mut error: Result<Int32, String> = divide(10, 0);
@@ -25,24 +26,22 @@ fn main(): Void {
     stdout.println(describe(ok));
     stdout.println(describe(error));
 
-    stdout.println(ok.is_ok());
-    stdout.println(ok.is_error());
-    stdout.println(error.is_ok());
-    stdout.println(error.is_error());
+    stdout.println(match ok { Ok(_) => true; Error(_) => false; });
+    stdout.println(match ok { Ok(_) => false; Error(_) => true; });
+    stdout.println(match error { Ok(_) => true; Error(_) => false; });
+    stdout.println(match error { Ok(_) => false; Error(_) => true; });
 
-    stdout.println(ok.ok_or_null() ?? - 1);
-    stdout.println(error.ok_or_null() ?? - 1);
-    stdout.println(ok.error_or_null() ?? "none");
-    stdout.println(error.error_or_null() ?? "none");
+    stdout.println(ok ?? -1);
+    stdout.println(error ?? -1);
+    stdout.println(nested());
+    stdout.println(match ok { Ok(_) => "none"; Error(value) => value; });
+    stdout.println(match error { Ok(_) => "none"; Error(value) => value; });
 
-    stdout.println(ok.get_or(-1));
-    stdout.println(error.get_or(-1));
+    stdout.println(match ok { Ok(value) => value; Error(_) => -1; });
+    stdout.println(match error { Ok(value) => value; Error(_) => -1; });
 
-    stdout.println(ok.unwrap());
-    stdout.println(error.unwrap_error());
+    stdout.println(match ok { Ok(value) => value; Error(_) => -1; });
+    stdout.println(match error { Ok(_) => "unexpected"; Error(value) => value; });
 
-    // Mandatory consumption: a `Result` produced by a statement and never
-    // matched or checked is a compile-time error; `_ = expr;` is the
-    // explicit discard that opts out.
     _ = divide(1, 0);
 }

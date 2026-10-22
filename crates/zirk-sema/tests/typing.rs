@@ -1126,7 +1126,7 @@ fn valid_exact_float_conversions() {
 fn valid_exact_float_parse_returns_a_result() {
     accepted_body(
         "mut r: Result<Float, ParseError> = Float.parse(\"0.1\");\n\
-         mut v: Float = r.unwrap();",
+         mut v: Float64 = match r { Ok(value) => value; Error(_) => 0.0f; };",
     );
 }
 
@@ -2168,16 +2168,13 @@ fn valid_result_construction_and_match() {
 }
 
 #[test]
-fn valid_result_seven_in_scope_methods() {
+fn valid_result_contextual_projection() {
     accepted_body(
         "mut r: Result<Int32, String> = Ok(5);\n\
-         mut a: Boolean = r.is_ok();\n\
-         mut b: Boolean = r.is_error();\n\
-         mut c: Int32? = r.ok_or_null();\n\
-         mut d: String? = r.error_or_null();\n\
-         mut e: Int32 = r.get_or(0);\n\
-         mut f: Int32 = r.unwrap();\n\
-         mut g: String = r.unwrap_error();",
+         mut projected: Int32? = r;\n\
+         mut fallback: Int32 = r ?? 0;\n\
+         mut matched: Int32 = match r { Ok(matched_value) => matched_value; Error(_) => -1; };\n\
+         mut preserved: Result<Int32, String> = r;",
     );
 }
 
@@ -2197,7 +2194,7 @@ fn invalid_result_get_or_wrong_argument_type() {
 #[test]
 fn invalid_result_get_or_wrong_argument_count() {
     let output = rejected_body("mut r: Result<Int32, String> = Ok(5);\nmut a: Int32 = r.get_or();");
-    assert!(output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()));
+    assert!(output.contains("Result.get_or` is no longer available"));
 }
 
 #[test]
@@ -7259,7 +7256,7 @@ fn valid_as_slice_construction_and_indexing_read_outside_unsafe() {
         "mut x: Int32 = 1;
          mut view: NativeSlice<Int32> = unsafe {
              mut p: Pointer<Int32> = Pointer.from(x);
-             p.as_slice(1).unwrap()
+             match p.as_slice(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); }
          };
          mut v: Int32 = view[0];
          mut n: UInt64 = view.length;
@@ -7273,7 +7270,7 @@ fn valid_native_slice_mut_indexing_read_and_write_outside_unsafe() {
         "mut x: Int32 = 1;
          mut view: NativeSliceMut<Int32> = unsafe {
              mut p: Pointer<Int32> = Pointer.from(x);
-             p.as_slice_mut(1).unwrap()
+             match p.as_slice_mut(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); }
          };
          view[0] = 42;
          mut v: Int32 = view[0];",
@@ -7286,7 +7283,7 @@ fn invalid_write_through_read_only_native_slice() {
         "mut x: Int32 = 1;
          mut view: NativeSlice<Int32> = unsafe {
              mut p: Pointer<Int32> = Pointer.from(x);
-             p.as_slice(1).unwrap()
+             match p.as_slice(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); }
          };
          view[0] = 42;",
     );
@@ -7317,7 +7314,7 @@ fn invalid_native_slice_escapes_as_return_value() {
              mut x: Int32 = 1;
              unsafe {
                  mut p: Pointer<Int32> = Pointer.from(x);
-                 return p.as_slice(1).unwrap();
+                 return match p.as_slice(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); };
              }
          }
          fn main(): Void { }",
@@ -7332,7 +7329,7 @@ fn invalid_native_slice_mut_escapes_as_return_value() {
              mut x: Int32 = 1;
              unsafe {
                  mut p: Pointer<Int32> = Pointer.from(x);
-                 return p.as_slice_mut(1).unwrap();
+                 return match p.as_slice_mut(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); };
              }
          }
          fn main(): Void { }",
@@ -7346,7 +7343,7 @@ fn invalid_native_slice_escapes_via_closure_capture() {
         "mut x: Int32 = 1;
          unsafe {
              mut p: Pointer<Int32> = Pointer.from(x);
-             mut view: NativeSlice<Int32> = p.as_slice(1).unwrap();
+             mut view: NativeSlice<Int32> = match p.as_slice(1) { Ok(view) => view; Error(_) => fatalError(\"slice failed\"); };
              mut f: Fn() => Void = (): Void => { mut w: NativeSlice<Int32> = view; };
          }",
     );
@@ -7794,11 +7791,11 @@ fn valid_temporal_boundaries_and_format() {
 fn valid_temporal_parse_statics() {
     accepted_body(
         "mut r1: Result<Date, ParseError> = Date.parse(\"2026-09-06\");\n\
-         mut d: Date = r1.unwrap();\n\
+         mut d: Date? = r1;\n\
          mut r2: Result<Time, ParseError> = Time.parse(\"14:30:45\");\n\
-         mut t: Time = r2.unwrap();\n\
+         mut t: Time? = r2;\n\
          mut r3: Result<DateTime, ParseError> = DateTime.parse(\"2026-09-06T14:30:45\");\n\
-         mut dt: DateTime = r3.unwrap();",
+         mut dt: DateTime? = r3;",
     );
 }
 

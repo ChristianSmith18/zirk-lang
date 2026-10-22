@@ -478,7 +478,7 @@ fn environment_package_import_and_fail_closed_api_resolve() {
              mut alias: Env? = null;\n\
              mut outcome = Env.get(\"ZIRK_TEST_VALUE\");\n\
              mut parsed = Env.get<Int32>(\"ZIRK_TEST_PORT\");\n\
-             mut also = Environment.get_or(\"ZIRK_TEST_VALUE\", \"fallback\");\n\
+             mut also: String? = Environment.get(\"ZIRK_TEST_VALUE\");\n\
              mut names = Env.list_names();\n\
              _ = outcome;\n\
              _ = parsed;\n\
@@ -497,6 +497,100 @@ fn environment_package_import_and_fail_closed_api_resolve() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn contextual_result_projection_and_preservation_resolve() {
+    let dir = workspace("contextual_result_projection");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn keep(value: Result<Int32, String>): Result<Int32, String> { return value; }\n\
+         fn project_return(value: Result<Int32, String>): Int32? { return value; }\n\
+         fn accept_nullable(value: Int32?): Int32? { return value; }\n\
+         fn project_nested(): Result<Result<Int32, String>, String> { mut inner: Result<Int32, String> = Ok(5); return Ok(inner); }\n\
+         class Holder { projected: Int32?; preserved: Result<Int32, String>; construct(value: Result<Int32, String>) { this.projected = value; this.preserved = value; } }\n\
+         fn identity<T>(value: T): T { return value; }\n\
+         fn main(): Void {\n\
+             mut result: Result<Int32, String> = Ok(5);\n\
+             mut projected: Int32? = result;\n\
+             mut fallback: Int32 = result ?? 0;\n\
+             mut argument_projection: Int32? = accept_nullable(result);\n\
+             mut return_projection: Int32? = project_return(result);\n\
+             mut nested_projection: Result<Int32, String>? = project_nested();\n\
+             mut holder = Holder(result);\n\
+             mut preserved: Result<Int32, String> = identity<Result<Int32, String>>(result);\n\
+             mut inferred: Int32? = identity(result);\n\
+             mut matched = match result { Ok(value) => value; Error(_) => -1; };\n\
+             _ = projected; _ = fallback; _ = argument_projection; _ = return_projection;\n\
+             _ = nested_projection; _ = holder; _ = preserved; _ = inferred; _ = matched;\n\
+             _ = keep(result);\n\
+         }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check contextual Result behavior");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn result_projection_rejects_payloads_without_nullable_runtime_layouts() {
+    let dir = workspace("unsupported_result_projection");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn main(): Void { mut value: Decimal = Decimal.parse(\"1.5\"); }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check unsupported nullable Result payload");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot be projected to a nullable value")
+    );
+}
+
+#[test]
+fn removed_result_extraction_methods_report_migration_guidance() {
+    for method in [
+        "is_ok()",
+        "is_error()",
+        "ok_or_null()",
+        "error_or_null()",
+        "get_or(0)",
+        "get_or_else(0)",
+        "unwrap()",
+        "unwrap_error()",
+    ] {
+        let dir = workspace(&format!("removed_result_helper_{method}"));
+        std::fs::write(
+            dir.join("main.zrk"),
+            format!(
+                "fn main(): Void {{ mut result: Result<Int32, String> = Ok(5); _ = result.{method}; }}"
+            ),
+        )
+        .unwrap();
+        let output = Command::new(compiler())
+            .args(["check", "main.zrk"])
+            .current_dir(&dir)
+            .output()
+            .expect("check removed Result method");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{method} unexpectedly compiled");
+        let method_name = method.split('(').next().unwrap();
+        assert!(
+            stderr.contains(&format!("`Result.{method_name}` is no longer available")),
+            "{method} did not get its migration diagnostic: {stderr}"
+        );
+    }
 }
 
 #[test]

@@ -17,9 +17,9 @@ fn main(): Void {
     stdout.println((15).rotate_right(1).to_string());
     stdout.println((4).is_even().to_string());
     stdout.println((7).is_odd().to_string());
-    stdout.println(Int32.parse("42").unwrap().to_string());
-    stdout.println(Int32.parse("ff", radix: 16).unwrap().to_string());
-    stdout.println((100).checked_add(50).unwrap().to_string());
+    stdout.println((Int32.parse("42") ?? 0).to_string());
+    stdout.println((Int32.parse("ff", radix: 16) ?? 0).to_string());
+    stdout.println(((100).checked_add(50) ?? 0).to_string());
     stdout.println((100).wrapping_add(50).to_string());
     stdout.println((100).saturating_add(50).to_string());
 }

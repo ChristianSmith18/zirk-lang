@@ -165,6 +165,20 @@ fn assert_failure_parity(name: &str, program: &str, expected_category: &str) {
 #[test]
 fn numeric_and_temporal_edges_match_native_observations() {
     assert_success_parity(
+        "contextual_result_projection",
+        r#"import { stdout } from std.io;
+fn main(): Void {
+    mut success: Result<Int32, String> = Ok(7);
+    mut failure: Result<Int32, String> = Error("hidden");
+    stdout.println(success);
+    stdout.println(failure);
+    stdout.println(success ?? 0);
+    stdout.println(match failure { Ok(value) => value.to_string(); Error(error) => error; });
+}"#,
+        "7\n<Null>\n7\nhidden\n",
+    );
+
+    assert_success_parity(
         "float_to_int_edges",
         r#"import { stdout } from std.io;
 fn main(): Void {
@@ -202,9 +216,9 @@ fn main(): Void {
         "decimal_exponents_and_float_durations",
         r#"import { stdout } from std.io;
 fn main(): Void {
-    stdout.println(Decimal.parse("1e999999").is_error().to_string());
-    stdout.println(Decimal.parse("1e-999999").is_error().to_string());
-    stdout.println(Decimal.parse("6.25e-2").unwrap().to_string());
+    stdout.println((match Decimal.parse("1e999999") { Error(_) => true; Ok(_) => false; }).to_string());
+    stdout.println((match Decimal.parse("1e-999999") { Error(_) => true; Ok(_) => false; }).to_string());
+    stdout.println((match Decimal.parse("6.25e-2") { Ok(value) => value; Error(_) => Decimal(0); }).to_string());
     stdout.println((1.5f * 1s).to_string());
     stdout.println((-0.25f * 2s).to_string());
 }"#,
@@ -215,7 +229,7 @@ fn main(): Void {
         "decimal_arithmetic_overflow",
         r#"import { stdout } from std.io;
 fn main(): Void {
-    inmut max: Decimal = Decimal.parse("99999999999999999999999999999999999999").unwrap();
+    inmut max: Decimal = match Decimal.parse("99999999999999999999999999999999999999") { Ok(value) => value; Error(_) => Decimal(0); };
     inmut result = max + max;
     stdout.println(result);
 }"#,

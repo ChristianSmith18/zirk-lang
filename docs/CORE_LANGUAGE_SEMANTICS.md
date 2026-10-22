@@ -16,6 +16,11 @@ outside this checkpoint. They are finalized respectively by
 Those later checkpoints supersede shorter historical descriptions at their
 interaction boundaries.
 
+In particular, a Result expression is preserved by direct `match` and
+explicitly Result-typed contexts; ordinary value contexts project `Ok(T)` to
+`T` and `Error(E)` to `null` as defined in
+[`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md).
+
 ## 1. Values, references, places, and projections
 
 - Scalars, tuples, records, enums, ranges, and declared value types copy as
@@ -92,7 +97,8 @@ Receiver-mutation metadata stays compiler-internal. Generators use `fn gen`,
 start lazily, suspend at `yield`, clean up deterministically when abandoned, and
 expose failures through their declared `Result`-shaped contract rather than
 hiding them in completion. `value |> f(a)` lowers to `f(value, a)` and performs
-no magical nullable, `Result`, async, or collection propagation.
+no asynchronous or collection propagation. Result-to-nullable projection is a
+separate context rule and never propagates an error into the surrounding call.
 
 ## 3. Classes and contracts
 

@@ -67,32 +67,6 @@ share class Environment {
         };
     }
 
-    static get_or_null(name: String): Result<String?, EnvironmentError> {
-        return match Environment.get_string_native(name) {
-            Ok(value) => Environment.nullable_ok(value);
-            Error(error) => match error {
-                EnvironmentError.Missing => Environment.nullable_ok(null);
-                _ => Environment.nullable_error(error);
-            }
-        };
-    }
-
-    static get_or<T from EnvironmentParsable<T> = String>(
-        name: String,
-        fallback: T,
-    ): Result<T, EnvironmentError> {
-        return match Environment.get_string_native(name) {
-            Ok(text) => match T.parse(text) {
-                Ok(value) => Ok<T, EnvironmentError>(value);
-                Error(_) => Error<T, EnvironmentError>(EnvironmentError.Parse);
-            }
-            Error(error) => match error {
-                EnvironmentError.Missing => Ok<T, EnvironmentError>(fallback);
-                _ => Error<T, EnvironmentError>(error);
-            }
-        };
-    }
-
     static require(name: String): Result<String, EnvironmentError> {
         return Environment.get_string_native(name);
     }
@@ -127,10 +101,6 @@ share class Environment {
         return Error(EnvironmentError.PermissionDenied);
     }
 
-    private static nullable_ok(value: String?): Result<String?, EnvironmentError> {
-        return Ok(value);
-    }
-
     private static int32_ok(value: Int32): Result<Int32, EnvironmentError> { return Ok(value); }
     private static int32_error(error: EnvironmentError): Result<Int32, EnvironmentError> { return Error(
             error,
@@ -139,10 +109,6 @@ share class Environment {
     private static float64_error(error: EnvironmentError): Result<Float64, EnvironmentError> { return Error(
             error,
         ); }
-
-    private static nullable_error(error: EnvironmentError): Result<String?, EnvironmentError> {
-        return Error(error);
-    }
 
     private static string_ok(value: String): Result<String, EnvironmentError> {
         return Ok(value);

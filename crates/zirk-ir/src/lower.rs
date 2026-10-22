@@ -8207,6 +8207,38 @@ impl<'a> FunctionLowering<'a> {
     // --- Expressions ------------------------------------------------------
 
     fn lower_expr(&mut self, expr: &ast::Expr) -> Operand {
+        let Some(&result_ty) = self.checked.result_projections.get(&expr.span()) else {
+            return self.lower_expr_unprojected(expr);
+        };
+
+        let result = self.lower_expr_unprojected(expr);
+        let result_ir = self.ir_type(result_ty);
+        let IrType::Enum(enum_id) = result_ir else {
+            unreachable!("a checked Result projection has an enum representation")
+        };
+        let instance_index = (enum_id - self.enum_instance_base) as usize;
+        let instance = &self.checked.enum_instances[instance_index];
+        let payload = self.ir_type(instance.args[0]);
+        let holder = self.declare_slot("<result_projection>", result_ir, expr.span());
+        self.emit_effect(InstKind::Store(holder, result), expr.span());
+        let stored = self.emit(InstKind::Load(holder), result_ir, expr.span());
+        let discriminant = self.emit(
+            InstKind::Discriminant(stored),
+            IrType::Int(IntWidth::I32),
+            expr.span(),
+        );
+        let ok_field = self.module.enums[enum_id as usize].variants[0][0];
+        self.lower_result_payload_or_null(
+            holder,
+            result_ir,
+            discriminant,
+            ok_field,
+            payload,
+            expr.span(),
+        )
+    }
+
+    fn lower_expr_unprojected(&mut self, expr: &ast::Expr) -> Operand {
         let span = expr.span();
 
         match expr {
@@ -8725,7 +8757,12 @@ impl<'a> FunctionLowering<'a> {
                     return self.lower_throws_check(result, returns, span);
                 }
                 if let Some(binding) = self.checked.standard_environment_calls.get(&e.span) {
-                    let semantic = self.checked.expr_types[&e.span];
+                    let semantic = self
+                        .checked
+                        .result_projections
+                        .get(&e.span)
+                        .copied()
+                        .unwrap_or(self.checked.expr_types[&e.span]);
                     let returns = self.ir_type(semantic);
                     let IrType::Enum(enum_id) = returns else {
                         unreachable!("Environment host calls return a typed Result enum")
@@ -11044,9 +11081,6 @@ impl<'a> FunctionLowering<'a> {
                     let ty = self.type_of_operand(operand);
                     return self.lower_throws_check(operand, ty, span);
                 }
-                if let Some(operand) = self.lower_result_method_call(e, span) {
-                    return operand;
-                }
                 if let Some(operand) = self.lower_array_list_method_call(e, span) {
                     return operand;
                 }
@@ -11432,7 +11466,19 @@ impl<'a> FunctionLowering<'a> {
     /// value is absent: `a ?? expensive()` must not call `expensive` when `a`
     /// holds a value.
     fn lower_coalesce(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
-        let left_type = self.type_of(&expr.left, expr.left.span());
+        let left_type = self
+            .checked
+            .result_projections
+            .get(&expr.left.span())
+            .and_then(|result_ty| {
+                let IrType::Enum(enum_id) = self.ir_type(*result_ty) else {
+                    return None;
+                };
+                let instance =
+                    &self.checked.enum_instances[(enum_id - self.enum_instance_base) as usize];
+                Nullable::of(self.ir_type(instance.args[0])).map(IrType::Nullable)
+            })
+            .unwrap_or_else(|| self.type_of(&expr.left, expr.left.span()));
         // A literal `null` fallback (`nullable ?? null`) has no type of its
         // own — `type_of` on `Expr::Null` is `unreachable!` on purpose,
         // because everywhere else a destination type supplies it first. Here
@@ -19145,9 +19191,10 @@ impl<'a> FunctionLowering<'a> {
             .unwrap_or_default();
         let returns = self
             .checked
-            .expr_types
+            .result_projections
             .get(&span)
             .copied()
+            .or_else(|| self.checked.expr_types.get(&span).copied())
             .filter(|ty| !ty.is_unknown())
             .map(|ty| self.ir_type(ty))
             .unwrap_or_else(|| self.ir_type(method.returns));
@@ -19198,9 +19245,10 @@ impl<'a> FunctionLowering<'a> {
         // whenever it recorded one.
         let returns = self
             .checked
-            .expr_types
+            .result_projections
             .get(&span)
             .copied()
+            .or_else(|| self.checked.expr_types.get(&span).copied())
             .filter(|ty| !ty.is_unknown())
             .map(|ty| self.ir_type(ty))
             .unwrap_or_else(|| self.ir_type(method.returns));
@@ -21510,8 +21558,9 @@ impl<'a> FunctionLowering<'a> {
         // checker's own record of this call.
         let result_sema = self
             .checked
-            .expr_types
+            .result_projections
             .get(&call.span)
+            .or_else(|| self.checked.expr_types.get(&call.span))
             .copied()
             .expect("the checker recorded this call's Result type");
         let result_ty = self.ir_type(result_sema);
@@ -22016,9 +22065,10 @@ impl<'a> FunctionLowering<'a> {
         // extraction `build_result_from_flag` performs.
         let result_sema = self
             .checked
-            .expr_types
+            .result_projections
             .get(&call.span)
             .copied()
+            .or_else(|| self.checked.expr_types.get(&call.span).copied())
             .expect("the checker recorded this call's Result type");
         let result_ty = self.ir_type(result_sema);
         let IrType::Enum(result_enum) = result_ty else {
@@ -25759,10 +25809,7 @@ impl<'a> FunctionLowering<'a> {
         self.lower_fatal_error(message, span)
     }
 
-    /// The operand-level core of [`Self::lower_fatal_error_call`], reused by
-    /// `Result::unwrap`/`unwrap_error` (roadmap Phase 4a) for the message
-    /// they build themselves rather than take from a program-written
-    /// argument.
+    /// The operand-level core of [`Self::lower_fatal_error_call`].
     fn lower_fatal_error(&mut self, message: Operand, span: Span) -> Operand {
         let result = self.emit(InstKind::FatalError(message), IrType::Never, span);
         self.terminate(Terminator::Unreachable);
@@ -25774,12 +25821,8 @@ impl<'a> FunctionLowering<'a> {
     /// Whether lowering this expression opens blocks of its own.
     ///
     /// Only these constructs move the insertion point, and that is what
-    /// forces an earlier value to travel through a slot. A method, needing
-    /// `self`: a call opens blocks not only when one of its arguments does,
-    /// but also when it is itself one of `Result<T,E>`'s branching methods
-    /// (`ok_or_null`, `get_or`, `unwrap`, … — `Self::result_method`) —
-    /// unlike `to_string()` or a construction, those lower to a branch of
-    /// their own (roadmap Phase 4a).
+    /// forces an earlier value to travel through a slot. A call opens blocks
+    /// when one of its arguments does or when the call's own lowering branches.
     ///
     /// Every ordinary call opens blocks too, unconditionally, since
     /// `fase-4d-runtimeerror`'s D11: [`Self::lower_throws_check`] now runs
@@ -25884,143 +25927,10 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// Which of `Result<T,E>`'s seven in-scope methods `call` is, if any
-    /// (`Checker::check_result_method_call`'s IR-side counterpart —
-    /// `get_or_else` and the four generic combinators are out of scope for
-    /// this pass, `fase-4a-errores/proposal.md`). Returns the method name
-    /// plus the receiver's own resolved `T`/`E`.
-    fn result_method(&self, call: &ast::CallExpr) -> Option<(&'static str, IrType, IrType)> {
-        let ast::Expr::Field(field) = &*call.callee else {
-            return None;
-        };
-        if field.safe {
-            return None;
-        }
-        // A static class method may share a name with a `Result<T, E>`
-        // combinator (for example `Environment.get_or`). Resolve the static
-        // owner before probing its path as though it were a runtime Result
-        // value; `type_of` deliberately cannot treat a class name as a value.
-        if self.checked.static_class_accesses.contains_key(&field.span)
-            || matches!(&*field.object, ast::Expr::Path(base)
-                if self.class_id_from_path(base).is_some())
-        {
-            return None;
-        }
-        let name = match field.name.name.as_str() {
-            "is_ok" => "is_ok",
-            "is_error" => "is_error",
-            "ok_or_null" => "ok_or_null",
-            "error_or_null" => "error_or_null",
-            "unwrap" => "unwrap",
-            "unwrap_error" => "unwrap_error",
-            "get_or" => "get_or",
-            _ => return None,
-        };
-        let IrType::Enum(module_id) = self.type_of(&field.object, field.object.span()) else {
-            return None;
-        };
-        if module_id < self.enum_instance_base {
-            return None;
-        }
-        let instance = &self.checked.enum_instances[(module_id - self.enum_instance_base) as usize];
-        if Some(instance.enum_id) != self.checked.native_result {
-            return None;
-        }
-        Some((
-            name,
-            self.ir_type(instance.args[0]),
-            self.ir_type(instance.args[1]),
-        ))
-    }
-
-    /// Lowers a call to one of `Result<T,E>`'s seven in-scope methods.
-    fn lower_result_method_call(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
-        let (name, t, e) = self.result_method(call)?;
-        let ast::Expr::Field(field) = &*call.callee else {
-            unreachable!("checked by `result_method`")
-        };
-
-        let receiver_ty = self.type_of(&field.object, field.object.span());
-        let IrType::Enum(module_id) = receiver_ty else {
-            unreachable!("checked by `result_method`")
-        };
-        let receiver = self.lower_expr(&field.object);
-        let holder = self.declare_slot("<result>", receiver_ty, span);
-        self.emit_effect(InstKind::Store(holder, receiver), span);
-        let object = self.emit(InstKind::Load(holder), receiver_ty, span);
-        let discriminant = self.emit(
-            InstKind::Discriminant(object),
-            IrType::Int(IntWidth::I32),
-            span,
-        );
-
-        // `Ok` is declared before `Error` (`register_native_result_enum`),
-        // so its discriminant and field index are always 0 and its variant
-        // 1 — the same order `specialize_enum` preserves.
-        let ok_field = self.module.enums[module_id as usize].variants[0][0];
-        let error_field = self.module.enums[module_id as usize].variants[1][0];
-
-        Some(match name {
-            "is_ok" | "is_error" => {
-                let target = self.emit(
-                    InstKind::ConstInt(if name == "is_ok" { 0 } else { 1 }),
-                    IrType::Int(IntWidth::I32),
-                    span,
-                );
-                self.emit(
-                    InstKind::Binary {
-                        op: BinaryOp::Eq,
-                        left: discriminant,
-                        right: target,
-                    },
-                    IrType::Boolean,
-                    span,
-                )
-            }
-            "ok_or_null" => {
-                self.lower_result_or_null(holder, receiver_ty, discriminant, ok_field, t, span)
-            }
-            "error_or_null" => {
-                self.lower_result_or_null(holder, receiver_ty, discriminant, error_field, e, span)
-            }
-            "unwrap" => self.lower_result_unwrap(
-                holder,
-                receiver_ty,
-                discriminant,
-                ok_field,
-                t,
-                "Error",
-                span,
-            ),
-            "unwrap_error" => self.lower_result_unwrap(
-                holder,
-                receiver_ty,
-                discriminant,
-                error_field,
-                e,
-                "Ok",
-                span,
-            ),
-            "get_or" => {
-                let default = self.lower_expr_as(&call.args[0].value, t);
-                self.lower_result_get_or(
-                    holder,
-                    receiver_ty,
-                    discriminant,
-                    ok_field,
-                    t,
-                    default,
-                    span,
-                )
-            }
-            _ => unreachable!("checked by `result_method`"),
-        })
-    }
-
     /// `result.ok_or_null()`/`.error_or_null()`: the named field, wrapped
     /// nullable, when the discriminant names that side; `null` otherwise.
     #[allow(clippy::too_many_arguments)]
-    fn lower_result_or_null(
+    fn lower_result_payload_or_null(
         &mut self,
         holder: SlotId,
         object_ty: IrType,
@@ -26029,9 +25939,15 @@ impl<'a> FunctionLowering<'a> {
         payload: IrType,
         span: Span,
     ) -> Operand {
-        let base = Nullable::of(payload)
-            .expect("`Result`'s own T/E can never be a closure type — no syntax names one (D9)");
-        let result_ty = IrType::Nullable(base);
+        let (base, result_ty) = match payload {
+            IrType::Nullable(base) => (base, payload),
+            _ => {
+                let base = Nullable::of(payload).expect(
+                    "`Result`'s own T/E can never be a closure type — no syntax names one (D9)",
+                );
+                (base, IrType::Nullable(base))
+            }
+        };
         let result = self.declare_slot("<result_or_null>", result_ty, span);
         let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
         let matches = self.emit(
@@ -26043,27 +25959,14 @@ impl<'a> FunctionLowering<'a> {
             IrType::Boolean,
             span,
         );
-        // `field` already picks out the right side (`ok_field` when this is
-        // `ok_or_null`, `error_field` when it is `error_or_null`), so the
-        // same discriminant-vs-`Ok` test the caller derives its own branch
-        // order from is reused, and only one of `field`/`discriminant`
-        // pairs is ever actually the one this compares — see the two call
-        // sites in `lower_result_method_call`.
+        // Only the Ok payload is present; Error always maps to null.
         let present_block = self.new_block();
         let absent_block = self.new_block();
         let continue_block = self.new_block();
         self.terminate(Terminator::Branch {
             condition: matches,
-            then_block: if field == 0 {
-                present_block
-            } else {
-                absent_block
-            },
-            else_block: if field == 0 {
-                absent_block
-            } else {
-                present_block
-            },
+            then_block: present_block,
+            else_block: absent_block,
         });
 
         self.current = present_block;
@@ -26090,146 +25993,6 @@ impl<'a> FunctionLowering<'a> {
 
         self.current = continue_block;
         self.emit(InstKind::Load(result), result_ty, span)
-    }
-
-    /// `result.get_or(default_value)`: the `Ok` payload, or `default_value`
-    /// when the receiver is `Error`.
-    #[allow(clippy::too_many_arguments)]
-    fn lower_result_get_or(
-        &mut self,
-        holder: SlotId,
-        object_ty: IrType,
-        discriminant: Operand,
-        ok_field: u32,
-        t: IrType,
-        default: Operand,
-        span: Span,
-    ) -> Operand {
-        let result = self.declare_slot("<result_get_or>", t, span);
-        // `default` was computed in the block active before this branch —
-        // values do not cross blocks (ADR-007) — so it travels through a
-        // slot to reach `error_block` the same way `holder`'s own payload
-        // does.
-        let default_holder = self.declare_slot("<result_default>", t, span);
-        self.emit_effect(InstKind::Store(default_holder, default), span);
-        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
-        let is_ok = self.emit(
-            InstKind::Binary {
-                op: BinaryOp::Eq,
-                left: discriminant,
-                right: zero,
-            },
-            IrType::Boolean,
-            span,
-        );
-        let ok_block = self.new_block();
-        let error_block = self.new_block();
-        let continue_block = self.new_block();
-        self.terminate(Terminator::Branch {
-            condition: is_ok,
-            then_block: ok_block,
-            else_block: error_block,
-        });
-
-        self.current = ok_block;
-        let object = self.emit(InstKind::Load(holder), object_ty, span);
-        let value = self.emit(
-            InstKind::LoadField {
-                object,
-                index: ok_field,
-            },
-            t,
-            span,
-        );
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
-
-        self.current = error_block;
-        let default = self.emit(InstKind::Load(default_holder), t, span);
-        self.emit_effect(InstKind::Store(result, default), span);
-        self.terminate(Terminator::Jump(continue_block));
-
-        self.current = continue_block;
-        self.emit(InstKind::Load(result), t, span)
-    }
-
-    /// `result.unwrap()`/`.unwrap_error()`: the named field when the
-    /// discriminant names that side; a `fatalError` naming the *other*
-    /// variant (`wrong_variant`) otherwise — the assertion the doc comment
-    /// of `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 2 describes.
-    /// The message is a static string rather than one built from the
-    /// payload's own text form: `T`/`E` are not guaranteed `is_printable`
-    /// (a class with no `to_string()`, say), and there is no source-location
-    /// plumbing yet for any compiler-generated failure (`zirk_rt_overflow`
-    /// and its siblings have the same gap) — both are narrower than this
-    /// pass needs to close.
-    #[allow(clippy::too_many_arguments)]
-    fn lower_result_unwrap(
-        &mut self,
-        holder: SlotId,
-        object_ty: IrType,
-        discriminant: Operand,
-        field: u32,
-        payload: IrType,
-        wrong_variant: &str,
-        span: Span,
-    ) -> Operand {
-        let result = self.declare_slot("<result_unwrap>", payload, span);
-        let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
-        // `field == 0` names the `Ok` side (`unwrap`); the other
-        // (`unwrap_error`) wants the discriminant to be `Error` instead.
-        let op = if field == 0 {
-            BinaryOp::Eq
-        } else {
-            BinaryOp::NotEq
-        };
-        let matches = self.emit(
-            InstKind::Binary {
-                op,
-                left: discriminant,
-                right: zero,
-            },
-            IrType::Boolean,
-            span,
-        );
-        let present_block = self.new_block();
-        let wrong_block = self.new_block();
-        let continue_block = self.new_block();
-        self.terminate(Terminator::Branch {
-            condition: matches,
-            then_block: present_block,
-            else_block: wrong_block,
-        });
-
-        self.current = present_block;
-        let object = self.emit(InstKind::Load(holder), object_ty, span);
-        let value = self.emit(
-            InstKind::LoadField {
-                object,
-                index: field,
-            },
-            payload,
-            span,
-        );
-        self.emit_effect(InstKind::Store(result, value), span);
-        self.terminate(Terminator::Jump(continue_block));
-
-        self.current = wrong_block;
-        let text = format!(
-            "called `unwrap{}()` on a `Result.{wrong_variant}` value",
-            if field == 0 { "" } else { "_error" }
-        );
-        let id = self.module.intern_string(&text);
-        let message = self.emit(InstKind::ConstString(id), IrType::String, span);
-        // `Never`, like a diverging `if`/ternary branch (`lower_if_expr`):
-        // nothing is stored and no jump to `continue_block` is made — the
-        // dangling block `lower_fatal_error` leaves `self.current` on is
-        // simply closed off here instead.
-        let _ = self.lower_fatal_error(message, span);
-        self.terminate(Terminator::Unreachable);
-
-        self.current = continue_block;
-        self.emit(InstKind::Load(result), payload, span)
     }
 
     /// Evaluates one complete expression with its ordinary semantics, then
@@ -32159,7 +31922,6 @@ impl<'a> FunctionLowering<'a> {
             || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
             || self.is_channel_method_call(call)
-            || self.result_method(call).is_some()
         {
             return false;
         }
@@ -32180,7 +31942,6 @@ impl<'a> FunctionLowering<'a> {
             || self.is_range_method_call(call)
             || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)
-            || self.result_method(call).is_some()
             || matches!(&*call.callee, ast::Expr::Super(_))
         {
             return false;
@@ -32221,6 +31982,9 @@ impl<'a> FunctionLowering<'a> {
     /// Total on a verified program. It is derivation, not checking: everything
     /// the checker would have rejected never reaches this point.
     fn type_of(&self, expr: &ast::Expr, _span: Span) -> IrType {
+        if let Some(&result_ty) = self.checked.result_projections.get(&expr.span()) {
+            return self.ir_type(result_ty);
+        }
         if let ast::Expr::Call(call) = expr
             && (self.checked.service_spawns.contains_key(&call.span)
                 || self.checked.service_ready_calls.contains_key(&call.span))
@@ -32597,21 +32361,6 @@ impl<'a> FunctionLowering<'a> {
                         "abs" => IrType::Int(IntWidth::I64),
                         "sign" => IrType::Int(IntWidth::I32),
                         _ => IrType::Boolean,
-                    };
-                }
-                if let Some((name, t, e_ty)) = self.result_method(e) {
-                    return match name {
-                        "is_ok" | "is_error" => IrType::Boolean,
-                        "ok_or_null" => IrType::Nullable(
-                            Nullable::of(t).expect("`Result`'s T/E cannot be a closure type (D9)"),
-                        ),
-                        "error_or_null" => IrType::Nullable(
-                            Nullable::of(e_ty)
-                                .expect("`Result`'s T/E cannot be a closure type (D9)"),
-                        ),
-                        "unwrap" | "get_or" => t,
-                        "unwrap_error" => e_ty,
-                        _ => unreachable!("checked by `result_method`"),
                     };
                 }
                 if let Some(&ty) = self.checked.expr_types.get(&expr.span())

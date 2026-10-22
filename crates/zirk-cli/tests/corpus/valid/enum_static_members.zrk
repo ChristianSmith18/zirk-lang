@@ -23,32 +23,30 @@ fn main(): Void {
         stdout.println(c.value);
     }
 
-    mut found = Direction.from_name("East");
-    if found.is_ok() {
-        stdout.println(found.unwrap().value);
-    } else {
-        stdout.println("miss");
+    match Direction.from_name("East") {
+        Ok(value) => stdout.println(value.value);
+        Error(_) => stdout.println("miss");
     }
-    mut miss = Direction.from_name("Up");
-    if miss.is_error() {
-        stdout.println("miss");
+    match Direction.from_name("Up") {
+        Error(_) => stdout.println("miss");
+        Ok(_) => stdout.println("unexpected");
     }
 
-    mut code = ExitCode.from_value(1);
-    if code.is_ok() {
-        stdout.println(code.unwrap().name);
+    match ExitCode.from_value(1) {
+        Ok(value) => stdout.println(value.name);
+        Error(_) => stdout.println("unexpected");
     }
-    mut nomap = Direction.from_value(2);
-    if nomap.is_ok() {
-        stdout.println(nomap.unwrap().name);
+    match Direction.from_value(2) {
+        Ok(value) => stdout.println(value.name);
+        Error(_) => stdout.println("unexpected");
     }
-    mut bad = ExitCode.from_value(99);
-    if bad.is_error() {
-        stdout.println("miss");
+    match ExitCode.from_value(99) {
+        Error(_) => stdout.println("miss");
+        Ok(_) => stdout.println("unexpected");
     }
-    mut text = HttpStatus.from_value("not-found");
-    if text.is_ok() {
-        stdout.println(text.unwrap().name);
+    match HttpStatus.from_value("not-found") {
+        Ok(value) => stdout.println(value.name);
+        Error(_) => stdout.println("unexpected");
     }
 
     stdout.println(Direction.to_string());

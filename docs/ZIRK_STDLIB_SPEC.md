@@ -594,18 +594,21 @@ Intrinsic timeouts are `Duration` parameters, such as
 the named shorthand `url:`, meaning `url: url`; it is never inferred from a
 reordered positional argument.
 
-`Result<T,E>` provides `is_ok`, `is_error`, nullable extraction, `get_or`,
-`get_or_else`, `map`, `map_error`, `and_then`, `or_else`, `unwrap`,
-`unwrap_error` and `or_throw`. `Error`, `Throwable`, `RuntimeError`,
+`Result<T,E>` supports direct variant matching and preserves both variants in
+explicitly Result-typed contexts. Other value contexts project it to `T?`, with
+`Error(E)` becoming `null`. Its composition operations are `map`, `map_error`,
+`and_then`, `or_else`, and `or_throw`. It does not expose status, extraction,
+fallback, or unwrap helpers. `Error`, `Throwable`, `RuntimeError`,
 `StackTrace`, `Resource<E>`, `ResourceFailure<B,C>`, `SecretString`,
 `Environment` and exact preferred alias `Env` are standard contracts.
 
-`Env` exposes static `get`, `get_or_null`, `get_or`, `require`, `get_secret`,
-`contains` and `list_names`. Every operation returns `Result` so absence cannot
-hide permission, encoding, or platform failure. Generic `get<T>` and `get_or<T>`
-use a compile-time-constrained ordinary parsing contract, not reflection. Both
-return `Parse` for malformed present values; `get_or<T>` uses its fallback only
-for authorized absence, and keeps permission and host failures distinct.
+`Env` exposes static `get`, `require`, `get_secret`, `contains` and `list_names`.
+Every operation returns `Result` so explicit matching can distinguish absence,
+permission, encoding, or platform failure. Ordinary value use projects any
+`Error` to `null`; `Env.get<T>(name) ?? fallback` therefore selects the fallback
+for every error variant. Generic `get<T>` uses a compile-time-constrained
+ordinary parsing contract, not reflection, and returns `Parse` for malformed
+present values.
 
 Every operation checks its named environment or secret grant; broad listing
 needs broad authority and returns only visible names, never values. Unauthorized

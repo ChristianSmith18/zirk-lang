@@ -2126,8 +2126,8 @@ share class HTTPMultipartBuilder {
     private static unit(): Void { return; }
 }
 
-import { TCPError, TCPListener, TCPStream } from std.net::tcp;
-import { TLSError, TLSListener, TLSStream } from std.net::tls;
+import { TCPError, TCPListener, TCPResourceError, TCPStream } from std.net::tcp;
+import { TLSError, TLSListener, TLSResourceError, TLSStream } from std.net::tls;
 import { SecretString } from std.environment;
 
 // Shareable, project-scoped signal used to stop a listening HTTP server from
@@ -2455,7 +2455,7 @@ share class HTTPServer {
                 }
             }
         }
-        mut close_outcome = listener.close();
+        mut close_outcome: Result<Void, TCPResourceError> = listener.close();
         if failed || failure == HTTPError.Cancelled {
             return HTTPServer.serve_many_error(failure);
         }
@@ -2507,7 +2507,7 @@ share class HTTPServer {
                 }
             }
         }
-        mut close_outcome = listener.close();
+        mut close_outcome: Result<Void, TLSResourceError> = listener.close();
         if failed || failure == HTTPError.Cancelled {
             return HTTPServer.serve_many_error(failure);
         }
@@ -2735,8 +2735,8 @@ share class HTTPServer {
         max_requests: UInt64,
         handler: Fn(HTTPRequest) => HTTPResponse,
     ): Result<UInt64, HTTPError> {
-        mut outcome = HTTPServer.serve_many(listener, max_requests, handler);
-        mut close_outcome = listener.close();
+        mut outcome: Result<UInt64, HTTPError> = HTTPServer.serve_many(listener, max_requests, handler);
+        mut close_outcome: Result<Void, TCPResourceError> = listener.close();
         return match outcome {
             Error(error) => HTTPServer.serve_many_error(error);
             Ok(completed) => match close_outcome {
@@ -3139,8 +3139,8 @@ share class HTTPRouter {
     // the accepted-connection bound or the first accept/connection error.
     serve_tls_and_close(listener: TLSListener, max_requests: UInt64): Result<UInt64, HTTPError> {
         mut router: HTTPRouter = this;
-        mut outcome = this.serve_tls(listener, max_requests);
-        mut close_outcome = listener.close();
+        mut outcome: Result<UInt64, HTTPError> = this.serve_tls(listener, max_requests);
+        mut close_outcome: Result<Void, TLSResourceError> = listener.close();
         return match outcome {
             Error(error) => HTTPRouter.serve_tls_error(error);
             Ok(completed) => match close_outcome {
@@ -4290,7 +4290,7 @@ share class HTTPClient {
         mut visited: String = "\n{url.as_string()}\n";
         mut followed: Int32 = 0;
         mut finished = false;
-        mut result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
+        mut result: Result<HTTPRedirectResult, HTTPError> = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
         while ! finished {
             match this.request(current_method, current_url, current_body, current_headers) {
                 Error(error) => {
@@ -4435,9 +4435,9 @@ share class HTTPClient {
         mut visited: String = "\n{url.as_string()}\n";
         mut followed: Int32 = 0;
         mut finished = false;
-        mut result = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
+        mut result: Result<HTTPRedirectResult, HTTPError> = Error<HTTPRedirectResult, HTTPError>(HTTPError.Transport);
         while ! finished {
-            mut hop_result = HTTPClient.response_error(HTTPError.Transport);
+            mut hop_result: Result<HTTPResponse, HTTPError> = HTTPClient.response_error(HTTPError.Transport);
             if body_discarded {
                 hop_result = this.request(current_method, current_url, empty_body, current_headers);
             } else {
@@ -4637,7 +4637,7 @@ share class HTTPClient {
         }
         mut retries_used = 0;
         mut finished = false;
-        mut result = HTTPClient.response_error(HTTPError.Transport);
+        mut result: Result<HTTPResponse, HTTPError> = HTTPClient.response_error(HTTPError.Transport);
         while ! finished {
             match this.request(method, url, body, headers) {
                 Ok(response) => {
@@ -4684,7 +4684,7 @@ share class HTTPClient {
         }
         mut retries_used = 0;
         mut finished = false;
-        mut result = HTTPClient.response_error(HTTPError.Transport);
+        mut result: Result<HTTPResponse, HTTPError> = HTTPClient.response_error(HTTPError.Transport);
         while ! finished {
             match this.request_body(method, url, body) {
                 Ok(response) => {
@@ -4769,7 +4769,7 @@ share class HTTPClient {
         mut empty_body: Array<Byte> = Array(0);
         mut empty_headers = HTTPHeaders.create();
         mut finished = false;
-        mut result = HTTPClient.response_error(HTTPError.Transport);
+        mut result: Result<HTTPResponse, HTTPError> = HTTPClient.response_error(HTTPError.Transport);
         while ! finished {
             match this.request(HTTPMethod.Get, current_url, empty_body, empty_headers) {
                 Error(error) => {
@@ -5097,7 +5097,7 @@ share class HTTP {
         mut current_url = url;
         mut redirects_left = max_redirects;
         mut finished = false;
-        mut result = HTTP.response_error(HTTPError.Transport);
+        mut result: Result<HTTPResponse, HTTPError> = HTTP.response_error(HTTPError.Transport);
         while ! finished {
             match HTTP.get(current_url) {
                 Error(error) => {
@@ -5202,9 +5202,9 @@ share class HTTP {
         mut redirects_left = max_redirects;
         mut use_get = false;
         mut finished = false;
-        mut result = HTTP.response_error(HTTPError.Transport);
+        mut result: Result<HTTPResponse, HTTPError> = HTTP.response_error(HTTPError.Transport);
         while ! finished {
-            mut response_result = match use_get {
+            mut response_result: Result<HTTPResponse, HTTPError> = match use_get {
                 true => HTTP.get(current_url);
                 false => HTTP.query_with_content_type(current_url, query, content_type);
             };

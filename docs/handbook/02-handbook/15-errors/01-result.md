@@ -1,76 +1,52 @@
 # `Result`
 
-`Result<T, E>` represents either `Ok(T)` or `Error(E)` and keeps expected failure in the return type.
+`Result<T, E>` represents either `Ok(T)` or `Error(E)` and keeps expected failure in the return type. Any `E` is valid; it need not implement the throwable `Error` contract.
 
-It provides Zirk's algebraic equivalent of Go's visible `value, err` outcome:
-exactly one variant exists, so “both present” and “neither present” are
-impossible. Any `E` is valid; it need not implement the throwable `Error`
-contract.
+There are two ways to consume it. A direct `match`, or a value context explicitly typed `Result<T,E>`, retains both variants. In every other value-demanding context the compiler projects `Ok(value)` to `value` and `Error(_)` to `null`, producing `T?`. This projection intentionally discards the error payload.
 
 ```zirk
 fn load(path: String): Result<Document, LoadError> { /* ... */ }
+
+// Concise value use: inferred type is Document?.
+inmut maybe_document = load("doc.zirk");
+
+// A nullable fallback handles every Error variant.
+inmut document = load("doc.zirk") ?? Document.empty();
+
+// Preserve the typed error for inspection.
+inmut result: Result<Document, LoadError> = load("doc.zirk");
 ```
 
-Callers can see and compose the failure without hidden control transfer. Choose a specific error type that contains actionable context without exposing secrets.
+Use `match` when the caller needs to distinguish missing data, permission denial, parsing failure, or another error:
 
-> **Implementation status:** the current checker recognizes seven structural
-> methods — `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`,
-> `unwrap`, and `unwrap_error`. `get_or_else`, `map`, `map_error`, `and_then`,
-> `or_else`, and `or_throw` are normative but not yet implemented: each needs
-> its own method-level type parameter (`map<U>(transform: Fn(T) => U)`), and
-> `MethodInfo` has no such field today — only the containing class/contract/enum
-> can be generic. `get_or_else` additionally needs `Fn` as a writable parameter
-> type, which the language does not have yet.
+```zirk
+match load("doc.zirk") {
+    Ok(document) => render(document),
+    Error(error) => report(error),
+}
+```
 
-Wrong-variant unwrap is a programmer assertion and invokes `fatalError`, not a
-recoverable exception.
+Projection is equivalent to an internal `to_value_or_null()` operation, not a public method. It maps every `Error(error)` to `null`, without examining `error`, throwing, or calling `fatalError`. `??` therefore uses its fallback for every error, not only absence. A direct match or explicit Result annotation is the lossless path.
+
+Projection is available only when `T?` has a runtime representation. `Void`,
+`Decimal`, and opaque `Regex` do not currently have one, so use `match` for
+those payloads; ordinary value use is a compile-time error.
+
+A Result used as a standalone expression statement remains a compile-time error. Write `_ = operation()` only when deliberately discarding it.
 
 ## API
 
-Either `Ok(T)` or `Error(E)` — exactly one variant exists. Any `E` is valid; it
-need not implement the throwable `Error` contract.
+| Surface | Contract | Status |
+| --- | --- | --- |
+| `Ok(value)` / `Error(error)` | The two `Result<T,E>` variants | Implemented |
+| Direct `match result` | Exhaustive inspection of the original variants | Implemented |
+| Contextual value use | `Ok(T)` becomes `T`; `Error(E)` becomes `null`; result type is `T?` | Implemented |
+| `map`, `map_error`, `and_then`, `or_else`, `or_throw` | Composable transformations that preserve `Result` | Specified; implementation pending |
 
-> **Delivery caveat:** the checker recognizes seven structural methods —
-> `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`, `unwrap`,
-> `unwrap_error`. `get_or_else`, `map`, `map_error`, `and_then`, `or_else`, and
-> `or_throw` are normative but **not implemented**: each needs a method-level
-> type parameter (`map<U>(transform: Fn(T) => U)`), which `MethodInfo` cannot
-> express yet, and `get_or_else` additionally needs `Fn` as a writable
-> parameter type.
+The removed methods `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`, `get_or_else`, `unwrap`, and `unwrap_error` duplicated direct matching or contextual projection. Use `match` for inspection and ordinary value use with `??` for a fallback.
 
-### Methods
-
-| Signature | Returns | Description | Status |
-| --- | --- | --- | --- |
-| `Ok(value)` / `Error(err)` | `Result<T, E>` | Variant constructors | implemented |
-| `r.is_ok()` | `Boolean` | `true` for `Ok(T)` | implemented — a method today; the property form is specified |
-| `r.is_error()` | `Boolean` | `true` for `Error(E)` | implemented — a method today; the property form is specified |
-| `r.ok_or_null()` | `T?` | Value or `null` | implemented |
-| `r.error_or_null()` | `E?` | Error or `null` | implemented |
-| `r.get_or(fallback)` | `T` | Value or the supplied default | implemented |
-| `r.unwrap()` | `T` | Value; wrong-variant unwrap invokes `fatalError` | implemented |
-| `r.unwrap_error()` | `E` | Error; wrong-variant unwrap invokes `fatalError` | implemented |
-| `r.get_or_else(fn)` | `T` | Value or `fn(error)` result | specified |
-| `r.map<U>(transform: Fn(T) => U)` | `Result<U, E>` | Transform the `Ok` value | specified |
-| `r.map_error<F>(transform: Fn(E) => F)` | `Result<T, F>` | Transform the `Error` value | specified |
-| `r.and_then<U>(fn: Fn(T) => Result<U, E>)` | `Result<U, E>` | Chaining (flat-map) | specified |
-| `r.or_else(fn: Fn(E) => Result<T, E>)` | `Result<T, E>` | Recover from `Error` | specified |
-| `r.or_throw()` | `T` | Value, or throw the `E` as a typed exception | specified |
-
-### Examples
-
-```zirk
-fn load(path: String): Result<Document, LoadError> { /* ... */ }
-
-match load("doc.zirk") {
-    Ok(doc) => render(doc),
-    Error(e) => report(e),
-}
-
-inmut doc = load("doc.zirk").get_or(Document.empty());
-inmut maybe = load("doc.zirk").ok_or_null();   // Document?
-```
+Printing and interpolation are value contexts: a successful Result prints its value and a failed Result prints the nullable marker `<Null>`. Calling `result.to_string()` directly on a Result-typed value keeps the enum representation, such as `Ok(5)`.
 
 ---
 
-**Previous:** [← Errors](README.md) · **Next:** [ Handling Result](02-handling-result.md)
+**Previous:** [← Errors](README.md) · **Next:** [Handling Result](02-handling-result.md)

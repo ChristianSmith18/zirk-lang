@@ -6,17 +6,19 @@ import { stdout } from std.io;
 // spec scenario "View indexing stays bounds-checked").
 fn main(): Void {
     mut x: Int32 = 41;
-    mut view: NativeSlice<Int32> = unsafe {
+    unsafe {
         mut p: Pointer<Int32> = Pointer.from (x);
-        p.as_slice(1).unwrap()
-    };
-
-    try {
-        mut v: Int32 = view[5];
-        stdout.println(v.to_string());
-    } catch IndexOutOfBoundsError(e) {
-        stdout.println("bounds: " + e.message());
+        match p.as_slice(1) {
+            Ok(view) => {
+                try {
+                    mut v: Int32 = view[5];
+                    stdout.println(v.to_string());
+                } catch IndexOutOfBoundsError(e) {
+                    stdout.println("bounds: " + e.message());
+                }
+                stdout.println("done");
+            }
+            Error(_) => stdout.println("slice construction failed");
+        }
     }
-
-    stdout.println("done");
 }

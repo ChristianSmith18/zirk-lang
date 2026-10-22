@@ -319,13 +319,21 @@ Linux targets and macOS ARM64; the browser Fetch job passed. Windows passed the
 same complete suite and peer step in [run 39702042337](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39702042337)
 at `634179a`; the only code difference in `2c06c67` is the test-only
 deterministic repair, verified on Windows by [focused run 39748669844](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39748669844).
-The redundant Windows full suite in 39739088146 remains active unusually long
-and is not treated as passing evidence. These per-target results close OpenSpec
-tasks 2.8 and 4.6. The recorded macOS ARM64 release-size comparison remains
-the only final linked application size measurement; non-macOS final executable
-sizes are not measured. The companion website has been synchronized and built
-against compiler docs commit `d760edd`; the final OpenSpec close-out commit will
-advance its provenance manifest once more.
+The latest push run [39752131334](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39752131334)
+passes Linux x86_64, Linux ARM64, macOS ARM64, and browser Fetch. Its Windows
+job passes the main test suite and networking conformance, then exits with
+`WinError 5` while the public HTTP/3 WebSocket interoperability script removes
+its temporary `program.exe`. The log does not show a protocol assertion failure,
+but this run is not green; Windows HTTP/3 WebSocket remains pending a clean CI
+rerun. The previous Windows full suite and peer interoperability passed in
+run 39702042337, and the deterministic regression test passed in focused run
+39748669844. The complete per-target evidence is therefore composite across
+runs rather than one green matrix. OpenSpec tasks 2.8 and 4.6 are implemented;
+the Windows cleanup result remains an outstanding CI issue. The recorded macOS
+ARM64 release-size comparison remains the only final linked application size
+measurement; non-macOS final executable sizes are not measured. The companion
+website was synchronized and built against compiler docs commit `d760edd`; the
+final OpenSpec close-out commit advances its provenance manifest.
 
 ## Phase 7b — Functional style
 
@@ -366,6 +374,7 @@ advance its provenance manifest once more.
   5 MiB macOS ceiling. The Linux ARM64 release compiler size is separately
   recorded in the OpenSpec task evidence; the complete target size matrix is
   still open.
+- Contextual Result projection refresh (2026-10-22): `Result<T,E>` remains intact in explicit `match` and typed contexts; ordinary value use projects to `T?`, and redundant extraction APIs plus `Env.get_or`/`Env.get_or_null` are removed. On the merged tree, `cargo fmt --all -- --check`, `cargo test --locked -p zirk-sema --test typing` (647), `cargo test --locked -p zirk-ir --test lowering` (171), `cargo test --locked -p zirk-cli --test check` (45), and native LLVM/interpreter numeric parity (1) pass. Focused E2Es also pass for signed environment approval/stale-manifest denial, fail-closed access without approval, and proxy-only secret use. The runtime static archive must be rebuilt before running the approval E2E so the generated program links the current permission verifier. The full `cargo test -p zirk-cli` run remains inconclusive; Linux/Windows native Result parity remains unverified. See [ADR-024](../decisions/ADR-024-contextual-result-value-projection.md) and the active `contextual-result-value-projection` change.
 - Current hostile-input/security matrix refresh (2026-10-18): `cargo test
   --locked -p zirk-runtime -p zirk-runtime-core -- --test-threads=1` passes
   1,019 tests with 12 ignored across 28 suites on native macOS ARM64, and the

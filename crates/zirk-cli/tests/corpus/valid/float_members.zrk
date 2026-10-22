@@ -16,6 +16,6 @@ fn main(): Void {
     stdout.println((2.3f).fraction().to_string());
     stdout.println((2.0f).sqrt().to_string());
     stdout.println((2.0f).pow(3).to_string());
-    stdout.println(Float64.parse("3.14").unwrap().to_string());
+    stdout.println((Float64.parse("3.14") ?? 0.0).to_string());
     stdout.println((1.0f).clamp(0.0f, 0.5f).to_string());
 }

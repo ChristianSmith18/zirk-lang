@@ -137,9 +137,9 @@ fn main(): Void {
     stdout.println(r2);
     stdout.println(Shape.Dot);
     inmut ok: Result<Int32, String> = Result.Ok(5);
-    stdout.println(ok);
+    stdout.println(ok.to_string());
     inmut err: Result<Int32, String> = Result.Error("boom");
-    stdout.println(err);
+    stdout.println(err.to_string());
     stdout.println(Color.to_string());
 
     // Contract dispatch keeps the implementer's own method.

@@ -244,6 +244,10 @@ pub struct CheckedProgram {
     /// expressions whose IR type would otherwise be ambiguous after context-
     /// directed inference.
     pub expr_types: HashMap<Span, Type>,
+    /// Source Result types for expressions whose value context projects them
+    /// to `T?`. Lowering uses this to emit the variant test before consuming
+    /// the expression as its nullable payload type.
+    pub result_projections: HashMap<Span, Type>,
     /// `zirk check --types`: every declaration name and resolved expression
     /// the checker saw, with its rendered type and whether the type was
     /// inferred or written (`return-type-inference`, spec `zirk-check`).
@@ -1454,6 +1458,12 @@ struct Checker<'a> {
     /// The inferred type of every expression, keyed by span. Lowering reads
     /// this to emit literals and operations at the width the context chose.
     expr_types: HashMap<Span, Type>,
+    /// Result expressions whose resolved context consumes the success payload
+    /// and maps the error variant to nullable absence.
+    result_projections: HashMap<Span, Type>,
+    /// Expression spans that must remain Results while their enclosing
+    /// construct inspects variants or resolves members on the Result type.
+    preserve_result_exprs: HashSet<Span>,
     /// The compiler-known `RegexMatch` record class id, minted at startup.
     regex_match_class: u32,
     /// `ClassDecl` → class id, for classes whose registered name is not the
@@ -1753,6 +1763,8 @@ impl<'a> Checker<'a> {
             native_clone: None,
             clone_cache: HashMap::new(),
             expr_types: HashMap::new(),
+            result_projections: HashMap::new(),
+            preserve_result_exprs: HashSet::new(),
             regex_match_class: 0,
             class_decl_ids: HashMap::new(),
             local_class_names: Vec::new(),
@@ -2409,6 +2421,7 @@ impl<'a> Checker<'a> {
             tuple_base,
             externs: self.externs,
             expr_types: self.expr_types,
+            result_projections: self.result_projections,
             type_map,
             regex_match_class: self.regex_match_class,
             type_aliases: self.type_aliases,
@@ -9349,6 +9362,7 @@ impl<'a> Checker<'a> {
                 ..
             }) => self.check_match_statement(m),
             Stmt::Expr(s) => {
+                self.preserve_result_exprs.insert(s.expr.span());
                 let ty = self.check_expr(&s.expr);
                 self.require_result_consumed(ty, s.span);
                 // A `Never` result diverges the way `throw` does: nothing
@@ -11606,6 +11620,9 @@ impl<'a> Checker<'a> {
         let target_hint = self.assignment_target_type(&stmt.target);
         let saved_expected = self.expected_type;
         self.expected_type = target_hint;
+        if matches!(&stmt.target, AssignTarget::Name(name) if name.name == "_") {
+            self.preserve_result_exprs.insert(stmt.value.span());
+        }
         let value = self.check_expr(&stmt.value);
         self.expected_type = saved_expected;
 
@@ -11626,18 +11643,20 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        self.check_assign_target(&stmt.target, value, stmt.value.span());
+        self.check_assign_target(&stmt.target, value, stmt.value.span(), target_hint);
     }
 
-    /// The type a value is being assigned to, for contextual literal inference.
-    /// Only `Name` targets are resolved here; field/index targets keep their
-    /// existing behavior.
-    fn assignment_target_type(&self, target: &AssignTarget) -> Option<Type> {
+    /// The type a value is being assigned to, for contextual literal inference
+    /// and Result projection. Resolve writable fields before checking the
+    /// source expression so an explicit `Result<T,E>` field preserves both
+    /// variants instead of first projecting the source to `T?`.
+    fn assignment_target_type(&mut self, target: &AssignTarget) -> Option<Type> {
         match target {
             AssignTarget::Name(name) if name.name != "_" => self
                 .scopes
                 .resolve(&name.name)
                 .map(|resolved| resolved.binding.ty),
+            AssignTarget::Field(field) => Some(self.check_writable_field(field)),
             _ => None,
         }
     }
@@ -11650,7 +11669,13 @@ impl<'a> Checker<'a> {
     /// `Self::check_multi_assign` (design D4) — a simultaneous assignment
     /// obeys exactly the rules a single assignment already does, applied to
     /// every destination.
-    fn check_assign_target(&mut self, target: &AssignTarget, value: Type, value_span: Span) {
+    fn check_assign_target(
+        &mut self,
+        target: &AssignTarget,
+        value: Type,
+        value_span: Span,
+        target_type: Option<Type>,
+    ) {
         if let Some(scope) = value.borrowed_scope() {
             let stays_in_region = match target {
                 AssignTarget::Name(name) if name.name != "_" => {
@@ -11668,7 +11693,7 @@ impl<'a> Checker<'a> {
         let AssignTarget::Name(name) = target else {
             let target_ty = match target {
                 AssignTarget::Field(field) => {
-                    let target_ty = self.check_writable_field(field);
+                    let target_ty = target_type.unwrap_or_else(|| self.check_writable_field(field));
                     if self.reject_pointer_escape(value, value_span, "assigned to a field") {
                         return;
                     }
@@ -11845,7 +11870,8 @@ impl<'a> Checker<'a> {
         let n = stmt.targets.len().min(stmt.values.len());
         let saved_expected = self.expected_type;
         for i in 0..n {
-            self.expected_type = self.assignment_target_type(&stmt.targets[i]);
+            let target_type = self.assignment_target_type(&stmt.targets[i]);
+            self.expected_type = target_type;
             let value = self.check_expr(&stmt.values[i]);
             self.expected_type = saved_expected;
 
@@ -11857,7 +11883,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            self.check_assign_target(&stmt.targets[i], value, stmt.values[i].span());
+            self.check_assign_target(&stmt.targets[i], value, stmt.values[i].span(), target_type);
         }
 
         // Beyond the shorter list's length, only the checker's ordinary
@@ -12575,7 +12601,7 @@ impl<'a> Checker<'a> {
             Expr::Collection(e) => self.check_collection_literal(e, expected),
             Expr::Tuple(tuple) => self.check_tuple_literal(tuple, expected),
             Expr::Record(e) => self.check_record_literal(e, expected),
-            Expr::If(e) => self.check_if_expr(e),
+            Expr::If(e) => self.check_if_expr(e, expected),
             Expr::This(e) => match self.this_type {
                 Some(ty) => {
                     // `this` used inside a lambda is a capture exactly like
@@ -12611,9 +12637,9 @@ impl<'a> Checker<'a> {
             Expr::Field(e) => self.check_field(e),
             Expr::Index(e) => self.check_index(e).1,
             Expr::Slice(e) => self.check_slice(e),
-            Expr::Ternary(e) => self.check_ternary(e),
+            Expr::Ternary(e) => self.check_ternary(e, expected),
             Expr::Increment(e) => self.check_increment(e),
-            Expr::Match(e) => self.check_match(e, true),
+            Expr::Match(e) => self.check_match(e, true, expected),
             Expr::Lambda(e) => self.check_lambda(e),
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
@@ -12654,7 +12680,7 @@ impl<'a> Checker<'a> {
         // their lexical borrow ends at that read. Reference and aggregate
         // projections retain the region and continue through the escape
         // checks below.
-        let ty = if ty.borrowed_scope().is_some() && is_borrowed_scalar_value(ty) {
+        let mut ty = if ty.borrowed_scope().is_some() && is_borrowed_scalar_value(ty) {
             without_borrowed_scope(ty)
         } else {
             ty
@@ -12709,8 +12735,74 @@ impl<'a> Checker<'a> {
                 return Type::UNKNOWN;
             }
         }
+        let raw_ty = ty;
+        let explicitly_expects_result =
+            expected.is_some_and(|expected| self.result_type_arguments(expected).is_some());
+        if !self.preserve_result_exprs.contains(&expr.span())
+            && !explicitly_expects_result
+            && let Some((value_ty, _)) = self.result_type_arguments(raw_ty)
+        {
+            if !self.result_projection_supported(value_ty) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span(),
+                    format!(
+                        "`Result<{}, E>` cannot be projected to a nullable value",
+                        self.name(value_ty)
+                    ),
+                    "this payload type has no runtime representation for `T?`",
+                    Some("use `match` to handle both Result variants explicitly".into()),
+                );
+                ty = Type::UNKNOWN;
+            } else {
+                self.result_projections.insert(expr.span(), raw_ty);
+                ty = value_ty.as_nullable();
+            }
+        }
+
         self.expr_types.insert(expr.span(), ty);
         ty
+    }
+
+    /// Returns `Result<T,E>`'s resolved payload types for the compiler-native
+    /// enum, including a constructed generic instance.
+    fn result_type_arguments(&self, ty: Type) -> Option<(Type, Type)> {
+        if ty.nullable {
+            return None;
+        }
+        let Base::EnumInstance(instance) = ty.base else {
+            return None;
+        };
+        let instance = self.enum_instances.get(instance as usize)?;
+        (Some(instance.enum_id) == self.native_result).then(|| (instance.args[0], instance.args[1]))
+    }
+
+    /// Types with a runtime nullable representation can participate in the
+    /// implicit Result projection. Keep this in sync with `zirk_ir::Nullable`;
+    /// unsupported payloads require explicit matching instead of panicking in
+    /// lowering.
+    fn result_projection_supported(&self, ty: Type) -> bool {
+        matches!(
+            ty.base,
+            Base::Int(_)
+                | Base::Float(_)
+                | Base::Char
+                | Base::Boolean
+                | Base::String
+                | Base::Duration
+                | Base::Date
+                | Base::Time
+                | Base::DateTime
+                | Base::Enum(_)
+                | Base::Atomic(_)
+                | Base::Contract(_)
+                | Base::Class(_)
+                | Base::Instance(_)
+                | Base::ContractInstance(_)
+                | Base::EnumInstance(_)
+                | Base::Array(_)
+                | Base::List(_)
+        )
     }
 
     /// `"text {expr} text"` (roadmap Phase 3b).
@@ -14516,22 +14608,37 @@ impl<'a> Checker<'a> {
     }
 
     /// `if` used where a value is expected. Decision D7.
-    fn check_if_expr(&mut self, stmt: &IfStmt) -> Type {
+    fn preserve_block_value_result(&mut self, block: &Block) {
+        if let Some(Stmt::Expr(tail)) = block.statements.last() {
+            self.preserve_result_exprs.insert(tail.expr.span());
+        }
+    }
+
+    fn check_if_expr(&mut self, stmt: &IfStmt, expected: Option<Type>) -> Type {
         let condition = self.check_expr(&stmt.condition);
         self.expect_boolean(condition, stmt.condition.span(), "the condition of an `if`");
 
         let incoming = self.scopes.move_snapshot();
+        self.preserve_block_value_result(&stmt.then_branch);
+        let saved_expected = self.expected_type;
+        self.expected_type = expected.filter(|ty| self.result_type_arguments(*ty).is_some());
         let then_type = self.check_block_value(&stmt.then_branch);
+        self.expected_type = saved_expected;
         let then_moves = self.scopes.move_snapshot();
         self.scopes.restore_moves(&incoming);
 
         let (else_type, else_moves) = match &stmt.else_branch {
             Some(ElseBranch::Block(b)) => {
+                self.preserve_block_value_result(b);
+                let saved_expected = self.expected_type;
+                self.expected_type =
+                    expected.filter(|ty| self.result_type_arguments(*ty).is_some());
                 let ty = self.check_block_value(b);
+                self.expected_type = saved_expected;
                 (ty, self.scopes.move_snapshot())
             }
             Some(ElseBranch::If(nested)) => {
-                let ty = self.check_if_expr(nested);
+                let ty = self.check_if_expr(nested, expected);
                 (ty, self.scopes.move_snapshot())
             }
             None => {
@@ -14571,7 +14678,7 @@ impl<'a> Checker<'a> {
     /// The same rules as the `if` expression — Boolean condition, branches that
     /// agree on a type — with wording that names the ternary, because that is
     /// what the author wrote.
-    fn check_ternary(&mut self, expr: &TernaryExpr) -> Type {
+    fn check_ternary(&mut self, expr: &TernaryExpr, _expected: Option<Type>) -> Type {
         let condition = self.check_expr(&expr.condition);
         self.expect_boolean(
             condition,
@@ -14580,6 +14687,8 @@ impl<'a> Checker<'a> {
         );
 
         let incoming = self.scopes.move_snapshot();
+        self.preserve_result_exprs.insert(expr.when_true.span());
+        self.preserve_result_exprs.insert(expr.when_false.span());
         let when_true = self.check_expr(&expr.when_true);
         let true_moves = self.scopes.move_snapshot();
         self.scopes.restore_moves(&incoming);
@@ -14668,7 +14777,7 @@ impl<'a> Checker<'a> {
             // The parser builds `if` as a statement wherever it appears, so a
             // block ending in one is a block ending in an expression: which it
             // is depends on the position, not on the shape.
-            Stmt::If(nested) => self.check_if_expr(nested),
+            Stmt::If(nested) => self.check_if_expr(nested, None),
             Stmt::Unsafe(nested) => self.check_unsafe_expr(nested),
             Stmt::Commit(nested) => self.check_commit_expr(nested),
             other => {
@@ -14719,7 +14828,7 @@ impl<'a> Checker<'a> {
 
     /// Checks a `match` used as a statement, reporting whether it returns.
     fn check_match_statement(&mut self, expr: &MatchExpr) -> bool {
-        self.check_match(expr, false);
+        self.check_match(expr, false, None);
 
         // Only an exhaustive match can guarantee anything: with a case left
         // uncovered, execution can fall past it.
@@ -14826,6 +14935,7 @@ impl<'a> Checker<'a> {
         let mut first_error = true;
 
         for acquisition in &expr.acquisitions {
+            self.preserve_result_exprs.insert(acquisition.expr.span());
             let scrutinee = self.check_expr(&acquisition.expr);
             self.check_resource_match_scrutinee(&acquisition.binding, scrutinee);
 
@@ -14915,11 +15025,12 @@ impl<'a> Checker<'a> {
         Type::VOID
     }
 
-    fn check_match(&mut self, expr: &MatchExpr, as_value: bool) -> Type {
+    fn check_match(&mut self, expr: &MatchExpr, as_value: bool, expected: Option<Type>) -> Type {
         if !expr.acquisitions.is_empty() {
             return self.check_grouped_match(expr, as_value);
         }
 
+        self.preserve_result_exprs.insert(expr.scrutinee.span());
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
         let incoming_moves = self.scopes.move_snapshot();
@@ -14978,8 +15089,33 @@ impl<'a> Checker<'a> {
             }
 
             let ty = match &arm.body {
-                ArmBody::Expr(e) => self.check_expr(e),
-                ArmBody::Block(b) if as_value => self.check_block_value(b),
+                ArmBody::Expr(e) => {
+                    // A value-producing match first joins its arm values, then
+                    // the match expression itself is projected if its caller
+                    // demands `T?`. Preserve an arm Result so it is not lost
+                    // before that join can happen.
+                    self.preserve_result_exprs.insert(e.span());
+                    // Seed Result-typed matches into their value arms before
+                    // variant constructors are checked. Otherwise `Ok(...)`
+                    // arms project independently before the outer return.
+                    let saved_expected = self.expected_type;
+                    self.expected_type =
+                        expected.filter(|ty| self.result_type_arguments(*ty).is_some());
+                    let ty = self.check_expr(e);
+                    self.expected_type = saved_expected;
+                    ty
+                }
+                ArmBody::Block(b) if as_value => {
+                    if let Some(Stmt::Expr(tail)) = b.statements.last() {
+                        self.preserve_result_exprs.insert(tail.expr.span());
+                    }
+                    let saved_expected = self.expected_type;
+                    self.expected_type =
+                        expected.filter(|ty| self.result_type_arguments(*ty).is_some());
+                    let ty = self.check_block_value(b);
+                    self.expected_type = saved_expected;
+                    ty
+                }
                 ArmBody::Block(b) => {
                     self.check_block(b);
                     Type::VOID
@@ -15845,6 +15981,7 @@ impl<'a> Checker<'a> {
             return member_ty;
         }
 
+        self.preserve_result_exprs.insert(expr.object.span());
         let object = self.check_expr(&expr.object);
 
         // `collection.parallel` (design D2/D3 of `parallel-cpu-regions`):
@@ -17360,7 +17497,10 @@ impl<'a> Checker<'a> {
 
         match &*expr.body {
             LambdaBody::Expr(e) => {
+                let saved_expected = self.expected_type;
+                self.expected_type = Some(returns);
                 let actual = self.check_expr(e);
+                self.expected_type = saved_expected;
                 self.expect_assignable(returns, actual, e.span(), "the lambda body");
             }
             LambdaBody::Block(b) => {
@@ -19013,58 +19153,43 @@ impl<'a> Checker<'a> {
             span,
             "a `Result` must be handled",
             "an operation that can fail must be matched or checked, not silently dropped",
-            Some("use `match`, one of its methods (`is_ok`, `get_or`, …), or `_ = expr;` to discard it deliberately".into()),
+            Some("use `match` to inspect the outcome, consume it in a value context, or use `_ = expr;` to discard it deliberately".into()),
         );
     }
 
-    /// `Result<T,E>`'s seven in-scope methods (`fase-4a-errores/proposal.md`
-    /// — `get_or_else` and the four generic combinators need machinery this
-    /// phase does not build). `t`/`e` are the receiver's own resolved type
-    /// arguments. `None` when `field` does not name one of them, so the
-    /// call falls through to the ordinary unknown-method error the way any
-    /// other unrecognized field access on the receiver would.
-    ///
-    /// Building a throwaway [`Signature`] and handing it to
-    /// [`Self::check_direct_call`] reuses the same argument-matching,
-    /// naming, and arity diagnostics an ordinary function call gets, rather
-    /// than duplicating that logic by hand for eight names.
+    /// Gives removed Result extraction helpers a targeted migration
+    /// diagnostic rather than a generic missing-member error.
     fn check_result_method_call(
         &mut self,
         expr: &CallExpr,
         field: &FieldExpr,
-        t: Type,
-        e: Type,
+        _t: Type,
+        _e: Type,
     ) -> Option<Type> {
-        let (params, returns): (Vec<(&str, Type)>, Type) = match field.name.name.as_str() {
-            "is_ok" | "is_error" => (Vec::new(), Type::BOOLEAN),
-            "ok_or_null" => (Vec::new(), t.as_nullable()),
-            "error_or_null" => (Vec::new(), e.as_nullable()),
-            "unwrap" => (Vec::new(), t),
-            "unwrap_error" => (Vec::new(), e),
-            "get_or" => (vec![("default_value", t)], t),
-            _ => return None,
-        };
-
-        let signature = Signature {
-            name: field.name.name.clone(),
-            params: params
-                .into_iter()
-                .map(|(name, ty)| ParamInfo {
-                    name: name.to_string(),
-                    ty,
-                    optional: false,
-                    has_default: false,
-                    default: None,
-                    variadic: false,
-                })
-                .collect(),
-            returns,
-            shared: true,
-            span: field.name.span,
-            type_params: Vec::new(),
-            throws: Vec::new(),
-        };
-        Some(self.check_direct_call(expr, &signature))
+        if !matches!(
+            field.name.name.as_str(),
+            "is_ok"
+                | "is_error"
+                | "ok_or_null"
+                | "error_or_null"
+                | "get_or"
+                | "get_or_else"
+                | "unwrap"
+                | "unwrap_error"
+        ) {
+            return None;
+        }
+        self.error(
+            codes::TYPE_MISMATCH,
+            field.name.span,
+            format!("`Result.{}` is no longer available", field.name.name),
+            "Result values are inspected with `match` or projected to `T?` by a value context",
+            Some("use direct `match` to inspect both variants, or use the Result expression as a nullable value".into()),
+        );
+        for arg in &expr.args {
+            self.check_expr(&arg.value);
+        }
+        Some(Type::UNKNOWN)
     }
 
     /// A `Pointer<T>` operation requiring `unsafe` used outside one (design
@@ -21448,6 +21573,12 @@ impl<'a> Checker<'a> {
 
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        if let Expr::Field(field) = &*expr.callee {
+            // Member calls inspect the receiver's declared type to resolve
+            // the member. Keep a Result receiver intact; only the resulting
+            // call expression is eligible for contextual projection.
+            self.preserve_result_exprs.insert(field.object.span());
+        }
         if let Expr::Field(field) = &*expr.callee
             && field.name.name == "ready"
             && !field.safe
@@ -23869,8 +24000,6 @@ impl<'a> Checker<'a> {
         mut seed: HashMap<u32, Type>,
     ) -> (Type, HashMap<u32, Type>) {
         let name = signature.name.clone();
-        let slots = self.match_arguments(expr, signature);
-
         if !expr.type_args.is_empty() {
             if signature.type_params.is_empty() {
                 self.error(
@@ -23898,6 +24027,11 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // Resolve every context that is already explicit before checking the
+        // arguments. In particular, an `Ok<T>(value)` constructor seeded by
+        // an expected `Result<Result<U,E>, F>` must preserve its `Result<U,E>`
+        // payload instead of projecting it before generic inference begins.
+        let slots = self.match_arguments(expr, signature, &seed);
         let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed);
         if !signature.type_params.is_empty() {
             self.generic_call_substitutions.insert(
@@ -24437,7 +24571,43 @@ impl<'a> Checker<'a> {
     /// Named arguments match by name, the rest by position, and what is left
     /// over goes to the variadic. Decision D4: this happens here so the IR only
     /// ever sees a call of fixed arity.
-    fn match_arguments(&mut self, expr: &CallExpr, signature: &Signature) -> Vec<ArgSlot> {
+    fn call_parameter_expects_result(
+        &mut self,
+        expr: &CallExpr,
+        signature: &Signature,
+        parameter_index: usize,
+        context_substitution: &HashMap<u32, Type>,
+    ) -> bool {
+        let Some(parameter) = signature.params.get(parameter_index) else {
+            return false;
+        };
+        let contextual_type = self.substitute(parameter.ty, context_substitution);
+        if self.result_type_arguments(contextual_type).is_some() {
+            return true;
+        }
+        let Base::Param(parameter_id) = parameter.ty.base else {
+            return false;
+        };
+        let Some(type_arg_index) = signature
+            .type_params
+            .iter()
+            .position(|id| *id == parameter_id)
+        else {
+            return false;
+        };
+        let Some(type_arg) = expr.type_args.get(type_arg_index) else {
+            return false;
+        };
+        let resolved = self.resolve_type(type_arg);
+        self.result_type_arguments(resolved).is_some()
+    }
+
+    fn match_arguments(
+        &mut self,
+        expr: &CallExpr,
+        signature: &Signature,
+        context_substitution: &HashMap<u32, Type>,
+    ) -> Vec<ArgSlot> {
         let mut slots: Vec<ArgSlot> = signature
             .params
             .iter()
@@ -24465,20 +24635,22 @@ impl<'a> Checker<'a> {
             // not the exact `Float` a context-free literal defaults to).
             // Only a fully concrete numeric hint is used — a generic
             // parameter's own inference must not be steered by it.
-            let hint = match &arg.name {
-                Some(name) => signature
-                    .params
-                    .iter()
-                    .find(|p| p.name == name.name)
-                    .map(|p| p.ty),
+            let parameter_index = match &arg.name {
+                Some(name) => signature.params.iter().position(|p| p.name == name.name),
                 None => {
                     let mut pos = next_position;
                     while pos < slots.len() && matches!(slots[pos], ArgSlot::Given { .. }) {
                         pos += 1;
                     }
-                    slots.get(pos).and(signature.params.get(pos)).map(|p| p.ty)
+                    signature.params.get(pos).map(|_| pos)
                 }
             };
+            let hint = parameter_index.and_then(|index| {
+                signature
+                    .params
+                    .get(index)
+                    .map(|parameter| self.substitute(parameter.ty, context_substitution))
+            });
             // Only a bare numeric literal (or its negation) should be steered
             // by the parameter type — anything else keeps its own type and is
             // checked against the parameter afterward.
@@ -24493,6 +24665,11 @@ impl<'a> Checker<'a> {
                 arg_is_numeric_literal
                     && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
             });
+            if parameter_index.is_some_and(|index| {
+                self.call_parameter_expects_result(expr, signature, index, context_substitution)
+            }) {
+                self.preserve_result_exprs.insert(arg.value.span());
+            }
             let ty = self.check_expr(&arg.value);
 
             if arg.is_spread {

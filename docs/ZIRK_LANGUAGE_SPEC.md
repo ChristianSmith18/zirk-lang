@@ -551,11 +551,14 @@ controlled typed errors.
 
 `Result<T,E>` is `Ok(T) | Error(E)` and is the primary mechanism for expected
 failure, analogous to Go's visible value/error outcome without an invalid
-two-value state. It must be consumed through exhaustive `match` or a Result
-method. Ignoring it is a compile error; `_ = operation()` is explicit discard.
-There is no `?` and no implicit conversion to or from an exception. Result
-combinators preserve a callback's declared exception effect; wrong-variant
-`unwrap` invokes `fatalError`.
+two-value state. A direct `match` or a value context explicitly typed
+`Result<T,E>` preserves the complete result. Every other value-demanding
+context projects `Ok(value)` to `value` and `Error(_)` to `null`, yielding
+`T?`; this intentionally loses the error payload. Use direct `match` or an
+explicit `Result<T,E>` binding when the error detail is needed. A Result used as
+a standalone expression statement is still a compile error; `_ = operation()`
+is explicit discard. There is no `?` and no implicit conversion to or from an
+exception. Result combinators preserve a callback's declared exception effect.
 
 Explicit extraordinary exceptions are checked and must be caught or declared
 with `throws`. Declared sets participate in `Fn` compatibility. Compiler-known

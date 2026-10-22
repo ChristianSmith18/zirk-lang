@@ -40,7 +40,7 @@ fn main(): Void {
     stdout.println(Decimal(0.5f).to_string());
 
     // Parse returns a Result.
-    stdout.println(Decimal.parse("3.14").unwrap().to_string());
+    match Decimal.parse("3.14") { Ok(value) => stdout.println(value.to_string()); Error(_) => stdout.println("parse failed"); }
 
     // Scientific literal is exact.
     stdout.println((6.25e-2 == 0.0625).to_string());

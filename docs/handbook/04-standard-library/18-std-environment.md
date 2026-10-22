@@ -35,44 +35,51 @@ secret values remain redacted.
 
 ```zirk
 import { Env } from std.environment;
+import { stdout } from std.io;
 
-match Env.get("APP_MODE") {
+inmut mode = Env.get("APP_MODE"); // String?; Error becomes null
+stdout.println(mode ?? "development");
+```
+
+The retrieval method always returns a typed Result. Direct matching preserves
+the error; ordinary value use projects it to a nullable value:
+
+```zirk
+inmut result: Result<String, EnvironmentError> = Env.get("APP_MODE");
+match result {
     Ok(mode) => stdout.println(mode);
     Error(error) => stderr.println(error);
 }
 ```
 
-Every public read preserves permission failure:
-
-```zirk
-Env.get(name)             // Result<String, EnvironmentError>
-Env.get_or_null(name)     // Result<String?, EnvironmentError>
-Env.get_or<T>(name, value) // Result<T, EnvironmentError>; T defaults to String
-Env.require(name)         // Result<String, EnvironmentError>
-Env.contains(name)        // Result<Boolean, EnvironmentError>
-Env.list_names()          // Result<List<String>, EnvironmentError>
-Env.get_secret(name)      // Result<SecretString, SecretError>
-```
+| API | Type |
+| --- | --- |
+| `Env.get(name)` | `Result<String, EnvironmentError>` |
+| `Env.get<T>(name)` | `Result<T, EnvironmentError>`; `T` defaults to `String` |
+| `Env.require(name)` | `Result<String, EnvironmentError>` |
+| `Env.contains(name)` | `Result<Boolean, EnvironmentError>` |
+| `Env.list_names()` | `Result<List<String>, EnvironmentError>` |
+| `Env.get_secret(name)` | `Result<SecretString, SecretError>` |
 
 `get` and `require` both demand a present value and currently return the same
 `EnvironmentError` outcomes; `require` is an explicit spelling for mandatory
-application settings. `get_or_null` returns a nullable string only for an
-authorized but absent variable. `get_or<T>` returns its typed fallback only
-when the authorized name is absent. For a present value it uses the same
-`EnvironmentParsable<T>` parser as `get<T>`; malformed input returns
-`EnvironmentError.Parse`. Neither absence form hides permission, decoding, or
-platform failure.
+application settings. `Env.get_or_null` and `Env.get_or` were removed because
+ordinary projection and `??` express those value-use policies. Remember that
+`??` uses the fallback for every `Error`, not only authorized absence.
 
 ```zirk
-match Env.get_or("LOG_LEVEL", "info") {
+match Env.get("LOG_LEVEL") {
     Ok(level) => configure_logging(level);
     Error(error) => report_configuration_error(error);
 }
 
-match Env.get_or<Int32>("WORKER_COUNT", 4) {
+match Env.get<Int32>("WORKER_COUNT") {
     Ok(count) => configure_workers(count);
     Error(error) => report_configuration_error(error);
 }
+
+mut worker_count = Env.get<Int32>("WORKER_COUNT") ?? 4;
+stdout.println(worker_count);
 ```
 
 ## Typed values
@@ -83,8 +90,8 @@ Generic reads use the ordinary parsing contract of the requested type:
 mut port = Env.get<Int32>("PORT");
 mut timeout = Env.get<Float64>("TIMEOUT_SECONDS");
 mut label = Env.get("APP_LABEL"); // T defaults to String
-mut workers = Env.get<Int32>("WORKERS");
-mut workers_with_default = Env.get_or<Int32>("WORKERS", 4);
+mut workers: Int32? = Env.get<Int32>("WORKERS");
+mut workers_with_default = Env.get<Int32>("WORKERS") ?? 4;
 ```
 
 The target result distinguishes:
@@ -114,9 +121,9 @@ class Port implements EnvironmentParsable<Port> {
 mut port = Env.get<Port>("PORT");
 ```
 
-A parser failure maps to `EnvironmentError.Parse`; `get_or` applies its
-fallback only to authorized absence. Permission denial, decoding, and platform
-errors retain their own outcomes.
+A parser failure maps to `EnvironmentError.Parse`. Direct matching retains
+`Parse`, permission denial, decoding, and platform errors. Projection maps any
+of these errors to `null`; a following `??` therefore defaults on all errors.
 Built-in string, numeric, decimal, and temporal parsers use compiler-owned
 intrinsics and satisfy the same constraint. The named `get_int32` and
 `get_float64` methods remain explicit convenience wrappers.

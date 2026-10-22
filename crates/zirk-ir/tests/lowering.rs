@@ -3241,10 +3241,10 @@ fn continue_inside_unsafe_emits_journal_rollback() {
 fn as_slice_construction_lowers_to_a_validation_call_producing_a_result() {
     let source = "fn main(): Void {
         mut x: Int32 = 1;
-        mut view: NativeSlice<Int32> = unsafe {
+        unsafe {
             mut p: Pointer<Int32> = Pointer.from(x);
-            p.as_slice(1).unwrap()
-        };
+            match p.as_slice(1) { Ok(view) => { _ = view; } Error(_) => { } }
+        }
     }";
     let module = compile(source);
     let main = module.function("main").expect("main exists");
@@ -3357,11 +3357,13 @@ fn unsafe_string_index_write_records_the_backing_edge() {
 fn index_read_lowers_to_a_bounds_check_then_a_load() {
     let source = "fn main(): Void {
         mut x: Int32 = 1;
-        mut view: NativeSlice<Int32> = unsafe {
+        unsafe {
             mut p: Pointer<Int32> = Pointer.from(x);
-            p.as_slice(1).unwrap()
-        };
-        mut v: Int32 = view[0];
+            match p.as_slice(1) {
+                Ok(view) => { mut v: Int32 = view[0]; _ = v; }
+                Error(_) => { }
+            }
+        }
     }";
     let module = compile(source);
     let main = module.function("main").expect("main exists");
@@ -3391,11 +3393,13 @@ fn index_read_lowers_to_a_bounds_check_then_a_load() {
 fn index_write_lowers_to_a_bounds_check_then_a_store() {
     let source = "fn main(): Void {
         mut x: Int32 = 1;
-        mut view: NativeSliceMut<Int32> = unsafe {
+        unsafe {
             mut p: Pointer<Int32> = Pointer.from(x);
-            p.as_slice_mut(1).unwrap()
-        };
-        view[0] = 42;
+            match p.as_slice_mut(1) {
+                Ok(view) => { view[0] = 42; }
+                Error(_) => { }
+            }
+        }
     }";
     let module = compile(source);
     let main = module.function("main").expect("main exists");
@@ -3427,10 +3431,10 @@ fn index_write_lowers_to_a_bounds_check_then_a_store() {
 fn a_native_slice_slot_is_never_a_gc_root() {
     let source = "fn main(): Void {
         mut x: Int32 = 1;
-        mut view: NativeSlice<Int32> = unsafe {
+        unsafe {
             mut p: Pointer<Int32> = Pointer.from(x);
-            p.as_slice(1).unwrap()
-        };
+            match p.as_slice(1) { Ok(view) => { _ = view; } Error(_) => { } }
+        }
     }";
     let module = compile(source);
     let main = module.function("main").expect("main exists");
@@ -3763,7 +3767,7 @@ fn enums_helpers_lower_like_the_direct_members() {
 fn from_name_lowers_to_a_comparison_chain_producing_a_result() {
     let module = compile(
         "enum Direction { North, South }
-         fn main(): Void { mut r = Direction.from_name(\"North\"); }",
+         fn main(): Void { mut r: Result<Direction, LookupError> = Direction.from_name(\"North\"); }",
     );
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
@@ -3799,7 +3803,7 @@ fn from_name_lowers_to_a_comparison_chain_producing_a_result() {
 fn from_value_compares_against_the_mapping() {
     let module = compile(
         "enum ExitCode { Success -> 0, Failure -> 1 }
-         fn main(): Void { mut r = ExitCode.from_value(1); }",
+         fn main(): Void { mut r: Result<ExitCode, LookupError> = ExitCode.from_value(1); }",
     );
     let main = module.function("main").expect("main exists");
     let comparisons = instructions(main)

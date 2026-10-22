@@ -12,7 +12,7 @@ manifest-as-consent descriptions are historical when they conflict here.
 
 | Channel | Meaning | Visible contract | Handling |
 |---|---|---|---|
-| `Result<T,E>` | expected operational failure | return type | mandatory |
+| `Result<T,E>` | expected operational failure | explicit Result context, or `T?` in an ordinary value context | direct `match` for detail; contextual projection when detail is unnecessary |
 | `throws X` | extraordinary recoverable failure | declared exception effect | catch or propagate |
 | `RuntimeError` | implicit safe-runtime failure | compiler-known operation metadata | optionally catch |
 | `fatalError` | irreparable state | `Never` | cannot recover |
@@ -29,31 +29,30 @@ enum Result<T, E> {
 ```
 
 `Result` is Zirk's algebraic equivalent of Go's explicit `value, err` outcome,
-without permitting invalid “both” or “neither” states. A result is handled by
-exhaustive `match` or a method. Ignoring it is a compile-time error; deliberate
-discard is `_ = operation()` and may receive a linter warning without a
-justifying comment.
+without permitting invalid “both” or “neither” states. A direct `match` or a
+value context explicitly typed `Result<T,E>` preserves both variants. In every
+other value-demanding context, `Ok(value)` projects to `value` and `Error(_)`
+projects to `null`, producing `T?`. This projection intentionally discards the
+error payload. Code that needs the typed failure uses direct `match` or stores
+the result in a binding explicitly typed `Result<T,E>`. A Result used as a
+standalone expression statement is still a compile-time error; deliberate
+discard is `_ = operation()`.
 
 ```zirk
-is_ok(): Boolean
-is_error(): Boolean
-ok_or_null(): T?
-error_or_null(): E?
-get_or(default_value: T): T
-get_or_else(factory: Fn() => T): T
 map<U>(transform: Fn(T) => U): Result<U,E>
 map_error<F>(transform: Fn(E) => F): Result<T,F>
 and_then<U>(transform: Fn(T) => Result<U,E>): Result<U,E>
 or_else<F>(transform: Fn(E) => Result<T,F>): Result<T,F>
-unwrap(): T
-unwrap_error(): E
 or_throw<X from Throwable>(transform: Fn(E) => X): T throws X
 ```
 
-`unwrap` on the wrong variant invokes `fatalError` with the source location,
-found variant, safe value representation, and handling guidance. If a callback
-passed to a combinator declares `throws X`, that effect propagates normally;
-the combinator does not turn it into `Error`.
+The removed status, extraction, fallback, and unwrap methods are replaced by
+direct `match` or contextual projection followed by `??`. `Env.get<T>(name)`
+projects every `Error`, including permission denial, parse failure, and host
+failure, to `null` when used as a value. Use direct `match` whenever those
+outcomes must remain distinguishable. If a callback passed to a combinator
+declares `throws X`, that effect propagates normally; the combinator does not
+turn it into `Error`.
 
 ## 3. Errors and exceptions
 
@@ -234,16 +233,15 @@ Environment
 Env // exact preferred alias
 
 Env.get(name): Result<String,EnvironmentError>
-Env.get_or_null(name): Result<String?,EnvironmentError>
-Env.get_or(name, fallback): Result<String,EnvironmentError>
 Env.require(name): Result<String,EnvironmentError>
 Env.get_secret(name): Result<SecretString,SecretError>
 Env.contains(name): Result<Boolean,EnvironmentError>
 Env.list_names(): Result<List<String>,EnvironmentError>
 ```
 
-Every environment operation returns `Result` so absence or a fallback cannot
-hide permission, encoding, or platform failure. `Env.list_names` requires broad
+Every environment operation returns `Result` so explicit inspection can
+distinguish absence, permission, encoding, and platform failure. Ordinary value
+use of a Result may project any failure to `null`; `Env.list_names` requires broad
 environment-read authority. Environment writes are excluded initially. A
 dynamic target outside the effective grant returns the privileged operation's
 typed `PermissionDeniedError`; deployed programs never prompt or modify their

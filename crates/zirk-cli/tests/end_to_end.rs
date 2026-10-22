@@ -1872,14 +1872,16 @@ fn environment_api_is_bundled_and_fails_closed_without_runtime_approval() {
                      Ok(_) => stdout.println(\"unexpected\");\n\
                      Error(_) => stdout.println(\"denied\");\n\
                  }\n\
-                 match Env.get_or(\"ZIRK_TEST_VALUE\", \"fallback\") {\n\
+                 match Env.get(\"ZIRK_TEST_VALUE\") {\n\
                      Ok(_) => stdout.println(\"unexpected fallback\");\n\
                      Error(_) => stdout.println(\"fallback denied\");\n\
                  }\n\
-                 match Env.get_or_null(\"ZIRK_TEST_VALUE\") {\n\
+                 match Env.get(\"ZIRK_TEST_VALUE\") {\n\
                      Ok(_) => stdout.println(\"unexpected null fallback\");\n\
                      Error(_) => stdout.println(\"null fallback denied\");\n\
                  }\n\
+                 stdout.println(Env.get(\"ZIRK_TEST_VALUE\"));\n\
+                 stdout.println(Env.get(\"ZIRK_TEST_VALUE\") ?? \"fallback\");\n\
                  match Env.require(\"ZIRK_TEST_VALUE\") {\n\
                      Ok(_) => stdout.println(\"unexpected required value\");\n\
                      Error(_) => stdout.println(\"require denied\");\n\
@@ -1906,7 +1908,7 @@ fn environment_api_is_bundled_and_fails_closed_without_runtime_approval() {
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(
         normalize(&output.stdout),
-        "denied\nfallback denied\nnull fallback denied\nrequire denied\ncontainment denied\nlisting denied\nsecret denied\n<redacted>\n[<redacted>]\n{1: <redacted>}\n<redacted>\nsecret=<redacted>\n"
+        "denied\nfallback denied\nnull fallback denied\n<Null>\nfallback\nrequire denied\ncontainment denied\nlisting denied\nsecret denied\n<redacted>\n[<redacted>]\n{1: <redacted>}\n<redacted>\nsecret=<redacted>\n"
     );
 }
 
@@ -1994,14 +1996,14 @@ fn raise_secret(value: SecretString): Void throws SecretFailure {
 fn main(): Void throws SecretFailure {
     match Env.get("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("denied"); }
     match Env.get("APPROVAL_NESTED_PACKAGE_VALUE") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_or("APPROVAL_FIXTURE_VALUE", "wrong fallback") { Ok(value) => stdout.println(value); Error(_) => stdout.println("present fallback denied"); }
+    match Env.get("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("present fallback denied"); }
     match Env.require("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("require denied"); }
-    match Env.get_or("APPROVAL_FIXTURE_MISSING", "fallback") { Ok(value) => stdout.println(value); Error(_) => stdout.println("fallback denied"); }
-    match Env.get_or<Int32>("APPROVAL_FIXTURE_MISSING", 7) { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_or<Int32>("APPROVAL_FIXTURE_INT", 99) { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_or<Int32>("APPROVAL_FIXTURE_BAD_INT", 99) { Ok(_) => stdout.println("unexpected typed fallback parse"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_or<Port>("APPROVAL_FIXTURE_MISSING", Port("custom-fallback")) { Ok(port) => stdout.println(port.value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_or_null("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value ?? "null"); Error(_) => stdout.println("null denied"); }
+    match Env.get("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("fallback denied"); }
+    match Env.get<Int32>("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
+    match Env.get<Int32>("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
+    match Env.get<Int32>("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected typed fallback parse"); Error(error) => stdout.println(error.to_string()); }
+    match Env.get<Port>("APPROVAL_FIXTURE_MISSING") { Ok(port) => stdout.println(port.value); Error(error) => stdout.println(error.to_string()); }
+    match Env.get("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("null denied"); }
     match Env.contains("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("contains denied"); }
     match Env.contains("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("contains denied"); }
     match Env.list_names() {
@@ -2030,7 +2032,7 @@ fn main(): Void throws SecretFailure {
             stdout.println(value);
             stdout.println("secret={value}");
             try { raise_secret(value); } catch SecretFailure(error) { stderr.println(error.message()); }
-            match Env.get_or("APPROVAL_FIXTURE_UNCAUGHT", "") {
+            match Env.get("APPROVAL_FIXTURE_UNCAUGHT") {
                 Ok(flag) => { if flag == "yes" { raise_secret(value); } }
                 Error(_) => { }
             }
@@ -2139,9 +2141,9 @@ fn main(): Void throws SecretFailure {
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
         if cfg!(unix) {
-            "approved\nnested-package-approved\napproved\napproved\nfallback\n7\n42\nParse\ncustom-fallback\nnull\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nInvalidEncoding\nInvalidEncoding\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
+            "approved\nnested-package-approved\napproved\napproved\nfallback denied\nMissing\n42\nParse\nMissing\nnull denied\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nInvalidEncoding\nInvalidEncoding\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
         } else {
-            "approved\nnested-package-approved\napproved\napproved\nfallback\n7\n42\nParse\ncustom-fallback\nnull\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nvalid-on-this-platform\ntrue\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
+            "approved\nnested-package-approved\napproved\napproved\nfallback denied\nMissing\n42\nParse\nMissing\nnull denied\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nvalid-on-this-platform\ntrue\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
         },
         "stderr: {}",
         String::from_utf8_lossy(&run.stderr)
