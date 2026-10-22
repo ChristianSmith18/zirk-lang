@@ -228,8 +228,10 @@ view materialization reads produce deep independent values and require `Clone`
 where necessary. A projection used as a mutation place writes original storage.
 
 Index access is bounds-checked and accepts negative positions for ordered
-families. Direct absence raises a typed controlled error; `get` returns a typed
-`Result`, while `get_or_null` deliberately collapses absence with nullability.
+families. Direct absence raises a typed controlled error; collection `get`
+returns a typed `Result`, while collection `get_or_null` deliberately collapses
+absence with nullability. These collection APIs are independent of the
+contextual projection of `Result<T, E>` values throughout the language.
 Slices use direction-sensitive Python-style omitted defaults, reject explicit
 out-of-range bounds, deep-copy results and require equal-length replacement.
 List resizing uses explicit add/insert/remove/splice APIs; Array never resizes.

@@ -13,10 +13,10 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | collections | `length`, `is_empty` | access, mutation, cloning, iteration, type-specific search/update operations, `to_string()` | [Collections](../02-handbook/12-collections/README.md) |
 | callable values | — | invocation, `clone()` (specified), `to_string()`; identity via `is` | [Function Types](../02-handbook/07-functions/12-function-types-and-callable-values.md) |
 | `Regex` | `pattern` (specified) | `matches()`, `find()`, `find_all()`, `replace()`, `split()`; `parse()` for dynamic patterns; `Regex.Match` exposes `group()`/`start`/`end`/`text` | [`Regex`](../02-handbook/03-everyday-types/12-regex.md) |
-| `Result<T,E>` | variant state | inspection, nullable extraction, fallback, map/chaining, unwrap, `or_throw` | [Result](../02-handbook/15-errors/01-result.md) |
+| `Result<T,E>` | variant state | direct `match`; `map`, `map_error`, `and_then`, `or_else`, `or_throw` | [Result](../02-handbook/15-errors/01-result.md) |
 | `Throwable` | immutable identity | `message()`, `code()`, `cause()`, `suppressed()`, `stack_trace()` | [Exceptions](../02-handbook/15-errors/04-exceptions.md) |
 | `Resource<E>` | `is_closed()` | `close()`; type-specific transfer/duplicate operations | [Resources](../02-handbook/16-resources/README.md) |
-| `Environment` / `Env` | — | static typed `get<T>`/`get_or<T>`, required/nullable/secret reads, containment and listing | [`std.environment`](../04-standard-library/18-std-environment.md) |
+| `Environment` / `Env` | — | static typed `get<T>`, required/secret reads, containment and listing | [`std.environment`](../04-standard-library/18-std-environment.md) |
 | `Weak<T>` | `is_alive` | static `from()`, `upgrade()`, `to_string()` | [Safe References](../02-handbook/17-memory-and-safety/04-safe-references.md) |
 | `Pointer<T>` | `is_null` | `read()`, `write()`, `offset()`, `offset_bytes()`, `cast<T>()`, volatile access | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |
 | native slices | `length`, `is_empty` | bounds-checked indexing/iteration; mutable writes for `NativeSliceMut<T>` | [Pointers](../02-handbook/17-memory-and-safety/05-pointers.md) |

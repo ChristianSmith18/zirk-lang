@@ -31,13 +31,18 @@ operation explicitly returns that enum, such as `ReadResult<T>` or
 ### Requirement: Privileged APIs preserve denial explicitly
 Filesystem, network, process, environment, system, and secret APIs SHALL retain
 permission, decoding, platform, and cancellation failures in their declared
-typed outcome. Nullable/default convenience operations SHALL NOT hide denial
-or host failure.
+typed `Result<T,E>` outcome. If a caller consumes that result in an ordinary
+value context, contextual Result projection SHALL map every `Error(E)` to
+`null`; this loss of detail SHALL be documented. The standard library SHALL
+NOT add nullable/default helpers that duplicate projection and `??`. Callers
+that need to distinguish denial or host failure SHALL directly match or
+preserve an explicitly typed Result.
 
-#### Scenario: Environment fallback lacks authority
-- **WHEN** `Env.get_or(name, fallback)` has no matching grant
-- **THEN** it returns `Error(EnvironmentPermissionError)` rather than the
-  fallback
+#### Scenario: Environment projection uses a fallback
+- **WHEN** `Env.get<Int32>(name) ?? fallback` receives any `Error`
+- **THEN** it evaluates to `fallback`
+- **AND** a direct match is required to distinguish permission denial from
+  absence or another host failure
 
 ### Requirement: String write by index
 

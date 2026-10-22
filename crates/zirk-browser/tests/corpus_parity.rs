@@ -88,8 +88,11 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("concurrent_task_capacity_ceiling", "structured concurrency"),
     ("dependent_local_only", "type Dependent"),
     ("extern_call", "`unsafe` journal blocks"),
-    ("native_slice_basic", "type NativeSliceMut"),
-    ("native_slice_bounds_error_caught", "type NativeSlice"),
+    ("native_slice_basic", "`unsafe` journal blocks"),
+    (
+        "native_slice_bounds_error_caught",
+        "`unsafe` journal blocks",
+    ),
     ("mutex_with_exception_unlock", "type Mutex"),
     ("mutex_with_mutates_payload", "type Mutex"),
     ("mutex_with_nested_record", "type Mutex"),

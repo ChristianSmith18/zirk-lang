@@ -19,7 +19,7 @@
 
 ## 4. Standard Library Migration
 
-- [ ] 4.1 Remove `Env.get_or_null` and `Env.get_or`, retain `Env.get<T>(name): Result<T, EnvironmentError>`, and migrate standard-library callers; verify absent, parse-failed, denied, and host-failure outcomes remain distinguishable by explicit matching.
+- [x] 4.1 Remove `Env.get_or_null` and `Env.get_or`, retain `Env.get<T>(name): Result<T, EnvironmentError>`, and migrate standard-library callers; verify absent, parse-failed, denied, and host-failure outcomes remain distinguishable by explicit matching.
 - [x] 4.2 Audit the complete Result API and remove the specified inspection/extraction/fallback/unwrap helpers while retaining Result composition operations; verify no exported declaration or compiler intrinsic still exposes removed helpers.
 - [x] 4.3 Audit other standard-library methods and keep unrelated nullable collection lookups and APIs whose contracts are not Result extraction; verify the public API inventory matches the implementation.
 
@@ -27,7 +27,9 @@
 
 - [x] 5.1 Add compiler conformance coverage for direct matching, explicit Result annotations, inferred nullable bindings, parameter/return/attribute contexts, generic inference, coalescing, nested Results, permission-denial projection, method-removal diagnostics, and standalone discard; verify with the relevant crate and integration test commands.
 - [x] 5.2 Audit feature status, current limitations, implementation-pipeline and roadmap documents after target verification; verify each claim names only behavior demonstrated by tests and supported runtime paths.
-- [ ] 5.3 Run focused sema, IR, interpreter/browser, native, standard-library, formatter, and full CI checks affected by the implementation; record exact commands and distinguish passing checks from unverified targets.
+- [x] 5.3 Run focused sema, IR, interpreter/browser, native, standard-library, formatter, and full CI checks affected by the implementation; record exact commands and distinguish passing checks from unverified targets.
+
+  Evidence on native macOS ARM64: `cargo fmt --all -- --check`; `cargo test --locked -p zirk-sema --test typing` (647 passed); `cargo test --locked -p zirk-ir --test lowering` (171 passed); `cargo test --locked -p zirk-cli --test check` (45 passed); `cargo test --locked -p zirk-browser --test corpus_parity native_corpus_runs_in_the_browser_or_is_explicitly_excluded -- --exact --test-threads=1` (1 passed); `cargo test --locked -p zirk-cli --test numeric_engine_parity -- --test-threads=1` (1 passed); focused environment approval and fail-closed E2Es (2 passed); all five migrated HTTP/TCP/Result E2Es (5 passed); and `cargo test --locked --workspace -- --test-threads=1` (2,852 passed, 16 ignored across 75 suites). Linux and Windows native Result parity remain unverified.
 
 ## 6. Public Website Synchronization
 

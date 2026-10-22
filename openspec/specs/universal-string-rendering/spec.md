@@ -8,7 +8,7 @@ Owns the render table for every Zirk value and the shared `to_string()` contract
 
 ### Requirement: Universal `to_string()` contract
 
-Every value-producing type SHALL answer `to_string(): String`, through a compiler default or a declared method. Only `Void` and `Never` have no text form. `print`, `println`, and interpolation SHALL accept every other type and route through this conversion.
+Every value-producing type SHALL answer `to_string(): String`, through a compiler default or a declared method. Only `Void` and `Never` have no text form. `print`, `println`, and interpolation SHALL accept every other type and route through this conversion. When a Result expression is consumed by printing or interpolation, it SHALL first use contextual Result projection; an `Ok(value)` renders the value and an `Error(_)` renders the nullable absence marker. An explicitly invoked `to_string()` on a receiver statically typed as `Result<T,E>` SHALL retain the Result variant representation.
 
 #### Scenario: Collection prints without declaration
 
@@ -20,9 +20,24 @@ Every value-producing type SHALL answer `to_string(): String`, through a compile
 - **WHEN** `Void` or `Never` is printed, converted, or interpolated
 - **THEN** a diagnostic states that it has no text form
 
+#### Scenario: Result success prints its value
+
+- **WHEN** `println(Env.get("APP_MODE"))` receives `Ok("production")`
+- **THEN** it prints `production`
+
+#### Scenario: Result failure prints nullable absence
+
+- **WHEN** `println(Env.get("APP_MODE"))` receives `Error(permission_error)`
+- **THEN** it prints the established null marker `<Null>` without rendering or exposing the error payload
+
+#### Scenario: Explicit Result stringification preserves the variant
+
+- **WHEN** `inmut result: Result<Int32, E> = Ok(5); result.to_string()` is invoked
+- **THEN** it renders `Ok(5)`
+
 ### Requirement: Scalar and temporal renderings
 
-Integers render base ten, except `IntN.to_string(radix: n)` which uses lowercase sign-magnitude base 2–36. Decimal and binary floats render decimal text, Boolean renders `true`/`false`, Char its grapheme, and String itself. Duration renders a normalized largest unit, Date/Time/DateTime use their ISO forms.
+Integers SHALL render in base ten, except `IntN.to_string(radix: n)` which uses lowercase sign-magnitude base 2–36. Decimal and binary floats SHALL render decimal text, Boolean SHALL render `true`/`false`, Char SHALL render its grapheme, and String SHALL render itself. Duration SHALL render a normalized largest unit; Date/Time/DateTime SHALL use their ISO forms.
 
 #### Scenario: Integer radix
 
@@ -32,6 +47,11 @@ Integers render base ten, except `IntN.to_string(radix: n)` which uses lowercase
 ### Requirement: Sequence rendering
 
 Array and List SHALL render recursively as `[e0, e1, …]`, with `, ` separators and `[]` when empty; string elements are unquoted.
+
+#### Scenario: Sequence renders its items in order
+
+- **WHEN** a `List<Int32>` containing `[1, 2, 3]` is converted to text
+- **THEN** it renders as `[1, 2, 3]`
 
 ### Requirement: Deterministic `Map` and `Set` rendering
 
@@ -62,7 +82,7 @@ A nullable receiver SHALL support direct `to_string()`: a present value renders 
 
 ### Requirement: Structured, enum, callable, and handle rendering
 
-Records, classes, and tuples use readable structural forms and surface names, stripping `$local$N` while keeping `Outer.Inner` and excluding synthesized `outer` fields. Payload enum cases render `Variant(field: v)`; Result renders `Ok(5)` and `Error(boom)`. Named functions render `<Function name>`, anonymous functions `<Function>`. Job, Channel, Pointer, NativeSlice, NativeSliceMut, Dependent, Pin, and Weak use `<TypeName>` forms. Regex renders `re'pattern'`.
+Records, classes, and tuples SHALL use readable structural forms and surface names, stripping `$local$N` while keeping `Outer.Inner` and excluding synthesized `outer` fields. Payload enum cases SHALL render `Variant(field: v)`; Result SHALL render `Ok(5)` and `Error(boom)`. Named functions SHALL render `<Function name>`, anonymous functions `<Function>`. Job, Channel, Pointer, NativeSlice, NativeSliceMut, Dependent, Pin, and Weak SHALL use `<TypeName>` forms. Regex SHALL render `re'pattern'`.
 
 #### Scenario: Contract dispatch
 

@@ -15,9 +15,10 @@ Filesystem, network, process, environment, system, and secret APIs SHALL retain 
 - **WHEN** `Env.get<Int32>("PORT") ?? 8080` receives any `Error`
 - **THEN** the expression evaluates to `8080`
 
-#### Scenario: Environment fallback lacks authority
-- **WHEN** a caller directly matches a denied `Env.get(name)` result and has a fallback value available
-- **THEN** the match exposes `EnvironmentPermissionError` rather than selecting the fallback
+#### Scenario: Environment projection uses a fallback
+- **WHEN** `Env.get<Int32>(name) ?? fallback` receives any `Error`
+- **THEN** it evaluates to `fallback`
+- **AND** a direct match is required to distinguish permission denial from absence or another host failure
 
 #### Scenario: Removed environment fallback helper is rejected
 - **WHEN** source calls `Env.get_or(name, fallback)` or `Env.get_or_null(name)`

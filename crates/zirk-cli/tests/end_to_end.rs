@@ -1418,7 +1418,10 @@ class Parser {
 }
 fn main(): Void {
     mut result: Result<Int32, String> = Parser.wrap<Int32>(42);
-    stdout.println(result.unwrap());
+    match result {
+        Ok(value) => stdout.println(value);
+        Error(error) => stdout.println(error);
+    }
 }"#,
         )],
     );
@@ -5099,8 +5102,8 @@ fn main(): Void {{
                     Error(_) => stdout.println("second URL failed");
                     Ok(second_url) => {{
                         concurrent {{
-                            inmut first = send(client, first_url);
-                            inmut second = send(client, second_url);
+                            inmut first: Result<HTTPResponse, HTTPError> = send(client, first_url);
+                            inmut second: Result<HTTPResponse, HTTPError> = send(client, second_url);
                         }}
                         match first {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}
                         match second {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}
@@ -5790,8 +5793,8 @@ fn main(): Void {{
                 Error(_) => stdout.println("URL parse failed");
                 Ok(url) => {{
                     concurrent {{
-                        inmut first = send(client, url);
-                        inmut second = send(client, url);
+                        inmut first: Result<HTTPResponse, HTTPError> = send(client, url);
+                        inmut second: Result<HTTPResponse, HTTPError> = send(client, url);
                     }}
                     match first {{ Error(error) => stdout.println(error.to_string()); Ok(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); }} }}
                     match second {{ Error(error) => stdout.println(error.to_string()); Ok(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); }} }}
@@ -9302,8 +9305,7 @@ fn bundled_std_net_tcp_stream_runs_an_approved_loopback_exchange() {
                              TCPReadResult.End => stdout.println(\"empty read treated as EOF\");\n\
                              TCPReadResult.Error(_) => stdout.println(\"empty read failed\");\n\
                          }}\n\
-                         mut sent = stream.write_all(payload);\n\
-                         _ = sent;\n\
+                         match stream.write_all(payload) {{ Ok(_) => {{ }} Error(_) => stdout.println(\"write failed\"); }}\n\
                          match stream.read(4 as UInt64) {{\n\
                              TCPReadResult.Value(_) => stdout.println(\"read\");\n\
                              TCPReadResult.End => stdout.println(\"end\");\n\
@@ -9689,8 +9691,7 @@ fn bundled_std_net_tcp_listener_accepts_only_with_listen_authority() {
                          match listener.accept() with stream {{\n\
                              Ok(stream) => {{\n\
                                  mut payload = [0x70 as UInt8, 0x69 as UInt8, 0x6e as UInt8, 0x67 as UInt8];\n\
-                                 mut sent = stream.write_all(payload);\n\
-                                 _ = sent;\n\
+                                 match stream.write_all(payload) {{ Ok(_) => {{ }} Error(_) => stdout.println(\"write failed\"); }}\n\
                                  stdout.println(\"accepted\");\n\
                              }}\n\
                              Error(_) => stdout.println(\"accept failed\");\n\

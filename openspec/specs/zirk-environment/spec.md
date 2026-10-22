@@ -8,7 +8,7 @@ Defines permission-checked, read-only access to the process environment, with ty
 
 ### Requirement: Environment access is available as a bundled Zirk package
 
-`std.environment` SHALL publish `Environment` and its exact preferred alias `Env` with `get`, `get_or_null`, `get_or`, `require`, `contains`, `list_names`, and `get_secret`. The API SHALL read the current process environment and SHALL NOT mutate it.
+`std.environment` SHALL publish `Environment` and its exact preferred alias `Env` with `get`, `require`, `contains`, `list_names`, and `get_secret`. `get<T>(name)` SHALL be the single environment-value retrieval operation and SHALL return `Result<T, EnvironmentError>`. Ordinary value contexts may apply contextual Result projection to produce `T?`; callers that need error details SHALL directly match the result or store it in an explicitly typed `Result<T, EnvironmentError>`. The API SHALL read the current process environment and SHALL NOT mutate it.
 
 #### Scenario: Import and read a configured value
 - **WHEN** an application imports `Env` and reads an authorized environment variable
@@ -20,23 +20,25 @@ Defines permission-checked, read-only access to the process environment, with ty
 
 ### Requirement: Environment operations require exact effective permission
 
-Every environment read, containment query, name listing, and secret read SHALL validate the application's effective runtime grant before inspecting host state. Libraries SHALL declare requirements but SHALL NOT grant authority. The application approval flow SHALL collect requirements from the application's complete locked dependency graph and request explicit consent for their union with application-declared scopes. Dependency manifests and lockfiles SHALL be included in the approval fingerprint so changing a transitive requirement invalidates prior consent. Unauthorized lookup SHALL NOT reveal whether a name exists, and permission failure SHALL remain an `Error` even for fallback and nullable operations.
+Every environment read, containment query, name listing, and secret read SHALL validate the application's effective runtime grant before inspecting host state. Libraries SHALL declare requirements but SHALL NOT grant authority. The application approval flow SHALL collect requirements from the application's complete locked dependency graph and request explicit consent for their union with application-declared scopes. Dependency manifests and lockfiles SHALL be included in the approval fingerprint so changing a transitive requirement invalidates prior consent. Unauthorized lookup SHALL NOT reveal whether a name exists. Permission failure SHALL remain an `Error` in the declared `get` result; if a caller chooses ordinary value projection, any error becomes `null` and loses its detail, as specified by the language contract.
 
 #### Scenario: A variable is not authorized
-- **WHEN** code calls `Env.get`, `Env.contains`, `Env.get_or`, or `Env.get_or_null` without matching authority
+- **WHEN** code calls `Env.get`, `Env.contains`, `Env.require`, `Env.list_names`, or `Env.get_secret` without matching authority
 - **THEN** the operation returns a typed permission error regardless of whether the variable exists
 
-#### Scenario: A fallback is requested without authority
-- **WHEN** code calls `Env.get_or(name, fallback)` without permission for `name`
-- **THEN** the operation returns permission denial and does not return the fallback as if access were allowed
+#### Scenario: Ordinary projection loses permission detail
+- **WHEN** an unauthorized `Env.get(name)` result is consumed in an ordinary value context
+- **THEN** the projected value is `null`
+- **AND** a direct match or explicit `Result<T, EnvironmentError>` annotation is required to inspect permission denial
 
 ### Requirement: Absence and typed parsing remain distinct
 
-`get` and `require` SHALL distinguish an authorized but absent value from permission, platform, and decoding failures. `get_or_null` and `get_or` SHALL apply nullable/fallback behavior only to authorized absence. Typed getters SHALL use an explicit compile-time-constrained parsing contract and return a typed parse error for malformed values; they SHALL NOT use reflection or guess constructors.
+`get` and `require` SHALL distinguish an authorized but absent value from permission, platform, and decoding failures. Typed `get<T>` SHALL use an explicit compile-time-constrained parsing contract and return a typed parse error for malformed values; it SHALL NOT use reflection or guess constructors. Nullable projection and `??` apply to every `Error` uniformly, not only authorized absence.
 
 #### Scenario: Authorized value is absent
 - **WHEN** an authorized name is absent
-- **THEN** `get` and `require` return their documented missing-value errors, `get_or_null` returns `Ok(null)`, and `get_or` returns `Ok(fallback)`
+- **THEN** `get` and `require` return their documented missing-value errors
+- **AND** ordinary value use of `get` projects to `null`, while `match` preserves the missing-value error
 
 #### Scenario: Typed value has invalid content
 - **WHEN** an authorized present value cannot be parsed as the requested type
