@@ -355,7 +355,9 @@ The trust-root overload accepts explicit DER roots and an opt-in TLS 1.2 flag.
 TLS 1.3 while sending the caller's ordered ALPN identifiers.
 `TLSStream.connect_with_options(endpoint, roots_der, allow_tls12, protocols)`
 combines those settings; an empty roots array selects system roots. After the
-handshake, `stream.negotiated_alpn()` returns the selected protocol or `null`.
+handshake, `stream.negotiated_alpn()` returns
+`Result<TLSNegotiatedALPN, TLSError>`; `TLSNegotiatedALPN` distinguishes
+`Negotiated(protocol)` from `NotNegotiated`.
 The runtime accepts
 at most 16 unique printable ASCII identifiers, each at most 255 bytes, with a
 1 KiB aggregate limit; invalid lists fail before socket creation. Certificate
@@ -371,9 +373,11 @@ certificate_chain_der, private_key_der, client_roots_der, allow_tls12)` requires
 an explicit non-empty DER trust-root list and rejects clients that do not
 present a valid certificate chain. On an authenticated stream,
 `peer_certificate_sha256()` returns the lowercase SHA-256 fingerprint of the
-validated peer leaf certificate, or `null` when no peer certificate is
-available for that TLS role. Session resumption and TLS key logging are not
-part of the current preview.
+validated peer leaf certificate through
+`TLSPeerCertificateFingerprint.Sha256(value)`, or reports
+`TLSPeerCertificateFingerprint.Unavailable` when no peer certificate is
+available for that TLS role. Both methods retain TLS failures in `Error`.
+Session resumption and TLS key logging are not part of the current preview.
 
 The TLS stream preserves backpressure, cancellation, and resource ownership. A
 failed or canceled handshake closes resources it owns. When an existing TCP

@@ -247,6 +247,17 @@ native backend is delivered.
 | `std.net` | partial | partial | partial | partial | partial | partial | The baseline feature delivers bundled IP/address values, bounded DNS, TCP streams/listeners, and authenticated TLS client/server APIs with exact grants, peer identity validation, cancellation, and owner-task cleanup. The `complete-stdlib-networking-and-http` change adds bounded UDP, local IPC, interface snapshots, configurable TLS, and controlled shutdown. Focused native conformance passes on all targets in run 39739088146; full per-target suite evidence passes across runs 39739088146 and 39702042337, with the changed Windows regression test also passing in 39748669844. Browser socket APIs remain excluded and the overall standard library is still partial. See [the network handbook](../handbook/04-standard-library/11-std-net.md). |
 | `std.http` | partial | partial | partial | partial | partial | partial | The baseline includes HTTP/1.1 and TLS HTTP/2 clients/servers, QUERY (RFC 10008), bounded bodies and streaming, redirects, cookies, caching, retries, proxies, routing/middleware, SSE, and HTTP/1.1 plus HTTP/2 WebSocket paths. The `complete-stdlib-networking-and-http` change adds optional native HTTP/3/QUIC client and server paths, RFC 9220 WebSocket, validated server options, and shareable controlled shutdown across TCP/TLS/HTTP/3. Full workspace and independent-peer interoperability evidence covers macOS ARM64 and both Linux targets in run 39739088146 and Windows x86_64 in run 39702042337; the current Windows regression-test change passes focused run 39748669844. Browser Fetch passes; browser listeners and sockets are excluded. The overall standard library is still partial. See [the HTTP handbook](../handbook/04-standard-library/12-std-http.md). |
 
+### Result and nullable standard-library outcome consistency (working tree, 2026-10-22)
+
+The active OpenSpec change `unify-result-nullable-collection-access` makes
+Array/List/Map `get` the single safe lookup and represents HTTP/TLS successful
+absence with non-null outcome enums. Compiler sema and IR crates pass
+`cargo check`; compiled CLI `check` and `build` accept typed Result lookups,
+nullable projection, the new HTTP/TLS signatures, and their outcome enums.
+Runtime behavior and the existing
+workspace suite have not been verified for this change. See
+[ADR-025](../decisions/ADR-025-unified-result-and-nullable-stdlib-outcomes.md).
+
 ## Native standard-library target verification (2026-10-20)
 
 GitHub Actions run [39359107965](https://github.com/ChristianSmith18/zirk-lang/actions/runs/39359107965), on compiler revision `b28daa73379a527159c9c303509632bd3ecf413a` (runtime/test revision `73a8bbccbf878b85f6b093de4e279cc033d73d22`), passes the full serial workspace suite on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64. Each target passes 155/155 compiled-Zirk CLI E2E tests. `zirk-runtime` passes 498 tests with 3 ignored and `zirk-runtime-core` passes 164 with 1 ignored on macOS and both Linux targets; Windows passes 500/3 ignored and 165/1 ignored, respectively. Generic response-producer backpressure fixtures pass for HTTP/1.1 and HTTP/2 on Unix and HTTP/2 on Windows; the Windows HTTP/1.1 socket-buffer fixture remains Unix-gated.

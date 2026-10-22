@@ -58,7 +58,7 @@ Every collection `length` member SHALL return a non-negative integer type that p
 - **THEN** they declare `length` with a consistent signedness across all four families
 
 ### Requirement: Indexing and safe access
-String, Tuple, Array, and List SHALL accept normalized negative indexes. Direct missing index/key access SHALL produce a typed controlled exception; safe `get` SHALL return typed Result and `get_or_null` MAY deliberately collapse absence with nullable value.
+String, Tuple, Array, and List SHALL accept normalized negative indexes. Direct missing index/key access SHALL produce a typed controlled exception. Safe `get` on Array/List SHALL return `Result<T, IndexOutOfBoundsError>` and on Map SHALL return `Result<V, LookupError>`; these SHALL be the sole safe lookup APIs. Nullable value contexts MAY project the Result to its value or null, while explicit Result contexts and `match` preserve the typed lookup error. `get_or_null` SHALL NOT be exposed.
 
 #### Scenario: Dynamic heterogeneous tuple index
 - **WHEN** a nonconstant variable indexes a heterogeneous Tuple

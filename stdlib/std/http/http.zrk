@@ -13,6 +13,18 @@ share enum HTTPMethod {
     Query,
 }
 
+// A successful stream poll always has a non-null value; End is explicit.
+share enum HTTPEventPoll {
+    Event(value: HTTPEvent),
+    End,
+}
+
+// RFC 10008 QUERY responses may identify an indirect result with 303.
+share enum HTTPIndirectResult {
+    Direct,
+    Redirect(url: URL),
+}
+
 share enum HTTPHeaderError {
     InvalidName,
     InvalidValue,
@@ -842,17 +854,17 @@ share class HTTPResponse {
     }
 
     // RFC 10008 uses 303 See Other to identify a GET-able indirect result.
-    // Returns null for direct responses; malformed/missing/ambiguous Location
-    // metadata is a protocol error. Following the returned URL is explicit.
-    indirect_result_url(base: URL): Result<URL?, HTTPError> {
-        if this.status_code_value != 303 { return HTTPResponse.indirect_url_ok(null); }
+    // Identifies a direct response or an explicit 303 result URL. Following
+    // the returned URL remains the caller's decision.
+    indirect_result_url(base: URL): Result<HTTPIndirectResult, HTTPError> {
+        if this.status_code_value != 303 { return HTTPResponse.indirect_direct(); }
         return match this.header_values("location") {
             Ok(values) => {
                 if values.length != 1 {
                     HTTPResponse.indirect_url_error(HTTPError.Protocol)
                 } else {
                     match URL.resolve(base, values[0]) {
-                        Ok(url) => HTTPResponse.indirect_url_ok(url);
+                        Ok(url) => HTTPResponse.indirect_redirect(url);
                         Error(error) => HTTPResponse.indirect_url_error(error);
                     }
                 }
@@ -861,10 +873,15 @@ share class HTTPResponse {
         };
     }
 
-    private static indirect_url_ok(value: URL?): Result<URL?, HTTPError> { return Ok(value); }
-    private static indirect_url_error(error: HTTPError): Result<URL?, HTTPError> { return Error(
-            error,
-        ); }
+    private static indirect_direct(): Result<HTTPIndirectResult, HTTPError> {
+        return Ok(HTTPIndirectResult.Direct);
+    }
+    private static indirect_redirect(url: URL): Result<HTTPIndirectResult, HTTPError> {
+        return Ok(HTTPIndirectResult.Redirect(url));
+    }
+    private static indirect_url_error(error: HTTPError): Result<HTTPIndirectResult, HTTPError> {
+        return Error(error);
+    }
 
     private static header_values_native(
         headers: Array<Byte>,
@@ -1176,7 +1193,14 @@ share class HTTPEventStream {
         };
     }
 
-    next_event(): Result<HTTPEvent?, HTTPError> {
+    next_event(): Result<HTTPEventPoll, HTTPError> {
+        return match this.next_event_nullable() {
+            Error(error) => HTTPEventStream.poll_error(error);
+            Ok(event) => HTTPEventStream.poll_nullable(event);
+        };
+    }
+
+    private next_event_nullable(): Result<HTTPEvent?, HTTPError> {
         if this.ended { return HTTPEventStream.event_ok(null); }
         while true {
             match this.response.read_sse_event_fields() {
@@ -1320,6 +1344,22 @@ share class HTTPEventStream {
 
     private static event_error(error: HTTPError): Result<HTTPEvent?, HTTPError> {
         return Error(error);
+    }
+
+    private static poll_event(value: HTTPEvent): Result<HTTPEventPoll, HTTPError> {
+        return Ok(HTTPEventPoll.Event(value));
+    }
+    private static poll_end(): Result<HTTPEventPoll, HTTPError> {
+        return Ok(HTTPEventPoll.End);
+    }
+    private static poll_error(error: HTTPError): Result<HTTPEventPoll, HTTPError> {
+        return Error(error);
+    }
+    private static poll_nullable(value: HTTPEvent?): Result<HTTPEventPoll, HTTPError> {
+        return match value {
+            null => HTTPEventStream.poll_end();
+            event => HTTPEventStream.poll_event(event);
+        };
     }
 
     private static reconnect_ok(value: Boolean): Result<Boolean, HTTPError> { return Ok(value); }

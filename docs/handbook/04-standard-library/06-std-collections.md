@@ -43,8 +43,8 @@ shared mutation uses synchronization or channels.
 ## Access and mutation
 
 Ordered collections accept negative indices and perform checked access. Direct
-absence raises a typed runtime error; `get` returns `Result`, and `get_or_null`
-deliberately collapses absence with nullability. Slices use
+absence raises a typed runtime error; `get` returns `Result`, and nullable
+value contexts project that same result to the value or null. Slices use
 `[start:end:step]`, Python-style omitted defaults, strict explicit bounds and
 equal-length replacement.
 

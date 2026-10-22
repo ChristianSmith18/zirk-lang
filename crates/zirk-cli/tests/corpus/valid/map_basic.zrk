@@ -7,9 +7,9 @@ fn main(): Void {
     stdout.println(m.length.to_string());
     stdout.println(m.contains_key(1).to_string());
     stdout.println(m.contains_key(3).to_string());
-    inmut a: Int32 = m.get_or_null(1) ?? 0;
+    inmut a: Int32 = m.get(1) ?? 0;
     stdout.println(a.to_string());
-    inmut b: Int32 = m.get_or_null(3) ?? 0;
+    inmut b: Int32 = m.get(3) ?? 0;
     stdout.println(b.to_string());
     stdout.println(m.remove(1).to_string());
     stdout.println(m.length.to_string());

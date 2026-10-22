@@ -3638,7 +3638,7 @@ fn map_and_set_methods_lower_to_dedicated_instructions() {
         "mut m: Map<String, Int32> = Map();\n\
          m.set(\"k\", 1);\n\
          mut b = m.contains_key(\"k\");\n\
-         mut v: Int32? = m.get_or_null(\"k\");\n\
+         mut v: Int32? = m.get(\"k\");\n\
          mut s: Set<String> = Set();\n\
          s.add(\"x\");\n\
          mut c = s.contains(\"x\");\n\

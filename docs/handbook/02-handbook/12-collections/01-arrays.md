@@ -168,10 +168,9 @@ removed. A managed reference: assignment aliases, `clone()` separates.
 | `Array(e0, e1, …)` / `[e0, e1, …]` | `Array<T>` | Literal construction; infers fixed length | implemented |
 | `Array(n)` | `Array<T>` | `n` default-initialized elements; `T` comes from the binding annotation | implemented |
 | `a[i]` | `T` | Checked indexing | implemented — negative-from-end indices resolve as `length + index` |
+| `a.get(i)` | `Result<T, IndexOutOfBoundsError>` (or `T?` in nullable value context) | Safe lookup; preserve or project absence | implemented |
 | `a[i] = v` | `Void` | Checked element replacement | implemented |
 | `a[start:end:step]` | `Array<T>` | Copying slice (safe code) | implemented |
-| `a.get(i)` | `Result<T, BoundsError>` | Checked access reporting absence | specified |
-| `a.get_or_null(i)` | `T?` | Access collapsing absence to `null` | specified |
 | `a.fill(value)` | `Void` | Overwrite every element | specified |
 | `a.copy_from(source)` | `Void` | Equal-length bulk copy | specified |
 | `a.contains(value)` | `Boolean` | Membership (`T from Equatable`) | specified |

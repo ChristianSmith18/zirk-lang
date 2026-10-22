@@ -27,6 +27,16 @@ share enum TLSReadResult<T> {
     Error(error: TLSError),
 }
 
+share enum TLSNegotiatedALPN {
+    NotNegotiated,
+    Negotiated(protocol: String),
+}
+
+share enum TLSPeerCertificateFingerprint {
+    Unavailable,
+    Sha256(value: String),
+}
+
 share class TLSResourceError implements Error {
     private inmut reason: TLSError;
 
@@ -136,14 +146,20 @@ share class TLSStream implements Resource<TLSResourceError> {
         return TLSStream.peer_address_native(this.handle);
     }
 
-    negotiated_alpn(): Result<String?, TLSError> {
-        return TLSStream.negotiated_alpn_native(this.handle);
+    negotiated_alpn(): Result<TLSNegotiatedALPN, TLSError> {
+        return match TLSStream.negotiated_alpn_native(this.handle) {
+            Error(error) => TLSStream.alpn_error(error);
+            Ok(protocol) => TLSStream.alpn_from_nullable(protocol);
+        };
     }
 
     // Returns the SHA-256 fingerprint of the authenticated peer certificate,
-    // or null when the TLS role has no peer certificate metadata.
-    peer_certificate_sha256(): Result<String?, TLSError> {
-        return TLSStream.peer_certificate_sha256_native(this.handle);
+    // or Unavailable when the TLS role has no peer certificate metadata.
+    peer_certificate_sha256(): Result<TLSPeerCertificateFingerprint, TLSError> {
+        return match TLSStream.peer_certificate_sha256_native(this.handle) {
+            Error(error) => TLSStream.fingerprint_error(error);
+            Ok(value) => TLSStream.fingerprint_from_nullable(value);
+        };
     }
 
     private static connect_native(endpoint: String): Result<UInt64, TLSError> {
@@ -206,6 +222,37 @@ share class TLSStream implements Resource<TLSResourceError> {
 
     private static peer_certificate_sha256_native(handle: UInt64): Result<String?, TLSError> {
         return Error(TLSError.Closed);
+    }
+
+    private static alpn_not_negotiated(): Result<TLSNegotiatedALPN, TLSError> {
+        return Ok(TLSNegotiatedALPN.NotNegotiated);
+    }
+    private static alpn_negotiated(protocol: String): Result<TLSNegotiatedALPN, TLSError> {
+        return Ok(TLSNegotiatedALPN.Negotiated(protocol));
+    }
+    private static alpn_error(error: TLSError): Result<TLSNegotiatedALPN, TLSError> {
+        return Error(error);
+    }
+    private static alpn_from_nullable(value: String?): Result<TLSNegotiatedALPN, TLSError> {
+        return match value {
+            null => TLSStream.alpn_not_negotiated();
+            protocol => TLSStream.alpn_negotiated(protocol);
+        };
+    }
+    private static fingerprint_unavailable(): Result<TLSPeerCertificateFingerprint, TLSError> {
+        return Ok(TLSPeerCertificateFingerprint.Unavailable);
+    }
+    private static fingerprint_sha256(value: String): Result<TLSPeerCertificateFingerprint, TLSError> {
+        return Ok(TLSPeerCertificateFingerprint.Sha256(value));
+    }
+    private static fingerprint_error(error: TLSError): Result<TLSPeerCertificateFingerprint, TLSError> {
+        return Error(error);
+    }
+    private static fingerprint_from_nullable(value: String?): Result<TLSPeerCertificateFingerprint, TLSError> {
+        return match value {
+            null => TLSStream.fingerprint_unavailable();
+            fingerprint => TLSStream.fingerprint_sha256(fingerprint);
+        };
     }
 
     private static connect_ok(value: TLSStream): Result<TLSStream, TLSError> { return Ok(value); }

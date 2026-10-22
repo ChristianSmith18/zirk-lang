@@ -20356,6 +20356,50 @@ impl<'a> Checker<'a> {
         .unwrap_or(Type::UNKNOWN);
 
         match field.name.name.as_str() {
+            "get" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, "get", 1);
+                    return Some(
+                        self.native_result_with(
+                            element,
+                            self.native_exceptions
+                                .expect("sequence lookup registers native errors")
+                                .index_out_of_bounds,
+                        ),
+                    );
+                }
+                let index = self.check_expr(&expr.args[0].value);
+                if !index.is_unknown() && !matches!(index.base, Base::Int(_)) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.args[0].value.span(),
+                        "sequence get index must be an integer",
+                        format!("found {}", self.name(index)),
+                        Some("use an integer index".into()),
+                    );
+                }
+                Some(
+                    self.native_result_with(
+                        element,
+                        self.native_exceptions
+                            .expect("sequence lookup registers native errors")
+                            .index_out_of_bounds,
+                    ),
+                )
+            }
+            "get_or_null" => {
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    field.name.span,
+                    "`get_or_null` is no longer available on collections",
+                    "safe collection lookup uses `get`, whose Result can be projected to a nullable value",
+                    Some("use `get(index)` as a nullable value, add `?? fallback`, or match its Result".into()),
+                );
+                Some(Type::UNKNOWN)
+            }
             "map" => {
                 if expr.args.len() != 1 {
                     self.sequence_wrong_arity(expr, "map", 1);
@@ -21041,25 +21085,52 @@ impl<'a> Checker<'a> {
                 }
                 Some(Type::BOOLEAN)
             }
-            "get_or_null" if matches!(object.base, Base::Map(_)) => {
+            "get" if matches!(object.base, Base::Map(_)) => {
                 if expr.args.len() != 1 {
                     self.error(
                         codes::WRONG_ARGUMENT_COUNT,
                         expr.span,
-                        "`Map.get_or_null` takes one argument",
+                        "`Map.get` takes one argument",
                         format!("received {}", expr.args.len()),
                         None,
                     );
                     for arg in &expr.args {
                         self.check_expr(&arg.value);
                     }
-                    return Some(value.as_nullable());
+                    return Some(
+                        self.native_result_with(
+                            value,
+                            self.native_exceptions
+                                .expect("map lookup registers native errors")
+                                .lookup_error,
+                        ),
+                    );
                 }
                 let k = self.check_expr(&expr.args[0].value);
                 if !k.is_unknown() && !key.accepts(k) {
                     self.expect_assignable(key, k, expr.args[0].value.span(), "the key");
                 }
-                Some(value.as_nullable())
+                Some(
+                    self.native_result_with(
+                        value,
+                        self.native_exceptions
+                            .expect("map lookup registers native errors")
+                            .lookup_error,
+                    ),
+                )
+            }
+            "get_or_null" if matches!(object.base, Base::Map(_)) => {
+                for arg in &expr.args {
+                    self.check_expr(&arg.value);
+                }
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    field.name.span,
+                    "`Map.get_or_null` is no longer available",
+                    "safe map lookup uses `get`, whose Result can be projected to a nullable value",
+                    Some("use `get(key)` as a nullable value, add `?? fallback`, or match its Result".into()),
+                );
+                Some(Type::UNKNOWN)
             }
             "remove" if matches!(object.base, Base::Map(_)) => {
                 if expr.args.len() != 1 {

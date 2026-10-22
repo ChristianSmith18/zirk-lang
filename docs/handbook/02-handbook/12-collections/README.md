@@ -12,7 +12,7 @@ the collection, as well as terminal conversions like `to_list`, `to_array`, and
 `to_set`. The last method in the chain determines the result family. For lazy,
 single-pass pipelines, use `.iterator()` and `collect()`.
 
-> **Implementation status:** `Array<T>` (fixed-capacity) and `List<T>` (resizable) are delivered by `array-list-tuple-duration-regex` as collector-tracked native reference collections with bounds-checked indexing, `length`/`is_empty`, and `for ... in` through `Iterable<T>`. `Map<K,V>` and `Set<T>` are partially delivered by `map-set-collections`: empty constructors, `length`/`is_empty`, `Map.set`/`contains_key`/`get_or_null`/`remove`, and `Set.add`/`contains`/`remove` work end-to-end on hashable primitive keys/elements. The runtime implementation is a minimal i64 map/set and does not trace GC references yet; `Range<T>` remains pending.
+> **Implementation status:** `Array<T>` (fixed-capacity) and `List<T>` (resizable) are delivered as collector-tracked native reference collections with bounds-checked indexing, `get` returning typed `Result`, `length`/`is_empty`, and `for ... in` through `Iterable<T>`. `Map<K,V>` and `Set<T>` provide lookup, insertion, membership, and removal for supported hashable keys/elements. See the API tables for current per-operation status; `Range<T>` remains pending.
 
 ---
 

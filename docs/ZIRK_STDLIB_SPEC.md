@@ -229,9 +229,9 @@ where necessary. A projection used as a mutation place writes original storage.
 
 Index access is bounds-checked and accepts negative positions for ordered
 families. Direct absence raises a typed controlled error; collection `get`
-returns a typed `Result`, while collection `get_or_null` deliberately collapses
-absence with nullability. These collection APIs are independent of the
-contextual projection of `Result<T, E>` values throughout the language.
+returns a typed `Result`; nullable value contexts project that same result to
+the value or null. Collections do not expose a parallel `get_or_null` method.
+This follows the language-wide contextual projection of `Result<T, E>`.
 Slices use direction-sensitive Python-style omitted defaults, reject explicit
 out-of-range bounds, deep-copy results and require equal-length replacement.
 List resizing uses explicit add/insert/remove/splice APIs; Array never resizes.

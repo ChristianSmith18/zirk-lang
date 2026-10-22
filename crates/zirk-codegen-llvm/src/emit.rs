@@ -10171,7 +10171,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("set contains");
                 call.try_as_basic_value().basic()
             }
-            // `map.get_or_null(key)`.
+            // Internal map value load; public lookup lowering guards presence.
             ir::InstKind::MapGet { receiver, key } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
                 let key = self.operand(*key);

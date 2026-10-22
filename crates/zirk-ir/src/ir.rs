@@ -2638,7 +2638,7 @@ pub enum InstKind {
         receiver: Operand,
         key: Operand,
     },
-    /// `map.get_or_null(key)` — returns `V?`.
+    /// Internal map value load; callers guard presence and unwrap the value.
     MapGet {
         receiver: Operand,
         key: Operand,

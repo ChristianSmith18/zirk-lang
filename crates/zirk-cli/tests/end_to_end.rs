@@ -6604,7 +6604,7 @@ fn bundled_std_net_tls_client_completes_approved_trusted_public_api_handshake() 
         .collect::<Vec<_>>()
         .join(", ");
     let source = format!(
-        r#"import {{ TLSReadResult, TLSError, TLSStream }} from std.net::tls;
+        r#"import {{ TLSNegotiatedALPN, TLSReadResult, TLSError, TLSStream }} from std.net::tls;
 import {{ stdout }} from std.io;
 fn read(stream: TLSStream): TLSReadResult<Array<Byte>> {{ return stream.read(4); }}
 fn tls_write(stream: TLSStream, bytes: Array<Byte>): Result<Void, TLSError> {{ return stream.write_all(bytes); }}
@@ -6615,9 +6615,9 @@ fn main(): Void {{
         Error(_) => stdout.println("TLS connect failed");
         Ok(stream) => {{
             match stream.negotiated_alpn() {{
-                Ok(protocol) => match protocol {{
-                    null => stdout.println("missing ALPN");
-                    value => stdout.println(value);
+                Ok(state) => match state {{
+                    TLSNegotiatedALPN.NotNegotiated => stdout.println("missing ALPN");
+                    TLSNegotiatedALPN.Negotiated(value) => stdout.println(value);
                 }};
                 Error(_) => stdout.println("ALPN query failed");
             }};
@@ -6764,7 +6764,7 @@ fn bundled_std_net_tcp_upgrades_the_same_authorized_socket_to_tls() {
         .join(", ");
     let source = format!(
         r#"import {{ TCPStream }} from std.net::tcp;
-import {{ TLSReadResult }} from std.net::tls;
+import {{ TLSNegotiatedALPN, TLSReadResult }} from std.net::tls;
 import {{ stdout }} from std.io;
 fn main(): Void {{
     mut roots: Array<Array<Byte>> = [[{root_literal}]];
@@ -6776,9 +6776,9 @@ fn main(): Void {{
             Ok(tls) => {{
                 stdout.println(tcp.is_closed().to_string());
                 match tls.negotiated_alpn() {{
-                    Ok(protocol) => match protocol {{
-                        null => stdout.println("missing ALPN");
-                        value => stdout.println(value);
+                    Ok(state) => match state {{
+                        TLSNegotiatedALPN.NotNegotiated => stdout.println("missing ALPN");
+                        TLSNegotiatedALPN.Negotiated(value) => stdout.println(value);
                     }};
                     Error(_) => stdout.println("ALPN query failed");
                 }};
@@ -6969,9 +6969,9 @@ fn main(): Void {{
         Error(error) => stdout.println(error.to_string());
         Ok(stream) => {{
             match stream.negotiated_alpn() {{
-                Ok(protocol) => match protocol {{
-                    null => stdout.println("missing ALPN");
-                    value => stdout.println(value);
+                Ok(state) => match state {{
+                    TLSNegotiatedALPN.NotNegotiated => stdout.println("missing ALPN");
+                    TLSNegotiatedALPN.Negotiated(value) => stdout.println(value);
                 }};
                 Error(_) => stdout.println("ALPN query failed");
             }};
@@ -7395,7 +7395,7 @@ fn bundled_std_net_tls_listener_requires_client_identity_and_exposes_validated_f
         "../../zirk-runtime/testdata/mtls-client-ca.der"
     ));
     let source = format!(
-        r#"import {{ TLSError, TLSReadResult, TLSListener, TLSStream }} from std.net::tls;
+        r#"import {{ TLSPeerCertificateFingerprint, TLSError, TLSReadResult, TLSListener, TLSStream }} from std.net::tls;
 import {{ stdout }} from std.io;
 fn accept(listener: TLSListener): Result<TLSStream, TLSError> {{ return listener.accept(); }}
 fn read(stream: TLSStream): TLSReadResult<Array<Byte>> {{ return stream.read(4); }}
@@ -7423,9 +7423,9 @@ fn main(): Void {{
             Ok(stream) => {{
                 match stream.peer_certificate_sha256() {{
                     Error(_) => stdout.println("fingerprint error");
-                    Ok(fingerprint) => match fingerprint {{
-                        null => stdout.println("client identity missing");
-                        value => stdout.println(value);
+                    Ok(state) => match state {{
+                        TLSPeerCertificateFingerprint.Unavailable => stdout.println("client identity missing");
+                        TLSPeerCertificateFingerprint.Sha256(value) => stdout.println(value);
                     }};
                 }};
                 match read(stream) {{
@@ -11953,7 +11953,7 @@ fn bundled_http_sse_client_returns_typed_events_and_reconnect_metadata() {
     std::fs::write(
         project.join("src/main.zrk"),
         format!(
-            r#"import {{ HTTPEventStream, URL }} from std.http;
+            r#"import {{ HTTPEventPoll, HTTPEventStream, URL }} from std.http;
 import {{ stdout }} from std.io;
 fn main(): Void {{
     match URL.parse("http://127.0.0.1:{}/events") {{
@@ -11963,28 +11963,28 @@ fn main(): Void {{
             Ok(stream) => {{
                 match stream.next_event() {{
                     Error(error) => stdout.println("first:" + error.to_string());
-                    Ok(event) => match event {{
-                        null => stdout.println("missing first event");
-                        value => {{
+                    Ok(poll) => match poll {{
+                        HTTPEventPoll.End => stdout.println("missing first event");
+                        HTTPEventPoll.Event(value) => {{
                             stdout.println(value.event_type() + ":" + value.data() + ":" + value.last_event_id());
                             match value.retry_ms() {{ null => stdout.println("no retry"); retry => stdout.println(retry); }}
                         }}
-                    }}
+                    }};
                 }}
                 stdout.println(stream.heartbeat_count());
                 match stream.next_event() {{
                     Error(error) => stdout.println("second:" + error.to_string());
-                    Ok(event) => match event {{
-                        null => stdout.println("missing second event");
-                        value => stdout.println(value.event_type() + ":" + value.data() + ":" + value.last_event_id());
-                    }}
+                    Ok(poll) => match poll {{
+                        HTTPEventPoll.End => stdout.println("missing second event");
+                        HTTPEventPoll.Event(value) => stdout.println(value.event_type() + ":" + value.data() + ":" + value.last_event_id());
+                    }};
                 }}
                 match stream.next_event() {{
                     Error(error) => stdout.println("end:" + error.to_string());
-                    Ok(event) => match event {{
-                        null => stdout.println("end");
-                        value => stdout.println("unexpected extra event:" + value.data());
-                    }}
+                    Ok(poll) => match poll {{
+                        HTTPEventPoll.End => stdout.println("end");
+                        HTTPEventPoll.Event(value) => stdout.println("unexpected extra event:" + value.data());
+                    }};
                 }}
                 stdout.println(stream.close());
                 match HTTPEventStream.reconnect(url, "cursor-2\nInjected: yes") {{
@@ -11995,10 +11995,10 @@ fn main(): Void {{
                     Error(error) => stdout.println("reconnect:" + error.to_string());
                     Ok(resumed) => match resumed.next_event() {{
                         Error(error) => stdout.println("resumed:" + error.to_string());
-                        Ok(event) => match event {{
-                            null => stdout.println("missing resumed event");
-                            value => stdout.println(value.event_type() + ":" + value.data() + ":" + value.last_event_id());
-                        }}
+                        Ok(poll) => match poll {{
+                            HTTPEventPoll.End => stdout.println("missing resumed event");
+                            HTTPEventPoll.Event(value) => stdout.println(value.event_type() + ":" + value.data() + ":" + value.last_event_id());
+                        }};
                     }}
                 }}
                 match HTTPEventStream.connect_with_reconnect(url) {{
@@ -12006,12 +12006,12 @@ fn main(): Void {{
                     Ok(auto) => {{
                         match auto.next_event() {{
                             Error(error) => stdout.println("auto-first:" + error.to_string());
-                            Ok(event) => match event {{ null => stdout.println("auto-missing first"); value => stdout.println(value.data()); }}
+                            Ok(poll) => match poll {{ HTTPEventPoll.End => stdout.println("auto-missing first"); HTTPEventPoll.Event(value) => stdout.println(value.data()); }};
                         }}
                         stdout.println(auto.heartbeat_count());
                         match auto.next_event() {{
                             Error(error) => stdout.println("auto-second:" + error.to_string());
-                            Ok(event) => match event {{ null => stdout.println("auto-missing second"); value => stdout.println(value.data()); }}
+                            Ok(poll) => match poll {{ HTTPEventPoll.End => stdout.println("auto-missing second"); HTTPEventPoll.Event(value) => stdout.println(value.data()); }};
                         }}
                         stdout.println(auto.heartbeat_count());
                         _ = auto.close();
@@ -12022,7 +12022,7 @@ fn main(): Void {{
                     Error(error) => stdout.println("no-content:" + error.to_string());
                     Ok(finished) => match finished.next_event() {{
                         Error(error) => stdout.println("no-content:" + error.to_string());
-                        Ok(event) => match event {{ null => stdout.println("no-content stopped"); value => stdout.println("unexpected:" + value.data()); }}
+                        Ok(poll) => match poll {{ HTTPEventPoll.End => stdout.println("no-content stopped"); HTTPEventPoll.Event(value) => stdout.println("unexpected:" + value.data()); }};
                     }}
                 }}
             }}

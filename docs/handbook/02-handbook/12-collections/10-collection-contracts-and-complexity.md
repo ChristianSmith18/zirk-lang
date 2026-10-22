@@ -19,12 +19,12 @@ than undefined behavior.
 ## Core APIs
 
 `Array` and `List` provide `length`, `capacity` where meaningful, `get`,
-`get_or_null`, `append`, `insert`, `remove_at`, `contains`, `clear`, `clone`,
+`append`, `insert`, `remove_at`, `contains`, `clear`, `clone`,
 iteration, and sequence conversion. Fixed arrays expose `length`, checked
 indexing, element replacement, `clone`, iteration, and conversion, but reject
 append, removal, and resizing.
 
-`Map` provides checked `[]`, `get`, `get_or_null`, `get_or_insert_with`,
+`Map` provides checked `[]`, `get`, `get_or_insert_with`,
 `contains_key`, `insert`, `remove`, `keys`, `values`, `entries`, `length`,
 `clear`, and `clone`. Keys satisfy equality and hashing contracts. A default or
 factory is evaluated only when the key is absent.
@@ -37,8 +37,8 @@ types and their equality/hash contracts.
 ## Access and slicing
 
 `String`, tuple, array, and list indexes accept negatives. Direct missing
-access reports a typed error. `get` returns `Result`; `get_or_null` is the
-explicit nullable alternative.
+access reports a typed error. `get` returns `Result`; nullable value contexts
+project that same result to the value or null.
 
 Only `String`, arrays, and lists slice. End is exclusive. `[::]` means first to
 last by one, `[n:w]` uses step one, and `[::-1]` reverses. With a negative step,

@@ -1,7 +1,8 @@
 # map-collections Specification
 
 ## Purpose
-TBD - created by archiving change map-set-collections. Update Purpose after archive.
+Defines the built-in Map and Set types, their construction, key and value
+contracts, lookup outcomes, mutation, membership, and managed runtime behavior.
 
 ## Requirements
 
@@ -20,11 +21,11 @@ The expression `Map()` SHALL create an empty `Map<K, V>` whose concrete types ar
 - **THEN** the expression type is `Map<String, Int32>` and the result is a managed reference
 
 ### Requirement: Map supports insertion, lookup, and membership
-The checker SHALL dispatch `m.set(key, value)` to `Void`, `m.get_or_null(key)` to `V?`, and `m.contains_key(key)` to `Boolean` for a `Map<K, V>` receiver.
+The checker SHALL dispatch `m.set(key, value)` to `Void`, `m.get(key)` to `Result<V, LookupError>`, and `m.contains_key(key)` to `Boolean` for a `Map<K, V>` receiver. Nullable value contexts SHALL project `get` to `V?`; `get_or_null` SHALL NOT be exposed.
 
 #### Scenario: Insert and retrieve
-- **WHEN** `m: Map<String, Int32>` is initialized with `Map()`, `m.set("one", 1)` is called, and `m.get_or_null("one")` is used
-- **THEN** `set` is accepted with `String` and `Int32`, and `get_or_null` yields `Int32?`
+- **WHEN** `m: Map<String, Int32>` is initialized with `Map()`, `m.set("one", 1)` is called, and `m.get("one")` is used
+- **THEN** `set` is accepted with `String` and `Int32`, and `get` yields `Result<Int32, LookupError>` or `Int32?` in a nullable value context
 
 ### Requirement: Key types must be hashable
 The type checker SHALL reject `Map<K, V>` when `K` does not satisfy the `Hash` and `Equal` contracts.

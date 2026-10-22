@@ -12,7 +12,10 @@ mut users: Map<UserId, User> = Map();
 users.set(user.id, user);
 ```
 
-Key types must satisfy the map's equality and hashing or ordering contract. Lookup absence must remain explicit—commonly through a nullable or result-bearing API—rather than returning a fabricated default.
+Key types must satisfy the map's equality and hashing or ordering contract.
+Lookup absence is reported by `get(key): Result<V, LookupError>`. Nullable
+value contexts project that result to `V?`; callers that need diagnostics can
+match the Result directly.
 
 Iteration order is guaranteed only if the concrete map contract says so. Do not make serialized output depend on unspecified order.
 
@@ -41,8 +44,7 @@ Unique key/value associations; insertion-order iteration; `K` requires coherent
 | --- | --- | --- | --- |
 | `Map()` / `Map<K,V>(entries)` | `Map<K,V>` | Construction | specified |
 | `m[key]` | `V` | Checked lookup; absence is a typed error | specified |
-| `m.get(key)` | `Result<V, LookupError>` | Result-bearing lookup | specified |
-| `m.get_or_null(key)` | `V?` | Nullable lookup | specified |
+| `m.get(key)` | `Result<V, LookupError>` (or `V?` in nullable value context) | Safe lookup; preserve or project absence | implemented |
 | `m.set(key, value)` | `SetResult<V>` | `SetResult.Inserted` or `SetResult.Replaced(previous)` | specified |
 | `m.remove(key)` | `V?` | Removes and returns the value if present | specified |
 | `m.contains_key(key)` | `Boolean` | Membership | specified |
@@ -62,9 +64,9 @@ Unique key/value associations; insertion-order iteration; `K` requires coherent
 ```zirk
 mut users: Map<UserId, User> = Map();
 inmut outcome = users.set(user.id, user);
-match users.get_or_null(id) {
-    null => stdout.println("absent"),
-    user => stdout.println(user.name),
+match users.get(id) {
+    Error(_) => stdout.println("absent"),
+    Ok(user) => stdout.println(user.name),
 }
 
 mut labels: Map<String, Int32> = Map();

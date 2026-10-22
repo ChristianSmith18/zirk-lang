@@ -22339,6 +22339,136 @@ impl<'a> FunctionLowering<'a> {
         let parallel = self.parallel_depth > 0 || self.sequence_receiver_is_parallel(&field.object);
         let receiver = self.lower_expr(&field.object);
         match (field.name.name.as_str(), call.args.len(), receiver_ty) {
+            ("get", 1, IrType::Array(_) | IrType::List(_)) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
+                let requested = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+                let requested_slot = self.spill(requested, IrType::Int(IntWidth::I64), span);
+                let sequence = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let length = self.sequence_length(sequence, receiver_ty, span);
+                let length = self.emit(InstKind::IntCast(length), IrType::Int(IntWidth::I64), span);
+                let length_slot = self.spill(length, IrType::Int(IntWidth::I64), span);
+                let zero = self.const_i64(0, span);
+                let requested = self.emit(
+                    InstKind::Load(requested_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let is_negative = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: requested,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let normalize_negative = self.new_block();
+                let keep_positive = self.new_block();
+                let index_ready = self.new_block();
+                let normalized_slot =
+                    self.declare_slot("<safe_sequence_index>", IrType::Int(IntWidth::I64), span);
+                self.terminate(Terminator::Branch {
+                    condition: is_negative,
+                    then_block: normalize_negative,
+                    else_block: keep_positive,
+                });
+
+                self.current = normalize_negative;
+                let requested = self.emit(
+                    InstKind::Load(requested_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let length = self.emit(
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let normalized = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Add,
+                        left: length,
+                        right: requested,
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(normalized_slot, normalized), span);
+                self.terminate(Terminator::Jump(index_ready));
+
+                self.current = keep_positive;
+                let requested = self.emit(
+                    InstKind::Load(requested_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                self.emit_effect(InstKind::Store(normalized_slot, requested), span);
+                self.terminate(Terminator::Jump(index_ready));
+
+                self.current = index_ready;
+                let normalized = self.emit(
+                    InstKind::Load(normalized_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let zero = self.const_i64(0, span);
+                let lower_bound = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::GtEq,
+                        left: normalized,
+                        right: zero,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let normalized = self.emit(
+                    InstKind::Load(normalized_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let length = self.emit(
+                    InstKind::Load(length_slot),
+                    IrType::Int(IntWidth::I64),
+                    span,
+                );
+                let upper_bound = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Lt,
+                        left: normalized,
+                        right: length,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let in_bounds = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::And,
+                        left: lower_bound,
+                        right: upper_bound,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    in_bounds,
+                    |this| {
+                        let receiver = this.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                        let index = this.emit(
+                            InstKind::Load(normalized_slot),
+                            IrType::Int(IntWidth::I64),
+                            span,
+                        );
+                        this.emit(
+                            InstKind::ArrayListLoad { receiver, index },
+                            element_ty,
+                            span,
+                        )
+                    },
+                    "sequence index out of bounds",
+                ))
+            }
             ("map", 1, IrType::Array(_) | IrType::List(_)) if parallel => {
                 Some(self.lower_parallel_sequence_map(
                     receiver,
@@ -24971,6 +25101,40 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 ))
             }
+            ("get", 1, IrType::Map(_)) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
+                let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let key_slot = self.spill(key, key_ty, span);
+                let receiver_for_check =
+                    self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let key_for_check = self.emit(InstKind::Load(key_slot), key_ty, span);
+                let present = self.emit(
+                    InstKind::MapContainsKey {
+                        receiver: receiver_for_check,
+                        key: key_for_check,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    present,
+                    |this| {
+                        let receiver = this.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                        let key = this.emit(InstKind::Load(key_slot), key_ty, span);
+                        let nullable =
+                            Nullable::of(value_ty).expect("a map's value type has a nullable form");
+                        let value = this.emit(
+                            InstKind::MapGet { receiver, key },
+                            IrType::Nullable(nullable),
+                            span,
+                        );
+                        this.emit(InstKind::Unwrap(value), value_ty, span)
+                    },
+                    "map key not found",
+                ))
+            }
             ("add", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
                 Some(self.emit(InstKind::SetAdd { receiver, value }, IrType::Void, span))
@@ -24980,15 +25144,6 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.emit(
                     InstKind::SetContains { receiver, value },
                     IrType::Boolean,
-                    span,
-                ))
-            }
-            ("get_or_null", 1, IrType::Map(_)) => {
-                let key = self.lower_expr_as(&call.args[0].value, key_ty);
-                let nullable = Nullable::of(value_ty)?;
-                Some(self.emit(
-                    InstKind::MapGet { receiver, key },
-                    IrType::Nullable(nullable),
                     span,
                 ))
             }

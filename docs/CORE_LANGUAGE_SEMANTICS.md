@@ -183,8 +183,9 @@ slice, entry, iterator, destructuring, and returned component reads project
 independent values.
 
 `String`, tuple, array, and list indexing accepts negatives. Missing direct
-access is a typed controlled error. `get` returns `Result`; a family may also
-offer an explicitly nullable `get_or_null`.
+access is a typed controlled error. `get` returns `Result`; nullable value
+contexts project that same result when callers intentionally collapse lookup
+errors to absence. Collections do not expose a parallel `get_or_null`.
 
 `String`, arrays, and lists slice with `[start:end:step]`; tuple, map, and set do
 not. End is exclusive. Positive or omitted step defaults to `(0, length, 1)`;

@@ -598,7 +598,7 @@ fn http_package_publishes_method_status_and_client_types() {
     let dir = workspace("standard_http_values");
     std::fs::write(
         dir.join("main.zrk"),
-        "import { HTTP, HTTPClient, HTTPError, HTTPEvent, HTTPEventStream, HTTPHeaders, HTTPMethod, HTTPMiddleware, HTTPMultipartPart, HTTPNext, HTTPProxy, HTTPRequest, HTTPResponse, HTTPRouteHandler, HTTPServer, HTTPStatus, HTTPStreamResponse, URL } from std.http;\n\
+        "import { HTTP, HTTPClient, HTTPError, HTTPEvent, HTTPEventPoll, HTTPEventStream, HTTPHeaders, HTTPMethod, HTTPMiddleware, HTTPMultipartPart, HTTPNext, HTTPProxy, HTTPRequest, HTTPResponse, HTTPRouteHandler, HTTPServer, HTTPStatus, HTTPStreamResponse, URL } from std.http;\n\
          import { TCPListener } from std.net::tcp;\n\
          import { HostPortAddress, SocketAddress } from std.net::address;\n\
          import { SecretString } from std.environment;\n\
@@ -616,7 +616,7 @@ fn http_package_publishes_method_status_and_client_types() {
          fn verify_header_helpers(headers: HTTPHeaders): Array<Byte> { mut copy = headers.redirect_copy(true, true); _ = copy; return headers.encode_for_transport(); }\n\
          fn verify_response_helpers(response: HTTPResponse, patterns: List<String>, methods: List<String>, path: String): Void { mut fields = response.read_sse_event_fields(); mut beats = response.sse_heartbeat_count(); mut rejected = HTTPResponse.method_not_allowed(patterns, methods, path); _ = fields; _ = beats; _ = rejected; }\n\
          fn verify_callback_helpers(route: HTTPRouteHandler, middleware: HTTPMiddleware, request: HTTPRequest, values: List<String>, next: HTTPNext): Void { mut routed = route.invoke(request, values); mut continued = middleware.invoke(request, next); _ = routed; _ = continued; }\n\
-         fn verify_sse(url: URL): Void { match HTTPEventStream.connect(url) { Ok(stream) => { mut event: Result<HTTPEvent?, HTTPError> = stream.next_event(); _ = event; _ = stream.close(); } Error(_) => { } } }\n\
+         fn verify_sse(url: URL): Void { match HTTPEventStream.connect(url) { Ok(stream) => { mut event: Result<HTTPEventPoll, HTTPError> = stream.next_event(); _ = event; _ = stream.close(); } Error(_) => { } } }\n\
          fn main(): Void {\n\
              mut method: HTTPMethod = HTTPMethod.Query;\n\
              mut status: HTTPStatus = HTTPStatus.Ok;\n\

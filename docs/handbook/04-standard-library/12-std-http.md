@@ -355,7 +355,8 @@ defines capability discovery through `Accept-Query`, not a client selection
 algorithm.
 When a QUERY response is `303 See Other`, `HTTPResponse.indirect_result_url(base)`
 validates its single `Location` value and resolves it against the original URL.
-It returns `null` for a direct result. To follow redirects explicitly,
+It returns `HTTPIndirectResult.Direct` for a direct result and
+`HTTPIndirectResult.Redirect(url)` for an indirect result. To follow redirects explicitly,
 `HTTP.query_following(url, body, max_redirects)` and
 `HTTP.query_following_with_content_type(url, body, content_type, max_redirects)`
 provide a bounded loop. A `303` switches to GET; `301`, `302`, `307`, and `308`
@@ -1166,9 +1167,9 @@ match HTTPEventStream.connect(URL("https://example.com/events")) {
     Ok(events) => {
         loop {
             match events.next_event() {
-                Ok(event) => match event {
-                    Some(value) => stdout.println(value.data());
-                    None => break;
+                Ok(poll) => match poll {
+                    HTTPEventPoll.Event(value) => stdout.println(value.data());
+                    HTTPEventPoll.End => break;
                 }
                 Error(error) => {
                     stderr.println(error);

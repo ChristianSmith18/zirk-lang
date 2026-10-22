@@ -7561,7 +7561,7 @@ fn valid_map_and_set_members() {
          mut n: UInt64 = m.length;\n\
          mut e: Boolean = m.is_empty;\n\
          mut has: Boolean = m.contains_key(\"k\");\n\
-         mut v: Int32? = m.get_or_null(\"k\");\n\
+         mut v: Int32? = m.get(\"k\");\n\
          mut r: Boolean = m.remove(\"k\");\n\
          mut s: Set<String> = Set();\n\
          s.add(\"x\");\n\

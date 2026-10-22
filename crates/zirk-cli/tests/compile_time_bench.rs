@@ -64,8 +64,8 @@ fn main(): Void {
     counts.set(1, 11); counts.set(2, 22); counts.set(3, 33); counts.set(4, 44);
     inmut checksum: Int32 = values[0] + values[1] + values[2] + values[3]
         + values[4] + values[5] + values[6] + values[7]
-        + (counts.get_or_null(1) ?? 0) + (counts.get_or_null(2) ?? 0)
-        + (counts.get_or_null(3) ?? 0) + (counts.get_or_null(4) ?? 0);
+        + (counts.get(1) ?? 0) + (counts.get(2) ?? 0)
+        + (counts.get(3) ?? 0) + (counts.get(4) ?? 0);
     stdout.println(checksum.to_string());
     stdout.println(names.length.to_string());
     stdout.println(seen.length.to_string());

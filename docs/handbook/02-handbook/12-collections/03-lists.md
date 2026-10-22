@@ -179,7 +179,7 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 | `l.remove(value)` | `Boolean` | Removes first equal element | implemented |
 | `l.splice(start, delete_count, replacement)` | `Void` | General splice | specified |
 | `l.clear()` | `Void` | Logical emptying; no capacity promise | specified |
-| `l.get(i)` / `l.get_or_null(i)` | `Result<T, BoundsError>` / `T?` | Explicit-absence access | specified |
+| `l.get(i)` | `Result<T, IndexOutOfBoundsError>` (or `T?` in nullable value context) | Safe lookup; preserve or project absence | implemented |
 | `l.contains(v)` / `l.find(pred)` | `Boolean` / `T?` | Search | specified |
 | `l.map(fn)` | `List<U>` | Eager transform; `U` from `fn` return | specified |
 | `l.filter(fn)` | `List<T>` | Eager selection | specified |
