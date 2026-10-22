@@ -795,10 +795,16 @@ async def auto_fallback_to_http1(
     tls.load_cert_chain(certificate_path, key_path)
     tls.set_alpn_protocols(["http/1.1"])
     requests: list[tuple[bytes, bytes]] = []
+    peer_errors: list[str] = []
+    request_received = asyncio.Event()
+    active_handlers: set[asyncio.Task[None]] = set()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            active_handlers.add(task)
         try:
-            head = await reader.readuntil(b"\r\n\r\n")
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10)
             headers = head.split(b"\r\n")
             content_length = next(
                 (
@@ -808,15 +814,28 @@ async def auto_fallback_to_http1(
                 ),
                 0,
             )
-            body = await reader.readexactly(content_length) if content_length else b""
+            body = (
+                await asyncio.wait_for(reader.readexactly(content_length), timeout=10)
+                if content_length
+                else b""
+            )
             requests.append((headers[0], body))
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nfallback-ok"
             )
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=10)
+        except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError) as error:
+            peer_errors.append(f"{type(error).__name__}: {error}")
         finally:
+            request_received.set()
             writer.close()
-            await writer.wait_closed()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=2)
+            except (OSError, TimeoutError):
+                pass
+            finally:
+                if task is not None:
+                    active_handlers.discard(task)
 
     server = await asyncio.start_server(handle, "127.0.0.1", port, ssl=tls)
     try:
@@ -828,11 +847,22 @@ async def auto_fallback_to_http1(
         )
         if "fallback-http1" not in output or "fallback-ok" not in output:
             raise RuntimeError(f"Auto did not fall back to HTTP/1.1:\n{output}")
+        await asyncio.wait_for(request_received.wait(), timeout=5)
+        if peer_errors:
+            raise RuntimeError(f"HTTP/1.1 fallback peer failed: {peer_errors}")
         if requests != [(b"QUERY /query HTTP/1.1", b'{"fallback":true}')]:
             raise RuntimeError(f"HTTP/1.1 fallback received an unexpected request: {requests!r}")
+        print("HTTP/1.1 Auto fallback passed.", flush=True)
     finally:
         server.close()
-        await server.wait_closed()
+        try:
+            await asyncio.wait_for(server.wait_closed(), timeout=3)
+        except TimeoutError:
+            handlers = tuple(active_handlers)
+            for task in handlers:
+                task.cancel()
+            if handlers:
+                await asyncio.wait(handlers, timeout=3)
 
 
 def main() -> int:
@@ -845,6 +875,7 @@ def main() -> int:
     zirk = ROOT / "target" / "debug" / exe
     if not zirk.is_file():
         raise FileNotFoundError(f"compiler binary was not produced: {zirk}")
+    print("Built the HTTP/3-enabled Zirk CLI.", flush=True)
 
     certificate = (RUNTIME_TESTDATA / "tls-loopback-cert.der").read_bytes()
     private_key = (RUNTIME_TESTDATA / "tls-loopback-key.der").read_bytes()
@@ -890,6 +921,7 @@ def main() -> int:
         approve(zirk, http_client_project, http_client_env)
         approve(zirk, unsupported_websocket_project, unsupported_websocket_env)
         approve(zirk, fallback_project, fallback_env)
+        print("Approved all five isolated interoperability fixtures.", flush=True)
 
         server = subprocess.Popen(
             [str(zirk), "run", "."],
@@ -916,6 +948,7 @@ def main() -> int:
                 server.kill()
             server_output, _ = server.communicate()
             raise RuntimeError(f"{error}\nserver output before failure:\n{server_output}") from error
+        print("Zirk-to-Zirk HTTP/3 WebSocket echo and close passed.", flush=True)
 
         make_server(server_project, port, certificate, private_key)
         run_aioquic_peer(
@@ -925,6 +958,7 @@ def main() -> int:
             port,
             root_certificate,
         )
+        print("Independent aioquic-to-Zirk RFC 9220 WebSocket passed.", flush=True)
         run_aioquic_origin_rejection(
             zirk,
             server_project,
@@ -932,6 +966,7 @@ def main() -> int:
             port,
             server_project.parent / "aioquic-root.pem",
         )
+        print("Independent peer Origin rejection passed.", flush=True)
 
         asyncio.run(
             aioquic_server_with_zirk_client(
@@ -949,6 +984,7 @@ def main() -> int:
                 private_key,
             )
         )
+        print("Independent Zirk-to-aioquic HTTP/3 and unsupported-peer checks passed.", flush=True)
 
     print(
         "HTTP/3 interoperability, unsupported WebSocket peer rejection, Origin rejection, "
