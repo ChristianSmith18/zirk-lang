@@ -33,5 +33,7 @@
 
 ## 6. Public Website Synchronization
 
-- [ ] 6.1 Commit the reviewed authoritative Zirk documentation and status changes, then run `./scripts/sync-website-content.sh`; verify it imports the exact clean Zirk commit and updates the expected descriptors and public pages.
-- [ ] 6.2 Review `../zirk-lang-site` generated and site-owned diffs, validate both repositories, and commit the site update separately; verify the public site presents the same Result contract, migration guidance, and verified implementation status.
+- [x] 6.1 Commit the reviewed authoritative Zirk documentation and status changes, then run `./scripts/sync-website-content.sh`; verify it imports the exact clean Zirk commit and updates the expected descriptors and public pages.
+- [x] 6.2 Review `../zirk-lang-site` generated and site-owned diffs, validate both repositories, and commit the site update separately; verify the public site presents the same Result contract, migration guidance, and verified implementation status.
+
+  Website evidence: synchronization imported Zirk commit `c5be8ecb9e7451ade6bb87b80c69c67b52911417`, generated and validated all 372 handbook documents/routes, and updated the handbook digest plus project-status audit date/checksums. `yarn content:verify` and `yarn content:test` pass (80 tests); site update committed as `30d8189`.

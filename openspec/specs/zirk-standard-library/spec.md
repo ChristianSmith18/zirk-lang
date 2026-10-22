@@ -44,6 +44,27 @@ preserve an explicitly typed Result.
 - **AND** a direct match is required to distinguish permission denial from
   absence or another host failure
 
+### Requirement: Standard Result APIs avoid redundant extraction helpers
+The standard library SHALL expose `Result<T,E>` variants and composition
+operations without separate status, extraction, fallback, or unwrap helpers.
+It SHALL remove `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`,
+`get_or_else`, `unwrap`, and `unwrap_error`. Environment reads SHALL use
+`Env.get<T>(name): Result<T, EnvironmentError>` as the single retrieval
+operation for present, absent, parse-error, permission-error, and host-error
+outcomes.
+
+#### Scenario: Environment value is read without a helper method
+- **WHEN** `inmut mode = Env.get("APP_MODE");` is evaluated
+- **THEN** the inferred value is `String?`
+
+#### Scenario: Detailed environment outcome remains available
+- **WHEN** a caller declares `inmut result: Result<String, EnvironmentError> = Env.get("APP_MODE");`
+- **THEN** the result's typed variants remain available for direct matching
+
+#### Scenario: Result composition remains available
+- **WHEN** a caller transforms a successful value or error using `map`, `map_error`, `and_then`, `or_else`, or `or_throw`
+- **THEN** the operation composes the Result without projecting it
+
 ### Requirement: String write by index
 
 `String` SHALL support `s[i] = c` where `i` is a valid grapheme index and `c` is a `Char` or a single-grapheme `String`. The assignment SHALL mutate the shared String referent, invalidate the grapheme cache, and preserve the String's invariants. Complete aliases of the same String SHALL observe the replacement. A write through `mut` or `inmut` SHALL be valid referent mutation; a write reachable through `inmut::strict` SHALL be rejected.
