@@ -6949,31 +6949,35 @@ mod tests {
         .with_alpn_protocols(vec![b"h2".to_vec()]);
         let entered = Arc::new(AtomicBool::new(false));
         let handler_entered = Arc::clone(&entered);
+        let server_ready = Arc::new(AtomicBool::new(false));
+        let client_server_ready = Arc::clone(&server_ready);
         let cancellation_seen = Arc::new(AtomicBool::new(false));
         let handler_cancellation_seen = Arc::clone(&cancellation_seen);
 
         let outcome = Executor::new().run_with_root(move || {
             let server_grant = Arc::clone(&grant);
-            let _server = spawn(move || {
+            let server = spawn(move || {
                 let listener = crate::network_transport::TlsListener::bind(
                     address,
                     &server_grant,
                     server_config,
                 )
                 .unwrap();
+                server_ready.store(true, Ordering::Release);
                 let (stream, _) = listener.accept().unwrap();
                 let stream: HttpServerIo = stream.into();
                 assert!(stream.negotiated_http2());
-                let result = serve_http2_many_offloaded(stream, true, 2, move |_| {
-                    handler_entered.store(true, Ordering::Release);
-                    crate::executor::sleep(10_000_000_000);
-                    if crate::executor::current_task_cancel_requested() {
-                        handler_cancellation_seen.store(true, Ordering::Release);
-                    }
-                    simple_response(200, b"late response")
-                });
-                assert_eq!(result, Err(HttpRuntimeError::Cancelled));
-                1
+                usize::from(
+                    serve_http2_many_offloaded(stream, true, 2, move |_| {
+                        handler_entered.store(true, Ordering::Release);
+                        crate::executor::sleep(10_000_000_000);
+                        if crate::executor::current_task_cancel_requested() {
+                            handler_cancellation_seen.store(true, Ordering::Release);
+                        }
+                        simple_response(200, b"late response")
+                    })
+                    .is_ok(),
+                )
             });
 
             let client_origin = origin.clone();
@@ -6997,6 +7001,14 @@ mod tests {
                     .build()
                     .unwrap();
                 runtime.block_on(async move {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    while !client_server_ready.load(Ordering::Acquire) {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "TLS HTTP/2 listener did not become ready"
+                        );
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
                     let socket = tokio::net::TcpStream::connect(address).await.unwrap();
                     let tls = connector
                         .connect(
@@ -7035,19 +7047,25 @@ mod tests {
             });
 
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while !cancellation_seen.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "HTTP/2 peer disconnect did not cancel the handler"
-                );
+            while !cancellation_seen.load(Ordering::Acquire) && std::time::Instant::now() < deadline
+            {
                 crate::executor::sleep(1_000_000);
             }
-            client.join().unwrap();
-            crate::executor::sleep(10_000_000);
+            let disconnected_handler_woke = cancellation_seen.load(Ordering::Acquire);
+            if !disconnected_handler_woke {
+                crate::executor::cancel_current(server);
+            }
+            let client_succeeded = client.join().is_ok();
+            let server_succeeded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::executor::await_task(server)
+            }))
+            .is_ok_and(|result| result == 1);
             assert!(
-                cancellation_seen.load(Ordering::Acquire),
+                disconnected_handler_woke,
                 "HTTP/2 peer disconnect must cancel the suspended handler"
             );
+            assert!(client_succeeded, "HTTP/2 test peer failed");
+            assert!(server_succeeded, "HTTP/2 server did not shut down cleanly");
             0
         });
 
