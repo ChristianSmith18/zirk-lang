@@ -77,8 +77,12 @@ calendar information.
 
 ```zirk
 inmut shifted = Time(23, 30) + 2h;   // 01:30 — wraps modulo one day
-inmut bounds = shifted.start_of("hour").unwrap(); // 01:00
 shifted.is_between(Time(0, 0), Time(6, 0));       // true
+
+match shifted.start_of("hour") {
+    Ok(bounds) => stdout.println(bounds);
+    Error(error) => stderr.println(error);
+}
 ```
 
 ---

@@ -279,7 +279,7 @@ fn main(): Void {
                 }
                 Error(error) => stderr.println(error);
             }
-            mut empty_body: Array<Byte> = [];
+            inmut empty_body: Array<Byte> = [];
             match HTTPClient.create(8) {
                 Ok(client) => {
                     match client.request(HTTPMethod.Get, url, empty_body, HTTPHeaders.create()) {
@@ -365,7 +365,7 @@ network permission, and TLS identity. The default limit is five redirects and
 the maximum is twenty.
 
 ```zirk
-mut filter = {
+inmut filter = {
     "published_after": "2026-01-01",
     "tags": ["zirk", "language"],
 };
@@ -440,7 +440,7 @@ For a secret credential, use the explicit write-only sink:
 ```zirk
 match Env.get_secret("API_TOKEN") {
     Ok(token) => {
-        mut empty_body: Array<Byte> = [];
+        inmut empty_body: Array<Byte> = [];
         match HTTP.request_with_secret_header(
             HTTPMethod.Get,
             url,
@@ -642,14 +642,14 @@ NUL, and other forbidden bytes, and rejects protocol-owned framing fields such
 as `Content-Length`, `Transfer-Encoding`, connection controls, and `Host`.
 
 ```zirk
-mut headers = HTTPHeaders.create();
+inmut headers = HTTPHeaders.create();
 _ = headers.add("accept", "application/json");
 _ = headers.add("accept", "application/problem+json");
 _ = headers.add("set-cookie", "session=first");
 _ = headers.add("set-cookie", "theme=dark");
 
-mut content_type = headers.get("content-type");
-mut cookies = headers.get_all("set-cookie");
+inmut content_type = headers.get("content-type");
+inmut cookies = headers.get_all("set-cookie");
 ```
 
 `HTTPResponse.try_with_headers(status, body, headers)` attaches this validated
@@ -751,7 +751,7 @@ Unknown extension codes remain representable and are not collapsed into an
 unrelated standard case.
 
 ```zirk
-mut status = response.status_code();
+inmut status = response.status_code();
 if status == 200 { stdout.println("success"); }
 else if status == 404 { stdout.println("missing"); }
 else if status >= 500 { stderr.println(status); }
@@ -827,7 +827,7 @@ current API.
 Missing values use `Option`; malformed typed values use `Result`:
 
 ```zirk
-mut search = request.query.get("search");
+inmut search = request.query.get("search");
 
 match request.query.parse<Int>("page") {
     Ok(Some(page)) => stdout.println(page);
@@ -840,7 +840,7 @@ Route parameters use `:name`, consistent with Zirk's established placeholder
 syntax. They are accessed with collection indexing:
 
 ```zirk
-mut id = request.params["id"];
+inmut id = request.params["id"];
 ```
 
 `HTTPFormData.create()` builds URL-encoded form bodies. Add each name/value pair
@@ -859,7 +859,7 @@ escapes, and UTF-8 return `HTTPError.Protocol`; excess body size returns
 `HTTPError.BodyTooLarge`, and excess fields return `HTTPError.TooManyFields`.
 
 ```zirk
-mut outgoing = HTTPFormData.create();
+inmut outgoing = HTTPFormData.create();
 _ = outgoing.add("q", "hello world");
 _ = outgoing.add("tag", "a+b");
 match HTTP.post_form(url, outgoing) {
@@ -868,7 +868,7 @@ match HTTP.post_form(url, outgoing) {
 }
 match outgoing.encode_urlencoded() {
     Ok(body) => {
-        mut headers = HTTPHeaders.create();
+        inmut headers = HTTPHeaders.create();
         _ = headers.add("content-type", "application/x-www-form-urlencoded");
         // Pass body and headers to HTTP.request(...).
     }
@@ -877,8 +877,8 @@ match outgoing.encode_urlencoded() {
 
 match HTTPFormData.parse(request) {
     Ok(form) => {
-        mut first_query = form.get("q");
-        mut all_tags = form.get_all("tag");
+        inmut first_query = form.get("q");
+        inmut all_tags = form.get_all("tag");
     }
     Error(error) => report(error);
 }
@@ -921,7 +921,7 @@ encoded body to 1 MiB. This builder retains payloads in managed memory and
 does not create files or temporary upload resources.
 
 ```zirk
-mut multipart = HTTPMultipartBuilder.create();
+inmut multipart = HTTPMultipartBuilder.create();
 match multipart.add("avatar", image_bytes, "avatar.png", "image/png") {
     Error(error) => report(error);
     Ok(_) => match HTTP.post_multipart(url, multipart, "zirk-upload-2026") {
@@ -941,8 +941,8 @@ match HTTPMultipartData.parse(request) {
                 null => { }
                 part => {
                     stdout.println(part.name());
-                    mut filename = part.filename();
-                    mut bytes = part.bytes();
+                    inmut filename = part.filename();
+                    inmut bytes = part.bytes();
                     stdout.println(bytes.length);
                 }
             }
@@ -960,7 +960,7 @@ plain TCP server can serve a bounded number of requests:
 ```zirk
 import { stdout } from std.io;
 
-mut router: HTTPRouter = HTTPRouter();
+inmut router = HTTPRouter();
 match HTTPServer.bind("tcp://127.0.0.1:8080") {
     Error(error) => stdout.println(error.to_string());
     Ok(listener) => {
@@ -1049,7 +1049,7 @@ The bundled preview installs middleware on an `HTTPRouter`:
 ```zirk
 fn logging(request: HTTPRequest, next: HTTPNext): HTTPResponse {
     stdout.println(request.method());
-    mut response: HTTPResponse = next.proceed(request);
+    inmut response = next.proceed(request);
     return response;
 }
 
@@ -1248,9 +1248,9 @@ fn echo_one(socket: HTTPWebSocket): Void {
 }
 
 fn serve_one(listener: TCPListener): Void {
-    mut origins: List<String> = List();
+    inmut origins: List<String> = List();
     origins.add("https://app.example");
-    mut protocols: List<String> = List();
+    inmut protocols: List<String> = List();
     protocols.add("zirk.echo.v1");
     match listener.accept() {
         Ok(stream) => {

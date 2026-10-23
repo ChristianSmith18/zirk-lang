@@ -110,7 +110,7 @@ attenuate the capture: they create an independent safe callable capability
 without exposing mutable control over the original standard object.
 
 ```zirk
-mut log = stdout.println;
+inmut log = stdout.println;
 log("ready");
 ```
 

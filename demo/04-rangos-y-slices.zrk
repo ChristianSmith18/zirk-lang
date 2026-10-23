@@ -20,11 +20,11 @@ fn main(): Void {
         stdout.println(i);
     }
     stdout.println("done");
-    mut r: Range<Int32> = 2 .. 9;
+    inmut r = 2 .. 9;
     stdout.println(r.start);
     stdout.println(r.end);
     stdout.println(r.step);
-    mut rr: Range<Int32> = 8 .. 1: -1;
+    inmut rr = 8 .. 1: -1;
     for i in rr {
         stdout.println(i);
     }

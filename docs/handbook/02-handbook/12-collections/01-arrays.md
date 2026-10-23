@@ -9,7 +9,7 @@ cannot be appended or removed.
 ```zirk
 inmut names: Array<String> = ["Ada", "Grace", "Linus"];
 
-mut explicit: Array<Int32> = Array(1, 2, 3, 4);
+inmut explicit: Array<Int32> = Array(1, 2, 3, 4);
 
 mut sized: String[8];                    // canonical explicit-size form
 mut also: Array<String>(8);              // supported alternative
@@ -42,8 +42,8 @@ Bounds are checked in safe code. A negative index counts from the end.
 ## Sharing and cloning
 
 ```zirk
-mut first: String[3] = ["a", "b", "c"];
-mut second = first;
+inmut first: String[3] = ["a", "b", "c"];
+inmut second = first;
 
 second[0] = "X";
 
@@ -54,7 +54,7 @@ Arrays are managed references. Assignment aliases the same array. To get an
 independent copy, use `clone()`:
 
 ```zirk
-mut independent = first.clone();
+inmut independent = first.clone();
 independent[0] = "Y";
 
 // first is ["X", "b", "c"]
@@ -67,8 +67,8 @@ A slice creates a view or a copy depending on the contract. In safe code, slices
 copy their elements so that `inmut::strict` sources remain protected:
 
 ```zirk
-mut numbers: Int32[5] = [1, 2, 3, 4, 5];
-mut middle = numbers[1:4];   // [2, 3, 4]
+inmut numbers: Int32[5] = [1, 2, 3, 4, 5];
+inmut middle = numbers[1:4];   // [2, 3, 4]
 
 middle[0] = 99;
 // numbers is still [1, 2, 3, 4, 5]
@@ -85,7 +85,7 @@ compile-time contract. It does not select a different resizable collection.
 ```zirk
 fn checksum(bytes: UInt8[16]): UInt32 { ... }
 
-mut header: UInt8[16] = ...;
+inmut header: UInt8[16] = ...;
 checksum(header);         // valid
 checksum(some_array);     // error if the array size is not 16
 ```
@@ -105,8 +105,8 @@ Arrays implement `Iterable<T>`. Mutation during iteration is a controlled error.
 Array equality is element-wise when `T` is `Equatable`:
 
 ```zirk
-mut a: Int32[3] = [1, 2, 3];
-mut b: Int32[3] = [1, 2, 3];
+inmut a: Int32[3] = [1, 2, 3];
+inmut b: Int32[3] = [1, 2, 3];
 
 a == b; // true
 a is b; // false: two different array instances
@@ -117,7 +117,7 @@ a is b; // false: two different array instances
 `Array<T>` supports the same eager, chainable transformations as `List<T>`:
 
 ```zirk
-mut values: Int32[4] = [1, 2, 3, 4];
+inmut values: Int32[4] = [1, 2, 3, 4];
 
 inmut doubled = values.map((n) => n * 2);          // Array<Int32>
 inmut evens = values.filter((n) => n.is_even());   // Array<Int32>

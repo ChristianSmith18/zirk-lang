@@ -38,7 +38,7 @@ fn main(): Void {
     stdout.println(500ms <= 500ms);
 
     // `to_string()`, `String(...)` e interpolación muestran el mismo formato.
-    inmut d: Duration = 1500ms;
+    inmut d = 1500ms;
     stdout.println(d.to_string());
     stdout.println(String(d));
     stdout.println("elapsed {1s + 500ms}");
@@ -50,7 +50,7 @@ fn main(): Void {
     stdout.println(neg.is_zero().to_string());
     stdout.println(neg.is_positive().to_string());
     stdout.println(neg.is_negative().to_string());
-    inmut zero: Duration = 0ns;
+    inmut zero = 0ns;
     stdout.println(zero.is_zero().to_string());
     stdout.println(zero.sign().to_string());
     stdout.println(d.is_positive().to_string());

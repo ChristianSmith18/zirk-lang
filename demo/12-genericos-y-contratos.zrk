@@ -27,15 +27,15 @@ class CounterIt implements Iterator<Int32> {
     construct() { this.current = 0; }
     next(): Iteration<Int32> {
         if (this.current >= 3) { return Iteration.Done; }
-        mut v = this.current;
+        inmut v = this.current;
         this.current = this.current + 1;
         return Iteration.Item(value: v);
     }
 }
 
 fn main(): Void {
-    mut t = Tag();
-    mut b = Box2();
+    inmut t = Tag();
+    inmut b = Box2();
     stdout.println(t.name());
     stdout.println(show(b));
     for i in Counter() {
@@ -43,7 +43,7 @@ fn main(): Void {
     }
     // `next()` se invoca mediante una variable tipada como `Iterator<Int32>`;
     // el contrato genérico determina el método que se ejecuta.
-    mut it: Iterator<Int32> = Counter().iterator();
+    inmut it: Iterator<Int32> = Counter().iterator();
     match it.next() {
         Iteration.Item(value) => stdout.println(value);
         Iteration.Done => stdout.println("done");

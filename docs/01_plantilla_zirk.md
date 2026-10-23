@@ -4723,7 +4723,7 @@ double value = (double)count;
 Posible:
 
 ```text
-mut value: Float64 = count as Float64;
+inmut value = count as Float64;
 ```
 
 **Respuesta:**
@@ -4738,8 +4738,8 @@ value as Type
 Ejemplos:
 
 ```text
-mut decimal = count as Float64;
-mut decimal = <Float64>count;
+inmut decimal = count as Float64;
+inmut decimal = <Float64>count;
 ```
 
 La forma prefija aplicará el cast a la expresión que aparezca a continuación. Los paréntesis delimitarán expresiones compuestas y permitirán continuar accediendo al resultado casteado:

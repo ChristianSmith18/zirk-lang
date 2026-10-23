@@ -30,9 +30,9 @@ fn describe(s: Shape): String {
 
 fn main(): Void {
     // Los argumentos nombrados pueden cambiar de orden, igual que en una llamada normal.
-    mut circle = Shape.Circle(radius: 2);
-    mut rect = Shape.Rect(height: 4, width: 3);
-    mut point = Shape.Point;
+    inmut circle = Shape.Circle(radius: 2);
+    inmut rect = Shape.Rect(height: 4, width: 3);
+    inmut point = Shape.Point;
 
     stdout.println(area(circle));
     stdout.println(area(rect));

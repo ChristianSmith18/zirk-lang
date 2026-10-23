@@ -53,8 +53,8 @@ Cross-compilation makes the machine running the compiler different from the
 machine that will run the program:
 
 ```zirk
-mut build_machine = Platform.host;
-mut output_machine = Platform.target;
+inmut build_machine = Platform.host;
+inmut output_machine = Platform.target;
 
 if build_machine.os != output_machine.os {
     stdout.println("cross-compiling");

@@ -34,7 +34,7 @@ for index in 0..{number}:1 {
 sequence — `r[1:4]` is the range of `r`'s second through fourth elements:
 
 ```zirk
-mut r: Range<Int32> = 0..10;
+inmut r: Range<Int32> = 0..10;
 r[2:6];   // 2, 3, 4, 5
 r[::2];   // 0, 2, 4, 6, 8
 ```

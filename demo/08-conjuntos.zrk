@@ -4,14 +4,14 @@
 import { stdout } from std.io;
 
 fn main(): Void {
-    mut s: Set<Int32> = Set();
+    inmut s: Set<Int32> = Set();
     s.add(1);
     s.add(2);
     s.add(1);
-    stdout.println(s.length.to_string());
-    stdout.println(s.contains(1).to_string());
-    stdout.println(s.contains(3).to_string());
-    stdout.println(s.remove(1).to_string());
-    stdout.println(s.length.to_string());
-    stdout.println(s.remove(1).to_string());
+    stdout.println(s.length);
+    stdout.println(s.contains(1));
+    stdout.println(s.contains(3));
+    stdout.println(s.remove(1));
+    stdout.println(s.length);
+    stdout.println(s.remove(1));
 }

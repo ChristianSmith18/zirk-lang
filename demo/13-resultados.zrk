@@ -20,27 +20,17 @@ fn describe(r: Result<Int32, String>): String {
 }
 
 fn main(): Void {
-    mut ok: Result<Int32, String> = divide(10, 2);
-    mut error: Result<Int32, String> = divide(10, 0);
+    // Explicit Result annotations preserve both variants for the later match.
+    inmut ok: Result<Int32, String> = divide(10, 2);
+    inmut error: Result<Int32, String> = divide(10, 0);
 
     stdout.println(describe(ok));
     stdout.println(describe(error));
 
-    stdout.println(ok.is_ok());
-    stdout.println(ok.is_error());
-    stdout.println(error.is_ok());
-    stdout.println(error.is_error());
-
-    stdout.println(ok.ok_or_null() ?? - 1);
-    stdout.println(error.ok_or_null() ?? - 1);
-    stdout.println(ok.error_or_null() ?? "none");
-    stdout.println(error.error_or_null() ?? "none");
-
-    stdout.println(ok.get_or(-1));
-    stdout.println(error.get_or(-1));
-
-    stdout.println(ok.unwrap());
-    stdout.println(error.unwrap_error());
+    // Ordinary value use projects Ok(value) to value and every Error to null.
+    // `??` therefore applies the fallback to every error, not only absence.
+    stdout.println(ok ?? -1);
+    stdout.println(error ?? -1);
 
     // Un `Result` debe analizarse o comprobarse. Si se quiere descartar de
     // forma deliberada, `_ = expresión;` expresa esa decisión.

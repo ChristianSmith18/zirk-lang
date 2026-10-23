@@ -1,45 +1,44 @@
-// DEMO 01 — Familias enteras con signo y sin signo, conversiones explícitas y operaciones bit a bit.
+// DEMO 01 — Familias enteras con signo y sin signo, conversiones y operaciones bit a bit.
 // Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
-// La familia completa de enteros permite declarar cada ancho y comprobar
-// operaciones según el ancho y el signo. La ampliación segura implícita exige
-// conservar el signo y no reducir el ancho; `as` permite conversiones
-// explícitas que reducen el ancho o cambian el signo. Los operadores de bits
-// y desplazamiento aceptan anchos distintos para el valor y el desplazamiento.
+// `as` es un cast comprobado entre tipos relacionados. Las conversiones de
+// valor entre familias numéricas usan el constructor del tipo de destino y
+// comprueban el rango. Las ampliaciones seguras pueden inferirse desde el tipo
+// esperado. Los operadores de bits y desplazamiento siguen el tipo del valor.
 fn main(): Void {
     // Aritmética comprobada con un entero con signo de ancho reducido.
-    mut a: Int32 = 100;
-    mut a8 = a as Int8;
-    mut b8 =(20 as Int32) as Int8;
-    stdout.println((a8 + b8) as Int32);
+    inmut a = 100;
+    inmut a8 = Int8(a);
+    inmut b8 = Int8(20);
+    stdout.println(Int32(a8 + b8));
 
     // Aritmética comprobada y comparación con enteros sin signo.
-    mut u8: UInt8 = 200;
-    mut v8: UInt8 = 50 as UInt8;
+    inmut u8 = UInt8(200);
+    inmut v8 = UInt8(50);
     stdout.println("type:", u8.type);
     stdout.println(u8 < v8);
     stdout.println(v8 < u8);
 
     // Ampliación segura implícita: Int32 -> Int64 -> Int128, sin cambiar el signo.
-    mut x64: Int64 = a as Int64;
-    mut y64: Int64 = 3;
-    mut z64 = x64 * y64;
-    stdout.println(z64 as Int32);
+    inmut x64: Int64 = a;
+    inmut y64 = Int64(3);
+    inmut z64 = x64 * y64;
+    stdout.println(Int32(z64));
 
-    mut w128: Int128 = z64 as Int128;
-    stdout.println(w128 as Int32);
+    inmut w128: Int128 = z64;
+    stdout.println(Int32(w128));
 
     // `-` requiere un ancho con signo; `~` y las operaciones de bits admiten ambos.
-    mut n: UInt32 = 10 as UInt32;
-    stdout.println((n << 2) as Int32);
-    stdout.println((n >> 1) as Int32);
-    stdout.println((~ a));
+    inmut n = UInt32(10);
+    stdout.println(Int32(n << 2));
+    stdout.println(Int32(n >> 1));
+    stdout.println(~a);
 
     // División y resto con comprobación.
-    mut p: Int64 = 100 as Int64;
-    mut q: Int64 = 7 as Int64;
-    stdout.println((p / q) as Int32);
-    stdout.println((p % q) as Int32);
+    inmut p = Int64(100);
+    inmut q = Int64(7);
+    stdout.println(Int32(p / q));
+    stdout.println(Int32(p % q));
 }

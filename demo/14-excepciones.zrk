@@ -48,7 +48,7 @@ fn wrapper(fail: Boolean): Int32 throws NetworkError {
 
 fn main(): Void {
     try {
-        mut value: Int32 = risky(false);
+        inmut value = risky(false);
         stdout.println(value);
     } catch NetworkError(error) {
         stdout.println(error.message());
@@ -57,7 +57,7 @@ fn main(): Void {
     }
 
     try {
-        mut value: Int32 = risky(true);
+        inmut value = risky(true);
         stdout.println(value);
     } catch NetworkError(error) {
         stdout.println(error.message());

@@ -16,8 +16,8 @@ record Point {
 }
 
 fn main(): Void {
-    mut p = Point(x: 1, y: 2, name: "hi", tag: Tag("t"));
-    mut q = p.clone();
+    inmut p = Point(x: 1, y: 2, name: "hi", tag: Tag("t"));
+    inmut q = p.clone();
     stdout.println(p.x);
     stdout.println(q.x);
     stdout.println(q.name);

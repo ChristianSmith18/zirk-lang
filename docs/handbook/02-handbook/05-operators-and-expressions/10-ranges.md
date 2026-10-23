@@ -30,7 +30,7 @@ slices the element sequence, returning a new `Range`). Write descending bounds
 and a negative step directly when one is needed:
 
 ```zirk
-mut r: Range<Int32> = 8..1:-1;
+inmut r: Range<Int32> = 8..1:-1;
 for i in r {
     // 8 down to 2
 }

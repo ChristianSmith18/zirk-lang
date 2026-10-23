@@ -44,7 +44,11 @@ interpolation (`"value={42}"`) or pass separate values to `stdout.print`.
 Parsing text that can fail returns a typed result rather than relying on a cast:
 
 ```zirk
-mut parsed: Result<Int32, ParseError> = Int32.parse(text);
+inmut parsed: Result<Int32, ParseError> = Int32.parse(text);
+match parsed {
+    Ok(value) => stdout.println(value);
+    Error(error) => stderr.println(error);
+}
 ```
 
 `to_string()` is the universal non-lossy rendering operation: every
@@ -58,8 +62,8 @@ form exists as well). It verifies the runtime type and fails the operation
 on a mismatch:
 
 ```zirk
-mut a: Animal = Dog();
-mut d = a as Dog; // verifies a is a Dog
+inmut a: Animal = Dog();
+inmut d = a as Dog; // verifies a is a Dog
 ```
 
 When failure is an ordinary outcome, `as?` yields a nullable result instead:
@@ -67,7 +71,7 @@ When failure is an ordinary outcome, `as?` yields a nullable result instead:
 match, so the result composes with `match`, `?.`, and `??`:
 
 ```zirk
-mut maybeDog: Dog? = a as? Dog;
+inmut maybeDog = a as? Dog;
 match maybeDog {
     null => stdout.println("no dog"),
     d => stdout.println(d.speak()),

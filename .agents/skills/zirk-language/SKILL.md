@@ -37,6 +37,16 @@ several categories and needs a compact cross-category checklist.
   100” means a resizable `List<Int32>`; `List(1..=100)` is shorter and clearer
   than a manual loop. If the length must not change, choose `Array<Int32>` or
   a fixed declaration such as `Int32[100]` instead.
+- Prefer inferred local types when an initializer already establishes the
+  intended type. Prefer `inmut` for stable bindings when the type permits the
+  intended operations. Use `mut` for rebinding, definite initialization, or
+  writes through a value-semantic place that require it; a mutable
+  reference-backed referent alone does not require `mut`. Do not
+  add `as T` to restate a known type. Keep annotations that define public
+  contracts, resolve ambiguity, choose a meaningful width, describe an empty
+  generic value, or preserve `Result<T, E>` for error handling. Keep casts only
+  for a real checked cast between related types; use the documented conversion
+  constructor or method for value conversion.
 - Prefer the narrowest language form that expresses the request. Use a range
   for a regular finite sequence, `for item in iterable` to consume it, and a
   traditional `for mut i = ...` only when the update is not a range.
@@ -49,6 +59,12 @@ several categories and needs a compact cross-category checklist.
 - Select one explicit failure channel: `Result<T, E>` for expected outcomes,
   `throws` for exceptional recoverable failure, and `fatalError` only for an
   unrecoverable invariant. There is no `?` propagation operator.
+- Consume `Result` with `match` when the caller needs its error or to distinguish
+  failure causes. In ordinary value contexts it projects to `T?`; `??` uses
+  its fallback for every `Error`, not just missing data. Do not suggest removed
+  Result status/extraction/fallback/unwrap methods or collection `get_or_null`.
+  Keep nullable-only APIs when absence is their only outcome and there is no
+  parallel Result operation; keep testing assertions such as `assert.is_ok`.
 - If the request says “function”, first choose a top-level `fn`, a method, a
   lambda, or a generic callable value; if it says “object”, choose `class`,
   `record`, or a collection from the semantics, not from the noun alone.

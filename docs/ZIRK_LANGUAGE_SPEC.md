@@ -642,9 +642,9 @@ Safe conversions use constructors or typed methods that may return a `Result`.
 Explicit casts admit postfix and prefix forms:
 
 ```text
-mut value = source as String;
-mut value = <String>source;
-mut field = <CustomObject>(obj.field).field;
+inmut value = source as String;
+inmut value = <String>source;
+inmut field = <CustomObject>(obj.field).field;
 ```
 
 Checkable casts fail in a controlled way. Casts that reinterpret memory or

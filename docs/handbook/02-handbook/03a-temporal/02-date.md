@@ -6,8 +6,12 @@ midnight timestamp.
 
 ```zirk
 inmut release = Date(2026, 8, 15);
-inmut iso = Date.parse("2026-08-15").unwrap();
 inmut local_today = Date.today();
+
+match Date.parse("2026-08-15") {
+    Ok(parsed) => stdout.println(parsed.to_iso_string());
+    Error(error) => stderr.println(error);
+}
 ```
 
 Month numbers are 1-based. Invalid dates never normalize silently:
@@ -92,8 +96,12 @@ A proleptic Gregorian calendar date with no time, offset, or zone.
 
 ```zirk
 inmut release = Date(2026, 8, 15);
-inmut iso = Date.parse("2026-08-15").unwrap();
 inmut local_today = Date.today();
+
+match Date.parse("2026-08-15") {
+    Ok(parsed) => stdout.println(parsed.to_iso_string());
+    Error(error) => stderr.println(error);
+}
 
 release.day_of_week;                       // Int32 ISO: 1 = Monday … 7 = Sunday
 release + 5h;                              // DateTime(2026, 8, 15, 5:00) — Date promotes

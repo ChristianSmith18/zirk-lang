@@ -97,8 +97,8 @@ The namespace and direct-import forms refer to the same symbols:
 import { HostPortAddress, IPAddress, SocketAddress } from std.net::address;
 import { TCPStream } from std.net::tcp;
 
-mut outbound = HostPortAddress.parse("Exämple.com", 443);
-mut literal = IPAddress.parse("127.0.0.1");
+inmut outbound = HostPortAddress.parse("Exämple.com", 443);
+inmut literal = IPAddress.parse("127.0.0.1");
 ```
 
 Use `IPv4` and `IPv6` with a lowercase `v`. Other networking acronyms remain

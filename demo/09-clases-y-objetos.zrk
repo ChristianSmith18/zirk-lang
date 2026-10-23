@@ -36,7 +36,7 @@ class Counter {
 }
 
 fn main(): Void {
-    mut user = User(1, "Cristian");
+    inmut user = User(1, "Cristian");
     stdout.println(user.id);
     stdout.println(user.name);
 
@@ -44,8 +44,8 @@ fn main(): Void {
     user.name = "otro";
     stdout.println(user.name);
 
-    mut from_zero = Counter();
-    mut from_ten = Counter(10);
+    inmut from_zero = Counter();
+    inmut from_ten = Counter(10);
     stdout.println(from_zero.count);
     stdout.println(from_ten.count);
 
@@ -53,8 +53,8 @@ fn main(): Void {
     stdout.println(from_zero.twice());
 
     // Dos objetos distintos no comparten estado.
-    mut a = User(1, "a");
-    mut b = User(2, "b");
+    inmut a = User(1, "a");
+    inmut b = User(2, "b");
     a.name = "cambiado";
     stdout.println(b.name);
 }

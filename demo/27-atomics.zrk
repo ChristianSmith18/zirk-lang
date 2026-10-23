@@ -4,7 +4,7 @@
 import { stdout } from std.io;
 
 fn main(): Void {
-    mut value = Atomic(3);
+    inmut value = Atomic(3);
     stdout.println(value.load().to_string());
     value.store(9);
     stdout.println(value.exchange(12).to_string());
@@ -25,7 +25,7 @@ fn main(): Void {
         stdout.println(value.load(AtomicOrder.acquire).to_string());
     }
 
-    mut invalid = AtomicOrder.release;
+    inmut invalid = AtomicOrder.release;
     try {
         unsafe { value.load(invalid); }
     } catch InvalidArgumentError(_) {

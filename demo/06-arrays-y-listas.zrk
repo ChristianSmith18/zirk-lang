@@ -4,26 +4,26 @@
 import { stdout } from std.io;
 
 fn main(): Void {
-    mut arr: Array<Int32> = Array(3);
+    inmut arr: Array<Int32> = Array(3);
     arr[0] = 10;
     arr[1] = 20;
     arr[2] = 30;
-    stdout.println(arr.length.to_string());
-    stdout.println(arr[0].to_string());
+    stdout.println(arr.length);
+    stdout.println(arr[0]);
 
-    mut l: List<Int32> = List();
+    inmut l: List<Int32> = List();
     l.add(1);
     l.add(2);
     l.add(3);
-    stdout.println(l.length.to_string());
+    stdout.println(l.length);
     l.insert(1, 99);
-    stdout.println(l[1].to_string());
+    stdout.println(l[1]);
     l.remove(2);
-    stdout.println(l.length.to_string());
+    stdout.println(l.length);
 
     mut sum = 0;
     for x in l {
         sum = sum + x;
     }
-    stdout.println(sum.to_string());
+    stdout.println(sum);
 }

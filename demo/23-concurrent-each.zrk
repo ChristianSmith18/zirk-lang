@@ -5,7 +5,7 @@ import { stdout } from std.io;
 
 fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3, 4];
-    mut doubled = Concurrent.each(
+    inmut doubled = Concurrent.each(
         values,
         (value: Int32): Int32 => {
         stdout.println("start " + value.to_string());

@@ -1,6 +1,6 @@
 # Demo del lenguaje Zirk
 
-Este directorio reúne ejemplos numerados del lenguaje y de las funciones que están implementadas en este checkout. Los `.zrk` se derivan de casos válidos del corpus del compilador para mantener la sintaxis alineada con la implementación. Los ejemplos avanzados deben leerse junto con el estado vigente en [`docs/init/ZIRK_FEATURE_STATUS.md`](../docs/init/ZIRK_FEATURE_STATUS.md).
+Este directorio reúne ejemplos numerados del lenguaje, incluidas capacidades implementadas y temas avanzados cuya disponibilidad depende del backend o sigue en especificación. Los `.zrk` se derivan de casos del corpus del compilador. Consulta el estado vigente en [`docs/init/ZIRK_FEATURE_STATUS.md`](../docs/init/ZIRK_FEATURE_STATUS.md) antes de asumir que una característica está disponible en todos los targets.
 
 ## Ejecutar
 
@@ -13,6 +13,27 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
+
+El archivo `demo/29-proyecto-y-modulos/src/domain/geometry.zrk` es un módulo
+importado, no un programa independiente. Comprueba el ejemplo desde su
+entrypoint `src/main.zrk`.
+
+## Convenciones de los ejemplos
+
+- Las variables locales usan `inmut` y tipo inferido cuando el inicializador
+  deja clara la intención. `mut` corresponde cuando hay reasignación,
+  inicialización definitiva posterior o escrituras sobre un lugar con
+  semántica de valor que lo requieren. Un objeto referenciado que cambia a
+  través de su API no exige `mut` por sí solo.
+- Las anotaciones se conservan cuando fijan un contrato, el ancho numérico, un
+  tipo genérico vacío o ambiguo, o cuando guardan un `Result<T, E>` para
+  inspeccionar después sus variantes.
+- `as` expresa un cast comprobado entre tipos relacionados. Las conversiones
+  de valor usan el constructor o método documentado para el tipo de destino.
+- Un `Result` se consume con `match` si el error importa. En un contexto de
+  valor se proyecta a `T?`; `??` usa el fallback para cualquier error. No hay
+  métodos de `Result` duplicados como `unwrap` ni aliases de lookup
+  `get_or_null`.
 
 ## Índice de capacidades
 
@@ -50,6 +71,6 @@ Desde la raíz del repositorio, con el compilador ya construido:
 
 ## Cobertura y límites actuales
 
-Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos. El catálogo de estado es la fuente para conocer las restricciones exactas por plataforma y backend.
+Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. El catálogo de estado es la fuente para esas restricciones.
 
 No presento como implementadas las construcciones que el catálogo marca como pendientes o excluidas: entre ellas `async fn` y `await`, `task`/`select`, generadores `fn gen`, `|>`, `map`/`filter`/`reduce` funcionales, decoradores `fn dec`, `Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, `Once<T>`, atomics de punteros y adquisición/publicación de paquetes externos.

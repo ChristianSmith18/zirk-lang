@@ -10,8 +10,8 @@ same list. Clone it when you need an independent copy.
 ## Construction
 
 ```zirk
-mut empty: List<Int32> = List();
-mut names = List("Ada", "Grace", "Linus");
+inmut empty: List<Int32> = List();
+inmut names = List("Ada", "Grace", "Linus");
 ```
 
 `List<T>()` or `List(...)` creates an empty or pre-populated list. The element
@@ -21,14 +21,14 @@ A `List<T>` annotation also selects list storage for `[...]`; ranges expand in
 place in literals and constructor calls:
 
 ```zirk
-mut values: List<Int32> = [0..3];
-mut more: List<Int32> = List(-1, 3..6, 6);
+inmut values: List<Int32> = [0..3];
+inmut more: List<Int32> = List(-1, 3..6, 6);
 ```
 
 ## Growth, insertion, and removal
 
 ```zirk
-mut numbers = List(10, 20);
+inmut numbers = List(10, 20);
 
 numbers.add(30);              // [10, 20, 30]
 numbers.insert(0, 5);         // [5, 10, 20, 30]
@@ -53,8 +53,8 @@ numbers[10];     // error: index out of bounds
 ## Sharing and cloning
 
 ```zirk
-mut first = List(1, 2, 3);
-mut second = first;
+inmut first = List(1, 2, 3);
+inmut second = first;
 
 second.add(4);
 
@@ -65,7 +65,7 @@ The assignment makes `second` another name for the same list. To get an
 independent list, call `clone()`:
 
 ```zirk
-mut independent = first.clone();
+inmut independent = first.clone();
 independent.add(5);
 
 // first is [1, 2, 3, 4]
@@ -79,7 +79,7 @@ be rebound but still permits permitted referent mutation. `inmut::strict`
 forbids even that:
 
 ```zirk
-mut a = List(1, 2, 3);
+mut a = List(1, 2, 3); // this example demonstrates rebinding
 a.add(4);        // valid
 a = List();      // valid
 
@@ -114,8 +114,8 @@ for value in numbers {
 `List` equality is element-wise when `T` is `Equatable`:
 
 ```zirk
-mut a = List(1, 2, 3);
-mut b = List(1, 2, 3);
+inmut a = List(1, 2, 3);
+inmut b = List(1, 2, 3);
 
 a == b; // true
 a is b; // false: two different list instances
@@ -127,7 +127,7 @@ a is b; // false: two different list instances
 The last transform returns a new `List`; a terminal conversion changes the family:
 
 ```zirk
-mut numbers = List(1, 2, 3, 4, 5);
+inmut numbers = List(1, 2, 3, 4, 5);
 
 inmut doubled = numbers.map((n) => n * 2);           // [2, 4, 6, 8, 10]
 inmut evens = numbers.filter((n) => n.is_even());  // [2, 4]

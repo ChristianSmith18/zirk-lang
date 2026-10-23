@@ -25,15 +25,15 @@ Values and declared types expose `type()` directly, so ordinary identity checks
 do not require importing a global reflection object:
 
 ```zirk
-mut runtime_type: Type = user.type();
-mut declared_type: Type = User.type();
+inmut runtime_type = user.type();
+inmut declared_type = User.type();
 ```
 
 `value.type()` returns the concrete runtime type. `T.type()` returns the
 identity of the declared type `T`:
 
 ```zirk
-mut account: Account = AdminAccount();
+inmut account: Account = AdminAccount();
 
 account.type();      // AdminAccount.type()
 Account.type();      // TypeKind.Interface
@@ -142,7 +142,7 @@ Constructed generic types preserve their arguments:
 ```zirk
 List<String>.type() != List<Int>.type();
 
-mut list_type = List<String>.type();
+inmut list_type = List<String>.type();
 list_type.is_generic;                  // true
 list_type.generic_arguments[0];        // String.type()
 ```
@@ -181,7 +181,7 @@ Reflection observes identity; casts perform checked conversion or narrowing:
 
 ```zirk
 if value.type().is(User) {
-    mut user = value as User;
+    inmut user = value as User;
     stdout.println(user.name);
 }
 ```

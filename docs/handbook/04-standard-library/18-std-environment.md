@@ -78,7 +78,7 @@ match Env.get<Int32>("WORKER_COUNT") {
     Error(error) => report_configuration_error(error);
 }
 
-mut worker_count = Env.get<Int32>("WORKER_COUNT") ?? 4;
+inmut worker_count = Env.get<Int32>("WORKER_COUNT") ?? 4;
 stdout.println(worker_count);
 ```
 
@@ -87,11 +87,11 @@ stdout.println(worker_count);
 Generic reads use the ordinary parsing contract of the requested type:
 
 ```zirk
-mut port = Env.get<Int32>("PORT");
-mut timeout = Env.get<Float64>("TIMEOUT_SECONDS");
-mut label = Env.get("APP_LABEL"); // T defaults to String
-mut workers: Int32? = Env.get<Int32>("WORKERS");
-mut workers_with_default = Env.get<Int32>("WORKERS") ?? 4;
+inmut port = Env.get<Int32>("PORT");
+inmut timeout = Env.get<Float64>("TIMEOUT_SECONDS");
+inmut label = Env.get("APP_LABEL"); // T defaults to String
+inmut workers: Int32? = Env.get<Int32>("WORKERS");
+inmut workers_with_default = Env.get<Int32>("WORKERS") ?? 4;
 ```
 
 The target result distinguishes:
@@ -118,7 +118,7 @@ class Port implements EnvironmentParsable<Port> {
     }
 }
 
-mut port = Env.get<Port>("PORT");
+inmut port = Env.get<Port>("PORT");
 ```
 
 A parser failure maps to `EnvironmentError.Parse`. Direct matching retains
@@ -131,8 +131,8 @@ intrinsics and satisfy the same constraint. The named `get_int32` and
 Named shorthand follows the language-wide rule:
 
 ```zirk
-mut name = "PORT";
-mut port = Env.get<Int32>(name:);
+inmut name = "PORT";
+inmut port = Env.get<Int32>(name:);
 ```
 
 `name:` means `name: name`; it does not perform positional name matching.
@@ -225,7 +225,7 @@ state between libraries and tests, and can race native code.
 Configure a child without changing the parent:
 
 ```zirk
-mut operation = Process.command("worker")
+inmut operation = Process.command("worker")
     .env("APP_MODE", "production")
     .run();
 ```
