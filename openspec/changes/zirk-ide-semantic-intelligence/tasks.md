@@ -67,7 +67,7 @@
 ## 8. Documentation, status, and release validation
 
 - [x] 8.1 Update authoritative LSP/editor/compiler documentation, feature status, limitations, and roadmap only for capabilities verified as implemented; verify each public claim maps to a test or Devin evidence.
-- [ ] 8.2 Update the companion `../zirk-lang-site` from the committed source revision after source docs are committed; review generated changes and the site-owned status catalog, using a reviewed `--audit-date YYYY-MM-DD` when project status changes.
+- [x] 8.2 Update the companion `../zirk-lang-site` from the committed source revision after source docs are committed; review generated changes and the site-owned status catalog, using a reviewed `--audit-date YYYY-MM-DD` when project status changes.
 - [x] 8.3 Run focused Rust tests for changed crates, LSP protocol tests, extension validation, and a release-binary stdio smoke test; verify the server returns semantic results and documented target limitations are accurate.
 - [x] 8.4 Run the documented Devin end-to-end suite; verify editor rendering, editing workflows, clean-window discovery, and native debugger behavior.
-- [ ] 8.5 Validate the OpenSpec change and both repository diffs; verify source and website changes are committed separately and record both revisions for auditability.
+- [x] 8.5 Validate the OpenSpec change and both repository diffs; verify source and website changes are committed separately and record both revisions for auditability.
