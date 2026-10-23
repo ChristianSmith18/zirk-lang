@@ -32,6 +32,16 @@ pub struct Crate {
     pub sources: SourceMap,
     /// One parsed program per file, in the order the files were loaded.
     pub units: Vec<Unit>,
+    /// Filesystem roots the loader authorized for this module graph. Editor
+    /// indexes may inspect these roots, but must not broaden them.
+    pub module_roots: ModuleRoots,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModuleRoots {
+    pub local_root: PathBuf,
+    /// Package name to the directory containing its entry module.
+    pub packages: HashMap<String, PathBuf>,
 }
 
 pub struct Unit {
@@ -47,6 +57,18 @@ pub fn load(entry: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
 /// package-aware entry point used by project commands; single-file loading
 /// remains available for scripts and editor overlays.
 pub fn load_project(start: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
+    load_project_with_overlay(start, &HashMap::new(), sink)
+}
+
+/// Loads the declared project entrypoint while letting editor buffers shadow
+/// their on-disk files. The project manifest and dependency graph still come
+/// from disk; only source text is overlaid.
+pub fn load_project_with_overlay(
+    start: &Path,
+    overlay: &HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<Crate> {
+    let overlay = normalize_overlay(overlay);
     let manifest_path = project::discover(start)?;
     let manifest = match project::read_manifest(&manifest_path) {
         Ok(manifest) => manifest,
@@ -80,6 +102,7 @@ pub fn load_project(start: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
         &manifest,
         lock.as_ref().unwrap_or(&empty_lock),
         root,
+        &overlay,
         sink,
     )
 }
@@ -98,22 +121,21 @@ pub fn load_with_overlay(
 ) -> Option<Crate> {
     // Keys are normalized once so callers may pass paths in any shape while
     // lookups always see the normalized form `Loader::load` produces.
-    let overlay: HashMap<PathBuf, String> = overlay
-        .iter()
-        .map(|(path, text)| (absolute_normalize(path), text.clone()))
-        .collect();
+    let overlay = normalize_overlay(overlay);
 
     let entry = absolute_normalize(entry);
+    let local_root = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let package_roots = standard_package_roots();
     let mut loader = Loader {
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
         overlay: &overlay,
-        package_roots: standard_package_roots(),
-        local_root: entry
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf(),
+        package_roots: package_roots.clone(),
+        local_root: local_root.clone(),
         sink,
     };
 
@@ -122,7 +144,18 @@ pub fn load_with_overlay(
     Some(Crate {
         sources: loader.sources,
         units: loader.units,
+        module_roots: ModuleRoots {
+            local_root,
+            packages: package_directories(&package_roots),
+        },
     })
+}
+
+fn normalize_overlay(overlay: &HashMap<PathBuf, String>) -> HashMap<PathBuf, String> {
+    overlay
+        .iter()
+        .map(|(path, text)| (absolute_normalize(path), text.clone()))
+        .collect()
 }
 
 fn load_with_project(
@@ -130,10 +163,10 @@ fn load_with_project(
     manifest: &ProjectManifest,
     lock: &project::Lockfile,
     root: &Path,
+    overlay: &HashMap<PathBuf, String>,
     sink: &mut DiagnosticSink,
 ) -> Option<Crate> {
-    let overlay = HashMap::new();
-    let package_roots: HashMap<String, PathBuf> =
+    let resolved_package_roots: HashMap<String, PathBuf> =
         match project::resolve_package_roots(root, manifest, lock) {
             Ok(roots) => roots
                 .into_iter()
@@ -151,24 +184,34 @@ fn load_with_project(
                 return None;
             }
         };
+    let mut package_roots = standard_package_roots();
+    package_roots.extend(resolved_package_roots);
+    let local_root = absolute_normalize(root);
     let mut loader = Loader {
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
-        overlay: &overlay,
-        package_roots: {
-            let mut roots = standard_package_roots();
-            roots.extend(package_roots);
-            roots
-        },
-        local_root: absolute_normalize(root),
+        overlay,
+        package_roots: package_roots.clone(),
+        local_root: local_root.clone(),
         sink,
     };
     loader.load(entry, None, &loader.local_root.clone())?;
     Some(Crate {
         sources: loader.sources,
         units: loader.units,
+        module_roots: ModuleRoots {
+            local_root,
+            packages: package_directories(&package_roots),
+        },
     })
+}
+
+fn package_directories(entries: &HashMap<String, PathBuf>) -> HashMap<String, PathBuf> {
+    entries
+        .iter()
+        .filter_map(|(name, entry)| Some((name.clone(), entry.parent()?.to_path_buf())))
+        .collect()
 }
 
 /// Compiler-owned package roots are ordinary Zirk source trees bundled with

@@ -1,0 +1,11 @@
+share interface Named {
+    name(): String;
+}
+
+share record User implements Named {
+    display_name: String;
+
+    name(): String {
+        return this.display_name;
+    }
+}

@@ -18,7 +18,7 @@
 mod emit;
 mod runtime;
 
-pub use emit::emit;
+pub use emit::{emit, emit_with_sources};
 pub use runtime::symbols;
 
 use inkwell::OptimizationLevel;
@@ -316,6 +316,44 @@ pub fn compile_to_object(
     output: &Path,
 ) -> DiagnosticResult<()> {
     compile_to_object_with_optimization(module, name, output, CodegenOptimizationLevel::None)
+}
+
+/// Compiles an IR module into a host object with full source-level debug data.
+///
+/// The source map supplies the per-file paths and line tables used for native
+/// breakpoints. Ordinary builds keep using [`compile_to_object`] and do not
+/// carry DWARF unless the caller explicitly requests it.
+pub fn compile_to_object_with_debug_info(
+    module: &zirk_ir::Module,
+    name: &str,
+    sources: &zirk_diagnostics::SourceMap,
+    output: &Path,
+) -> DiagnosticResult<()> {
+    if module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| {
+            matches!(
+                instruction.kind,
+                zirk_ir::InstKind::MutexAcquire { .. }
+                    | zirk_ir::InstKind::MutexRelease { .. }
+                    | zirk_ir::InstKind::BorrowViewStart { .. }
+                    | zirk_ir::InstKind::BorrowViewEnd { .. }
+            )
+        })
+    {
+        return Err(Diagnostic::error(
+            codes::MUTEX_IR_NOT_LOWERED,
+            "mutex and borrowed-view IR markers are not executable yet",
+        )
+        .with_help("use the source mutex API after payload access, runtime, and cleanup lowering are implemented")
+        .boxed());
+    }
+    let context = inkwell::context::Context::create();
+    let llvm = emit_with_sources(&context, module, name, sources);
+    emit_object_for_host(&llvm, output)
 }
 
 /// Compiles an IR module at an explicit experimental optimization level.

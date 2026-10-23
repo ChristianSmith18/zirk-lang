@@ -1,0 +1,6 @@
+fn main(): Void {
+    inmut item = 1;
+    if true {
+        inmut item = 2;
+    }
+}

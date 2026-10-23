@@ -12,6 +12,7 @@ pub struct FrontendResult {
     pub program: zirk_ast::Program,
     pub checked: zirk_sema::CheckedProgram,
     pub sources: SourceMap,
+    pub module_roots: crate::modules::ModuleRoots,
 }
 
 /// Loads, parses, resolves, and checks the program rooted at `path`.
@@ -37,6 +38,7 @@ pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendRe
         program,
         checked,
         sources: loaded.sources,
+        module_roots: loaded.module_roots,
     })
 }
 
@@ -57,7 +59,7 @@ pub fn run_frontend_lenient_with_overlay(
     sink: &mut DiagnosticSink,
 ) -> Option<FrontendResult> {
     let loaded = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
-        crate::modules::load_project(path, sink)?
+        crate::modules::load_project_with_overlay(path, overlay, sink)?
     } else {
         crate::modules::load_with_overlay(path, overlay, sink)?
     };
@@ -71,6 +73,45 @@ pub fn run_frontend_lenient_with_overlay(
         program,
         checked,
         sources: loaded.sources,
+        module_roots: loaded.module_roots,
+    })
+}
+
+/// Best-effort semantic frontend for editor requests. Unlike the CLI's
+/// lenient check mode, it retains a partial snapshot when an imported file or
+/// declared package is not resolved yet, so import completion can help the
+/// user repair the current line. Project validation, root authorization, and
+/// compiler diagnostics are unchanged; non-import loading failures still
+/// produce no frontend result.
+pub fn run_frontend_ide_with_overlay(
+    path: &Path,
+    overlay: &std::collections::HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<FrontendResult> {
+    let loaded = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        crate::modules::load_project_with_overlay(path, overlay, sink)?
+    } else {
+        crate::modules::load_with_overlay(path, overlay, sink)?
+    };
+    let only_unresolved_imports = sink
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.severity == zirk_diagnostics::Severity::Error)
+        .all(|diagnostic| {
+            diagnostic.code == crate::codes::UNREADABLE_FILE
+                || diagnostic.code == crate::codes::PACKAGE_RESOLUTION
+        });
+    if sink.has_errors() && !only_unresolved_imports {
+        return None;
+    }
+
+    let program = merge(&loaded);
+    let checked = zirk_sema::check(&loaded.sources, &program, sink);
+    Some(FrontendResult {
+        program,
+        checked,
+        sources: loaded.sources,
+        module_roots: loaded.module_roots,
     })
 }
 

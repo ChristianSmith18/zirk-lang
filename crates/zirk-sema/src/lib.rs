@@ -18,6 +18,7 @@
 //! error does not produce a dozen derived ones.
 
 mod checker;
+mod ide;
 mod scope;
 pub mod stdlib;
 mod types;
@@ -26,6 +27,10 @@ pub use checker::{
     Capture, CheckedProgram, ConcurrentPlan, EffectSummary, GenericCallInfo, LambdaInfo,
     OwnershipMarkers, OwnershipProperties, ServiceSpawnInfo, SettledPlan, TypeMapEntry,
     TypeMapKind, check,
+};
+pub use ide::{
+    ReferenceRole, SemanticIndex, SemanticReference, SemanticSymbol, SemanticSymbolKind,
+    SemanticVisibility, SymbolId,
 };
 pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{

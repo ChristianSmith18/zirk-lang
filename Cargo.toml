@@ -20,6 +20,7 @@ zirk-browser = { path = "crates/zirk-browser" }
 zirk-codegen-llvm = { path = "crates/zirk-codegen-llvm" }
 zirk-diagnostics = { path = "crates/zirk-diagnostics" }
 zirk-format = { path = "crates/zirk-format" }
+zirk-ide = { path = "crates/zirk-ide" }
 zirk-ir = { path = "crates/zirk-ir" }
 zirk-lexer = { path = "crates/zirk-lexer" }
 zirk-parser = { path = "crates/zirk-parser" }

@@ -1,7 +1,7 @@
 {
   "name": "zirk-lang",
   "displayName": "Zirk Language Support",
-  "description": "Syntax highlighting, diagnostics, build/run commands, and language support for the Zirk programming language",
+  "description": "Syntax, compiler diagnostics, semantic navigation, authoring support, versioned quick fixes, build/run commands, and language support for Zirk",
   "version": "0.6.0",
   "publisher": "ChristianSmith",
   "author": "Christian Smith",
@@ -10,6 +10,11 @@
     "vscode": "^1.75.0"
   },
   "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:zirk",
+    "onDebugResolve:zirk",
+    "onDebugInitialConfigurations:zirk"
+  ],
   "categories": [
     "Programming Languages"
   ],
@@ -18,6 +23,36 @@
     "zirk-lang"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "[zirk]": {
+        "editor.semanticHighlighting.enabled": true,
+        "editor.semanticTokenColorCustomizations": {
+          "enabled": true,
+          "rules": {
+            "namespace": "#F4A261",
+            "type": "#32D4C6",
+            "class": "#34D399",
+            "interface": "#34D399",
+            "struct": "#34D399",
+            "enum": "#34D399",
+            "enumMember": "#FF6B81",
+            "typeParameter": "#A78BFA",
+            "parameter": {
+              "foreground": "#B8B8C3",
+              "fontStyle": "italic"
+            },
+            "local": "#F7F7FA",
+            "variable": "#F7F7FA",
+            "property": "#F7C65C",
+            "function": "#39C6FF",
+            "method": "#38BDF8",
+            "*.declaration": { "fontStyle": "bold" },
+            "*.reference": { "fontStyle": "italic" },
+            "*.import": { "fontStyle": "italic" }
+          }
+        }
+      }
+    },
     "configuration": {
       "title": "Zirk",
       "properties": {
@@ -49,7 +84,17 @@
         "zirk.lspPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the zirk-lsp language server executable. If empty, the extension searches target/debug/zirk-lsp, target/release/zirk-lsp, and PATH. When the server runs it provides live diagnostics, hover, document symbols, and formatting; without it the CLI bridge remains the fallback."
+          "description": "Path to the zirk-lsp language server executable. If empty, the extension searches its bin directory, target/debug, target/release, and PATH. When the server runs it provides live diagnostics, hover, document/workspace symbols, formatting, definition/type definition, references, safe rename, completion and resolution, signature help, inlay hints, quick fixes, highlights, and semantic tokens; without it semantic editor features are unavailable and the CLI bridge remains the fallback."
+        },
+        "zirk.dapPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the zirk-dap interpreter debug adapter. If empty, the extension searches its bin directory, target/debug, target/release, and PATH."
+        },
+        "zirk.nativeDebuggerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to lldb-dap for native Zirk debugging. If empty, the extension uses xcrun on macOS and then searches PATH for lldb-dap or lldb-vscode."
         }
       }
     },
@@ -102,6 +147,59 @@
         }
       }
     ],
+    "debuggers": [
+      {
+        "type": "zirk",
+        "label": "Zirk",
+        "languages": ["zirk"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to a .zrk file or a Zirk project directory"
+              },
+              "target": {
+                "type": "string",
+                "enum": ["interpreter", "native"],
+                "default": "interpreter",
+                "description": "Use the Zirk interpreter or compile with DWARF and debug through LLDB"
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Workspace root allowed to contain the program"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Pause before the first instruction in main"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "zirk",
+            "request": "launch",
+            "name": "Debug Zirk program",
+            "program": "${file}",
+            "target": "interpreter",
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false
+          },
+          {
+            "type": "zirk",
+            "request": "launch",
+            "name": "Debug Zirk program (native)",
+            "program": "${file}",
+            "target": "native",
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false
+          }
+        ]
+      }
+    ],
     "languages": [
       {
         "id": "zirk",
@@ -147,6 +245,27 @@
         "language": "zirk-init",
         "scopeName": "source.zirk",
         "path": "./syntaxes/zirk.tmLanguage.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "zirk",
+        "scopes": {
+          "namespace": ["support.module.standard.zirk"],
+          "type": ["storage.type.zirk"],
+          "class": ["entity.name.class.zirk"],
+          "interface": ["entity.name.type.zirk"],
+          "struct": ["entity.name.type.zirk"],
+          "enum": ["entity.name.type.zirk"],
+          "enumMember": ["constant.language.zirk"],
+          "typeParameter": ["entity.name.type.zirk"],
+          "parameter": ["variable.parameter.zirk"],
+          "local": ["variable.other.readwrite.zirk"],
+          "variable": ["variable.other.readwrite.zirk"],
+          "property": ["variable.other.property.zirk"],
+          "function": ["entity.name.function.zirk"],
+          "method": ["entity.name.function.call.zirk"]
+        }
       }
     ],
     "snippets": [

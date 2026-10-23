@@ -214,6 +214,7 @@ fn check(args: &[String]) -> i32 {
 #[cfg(feature = "backend")]
 fn compile(args: &[String], action: Action) -> i32 {
     let json = args.iter().any(|a| a == "--json");
+    let debug_info = args.iter().any(|a| a == "--debug-info");
     let color = frontend::resolve_color(color_choice(args).as_deref());
     let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
 
@@ -242,7 +243,11 @@ fn compile(args: &[String], action: Action) -> i32 {
         frontend::resolve_source_path(files[0].as_str())
     };
     let output_dir = PathBuf::from(OUTPUT_DIR);
-    let compilation = driver::compile(&path, &output_dir);
+    let compilation = if debug_info {
+        driver::compile_with_debug_info(&path, &output_dir)
+    } else {
+        driver::compile(&path, &output_dir)
+    };
 
     if !compilation.sink.is_empty() {
         eprint!("{}", frontend::render(&compilation.sink, json, color));
@@ -481,6 +486,7 @@ fn help() {
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");
+        println!("      --debug-info   include source-level DWARF for native debugging");
         println!("  run <file>         compile and run");
     }
     println!();

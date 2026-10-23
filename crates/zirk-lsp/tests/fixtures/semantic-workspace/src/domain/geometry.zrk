@@ -1,0 +1,11 @@
+share fn area(radius: Int32): Int32 {
+    return radius * radius * 3;
+}
+
+share fn identity<T>(value: T): T {
+    return value;
+}
+
+share fn twice(radius: Int32): Int32 {
+    return radius * 2;
+}

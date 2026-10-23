@@ -1,0 +1,3 @@
+fn unrelated(): Int32 {
+    return 999;
+}

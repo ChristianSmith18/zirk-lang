@@ -19,7 +19,7 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `deliver-std-http-and-environment`, **2026-10-20**.
+Last reviewed for `zirk-ide-semantic-intelligence`, **2026-10-23**.
 
 ## Browser-hosted interpreter tooling
 
@@ -359,7 +359,7 @@ final OpenSpec close-out commit advances its provenance manifest.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `.zpkg` / package manager | partial | partial | partial | no | no | partial | Package API/artifact inspection scaffolding exists, but publication remains gated on reproducible archives and cryptographic integrity verification. |
-| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-format` provides canonical whole-document formatting to the CLI, `zirk-lsp`, and browser package; the LSP MVP also serves diagnostics, hover, and document symbols over stdio. Incremental snapshots, completion, navigation, rename, range formatting, and a debugger remain Phase 9. |
+| LSP / formatter / debugger | n/a | n/a | n/a | n/a | n/a | partial | `zirk-format` provides canonical whole-document formatting to the CLI, `zirk-lsp`, and browser package. The LSP serves in-memory diagnostics, type hover, document/workspace symbols, formatting, cross-module definition/references, safe rename, contextual completion and completion resolution, signature help with generic substitutions, inferred-type and parameter-name hints, document highlights, diagnostic-backed versioned quick fixes, and negotiated full/delta/range semantic tokens over stdio. Import path suggestions use a bounded on-demand index over compiler-authorized local, standard-library, and declared-package roots; import-name completion can parse top-level `share` exports from one unopened module at a time. LSP request cancellation, workspace-generation supersession, and negotiated analysis progress are implemented; blocking compiler work cannot yet be interrupted cooperatively, and the import-path index has no granular progress. The interpreter DAP supports source breakpoints, pause/continue/step, bounded stack and local snapshots, unavailable-value reporting, stale-handle invalidation, and SecretString redaction; it rejects programs that need unsupported native host capabilities. The native debug path emits LLVM DWARF and uses LLDB DAP, with native editor acceptance still pending. Browser DAP is not implemented. A full semantic index over every unopened file, range formatting, Devin visual acceptance, and packaged clean-window discovery remain unfinished parts of Phase 9; verify active OpenSpec change `zirk-ide-semantic-intelligence` for delivery status. |
 | Decorators (`fn dec`) | yes | no | no | no | no | no | `Keyword::Dec` gated to Phase 10. |
 
 ---

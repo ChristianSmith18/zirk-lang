@@ -13,14 +13,22 @@
 use crate::runtime;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::module::{Linkage, Module as LlvmModule};
+use inkwell::debug_info::{
+    AsDIScope, DICompileUnit, DIFile, DIFlags, DIFlagsConstants, DILocalVariable, DIScope,
+    DISubprogram, DIType, DWARFEmissionKind, DWARFSourceLanguage, DebugInfoBuilder,
+};
+use inkwell::module::{FlagBehavior, Linkage, Module as LlvmModule};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FloatType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
-    PointerValue,
+    AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
+    IntValue, PointerValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate};
+use llvm_sys::core::LLVMSetIsNewDbgInfoFormat;
+use llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordBefore;
 use std::collections::HashMap;
+use std::path::Path;
+use zirk_diagnostics::{FileId, SourceMap, Span};
 use zirk_ir as ir;
 
 /// Prefix applied to every Zirk function in the generated code.
@@ -89,8 +97,39 @@ fn callable_dispatch_signature<'ctx>(
 
 /// Translates an IR module into an LLVM module.
 pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> LlvmModule<'ctx> {
+    emit_inner(context, module, name, None)
+}
+
+/// Translates an IR module into LLVM IR and attaches source-level DWARF data.
+///
+/// The source map is kept outside the portable IR: it supplies filesystem
+/// paths and line/column coordinates without making the IR backend depend on
+/// frontend project-loading policy.
+pub fn emit_with_sources<'ctx>(
+    context: &'ctx Context,
+    module: &ir::Module,
+    name: &str,
+    sources: &SourceMap,
+) -> LlvmModule<'ctx> {
+    emit_inner(context, module, name, Some(sources))
+}
+
+fn emit_inner<'ctx>(
+    context: &'ctx Context,
+    module: &ir::Module,
+    name: &str,
+    sources: Option<&SourceMap>,
+) -> LlvmModule<'ctx> {
     let llvm = context.create_module(name);
+    if sources.is_some() {
+        // LLVM 20 stores source variable locations as debug records rather
+        // than ordinary instructions. Inkwell 0.10's convenience wrapper
+        // attempts to wrap those records as instructions, so use LLVM's C API
+        // directly when inserting `dbg.declare` records below.
+        unsafe { LLVMSetIsNewDbgInfoFormat(llvm.as_mut_ptr(), 1) };
+    }
     let builder = context.create_builder();
+    let debug = sources.map(|sources| DebugContext::new(context, &llvm, sources));
 
     let runtime = runtime::declare(context, &llvm);
 
@@ -314,6 +353,10 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         .collect();
 
     for function in &module.functions {
+        let subprogram = debug
+            .as_ref()
+            .filter(|_| !function.span.is_empty())
+            .map(|debug| debug.function(function, functions[&function.name]));
         FunctionEmitter {
             context,
             builder: &builder,
@@ -324,6 +367,10 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
             strings: &strings,
             descriptors: &descriptors,
             closure_descriptors: &closure_descriptors,
+            debug: debug.as_ref(),
+            subprogram,
+            debug_variables: HashMap::new(),
+            declared_debug_variables: std::collections::HashSet::new(),
             values: HashMap::new(),
             value_types: HashMap::new(),
             slots: HashMap::new(),
@@ -333,11 +380,170 @@ pub fn emit<'ctx>(context: &'ctx Context, module: &ir::Module, name: &str) -> Ll
         .emit(function, functions[&function.name]);
     }
 
+    builder.unset_current_debug_location();
     if let Some(entry) = functions.get(ENTRYPOINT) {
         emit_c_entrypoint(context, &builder, &llvm, &runtime, *entry);
     }
 
+    if let Some(debug) = &debug {
+        debug.builder.finalize();
+    }
+
     llvm
+}
+
+/// Source and type metadata shared by the functions in one emitted module.
+struct DebugContext<'ctx, 'sources> {
+    builder: DebugInfoBuilder<'ctx>,
+    unit: DICompileUnit<'ctx>,
+    files: HashMap<FileId, DIFile<'ctx>>,
+    sources: &'sources SourceMap,
+}
+
+impl<'ctx, 'sources> DebugContext<'ctx, 'sources> {
+    fn new(context: &'ctx Context, llvm: &LlvmModule<'ctx>, sources: &'sources SourceMap) -> Self {
+        let entry_path = Path::new(sources.entry().name());
+        let filename = entry_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(sources.entry().name());
+        let directory = entry_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_string_lossy();
+        let (builder, unit) = llvm.create_debug_info_builder(
+            true,
+            // DWARF has no Zirk language code; use C's generic source-location
+            // model so debuggers can consume the line and variable records.
+            DWARFSourceLanguage::C,
+            filename,
+            &directory,
+            &format!("Zirk compiler {}", env!("CARGO_PKG_VERSION")),
+            false,
+            "",
+            0,
+            "",
+            DWARFEmissionKind::Full,
+            0,
+            false,
+            false,
+            "",
+            "",
+        );
+        llvm.add_basic_value_flag(
+            "Debug Info Version",
+            FlagBehavior::Warning,
+            context.i32_type().const_int(
+                u64::from(inkwell::debug_info::debug_metadata_version()),
+                false,
+            ),
+        );
+
+        let mut files = HashMap::new();
+        for (id, source) in sources.files() {
+            let file = if id == FileId::ENTRY {
+                unit.get_file()
+            } else {
+                let path = Path::new(source.name());
+                let filename = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(source.name());
+                let directory = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_string_lossy();
+                builder.create_file(filename, &directory)
+            };
+            files.insert(id, file);
+        }
+        Self {
+            builder,
+            unit,
+            files,
+            sources,
+        }
+    }
+
+    fn file(&self, file: FileId) -> DIFile<'ctx> {
+        self.files
+            .get(&file)
+            .copied()
+            .unwrap_or_else(|| self.unit.get_file())
+    }
+
+    fn location(
+        &self,
+        span: Span,
+        scope: DIScope<'ctx>,
+        context: &'ctx Context,
+    ) -> inkwell::debug_info::DILocation<'ctx> {
+        let source = self.sources.file(span.file);
+        let (line, column) = source.line_column(span.start);
+        self.builder
+            .create_debug_location(context, line, column, scope, None)
+    }
+
+    fn function(
+        &self,
+        function: &ir::Function,
+        llvm_function: FunctionValue<'ctx>,
+    ) -> DISubprogram<'ctx> {
+        let file = self.file(function.span.file);
+        let (line, _) = self
+            .sources
+            .file(function.span.file)
+            .line_column(function.span.start);
+        let parameter_types: Vec<_> = function
+            .params
+            .iter()
+            .map(|slot| debug_type(&self.builder, function.slots[slot.0 as usize].ty))
+            .collect();
+        let result_type = (function.return_type != ir::IrType::Void)
+            .then(|| debug_type(&self.builder, function.return_type));
+        let signature = self.builder.create_subroutine_type(
+            file,
+            result_type,
+            &parameter_types,
+            DIFlags::PUBLIC,
+        );
+        let linkage_name = llvm_function.get_name().to_string_lossy().into_owned();
+        let subprogram = self.builder.create_function(
+            self.unit.as_debug_info_scope(),
+            &function.name,
+            Some(&linkage_name),
+            file,
+            line,
+            signature,
+            true,
+            true,
+            line,
+            DIFlags::PUBLIC,
+            false,
+        );
+        llvm_function.set_subprogram(subprogram);
+        subprogram
+    }
+}
+
+fn debug_type<'ctx>(builder: &DebugInfoBuilder<'ctx>, ty: ir::IrType) -> DIType<'ctx> {
+    let (name, size, encoding) = match ty {
+        ir::IrType::Int(width) => (
+            width.as_str(),
+            u64::from(width.bits()),
+            if width.signed() { 0x05 } else { 0x07 },
+        ),
+        ir::IrType::Float(width) => (width.as_str(), u64::from(width.bits()), 0x04),
+        ir::IrType::Boolean => ("Boolean", 1, 0x02),
+        ir::IrType::Void | ir::IrType::Never => ("Void", 0, 0x00),
+        _ => (ty.as_str(), 0, 0x00),
+    };
+    builder
+        .create_basic_type(name, size, encoding, DIFlags::PUBLIC)
+        .expect("Zirk debug type has a non-empty name")
+        .as_type()
 }
 
 /// The LLVM type of an IR type, resolving closure and value layouts against
@@ -1106,6 +1312,10 @@ struct FunctionEmitter<'ctx, 'a> {
     descriptors: &'a [PointerValue<'ctx>],
     /// The capture-block descriptor of each closure layout, by layout id.
     closure_descriptors: &'a [PointerValue<'ctx>],
+    debug: Option<&'a DebugContext<'ctx, 'a>>,
+    subprogram: Option<DISubprogram<'ctx>>,
+    debug_variables: HashMap<ir::SlotId, DILocalVariable<'ctx>>,
+    declared_debug_variables: std::collections::HashSet<ir::SlotId>,
 
     values: HashMap<ir::ValueId, BasicValueEnum<'ctx>>,
     /// The IR type of each emitted value, which a pointer alone does not carry.
@@ -1164,6 +1374,46 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     }
 
     fn emit(mut self, function: &ir::Function, llvm_function: FunctionValue<'ctx>) {
+        self.builder.unset_current_debug_location();
+        if let (Some(debug), Some(subprogram)) = (self.debug, self.subprogram) {
+            for (index, slot) in function.slots.iter().enumerate() {
+                let slot_id = ir::SlotId(index as u32);
+                let file = debug.file(slot.span.file);
+                let (line, _) = debug
+                    .sources
+                    .file(slot.span.file)
+                    .line_column(slot.span.start);
+                let variable = if let Some(parameter_index) = function
+                    .params
+                    .iter()
+                    .position(|parameter| *parameter == slot_id)
+                {
+                    debug.builder.create_parameter_variable(
+                        subprogram.as_debug_info_scope(),
+                        &slot.name,
+                        parameter_index as u32 + 1,
+                        file,
+                        line,
+                        debug_type(&debug.builder, slot.ty),
+                        true,
+                        DIFlags::PUBLIC,
+                    )
+                } else {
+                    debug.builder.create_auto_variable(
+                        subprogram.as_debug_info_scope(),
+                        &slot.name,
+                        file,
+                        line,
+                        debug_type(&debug.builder, slot.ty),
+                        true,
+                        DIFlags::PUBLIC,
+                        0,
+                    )
+                };
+                self.debug_variables.insert(slot_id, variable);
+            }
+        }
+
         // Every block is created up front so a branch can reference one that
         // has not been filled yet.
         for block in &function.blocks {
@@ -1281,15 +1531,32 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             let value = llvm_function
                 .get_nth_param(index as u32)
                 .expect("declared parameter");
-            self.builder
+            if let (Some(debug), Some(subprogram)) = (self.debug, self.subprogram) {
+                let location = debug.location(
+                    function.slots[slot.0 as usize].span,
+                    subprogram.as_debug_info_scope(),
+                    self.context,
+                );
+                self.builder.set_current_debug_location(location);
+            }
+            let store = self
+                .builder
                 .build_store(self.slots[slot], value)
                 .expect("parameter store");
+            self.declare_debug_slot(*slot, function.slots[slot.0 as usize].span, store);
         }
 
         for block in &function.blocks {
             self.builder.position_at_end(self.blocks[&block.id]);
 
             for instruction in &block.instructions {
+                if let (Some(debug), Some(subprogram)) = (self.debug, self.subprogram) {
+                    self.builder.set_current_debug_location(debug.location(
+                        instruction.span,
+                        subprogram.as_debug_info_scope(),
+                        self.context,
+                    ));
+                }
                 self.emit_instruction(instruction);
             }
 
@@ -1298,6 +1565,36 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .as_ref()
                 .expect("verified IR always has a terminator");
             self.emit_terminator(terminator);
+        }
+    }
+
+    fn declare_debug_slot(
+        &mut self,
+        slot: ir::SlotId,
+        span: Span,
+        store: inkwell::values::InstructionValue<'ctx>,
+    ) {
+        if !self.declared_debug_variables.insert(slot) {
+            return;
+        }
+        let (Some(debug), Some(subprogram), Some(variable)) = (
+            self.debug,
+            self.subprogram,
+            self.debug_variables.get(&slot).copied(),
+        ) else {
+            return;
+        };
+        let location = debug.location(span, subprogram.as_debug_info_scope(), self.context);
+        let expression = debug.builder.create_expression(Vec::new());
+        unsafe {
+            LLVMDIBuilderInsertDeclareRecordBefore(
+                debug.builder.as_mut_ptr(),
+                self.slots[&slot].as_value_ref(),
+                variable.as_mut_ptr(),
+                expression.as_mut_ptr(),
+                location.as_mut_ptr(),
+                store.as_value_ref(),
+            );
         }
     }
 
@@ -4842,9 +5139,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             }
 
             ir::InstKind::Store(slot, operand) => {
-                self.builder
+                let store = self
+                    .builder
                     .build_store(self.slots[slot], self.operand(*operand))
                     .expect("slot store");
+                self.declare_debug_slot(*slot, instruction.span, store);
                 None
             }
 

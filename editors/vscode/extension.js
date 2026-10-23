@@ -1,5 +1,5 @@
 const vscode = require('vscode');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -13,11 +13,11 @@ let outputChannel;
 let statusBarItem;
 let tripleQuoteGuide;
 let tripleQuoteEndpoint;
+const lspDiagnostics = new Map();
 
-// Set while a `zirk-lsp` language client is running. The server then owns
-// diagnostics, hover and formatting for `zirk` documents, and the CLI bridge
-// code paths below stay silent (spec `zirk-lsp`, "Editor integration with
-// CLI fallback").
+// Set while a `zirk-lsp` language client is running. The server owns the LSP
+// providers for `zirk` documents; the CLI bridge stays silent for overlapping
+// diagnostics, hover, and formatting paths.
 let languageClient;
 
 const pendingLiveChecks = new Map();
@@ -135,6 +135,13 @@ async function activate(context) {
     diagnosticCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
 
     context.subscriptions.push(outputChannel, diagnosticCollection);
+    registerDebugAdapter(context);
+
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+    statusBarItem.text = '$(sync~spin) Zirk: Starting';
+    statusBarItem.tooltip = 'Starting the Zirk language service';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
 
     // The language server takes over diagnostics, hover and formatting when
     // its binary exists; everything else below is untouched either way.
@@ -168,14 +175,12 @@ async function activate(context) {
     });
     context.subscriptions.push(tripleQuoteGuide, tripleQuoteEndpoint);
 
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    statusBarItem.text = serverRunning ? '$(server) Zirk: LSP' : 'Zirk';
+    statusBarItem.text = serverRunning ? '$(server) Zirk: Ready' : '$(warning) Zirk: CLI fallback';
     statusBarItem.tooltip = serverRunning
-        ? 'The Zirk language server is handling this file'
-        : 'Click to re-check the active Zirk file';
+        ? 'The Zirk language server is ready'
+        : 'The language server is unavailable; compiler-backed CLI features are active';
     statusBarItem.command = serverRunning ? undefined : 'zirk.check';
     statusBarItem.show();
-    context.subscriptions.push(statusBarItem);
 
     const checkCommand = vscode.commands.registerCommand('zirk.check', () => {
         const editor = vscode.window.activeTextEditor;
@@ -202,6 +207,10 @@ async function activate(context) {
 
     const openDisposable = vscode.workspace.onDidOpenTextDocument(document => {
         if (document.languageId === LANGUAGE_ID) {
+            lspDiagnostics.delete(document.uri.toString());
+            if (languageClient && vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString()) {
+                setLanguageStatus('$(sync~spin) Zirk: Indexing', 'Analyzing the open Zirk workspace');
+            }
             checkDocument(document);
         }
     });
@@ -217,6 +226,12 @@ async function activate(context) {
         updateTripleQuoteGuideForDocument(document);
         if (document.languageId !== LANGUAGE_ID || document.isUntitled || document.uri.scheme !== 'file') {
             return;
+        }
+        if (languageClient) {
+            lspDiagnostics.delete(document.uri.toString());
+            if (vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString()) {
+                setLanguageStatus('$(sync~spin) Zirk: Indexing', 'Updating semantic information for this document');
+            }
         }
         const config = vscode.workspace.getConfiguration(CONFIG_SECTION, document.uri);
         if (config.get('checkOnType', true)) {
@@ -235,6 +250,7 @@ async function activate(context) {
         removeLiveTempFile(document.uri.fsPath);
         diagnosticCollection.delete(document.uri);
         typeMaps.delete(document.uri.toString());
+        lspDiagnostics.delete(key);
     });
 
     const activeEditorDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -273,6 +289,13 @@ async function activate(context) {
 
     const codeActions = vscode.languages.registerCodeActionsProvider(LANGUAGE_ID, {
         provideCodeActions(document, range, context) {
+            // Some VS Code-compatible clients do not support versioned
+            // document changes, so zirk-lsp omits its code-action provider.
+            // Keep the narrow, single-document deprecated-type fix available
+            // in that case.
+            if (languageClient?.initializeResult?.capabilities?.codeActionProvider) {
+                return [];
+            }
             return provideDeprecatedTypeActions(document, context);
         }
     }, {
@@ -658,11 +681,10 @@ async function runInTerminal(executable, document) {
 }
 
 /**
- * Finds the `zirk-lsp` executable: `zirk.lspPath` first, then the same search
- * roots the compiler discovery uses (`target/{debug,release}/zirk-lsp`), then
- * PATH.
+ * Finds the `zirk-lsp` executable: `zirk.lspPath`, the extension's bundled
+ * binary, repository build roots, then PATH.
  */
-function findLanguageServer() {
+function findLanguageServer(context) {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd());
     const config = vscode.workspace.getConfiguration(CONFIG_SECTION, root);
     const configured = config.get('lspPath', '');
@@ -672,8 +694,178 @@ function findLanguageServer() {
         }
         outputChannel.appendLine(`Configured zirk.lspPath not found: ${configured}`);
     }
+    const executableName = process.platform === 'win32' ? 'zirk-lsp.exe' : 'zirk-lsp';
+    const bundled = path.join(context.extensionPath, 'bin', executableName);
+    if (fs.existsSync(bundled)) {
+        return bundled;
+    }
     return findInSearchRoots(collectSearchRoots(root), ['zirk-lsp'])
         ?? findOnAnyPath(['zirk-lsp']);
+}
+
+function registerDebugAdapter(context) {
+    const configurationProvider = vscode.debug.registerDebugConfigurationProvider('zirk', {
+        provideDebugConfigurations(folder) {
+            const program = vscode.window.activeTextEditor?.document.languageId === LANGUAGE_ID
+                ? vscode.window.activeTextEditor.document.uri.fsPath
+                : '${file}';
+            return [{
+                type: 'zirk',
+                request: 'launch',
+                name: 'Debug Zirk program (interpreter)',
+                program,
+                target: 'interpreter',
+                cwd: folder?.uri.fsPath,
+                stopOnEntry: false,
+            }, {
+                type: 'zirk',
+                request: 'launch',
+                name: 'Debug Zirk program (native)',
+                program,
+                target: 'native',
+                cwd: folder?.uri.fsPath,
+                stopOnEntry: false,
+            }];
+        },
+        async resolveDebugConfiguration(folder, configuration) {
+            const active = vscode.window.activeTextEditor?.document;
+            const resolved = { ...configuration };
+            if (!resolved.program && active?.languageId === LANGUAGE_ID) {
+                resolved.program = active.uri.fsPath;
+            }
+            if (!resolved.cwd && folder) {
+                resolved.cwd = folder.uri.fsPath;
+            }
+            if (!resolved.program) {
+                vscode.window.showErrorMessage('Zirk debugging requires a .zrk program. Open a Zirk file or set "program" in launch.json.');
+                return undefined;
+            }
+
+            if (resolved.target === 'native') {
+                const sourcePath = path.resolve(resolved.program);
+                const sourceDocument = vscode.workspace.textDocuments.find(document =>
+                    document.uri.scheme === 'file' && document.uri.fsPath === sourcePath);
+                if (sourceDocument?.isDirty && !await sourceDocument.save()) {
+                    vscode.window.showErrorMessage('Save the Zirk source file before starting a native debug session.');
+                    return undefined;
+                }
+                const compiler = findCompiler(vscode.Uri.file(sourcePath), 'build');
+                if (!compiler) {
+                    const message = 'The Zirk compiler was not found. Install Zirk, add it to PATH, or set zirk.executablePath.';
+                    outputChannel?.appendLine(message);
+                    vscode.window.showErrorMessage(message);
+                    return undefined;
+                }
+                try {
+                    const executable = await buildNativeDebugProgram(compiler, sourcePath, resolved.cwd);
+                    outputChannel?.appendLine(`Native debug executable: ${executable}`);
+                    resolved.program = executable;
+                    resolved.cwd = resolved.cwd || path.dirname(sourcePath);
+                } catch (error) {
+                    outputChannel?.appendLine(`Native debug build failed: ${error.message}`);
+                    vscode.window.showErrorMessage(`Zirk native debug build failed: ${error.message}`);
+                    return undefined;
+                }
+            }
+            return resolved;
+        },
+    });
+    const descriptorFactory = vscode.debug.registerDebugAdapterDescriptorFactory('zirk', {
+        createDebugAdapterDescriptor(session) {
+            if (session.configuration.target === 'native') {
+                const executable = findNativeDebugger(session.configuration);
+                if (!executable) {
+                    const message = 'LLDB DAP was not found. Install Xcode Command Line Tools, add lldb-dap to PATH, or set zirk.nativeDebuggerPath.';
+                    outputChannel?.appendLine(message);
+                    vscode.window.showErrorMessage(message);
+                    return undefined;
+                }
+                const cwd = session.configuration.cwd
+                    || (session.configuration.program ? path.dirname(session.configuration.program) : process.cwd());
+                outputChannel?.appendLine(`Native debugger running: ${executable}`);
+                return new vscode.DebugAdapterExecutable(executable, [], { cwd });
+            }
+            const executable = findDebugAdapter(context, session.configuration);
+            if (!executable) {
+                const message = 'The zirk-dap executable was not found. Build it with `cargo build -p zirk-dap`, add it to PATH, or set zirk.dapPath.';
+                outputChannel?.appendLine(message);
+                vscode.window.showErrorMessage(message);
+                return undefined;
+            }
+            const cwd = session.configuration.cwd
+                || (session.configuration.program ? path.dirname(session.configuration.program) : process.cwd());
+            outputChannel?.appendLine(`zirk-dap running: ${executable}`);
+            return new vscode.DebugAdapterExecutable(executable, [], { cwd });
+        },
+    });
+    context.subscriptions.push(configurationProvider, descriptorFactory);
+}
+
+function buildNativeDebugProgram(compiler, sourcePath, cwd) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(compiler, ['build', '--debug-info', sourcePath], {
+            cwd: cwd || path.dirname(sourcePath),
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+        child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+        child.on('error', reject);
+        child.on('close', code => {
+            if (code !== 0) {
+                reject(new Error((stderr || stdout || `compiler exited with ${code}`).trim()));
+                return;
+            }
+            const executable = stdout.trim().split(/\r?\n/).at(-1);
+            if (!executable || !fs.existsSync(executable)) {
+                reject(new Error('the compiler did not produce an executable path'));
+                return;
+            }
+            resolve(path.resolve(cwd || path.dirname(sourcePath), executable));
+        });
+    });
+}
+
+function findNativeDebugger(configuration) {
+    const program = typeof configuration.program === 'string' ? configuration.program : process.cwd();
+    const config = vscode.workspace.getConfiguration(CONFIG_SECTION, vscode.Uri.file(program));
+    const configured = config.get('nativeDebuggerPath', '');
+    if (configured) {
+        if (fs.existsSync(configured)) {
+            return configured;
+        }
+        outputChannel?.appendLine(`Configured zirk.nativeDebuggerPath not found: ${configured}`);
+    }
+    if (process.platform === 'darwin') {
+        const result = spawnSync('xcrun', ['--find', 'lldb-dap'], { encoding: 'utf8' });
+        const fromXcode = result.status === 0 ? result.stdout.trim() : '';
+        if (fromXcode && fs.existsSync(fromXcode)) {
+            return fromXcode;
+        }
+    }
+    return findOnAnyPath(['lldb-dap', 'lldb-vscode']);
+}
+
+function findDebugAdapter(context, configuration) {
+    const program = typeof configuration.program === 'string' ? configuration.program : process.cwd();
+    const documentUri = vscode.Uri.file(program);
+    const config = vscode.workspace.getConfiguration(CONFIG_SECTION, documentUri);
+    const configured = config.get('dapPath', '');
+    if (configured) {
+        if (fs.existsSync(configured)) {
+            return configured;
+        }
+        outputChannel?.appendLine(`Configured zirk.dapPath not found: ${configured}`);
+    }
+
+    const executableName = process.platform === 'win32' ? 'zirk-dap.exe' : 'zirk-dap';
+    const bundled = path.join(context.extensionPath, 'bin', executableName);
+    if (fs.existsSync(bundled)) {
+        return bundled;
+    }
+    return findInSearchRoots(collectSearchRoots(documentUri), ['zirk-dap'])
+        ?? findOnAnyPath(['zirk-dap']);
 }
 
 /**
@@ -682,16 +874,19 @@ function findLanguageServer() {
  */
 async function startLanguageClient(context) {
     let LanguageClient;
+    let LanguageClientState;
     try {
-        ({ LanguageClient } = require('vscode-languageclient/node'));
+        ({ LanguageClient, State: LanguageClientState } = require('vscode-languageclient/node'));
     } catch (error) {
+        setLanguageStatus('$(warning) Zirk: CLI fallback', 'The language client is unavailable; CLI features remain active');
         outputChannel.appendLine(`vscode-languageclient is not bundled: ${error.message}`);
         outputChannel.appendLine('Falling back to the CLI bridge.');
         return false;
     }
 
-    const executable = findLanguageServer();
+    const executable = findLanguageServer(context);
     if (!executable) {
+        setLanguageStatus('$(warning) Zirk: CLI fallback', 'The language server was not found; CLI features remain active');
         outputChannel.appendLine('No zirk-lsp executable found; falling back to the CLI bridge.');
         outputChannel.appendLine('Build it with `cargo build -p zirk-lsp`.');
         return false;
@@ -701,12 +896,27 @@ async function startLanguageClient(context) {
         'zirk-lsp',
         'Zirk Language Server',
         { command: executable },
-        { documentSelector: [{ scheme: 'file', language: LANGUAGE_ID }] }
+        {
+            documentSelector: [{ scheme: 'file', language: LANGUAGE_ID }],
+            middleware: {
+                handleDiagnostics(uri, diagnostics, next) {
+                    const key = uri.toString();
+                    lspDiagnostics.set(key, diagnostics);
+                    const active = vscode.window.activeTextEditor?.document;
+                    if (active?.languageId === LANGUAGE_ID && active.uri.toString() === key) {
+                        updateStatusBarForDocument(active);
+                    }
+                    next(uri, diagnostics);
+                }
+            }
+        }
     );
+    setLanguageStatus('$(sync~spin) Zirk: Starting', 'Starting the Zirk language server');
 
     try {
         await client.start();
     } catch (error) {
+        setLanguageStatus('$(warning) Zirk: CLI fallback', 'The language server failed to start; CLI features remain active');
         outputChannel.appendLine(`zirk-lsp failed to start: ${error.message ?? error}`);
         outputChannel.appendLine('Falling back to the CLI bridge.');
         return false;
@@ -714,6 +924,57 @@ async function startLanguageClient(context) {
 
     context.subscriptions.push({ dispose: () => client.stop() });
     languageClient = client;
+    client.onDidChangeState(event => {
+        if (event.newState === LanguageClientState.Stopped) {
+            setLanguageStatus('$(error) Zirk: LSP failed', 'The language server stopped unexpectedly');
+            outputChannel.appendLine('zirk-lsp stopped unexpectedly; restart the editor or language server.');
+        }
+    });
+    const watchWorkspaceFolder = folder => {
+        const disposables = [];
+        const patterns = ['**/*.zrk', '**/.zkinit', '**/zirk.lock'];
+        const fileChangeTypes = {
+            create: vscode.FileChangeType.Created,
+            change: vscode.FileChangeType.Changed,
+            delete: vscode.FileChangeType.Deleted,
+        };
+        for (const pattern of patterns) {
+            const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
+            for (const [eventName, changeType] of Object.entries(fileChangeTypes)) {
+                const subscription = watcher[`onDid${eventName[0].toUpperCase()}${eventName.slice(1)}`](uri => {
+                    client.sendNotification('workspace/didChangeWatchedFiles', {
+                        changes: [{ uri: uri.toString(), type: changeType }]
+                    }).catch(error => outputChannel.appendLine(`Could not notify zirk-lsp about ${uri.fsPath}: ${error.message ?? error}`));
+                });
+                disposables.push(subscription);
+            }
+            disposables.push(watcher);
+        }
+        return vscode.Disposable.from(...disposables);
+    };
+    const workspaceWatchers = new Map();
+    const addWorkspaceFolder = folder => {
+        const key = folder.uri.toString();
+        if (workspaceWatchers.has(key)) {
+            return;
+        }
+        const watcher = watchWorkspaceFolder(folder.uri);
+        workspaceWatchers.set(key, watcher);
+        context.subscriptions.push(watcher);
+    };
+    for (const folder of vscode.workspace.workspaceFolders || []) {
+        addWorkspaceFolder(folder);
+    }
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(event => {
+        for (const folder of event.removed) {
+            const key = folder.uri.toString();
+            workspaceWatchers.get(key)?.dispose();
+            workspaceWatchers.delete(key);
+        }
+        for (const folder of event.added) {
+            addWorkspaceFolder(folder);
+        }
+    }));
     outputChannel.appendLine(`zirk-lsp running: ${executable}`);
     return true;
 }
@@ -964,8 +1225,31 @@ function updateStatusBar(documentUri, ok, detail) {
     statusBarItem.show();
 }
 
+function setLanguageStatus(text, tooltip) {
+    if (!statusBarItem) {
+        return;
+    }
+    statusBarItem.text = text;
+    statusBarItem.tooltip = tooltip;
+    statusBarItem.show();
+}
+
 function updateStatusBarForDocument(document) {
-    if (!statusBarItem || languageClient) {
+    if (!statusBarItem) {
+        return;
+    }
+
+    if (languageClient) {
+        const diagnostics = lspDiagnostics.get(document.uri.toString());
+        if (diagnostics === undefined) {
+            setLanguageStatus('$(sync~spin) Zirk: Indexing', 'Waiting for the language server analysis');
+            return;
+        }
+        const count = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+        const warnings = diagnostics.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
+        const detail = count > 0 ? `${count} error${count === 1 ? '' : 's'}`
+            : warnings > 0 ? `${warnings} warning${warnings === 1 ? '' : 's'}` : 'Ready';
+        setLanguageStatus(`${count || warnings ? '$(warning)' : '$(check)'} Zirk: ${detail}`, 'Diagnostics and semantic information are current');
         return;
     }
 

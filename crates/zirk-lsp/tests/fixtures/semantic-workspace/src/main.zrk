@@ -1,0 +1,23 @@
+import { stdout } from std.io;
+import { area, identity -> keep } from "./domain/geometry";
+import { User, Named -> NamedValue } from "./domain/model";
+
+fn read_name(value: NamedValue): String {
+    return value.name();
+}
+
+fn main(): Void {
+    mut total = 0;
+    inmut user = User(display_name: "Ada");
+    inmut named: NamedValue = user;
+    inmut name = keep(user.name());
+
+    if total == 0 {
+        inmut local = area(3);
+        total = local;
+    }
+
+    stdout.println(read_name(named));
+    stdout.println(name);
+    stdout.println(total);
+}

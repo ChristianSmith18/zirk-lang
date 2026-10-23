@@ -13,6 +13,7 @@ zirk-ast.workspace = true
 zirk-sema.workspace = true
 
 inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
+llvm-sys = { version = "201.1.0", default-features = false }
 
 [dev-dependencies]
 zirk-lexer.workspace = true

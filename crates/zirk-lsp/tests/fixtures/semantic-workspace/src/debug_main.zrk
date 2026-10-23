@@ -1,0 +1,9 @@
+fn add(left: Int32, right: Int32): Int32 {
+    return left + right;
+}
+
+fn main(): Void {
+    inmut base = 10;
+    inmut result = add(base, 5);
+    inmut final_value = result + 1;
+}

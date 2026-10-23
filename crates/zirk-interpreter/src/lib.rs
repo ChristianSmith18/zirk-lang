@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use zirk_diagnostics::{FileId, Span};
@@ -586,6 +587,32 @@ pub struct StackFrame {
     pub span: Option<Span>,
 }
 
+/// One bounded, source-facing variable captured while the interpreter is paused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugVariable {
+    pub name: String,
+    pub type_name: String,
+    pub value: String,
+    pub available: bool,
+    pub children: Vec<DebugVariable>,
+}
+
+/// One call frame captured for an editor debugger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugFrame {
+    pub function: String,
+    pub span: Option<Span>,
+    pub locals: Vec<DebugVariable>,
+}
+
+/// Bounded view of a paused interpreter. Values are snapshots, never handles
+/// into mutable interpreter storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DebugSnapshot {
+    pub frames: Vec<DebugFrame>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitFailure {
     Instructions,
@@ -1151,7 +1178,7 @@ impl From<String> for ExecutionFault {
 /// Execution instance for one verified module. Dropping it drops the complete
 /// arena and all frames, so no state can leak into another browser run.
 pub struct Interpreter<'module> {
-    module: &'module Module,
+    module: Cow<'module, Module>,
     limits: InterpreterLimits,
     heap: Heap,
     frames: Vec<Frame>,
@@ -1178,11 +1205,28 @@ impl<'module> Interpreter<'module> {
         module: &'module Module,
         limits: InterpreterLimits,
     ) -> Result<Self, InternalFailure> {
+        Self::new_with_module(Cow::Borrowed(module), limits)
+    }
+
+    /// Constructs an interpreter that owns its verified module. This is
+    /// useful for long-lived hosts such as a debugger adapter, which must keep
+    /// execution state across many protocol requests without self-references.
+    pub fn new_owned(
+        module: Module,
+        limits: InterpreterLimits,
+    ) -> Result<Interpreter<'static>, InternalFailure> {
+        Interpreter::new_with_module(Cow::Owned(module), limits)
+    }
+
+    fn new_with_module(
+        module: Cow<'module, Module>,
+        limits: InterpreterLimits,
+    ) -> Result<Self, InternalFailure> {
         limits.validate().map_err(|error| InternalFailure {
             message: format!("invalid interpreter limits: {error:?}"),
             span: None,
         })?;
-        verify(module).map_err(|errors| InternalFailure {
+        verify(&module).map_err(|errors| InternalFailure {
             message: format!("IR verification failed: {}", errors[0]),
             span: None,
         })?;
@@ -1257,6 +1301,462 @@ impl<'module> Interpreter<'module> {
             .collect()
     }
 
+    /// Prepares an interpreter instance without consuming its first source
+    /// instruction, so a debugger can verify and stop at a main-entry
+    /// breakpoint before execution begins.
+    pub fn prepare_main_for_debug(
+        &mut self,
+        host: &dyn InterpreterHost,
+    ) -> Result<(), ExecutionResult> {
+        if self.main_started || !self.frames.is_empty() {
+            return Err(self.internal("debugger preparation requires a fresh interpreter", None));
+        }
+        if host.is_cancelled() {
+            return Err(ExecutionResult::LimitFailure(LimitFailure::Cancelled));
+        }
+        if let Err(mut failures) =
+            preflight_with_standard_sources(&self.module, &self.bundled_standard_sources)
+        {
+            return Err(ExecutionResult::CapabilityFailure(failures.remove(0)));
+        }
+        let Some(function) = self
+            .module
+            .functions
+            .iter()
+            .position(|function| function.name == "main")
+        else {
+            return Err(self.internal("verified module has no main entrypoint", None));
+        };
+        self.push_frame(function, Vec::new(), None)
+            .map_err(ExecutionResult::LimitFailure)?;
+        self.main_started = true;
+        self.main_paused = true;
+        Ok(())
+    }
+
+    /// Source span of the next instruction that will execute while paused.
+    pub fn debug_location(&self) -> Option<Span> {
+        if !self.main_paused {
+            return None;
+        }
+        let frame = self.frames.last()?;
+        let function = self.module.functions.get(frame.function)?;
+        let block = function.block(frame.block)?;
+        block
+            .instructions
+            .get(frame.instruction)
+            .or_else(|| {
+                frame
+                    .instruction
+                    .checked_sub(1)
+                    .and_then(|i| block.instructions.get(i))
+            })
+            .map(|instruction| instruction.span)
+            .or(Some(function.span))
+    }
+
+    /// Current call depth while paused. It is intended for step-over and
+    /// step-out decisions in an external debugger adapter.
+    pub fn debug_frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Captures source-named locals and a bounded view of aggregate values.
+    /// The method returns `None` while execution is running so callers cannot
+    /// retain a live view across a resume.
+    pub fn debug_snapshot(
+        &self,
+        max_frames: usize,
+        max_variables: usize,
+        max_depth: usize,
+    ) -> Option<DebugSnapshot> {
+        if !self.main_paused {
+            return None;
+        }
+        let max_frames = max_frames.min(self.limits.stack_frames as usize);
+        let max_variables = max_variables.min(4_096);
+        let max_depth = max_depth.min(8);
+        let mut remaining = max_variables;
+        let mut truncated = false;
+        let mut frames = Vec::new();
+        let mut visiting = HashSet::new();
+
+        for frame in self.frames.iter().rev().take(max_frames) {
+            let Some(function) = self.module.functions.get(frame.function) else {
+                continue;
+            };
+            let mut locals = Vec::new();
+            for (index, slot) in function.slots.iter().enumerate() {
+                if remaining == 0 {
+                    truncated = true;
+                    break;
+                }
+                let value = frame.slots.get(index).and_then(Option::as_ref);
+                locals.push(self.debug_variable(
+                    slot.name.clone(),
+                    slot.ty,
+                    value,
+                    0,
+                    max_depth,
+                    &mut remaining,
+                    &mut visiting,
+                    &mut truncated,
+                ));
+            }
+            let span = if frames.is_empty() {
+                self.debug_location()
+            } else {
+                function
+                    .block(frame.block)
+                    .and_then(|block| {
+                        block.instructions.get(frame.instruction).or_else(|| {
+                            frame
+                                .instruction
+                                .checked_sub(1)
+                                .and_then(|i| block.instructions.get(i))
+                        })
+                    })
+                    .map(|instruction| instruction.span)
+                    .or(Some(function.span))
+            };
+            frames.push(DebugFrame {
+                function: function.name.clone(),
+                span,
+                locals,
+            });
+        }
+        if self.frames.len() > max_frames {
+            truncated = true;
+        }
+        Some(DebugSnapshot { frames, truncated })
+    }
+
+    fn debug_variable(
+        &self,
+        name: String,
+        ty: IrType,
+        value: Option<&Value>,
+        depth: usize,
+        max_depth: usize,
+        remaining: &mut usize,
+        visiting: &mut HashSet<HeapId>,
+        truncated: &mut bool,
+    ) -> DebugVariable {
+        *remaining = remaining.saturating_sub(1);
+        let Some(value) = value else {
+            return DebugVariable {
+                name,
+                type_name: self.debug_type_name(ty),
+                value: "<unavailable>".into(),
+                available: false,
+                children: Vec::new(),
+            };
+        };
+        let type_name = self.debug_type_name(ty);
+        if self.is_secret_debug_value(value) {
+            return DebugVariable {
+                name,
+                type_name,
+                value: "<redacted>".into(),
+                available: true,
+                children: Vec::new(),
+            };
+        }
+        let mut children = Vec::new();
+        let display = self.debug_render_value(ty, value);
+        if depth < max_depth {
+            if let Value::Heap(id) = value {
+                if visiting.insert(*id) {
+                    self.debug_children(
+                        *id,
+                        ty,
+                        depth,
+                        max_depth,
+                        remaining,
+                        visiting,
+                        truncated,
+                        &mut children,
+                    );
+                    visiting.remove(id);
+                } else {
+                    *truncated = true;
+                }
+            }
+        } else if self.debug_has_children(ty, value) {
+            *truncated = true;
+        }
+        DebugVariable {
+            name,
+            type_name,
+            value: display,
+            available: true,
+            children,
+        }
+    }
+
+    /// SecretString payloads are deliberately hidden from debugger snapshots,
+    /// including when the value is held through a derived class or aggregate.
+    fn is_secret_debug_value(&self, value: &Value) -> bool {
+        let Value::Heap(id) = value else {
+            return false;
+        };
+        let Some(HeapEntry::Object { layout, .. }) = self.heap.get(*id) else {
+            return false;
+        };
+        self.module
+            .objects
+            .get(*layout as usize)
+            .is_some_and(|object| {
+                object.name == "SecretString"
+                    || object.ancestors.iter().any(|ancestor| {
+                        self.module
+                            .objects
+                            .get(*ancestor as usize)
+                            .is_some_and(|base| base.name == "SecretString")
+                    })
+            })
+    }
+
+    fn debug_children(
+        &self,
+        id: HeapId,
+        ty: IrType,
+        depth: usize,
+        max_depth: usize,
+        remaining: &mut usize,
+        visiting: &mut HashSet<HeapId>,
+        truncated: &mut bool,
+        output: &mut Vec<DebugVariable>,
+    ) {
+        let Some(entry) = self.heap.get(id) else {
+            return;
+        };
+        let mut add = |name: String, ty: IrType, value: &Value| {
+            if *remaining == 0 {
+                *truncated = true;
+                return;
+            }
+            output.push(self.debug_variable(
+                name,
+                ty,
+                Some(value),
+                depth + 1,
+                max_depth,
+                remaining,
+                visiting,
+                truncated,
+            ));
+        };
+        match entry {
+            HeapEntry::Object { layout, fields } => {
+                if let Some(layout) = self.module.objects.get(*layout as usize) {
+                    for (field, value) in layout.fields.iter().zip(fields) {
+                        add(field.name.clone(), field.ty, value);
+                    }
+                }
+            }
+            HeapEntry::Record { layout, fields } => {
+                if let Some(layout) = self.module.values.get(*layout as usize) {
+                    for (field, value) in layout.fields.iter().zip(fields) {
+                        add(field.name.clone(), field.ty, value);
+                    }
+                }
+            }
+            HeapEntry::Enum {
+                layout,
+                variant,
+                fields,
+            } => {
+                if let Some(layout) = self.module.enums.get(*layout as usize) {
+                    if let Some(indices) = layout.variants.get(*variant as usize) {
+                        for (index, field_index) in indices.iter().enumerate() {
+                            let Some(field) = layout.fields.get(*field_index as usize) else {
+                                continue;
+                            };
+                            if let Some(value) = fields.get(*field_index as usize) {
+                                add(format!("{}[{}]", field.name, index), field.ty, value);
+                            }
+                        }
+                    }
+                }
+            }
+            HeapEntry::Array(values) | HeapEntry::List(values) => {
+                let element_type = match ty {
+                    IrType::Array(index) => self.module.array_types.get(index as usize).copied(),
+                    IrType::List(index) => self.module.list_types.get(index as usize).copied(),
+                    _ => None,
+                };
+                if let Some(element_type) = element_type {
+                    for (index, value) in values.iter().enumerate() {
+                        add(format!("[{index}]"), element_type, value);
+                    }
+                }
+            }
+            HeapEntry::Map(values) => {
+                if let IrType::Map(index) = ty
+                    && let Some((key_type, value_type)) =
+                        self.module.map_types.get(index as usize).copied()
+                {
+                    for (index, (key, value)) in values.iter().enumerate() {
+                        add(format!("[{index}].key"), key_type, key);
+                        add(format!("[{index}].value"), value_type, value);
+                    }
+                }
+            }
+            HeapEntry::Set(values) => {
+                if let IrType::Set(index) = ty
+                    && let Some(element_type) = self.module.set_types.get(index as usize).copied()
+                {
+                    for (index, value) in values.iter().enumerate() {
+                        add(format!("[{index}]"), element_type, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn debug_render_value(&self, ty: IrType, value: &Value) -> String {
+        match value {
+            Value::Int(value) if value.width.signed() => value.signed().to_string(),
+            Value::Int(value) => value.unsigned().to_string(),
+            Value::Float { text, .. } | Value::Decimal(text) => text.clone(),
+            Value::Boolean(value) => value.to_string(),
+            Value::Nullable(None) => "null".into(),
+            Value::Nullable(Some(value)) => self.debug_render_value(ty, value),
+            Value::Void | Value::Never | Value::Undefined => "<unavailable>".into(),
+            Value::Heap(id) => match self.heap.get(*id) {
+                Some(HeapEntry::String(value)) | Some(HeapEntry::Char(value)) => {
+                    format!("{value:?}")
+                }
+                Some(HeapEntry::Object { layout, .. }) => self
+                    .module
+                    .objects
+                    .get(*layout as usize)
+                    .map(|layout| layout.name.clone())
+                    .unwrap_or_else(|| "<object>".into()),
+                Some(HeapEntry::Record { layout, .. }) => self
+                    .module
+                    .values
+                    .get(*layout as usize)
+                    .map(|layout| layout.name.clone())
+                    .unwrap_or_else(|| "<record>".into()),
+                Some(HeapEntry::Enum {
+                    layout, variant, ..
+                }) => self
+                    .module
+                    .enums
+                    .get(*layout as usize)
+                    .map(|layout| format!("{}::variant{}", layout.name, variant))
+                    .unwrap_or_else(|| "<enum>".into()),
+                Some(HeapEntry::Array(values)) => format!("Array({})", values.len()),
+                Some(HeapEntry::List(values)) => format!("List({})", values.len()),
+                Some(HeapEntry::Map(values)) => format!("Map({})", values.len()),
+                Some(HeapEntry::Set(values)) => format!("Set({})", values.len()),
+                Some(HeapEntry::Closure { target, .. }) => format!("<closure {target}>"),
+                Some(HeapEntry::RuntimeError { category, message }) => {
+                    format!("{category}: {message}")
+                }
+                Some(HeapEntry::Regex(value)) => format!("/{value}/"),
+                Some(HeapEntry::Range(value)) => format!("{value:?}"),
+                None => format!("<unavailable {}>", self.debug_type_name(ty)),
+            },
+        }
+    }
+
+    fn debug_has_children(&self, ty: IrType, value: &Value) -> bool {
+        let Value::Heap(id) = value else { return false };
+        match self.heap.get(*id) {
+            Some(HeapEntry::Object { .. } | HeapEntry::Record { .. } | HeapEntry::Enum { .. }) => {
+                true
+            }
+            Some(HeapEntry::Array(_) | HeapEntry::List(_)) => {
+                matches!(ty, IrType::Array(_) | IrType::List(_))
+            }
+            Some(HeapEntry::Map(_)) => matches!(ty, IrType::Map(_)),
+            Some(HeapEntry::Set(_)) => matches!(ty, IrType::Set(_)),
+            _ => false,
+        }
+    }
+
+    fn debug_type_name(&self, ty: IrType) -> String {
+        match ty {
+            IrType::BorrowedView { .. } => "BorrowedView".into(),
+            IrType::Void => "Void".into(),
+            IrType::Never => "Never".into(),
+            IrType::Int(width) => width.as_str().into(),
+            IrType::Float(width) => width.as_str().into(),
+            IrType::Decimal => "Float".into(),
+            IrType::Boolean => "Bool".into(),
+            IrType::String => "String".into(),
+            IrType::Regex => "Regex".into(),
+            IrType::Char => "Char".into(),
+            IrType::Closure(_) | IrType::Callable(_) => "Callable".into(),
+            IrType::Job => "Job".into(),
+            IrType::Channel(index) => format!("Channel#{index}"),
+            IrType::Atomic(kind) => format!("Atomic<{kind:?}>"),
+            IrType::Mutex(index) => format!("Mutex#{index}"),
+            IrType::Object(index) => self
+                .module
+                .objects
+                .get(index as usize)
+                .map(|layout| layout.name.clone())
+                .unwrap_or_else(|| format!("Object#{index}")),
+            IrType::Contract(index) => format!("Contract#{index}"),
+            IrType::Value(index) => self
+                .module
+                .values
+                .get(index as usize)
+                .map(|layout| layout.name.clone())
+                .unwrap_or_else(|| format!("Value#{index}")),
+            IrType::Enum(index) => self
+                .module
+                .enums
+                .get(index as usize)
+                .map(|layout| layout.name.clone())
+                .unwrap_or_else(|| format!("Enum#{index}")),
+            IrType::Nullable(inner) => format!("{}?", self.debug_type_name(inner.inner())),
+            IrType::Pointer(index) => format!("Pointer#{index}"),
+            IrType::Weak(index) => format!("Weak#{index}"),
+            IrType::JournalHandle => "Journal".into(),
+            IrType::NativeSlice(index) => format!("NativeSlice#{index}"),
+            IrType::NativeSliceMut(index) => format!("NativeSliceMut#{index}"),
+            IrType::Dependent(index) => format!("Dependent#{index}"),
+            IrType::Pin(index) => format!("Pin#{index}"),
+            IrType::Array(index) => self
+                .module
+                .array_types
+                .get(index as usize)
+                .map(|element| format!("Array<{}>", self.debug_type_name(*element)))
+                .unwrap_or_else(|| format!("Array#{index}")),
+            IrType::List(index) => self
+                .module
+                .list_types
+                .get(index as usize)
+                .map(|element| format!("List<{}>", self.debug_type_name(*element)))
+                .unwrap_or_else(|| format!("List#{index}")),
+            IrType::Range => "Range".into(),
+            IrType::Map(index) => self
+                .module
+                .map_types
+                .get(index as usize)
+                .map(|(key, value)| {
+                    format!(
+                        "Map<{}, {}>",
+                        self.debug_type_name(*key),
+                        self.debug_type_name(*value)
+                    )
+                })
+                .unwrap_or_else(|| format!("Map#{index}")),
+            IrType::Set(index) => self
+                .module
+                .set_types
+                .get(index as usize)
+                .map(|element| format!("Set<{}>", self.debug_type_name(*element)))
+                .unwrap_or_else(|| format!("Set#{index}")),
+        }
+    }
+
     /// Executes the `main` entrypoint for the browser-compatible scalar
     /// literal subset. Subsequent execution tasks extend this loop without
     /// changing the frame or result boundary.
@@ -1313,7 +1813,7 @@ impl<'module> Interpreter<'module> {
 
         if !self.main_started {
             if let Err(mut failures) =
-                preflight_with_standard_sources(self.module, &self.bundled_standard_sources)
+                preflight_with_standard_sources(&self.module, &self.bundled_standard_sources)
             {
                 return ExecutionResult::CapabilityFailure(failures.remove(0));
             }
@@ -6904,6 +7404,81 @@ mod tests {
     use super::*;
     use zirk_ir::{Block, BlockId, Function, Instruction, IntWidth, Operand, Slot, SlotId};
 
+    #[test]
+    fn debugger_prepares_before_entry_and_captures_only_paused_live_locals() {
+        let main_span = Span::empty(1);
+        let value_span = Span::empty(14);
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Void,
+                slots: vec![Slot {
+                    name: "answer".into(),
+                    ty: IrType::Int(IntWidth::I32),
+                    span: value_span,
+                }],
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstInt(42),
+                            ty: IrType::Int(IntWidth::I32),
+                            span: value_span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::Store(SlotId(0), Operand(ValueId(0))),
+                            ty: IrType::Void,
+                            span: main_span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(None)),
+                }],
+                entry: BlockId(0),
+                span: main_span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let mut host = CapturedHost::default();
+        interpreter
+            .prepare_main_for_debug(&host)
+            .expect("debug launch primes main without executing it");
+        assert_eq!(interpreter.debug_location(), Some(value_span));
+        let initial = interpreter.debug_snapshot(8, 16, 2).unwrap();
+        assert_eq!(initial.frames[0].locals[0].value, "<unavailable>");
+        assert!(!initial.frames[0].locals[0].available);
+
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        assert_eq!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Yielded
+        );
+        let paused = interpreter.debug_snapshot(8, 16, 2).unwrap();
+        assert_eq!(
+            interpreter.debug_snapshot(8, 16, 2).unwrap(),
+            paused,
+            "repeated inspection at one pause returns the same value snapshot"
+        );
+        let answer = &paused.frames[0].locals[0];
+        assert_eq!(answer.name, "answer");
+        assert_eq!(answer.type_name, "Int32");
+        assert_eq!(answer.value, "42");
+        assert!(answer.available);
+
+        assert!(matches!(
+            interpreter.run_main_with_host_slice(&mut host, 1),
+            ExecutionResult::Completed { value: None }
+        ));
+        assert!(interpreter.debug_snapshot(8, 16, 2).is_none());
+    }
+
     fn int(width: IntWidth, value: i128) -> Value {
         Value::Int(IntegerValue::from_literal(value, width).unwrap())
     }
@@ -6916,17 +7491,27 @@ mod tests {
             name: "main".into(),
             params: Vec::new(),
             return_type: IrType::Void,
-            slots: Vec::new(),
+            slots: vec![Slot {
+                name: "secret".into(),
+                ty: IrType::Object(1),
+                span,
+            }],
             entry: BlockId(0),
             span,
-            gc_roots: Vec::new(),
+            gc_roots: vec![SlotId(0)],
             blocks: vec![Block {
                 id: BlockId(0),
                 instructions: vec![
                     Instruction {
                         result: Some(ValueId(0)),
-                        kind: InstKind::Alloc(0),
-                        ty: IrType::Object(0),
+                        kind: InstKind::Alloc(1),
+                        ty: IrType::Object(1),
+                        span,
+                    },
+                    Instruction {
+                        result: None,
+                        kind: InstKind::Store(SlotId(0), Operand(ValueId(0))),
+                        ty: IrType::Void,
                         span,
                     },
                     Instruction {
@@ -6971,6 +7556,18 @@ mod tests {
             ..Module::default()
         };
         let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+
+        let mut debugger = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let mut debug_host = CapturedHost::default();
+        debugger.prepare_main_for_debug(&debug_host).unwrap();
+        assert_eq!(
+            debugger.run_main_with_host_slice(&mut debug_host, 4),
+            ExecutionResult::Yielded
+        );
+        let snapshot = debugger.debug_snapshot(8, 16, 2).unwrap();
+        assert_eq!(snapshot.frames[0].locals[0].value, "<redacted>");
+        assert!(snapshot.frames[0].locals[0].children.is_empty());
+        assert!(!format!("{snapshot:?}").contains("do-not-record-this-secret"));
 
         assert!(interpreter.is_secret_trace_field(0, 0));
         assert!(interpreter.is_secret_trace_field(1, 0));

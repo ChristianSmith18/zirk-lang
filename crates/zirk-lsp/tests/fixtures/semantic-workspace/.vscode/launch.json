@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "zirk",
+      "request": "launch",
+      "name": "Debug Zirk fixture (interpreter)",
+      "program": "${workspaceFolder}/src/debug_main.zrk",
+      "target": "interpreter",
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false
+    },
+    {
+      "type": "zirk",
+      "request": "launch",
+      "name": "Debug Zirk fixture (native)",
+      "program": "${workspaceFolder}/src/debug_main.zrk",
+      "target": "native",
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+[package]
+name = "zirk-dap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zirk-dap"
+path = "src/main.rs"
+
+[dependencies]
+zirk-cli = { path = "../zirk-cli", default-features = false }
+zirk-diagnostics.workspace = true
+zirk-ir.workspace = true
+zirk-interpreter.workspace = true
+serde_json.workspace = true

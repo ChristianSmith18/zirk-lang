@@ -1,0 +1,3 @@
+project "semantic-workspace-fixture"
+kind application
+entry "src/main.zrk"

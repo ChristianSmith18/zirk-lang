@@ -1,0 +1,13 @@
+[package]
+name = "zirk-ide"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zirk-ast.workspace = true
+zirk-diagnostics.workspace = true
+zirk-lexer.workspace = true
+zirk-parser.workspace = true
+zirk-sema.workspace = true

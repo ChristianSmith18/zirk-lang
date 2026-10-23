@@ -11,7 +11,9 @@ use std::process::Command;
 #[cfg(unix)]
 use std::process::ExitStatus;
 pub use zirk_codegen_llvm::CodegenOptimizationLevel;
-use zirk_codegen_llvm::{compile_to_object, compile_to_object_with_optimization};
+use zirk_codegen_llvm::{
+    compile_to_object, compile_to_object_with_debug_info, compile_to_object_with_optimization,
+};
 use zirk_diagnostics::{Diagnostic, DiagnosticSink};
 
 use crate::codes;
@@ -53,10 +55,27 @@ pub fn compile_with_optimization(
     output_dir: &Path,
     optimization: CodegenOptimizationLevel,
 ) -> Compilation {
+    compile_internal(path, output_dir, optimization, false)
+}
+
+/// Compiles a native executable with source-level DWARF for native debugging.
+pub fn compile_with_debug_info(path: &Path, output_dir: &Path) -> Compilation {
+    compile_internal(path, output_dir, CodegenOptimizationLevel::None, true)
+}
+
+fn compile_internal(
+    path: &Path,
+    output_dir: &Path,
+    optimization: CodegenOptimizationLevel,
+    debug_info: bool,
+) -> Compilation {
     let mut sink = DiagnosticSink::new();
 
     let Some(crate::frontend::FrontendResult {
-        program, checked, ..
+        program,
+        checked,
+        sources,
+        ..
     }) = crate::frontend::run_frontend(path, &mut sink)
     else {
         return Compilation::failed(sink);
@@ -101,7 +120,9 @@ pub fn compile_with_optimization(
     let object = output_dir.join(format!("{stem}{}", object_extension()));
     let executable = output_dir.join(exe_name(&stem));
 
-    let emission = if optimization == CodegenOptimizationLevel::None {
+    let emission = if debug_info {
+        compile_to_object_with_debug_info(&ir, &stem, &sources, &object)
+    } else if optimization == CodegenOptimizationLevel::None {
         compile_to_object(&ir, &stem, &object)
     } else {
         compile_to_object_with_optimization(&ir, &stem, &object, optimization)
@@ -111,9 +132,15 @@ pub fn compile_with_optimization(
         return Compilation::failed(sink);
     }
 
-    if let Err(diagnostic) = link(&object, &executable) {
+    if let Err(diagnostic) = link(&object, &executable, debug_info) {
         sink.emit(*diagnostic);
         return Compilation::failed(sink);
+    }
+    if debug_info {
+        if let Err(diagnostic) = write_native_debug_symbols(&executable) {
+            sink.emit(*diagnostic);
+            return Compilation::failed(sink);
+        }
     }
 
     Compilation {
@@ -123,7 +150,11 @@ pub fn compile_with_optimization(
 }
 
 /// Links the object with the Zirk runtime.
-fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
+fn link(
+    object: &Path,
+    executable: &Path,
+    preserve_debug_info: bool,
+) -> Result<(), Box<Diagnostic>> {
     let runtime = locate_runtime()?;
     let driver = link_driver();
 
@@ -132,7 +163,11 @@ fn link(object: &Path, executable: &Path) -> Result<(), Box<Diagnostic>> {
         .arg(&runtime)
         .args(system_libraries())
         .arg(dead_strip_flag())
-        .args(strip_debug_info_args())
+        .args(if preserve_debug_info {
+            &[][..]
+        } else {
+            strip_debug_info_args()
+        })
         .arg("-o")
         .arg(executable)
         .output()
@@ -174,6 +209,51 @@ fn linker_help() -> &'static str {
     }
 }
 
+/// Materializes Mach-O DWARF into the standard companion bundle consumed by
+/// LLDB. Apple's linker drops object DWARF from the executable itself, so a
+/// debug build must run `dsymutil` after linking.
+fn write_native_debug_symbols(executable: &Path) -> Result<(), Box<Diagnostic>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    let symbols = executable.with_extension("dSYM");
+    let output = Command::new("xcrun")
+        .arg("dsymutil")
+        .arg(executable)
+        .arg("-o")
+        .arg(&symbols)
+        .output()
+        .map_err(|error| {
+            Diagnostic::error(
+                codes::LINK_FAILED,
+                "could not generate native debug symbols",
+            )
+            .with_cause(format!("could not invoke `xcrun dsymutil`: {error}"))
+            .with_help("install Xcode or the Command Line Tools to provide `dsymutil`")
+            .boxed()
+        })?;
+    if !output.status.success() {
+        let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if detail.is_empty() {
+            detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        }
+        if detail.is_empty() {
+            detail = format!(
+                "dsymutil exited with {} and produced no output",
+                output.status
+            );
+        }
+        return Err(Diagnostic::error(
+            codes::LINK_FAILED,
+            "could not generate native debug symbols",
+        )
+        .with_cause(detail)
+        .with_help("check that the Xcode or Command Line Tools installation is complete")
+        .boxed());
+    }
+    Ok(())
+}
+
 /// Requests dead-code elimination at link time, per container format.
 fn dead_strip_flag() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -189,9 +269,10 @@ fn dead_strip_flag() -> &'static str {
 /// Rust's Linux static runtime archive carries DWARF sections in development
 /// builds. GNU ld's `--gc-sections` does not discard those non-allocatable
 /// sections, so a tiny Zirk executable can otherwise inherit tens of MiB of
-/// runtime debug information. Zirk does not yet emit source-level DWARF; keep
-/// the ordinary symbol table and unwind metadata while excluding only debug
-/// sections from the linked application.
+/// runtime debug information. Ordinary Zirk builds do not yet emit source-level
+/// DWARF; keep the ordinary symbol table and unwind metadata while excluding
+/// only debug sections from the linked application. `--debug-info` bypasses
+/// this flag and creates a native debug-symbol bundle.
 fn strip_debug_info_args() -> &'static [&'static str] {
     if cfg!(target_os = "linux") {
         &["-Wl,--strip-debug"]

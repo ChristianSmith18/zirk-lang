@@ -7,6 +7,10 @@
 //! derived ones.
 
 use crate::codes;
+use crate::ide::{
+    ReferenceRole, SemanticIndex, SemanticSymbolData, SemanticSymbolKind, SemanticVisibility,
+    UnresolvedSemanticReference,
+};
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
@@ -15,6 +19,7 @@ use crate::types::{
     describe, is_ffi_safe, pending_type,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
@@ -75,6 +80,9 @@ pub struct GenericCallInfo {
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
+    /// Compiler-resolved declarations and uses for editor tooling. Identities
+    /// are valid only for this checked snapshot.
+    pub semantic_index: SemanticIndex,
     pub functions: HashMap<String, Signature>,
     /// Conservative suspension effect for each checked top-level function,
     /// keyed by the function-name span. An incomplete summary always has
@@ -359,6 +367,44 @@ pub struct OwnershipProperties {
 }
 
 impl CheckedProgram {
+    /// Renders a checked type with this program's own symbol tables.
+    ///
+    /// IDE clients use this for concrete types inferred at generic call sites;
+    /// keeping the renderer here ensures names for enums, classes, aliases,
+    /// and nested generic containers match compiler diagnostics.
+    pub fn describe_type(&self, ty: Type) -> String {
+        describe(
+            ty,
+            &Names {
+                enums: &self.enums,
+                fn_types: &self.fn_types,
+                job_types: &self.job_types,
+                channel_types: &self.channel_types,
+                atomic_types: &self.atomic_types,
+                mutex_types: &self.mutex_types,
+                classes: &self.classes,
+                contracts: &self.contracts,
+                type_params: &self.type_params,
+                generic_instances: &self.generic_instances,
+                contract_instances: &self.contract_instances,
+                enum_instances: &self.enum_instances,
+                unions: &self.unions,
+                pointer_types: &self.pointer_types,
+                weak_types: &self.weak_types,
+                native_slice_types: &self.native_slice_types,
+                native_slice_mut_types: &self.native_slice_mut_types,
+                dependent_types: &self.dependent_types,
+                pin_types: &self.pin_types,
+                tuple_types: &self.tuple_types,
+                array_types: &self.array_types,
+                list_types: &self.list_types,
+                range_types: &self.range_types,
+                map_types: &self.map_types,
+                set_types: &self.set_types,
+            },
+        )
+    }
+
     /// Derives conservative `Transfer` and `Share` properties for a resolved type.
     /// Unknown, open, or unaudited native shapes fail closed.
     pub fn ownership_of(&self, ty: Type) -> OwnershipProperties {
@@ -1164,6 +1210,9 @@ struct Checker<'a> {
     sources: &'a SourceMap,
     sink: &'a mut DiagnosticSink,
     scopes: Scopes,
+    resolved_semantic_references: Vec<UnresolvedSemanticReference>,
+    semantic_owners: HashMap<Span, Span>,
+    pattern_binding_spans: HashSet<Span>,
     functions: HashMap<String, Signature>,
     current_function: Option<Span>,
     direct_function_calls: HashMap<Span, HashSet<Span>>,
@@ -1353,6 +1402,7 @@ struct Checker<'a> {
     /// resolving a reference to it just resolves `target` instead, lazily,
     /// the same way a forward-referenced class does.
     type_aliases: HashMap<String, TypeRef>,
+    type_alias_spans: HashMap<String, Span>,
     /// Aliases currently being resolved, to catch `type A = B; type B = A;`
     /// before it recurses forever.
     resolving_aliases: Vec<String>,
@@ -1656,6 +1706,10 @@ impl<'a> Checker<'a> {
             sources,
             sink,
             scopes: Scopes::new(),
+            resolved_semantic_references: Vec::new(),
+            semantic_owners: HashMap::new(),
+            pattern_binding_spans: HashSet::new(),
+            type_alias_spans: HashMap::new(),
             functions: HashMap::new(),
             current_function: None,
             direct_function_calls: HashMap::new(),
@@ -2355,7 +2409,9 @@ impl<'a> Checker<'a> {
 
         let tuple_base = self.classes.len() as u32;
         let type_map = self.build_type_map(program);
+        let semantic_index = self.build_semantic_index(program, &type_map);
         CheckedProgram {
+            semantic_index,
             functions: self.functions,
             suspend_summaries,
             standard_stream_source_modules: self.standard_stream_source_modules,
@@ -2575,6 +2631,490 @@ impl<'a> Checker<'a> {
         entries.extend(expression_entries);
 
         entries
+    }
+
+    fn record_semantic_reference(&mut self, span: Span, target_span: Span, role: ReferenceRole) {
+        if span.start == span.end || target_span.start == target_span.end {
+            return;
+        }
+        if let Some(existing) = self
+            .resolved_semantic_references
+            .iter_mut()
+            .find(|reference| reference.span == span)
+        {
+            *existing = UnresolvedSemanticReference {
+                span,
+                target_span,
+                role,
+                rename_target_span: None,
+            };
+        } else {
+            self.resolved_semantic_references
+                .push(UnresolvedSemanticReference {
+                    span,
+                    target_span,
+                    role,
+                    rename_target_span: None,
+                });
+        }
+    }
+
+    /// Collects declarations from checked type entries and syntax-only
+    /// declarations, then replaces resolved target spans with snapshot-local
+    /// identities. Reference targets therefore come from actual checker
+    /// resolution rather than textual name matching.
+    fn build_semantic_index(&self, program: &Program, type_map: &[TypeMapEntry]) -> SemanticIndex {
+        fn is_stdlib(sources: &SourceMap, span: Span) -> bool {
+            let name = sources.file(span.file).name().replace('\\', "/");
+            name.contains("/stdlib/std/") || name.starts_with("std.")
+        }
+
+        fn push_symbol(
+            declarations: &mut Vec<SemanticSymbolData>,
+            sources: &SourceMap,
+            name: &str,
+            kind: SemanticSymbolKind,
+            declaration_span: Span,
+            selection_span: Span,
+            owner_span: Option<Span>,
+            type_text: Option<String>,
+            visibility: SemanticVisibility,
+        ) {
+            declarations.push(SemanticSymbolData {
+                name: name.to_owned(),
+                kind,
+                declaration_span,
+                selection_span,
+                owner_span,
+                type_text,
+                visibility,
+                is_standard_library: is_stdlib(sources, selection_span),
+            });
+        }
+
+        fn push_class_symbols(
+            declarations: &mut Vec<SemanticSymbolData>,
+            sources: &SourceMap,
+            class: &ClassDecl,
+        ) {
+            let kind = match class.kind {
+                ClassKind::Record => SemanticSymbolKind::Record,
+                _ => SemanticSymbolKind::Class,
+            };
+            push_symbol(
+                declarations,
+                sources,
+                &class.name.name,
+                kind,
+                class.span,
+                class.name.span,
+                None,
+                None,
+                if class.shared {
+                    SemanticVisibility::Public
+                } else {
+                    SemanticVisibility::Module
+                },
+            );
+            for nested in &class.nested {
+                push_class_symbols(declarations, sources, nested);
+            }
+        }
+
+        fn collect_programs<'program>(
+            program: &'program Program,
+            output: &mut Vec<&'program Program>,
+        ) {
+            output.push(program);
+            for module in &program.modules {
+                collect_programs(&module.body, output);
+            }
+        }
+
+        fn member_visibility(visibility: Visibility) -> SemanticVisibility {
+            match visibility {
+                Visibility::Public => SemanticVisibility::Public,
+                Visibility::Private | Visibility::Protected => SemanticVisibility::Private,
+            }
+        }
+
+        fn declaration_visibility(shared: bool) -> SemanticVisibility {
+            if shared {
+                SemanticVisibility::Public
+            } else {
+                SemanticVisibility::Module
+            }
+        }
+
+        fn normalize_path(path: &Path) -> PathBuf {
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+                    Component::RootDir => normalized.push(component.as_os_str()),
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        if !normalized.pop() {
+                            normalized.push(component.as_os_str());
+                        }
+                    }
+                    Component::Normal(part) => normalized.push(part),
+                }
+            }
+            normalized
+        }
+
+        fn canonical_source_path(identity: &zirk_diagnostics::SourceIdentity) -> String {
+            let package = identity.package.replace("::", ".");
+            let module = identity.canonical_module_path.replace("::", ".");
+            if module == package || module.starts_with(&format!("{package}.")) {
+                module
+            } else if module.is_empty() {
+                package
+            } else {
+                format!("{package}.{module}")
+            }
+        }
+
+        fn import_source_files(
+            sources: &SourceMap,
+            import: &ImportDecl,
+        ) -> Vec<zirk_diagnostics::FileId> {
+            match &import.source {
+                ImportSource::Local { path, .. } => {
+                    let importer = Path::new(sources.file(import.span.file).name());
+                    let target = normalize_path(
+                        &importer
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(path)
+                            .with_extension("zrk"),
+                    );
+                    sources
+                        .files()
+                        .filter_map(|(id, file)| {
+                            (normalize_path(Path::new(file.name())) == target).then_some(id)
+                        })
+                        .collect()
+                }
+                ImportSource::Package { path, .. } => {
+                    let module = path.replace("::", ".");
+                    sources
+                        .files()
+                        .filter_map(|(id, file)| {
+                            let canonical = canonical_source_path(file.identity()?);
+                            (canonical == module || canonical.starts_with(&format!("{module}.")))
+                                .then_some(id)
+                        })
+                        .collect()
+                }
+            }
+        }
+
+        let mut declarations = Vec::new();
+        let mut declaration_ranges = HashMap::new();
+        let mut visibilities = HashMap::new();
+        let mut semantic_owners = self.semantic_owners.clone();
+        let mut source_programs = Vec::new();
+        collect_programs(program, &mut source_programs);
+
+        let mut semantic_references = self.resolved_semantic_references.clone();
+        for source_program in &source_programs {
+            for function in &source_program.functions {
+                declaration_ranges.insert(function.name.span, function.span);
+                visibilities.insert(function.name.span, declaration_visibility(function.shared));
+            }
+            for class in Self::class_decls_flat(source_program) {
+                declaration_ranges.insert(class.name.span, class.span);
+                visibilities.insert(class.name.span, declaration_visibility(class.shared));
+                for field in &class.fields {
+                    declaration_ranges.insert(field.name.span, field.span);
+                    visibilities.insert(field.name.span, member_visibility(field.visibility));
+                    semantic_owners.insert(field.name.span, class.span);
+                }
+                for method in &class.methods {
+                    declaration_ranges.insert(method.name.span, method.span);
+                    visibilities.insert(method.name.span, member_visibility(method.visibility));
+                    semantic_owners.insert(method.name.span, class.span);
+                }
+            }
+            for enumeration in &source_program.enums {
+                declaration_ranges.insert(enumeration.name.span, enumeration.span);
+                visibilities.insert(
+                    enumeration.name.span,
+                    declaration_visibility(enumeration.shared),
+                );
+                for variant in &enumeration.variants {
+                    declaration_ranges.insert(variant.name.span, variant.span);
+                    semantic_owners.insert(variant.name.span, enumeration.span);
+                }
+            }
+            for contract in &source_program.contracts {
+                declaration_ranges.insert(contract.name.span, contract.span);
+                visibilities.insert(contract.name.span, declaration_visibility(contract.shared));
+                for method in &contract.methods {
+                    declaration_ranges.insert(method.name.span, method.span);
+                    visibilities.insert(method.name.span, member_visibility(method.visibility));
+                    semantic_owners.insert(method.name.span, contract.span);
+                }
+            }
+            for alias in &source_program.type_aliases {
+                declaration_ranges.insert(alias.name.span, alias.span);
+                visibilities.insert(alias.name.span, declaration_visibility(alias.shared));
+            }
+        }
+
+        for entry in type_map {
+            let (Some(name), kind) = (entry.name.as_deref(), entry.kind) else {
+                continue;
+            };
+            let kind = match kind {
+                TypeMapKind::Function => SemanticSymbolKind::Function,
+                TypeMapKind::Method => SemanticSymbolKind::Method,
+                TypeMapKind::Variable => SemanticSymbolKind::Variable,
+                TypeMapKind::Parameter => SemanticSymbolKind::Parameter,
+                TypeMapKind::Field => SemanticSymbolKind::Field,
+                TypeMapKind::Expression => continue,
+            };
+            let visibility = visibilities.get(&entry.span).copied().unwrap_or_else(|| {
+                if matches!(
+                    kind,
+                    SemanticSymbolKind::Variable | SemanticSymbolKind::Parameter
+                ) {
+                    SemanticVisibility::Local
+                } else {
+                    SemanticVisibility::Module
+                }
+            });
+            push_symbol(
+                &mut declarations,
+                self.sources,
+                name,
+                kind,
+                declaration_ranges
+                    .get(&entry.span)
+                    .copied()
+                    .unwrap_or(entry.span),
+                entry.span,
+                semantic_owners
+                    .get(&entry.span)
+                    .copied()
+                    .map(|owner| declaration_ranges.get(&owner).copied().unwrap_or(owner)),
+                Some(entry.text.clone()),
+                visibility,
+            );
+        }
+
+        for source_program in &source_programs {
+            for class in Self::class_decls_flat(source_program) {
+                push_class_symbols(&mut declarations, self.sources, class);
+            }
+            for enumeration in &source_program.enums {
+                push_symbol(
+                    &mut declarations,
+                    self.sources,
+                    &enumeration.name.name,
+                    SemanticSymbolKind::Enum,
+                    enumeration.span,
+                    enumeration.name.span,
+                    None,
+                    None,
+                    declaration_visibility(enumeration.shared),
+                );
+                for variant in &enumeration.variants {
+                    push_symbol(
+                        &mut declarations,
+                        self.sources,
+                        &variant.name.name,
+                        SemanticSymbolKind::EnumVariant,
+                        variant.span,
+                        variant.name.span,
+                        Some(enumeration.name.span),
+                        None,
+                        declaration_visibility(enumeration.shared),
+                    );
+                }
+            }
+            for contract in &source_program.contracts {
+                push_symbol(
+                    &mut declarations,
+                    self.sources,
+                    &contract.name.name,
+                    SemanticSymbolKind::Contract,
+                    contract.span,
+                    contract.name.span,
+                    None,
+                    None,
+                    declaration_visibility(contract.shared),
+                );
+            }
+            for alias in &source_program.type_aliases {
+                push_symbol(
+                    &mut declarations,
+                    self.sources,
+                    &alias.name.name,
+                    SemanticSymbolKind::TypeAlias,
+                    alias.span,
+                    alias.name.span,
+                    None,
+                    Some(alias.target.name.clone()),
+                    declaration_visibility(alias.shared),
+                );
+            }
+            for import in &source_program.imports {
+                for item in &import.names {
+                    let bound = item.bound_name();
+                    push_symbol(
+                        &mut declarations,
+                        self.sources,
+                        &bound.name,
+                        SemanticSymbolKind::Import,
+                        bound.span,
+                        bound.span,
+                        None,
+                        None,
+                        SemanticVisibility::Local,
+                    );
+                }
+            }
+            for module in &source_program.modules {
+                push_symbol(
+                    &mut declarations,
+                    self.sources,
+                    &module.name.name,
+                    SemanticSymbolKind::Module,
+                    module.span,
+                    module.name.span,
+                    None,
+                    None,
+                    declaration_visibility(module.shared),
+                );
+            }
+            for module in &source_program.module_reexports {
+                push_symbol(
+                    &mut declarations,
+                    self.sources,
+                    &module.name.name,
+                    SemanticSymbolKind::Module,
+                    module.span,
+                    module.name.span,
+                    None,
+                    None,
+                    SemanticVisibility::Public,
+                );
+            }
+        }
+
+        // Resolve import edges after every source declaration, including
+        // module declarations, has been registered in the snapshot.
+        for source_program in &source_programs {
+            for import in &source_program.imports {
+                let imported_files = import_source_files(self.sources, import);
+                for item in &import.names {
+                    let mut candidates = declarations
+                        .iter()
+                        .filter(|declaration| {
+                            declaration.name == item.name.name
+                                && declaration.visibility == SemanticVisibility::Public
+                                && declaration.selection_span.file != item.name.span.file
+                                && imported_files.contains(&declaration.selection_span.file)
+                        })
+                        .collect::<Vec<_>>();
+                    candidates.sort_by_key(|declaration| declaration.selection_span);
+                    candidates.dedup_by_key(|declaration| declaration.selection_span);
+                    if let [target] = candidates.as_slice() {
+                        let target_span = target.selection_span;
+                        semantic_references.push(UnresolvedSemanticReference {
+                            span: item.name.span,
+                            target_span,
+                            role: ReferenceRole::Import,
+                            rename_target_span: None,
+                        });
+                        if let Some(alias) = &item.alias {
+                            // Uses of an explicit local alias bind to the
+                            // import symbol, while navigation keeps following
+                            // the exported declaration.
+                            for reference in &mut semantic_references {
+                                if reference.span.file == alias.span.file
+                                    && reference.target_span == target_span
+                                    && reference.span != item.name.span
+                                {
+                                    let source = self.sources.file(reference.span.file);
+                                    if source.slice(reference.span) == alias.name {
+                                        reference.rename_target_span = Some(alias.span);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Some standard-library members are compiler-recognized calls and
+        // return before ordinary call resolution records the reference. The
+        // checker already preserves their canonical binding at the member
+        // token, so attach that binding to the corresponding parsed library
+        // declaration here.
+        for (span, binding) in &self.aliases {
+            let Some((module, name)) = binding.rsplit_once('.') else {
+                continue;
+            };
+            if !module.starts_with("std.") {
+                continue;
+            }
+            let candidates = declarations
+                .iter()
+                .filter(|declaration| {
+                    if declaration.name != name
+                        || declaration.selection_span.file == span.file
+                        || declaration.visibility != SemanticVisibility::Public
+                    {
+                        return false;
+                    }
+                    self.sources
+                        .file(declaration.selection_span.file)
+                        .identity()
+                        .is_some_and(|identity| canonical_source_path(identity) == module)
+                })
+                .collect::<Vec<_>>();
+            if let [target] = candidates.as_slice() {
+                semantic_references.push(UnresolvedSemanticReference {
+                    span: *span,
+                    target_span: target.selection_span,
+                    role: ReferenceRole::MemberCall,
+                    rename_target_span: None,
+                });
+            }
+        }
+
+        for span in &self.pattern_binding_spans {
+            semantic_references.push(UnresolvedSemanticReference {
+                span: *span,
+                target_span: *span,
+                role: ReferenceRole::PatternBinding,
+                rename_target_span: None,
+            });
+        }
+
+        for parameter in &self.type_params {
+            if parameter.span.start == parameter.span.end {
+                continue;
+            }
+            push_symbol(
+                &mut declarations,
+                self.sources,
+                &parameter.name,
+                SemanticSymbolKind::TypeParameter,
+                parameter.span,
+                parameter.span,
+                None,
+                Some(parameter.name.clone()),
+                SemanticVisibility::Local,
+            );
+        }
+
+        SemanticIndex::from_facts(declarations, semantic_references)
     }
 
     /// `fn(a: Int32, b: Int32): Void` — the rendered signature type-map
@@ -2806,6 +3346,9 @@ impl<'a> Checker<'a> {
         // `zirk check --types`: every local a body declares lands here —
         // except the synthetic `this`, whose zero-width span gives it away.
         if binding.span.start != binding.span.end {
+            if let Some(owner) = self.current_function {
+                self.semantic_owners.insert(binding.span, owner);
+            }
             let text = self.name(binding.ty);
             self.decl_type_entries.push(TypeMapEntry {
                 name: Some(binding.name.clone()),
@@ -6912,6 +7455,8 @@ impl<'a> Checker<'a> {
     /// every other type name already tolerates.
     fn declare_type_aliases(&mut self, program: &Program) {
         for decl in &program.type_aliases {
+            self.type_alias_spans
+                .insert(decl.name.name.clone(), decl.name.span);
             if self.type_aliases.contains_key(&decl.name.name) {
                 self.error(
                     codes::DUPLICATE_DECLARATION,
@@ -8500,6 +9045,13 @@ impl<'a> Checker<'a> {
         }
 
         let base = if let Some(id) = self.lookup_type_param(&reference.name) {
+            if let Some(parameter) = self.type_params.get(id as usize) {
+                self.record_semantic_reference(
+                    reference.span,
+                    parameter.span,
+                    ReferenceRole::TypeUse,
+                );
+            }
             Some(Type::of(Base::Param(id)))
         } else if reference.arguments.is_empty()
             && let Some(ty) = Type::from_name(&reference.name)
@@ -8510,21 +9062,27 @@ impl<'a> Checker<'a> {
             let named = Ident::new(reference.name.clone(), reference.span);
 
             if self.type_aliases.contains_key(&resolved) {
+                if let Some(span) = self.type_alias_spans.get(&resolved).copied() {
+                    self.record_semantic_reference(reference.span, span, ReferenceRole::TypeUse);
+                }
                 self.reject_type_arguments(reference);
                 Some(self.resolve_type_alias(&resolved, reference.span))
             } else if let Some(index) = self.enums.iter().position(|e| e.name == resolved) {
                 let declared = self.enums[index].span;
                 let shared = self.enums[index].shared;
+                self.record_semantic_reference(reference.span, declared, ReferenceRole::TypeUse);
                 self.require_visible(declared, shared, &named, "enum");
                 Some(self.resolve_enum_reference(index as u32, reference))
             } else if let Some(index) = self.class_id(&resolved).map(|i| i as usize) {
                 let declared = self.classes[index].span;
                 let shared = self.classes[index].shared;
+                self.record_semantic_reference(reference.span, declared, ReferenceRole::TypeUse);
                 self.require_visible(declared, shared, &named, "class");
                 Some(self.resolve_class_reference(index as u32, reference))
             } else if let Some(index) = self.contracts.iter().position(|c| c.name == resolved) {
                 let declared = self.contracts[index].span;
                 let shared = self.contracts[index].shared;
+                self.record_semantic_reference(reference.span, declared, ReferenceRole::TypeUse);
                 self.require_visible(declared, shared, &named, "contract");
                 Some(self.resolve_contract_reference(index as u32, reference))
             } else {
@@ -11904,6 +12462,11 @@ impl<'a> Checker<'a> {
     fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
         let object = self.check_expr(&field.object);
         let ty = self.member_type(object, &field.name, field.object.span(), false);
+        if let Base::Class(id) = object.base
+            && let Some(info) = self.classes[id as usize].field(&field.name.name).cloned()
+        {
+            self.record_semantic_reference(field.name.span, info.span, ReferenceRole::Write);
+        }
 
         // An `inmut` field is set exactly once, by the constructor: that is
         // where its value comes from. Rejecting it there would leave no way to
@@ -12005,6 +12568,7 @@ impl<'a> Checker<'a> {
             self.undeclared(target);
             return None;
         };
+        self.record_semantic_reference(target.span, resolved.binding.span, ReferenceRole::Write);
 
         let ty = resolved.binding.ty;
         let declared_line = self.sources.location(resolved.binding.span).line;
@@ -13486,6 +14050,7 @@ impl<'a> Checker<'a> {
         if let Some(signature) = self.functions.get(&declared).cloned()
             && self.scopes.lookup(&ident.name).is_none()
         {
+            self.record_semantic_reference(ident.span, signature.span, ReferenceRole::Read);
             let id = self.intern_fn_type(FnType {
                 params: signature.param_types(),
                 returns: signature.returns,
@@ -13511,6 +14076,7 @@ impl<'a> Checker<'a> {
             self.undeclared(ident);
             return Type::UNKNOWN;
         };
+        self.record_semantic_reference(ident.span, resolved.binding.span, ReferenceRole::Read);
 
         if resolved.binding.ty == Type::SERVICE_CONTEXT {
             self.error(
@@ -15213,6 +15779,7 @@ impl<'a> Checker<'a> {
             Pattern::Wildcard(_) => *has_wildcard = true,
             Pattern::Binding(ident) => {
                 *has_wildcard = true;
+                self.pattern_binding_spans.insert(ident.span);
                 bindings.push(Binding {
                     name: ident.name.clone(),
                     ty: scrutinee,
@@ -15436,7 +16003,7 @@ impl<'a> Checker<'a> {
             return;
         };
 
-        let enum_type = &self.enums[index];
+        let enum_type = self.enums[index].clone();
         let Some(variant) = enum_type.variant(&pattern.variant.name) else {
             let enum_name = enum_type.name.clone();
             let known: Vec<&str> = enum_type.variants.iter().map(|v| v.name.as_str()).collect();
@@ -16383,6 +16950,7 @@ impl<'a> Checker<'a> {
         let visibility = field.visibility;
         let declared = field.span;
         let owner = field.owner;
+        self.record_semantic_reference(member.span, declared, ReferenceRole::MemberRead);
 
         if field.promoted && !self.in_constructor {
             self.warning(
@@ -16752,7 +17320,7 @@ impl<'a> Checker<'a> {
         self.require_visible(declared, shared, &expr.enum_name, "enum");
 
         let enum_type = &self.enums[index];
-        let Some(variant) = enum_type.variant(&expr.variant.name) else {
+        let Some(variant) = enum_type.variant(&expr.variant.name).cloned() else {
             let enum_name = enum_type.name.clone();
             let known: Vec<&str> = enum_type.variants.iter().map(|v| v.name.as_str()).collect();
             self.error(
@@ -16764,6 +17332,7 @@ impl<'a> Checker<'a> {
             );
             return Type::UNKNOWN;
         };
+        self.record_semantic_reference(expr.variant.span, variant.span, ReferenceRole::Read);
 
         if !variant.associated.is_empty() {
             let fields: Vec<&str> = variant.associated.iter().map(|f| f.name.as_str()).collect();
@@ -18274,6 +18843,7 @@ impl<'a> Checker<'a> {
             .method(&field.name.name)
             .cloned()
             .unwrap_or(method);
+        self.record_semantic_reference(field.name.span, method.span, ReferenceRole::MemberCall);
 
         if method.is_static {
             self.error(
@@ -23741,6 +24311,7 @@ impl<'a> Checker<'a> {
             // demand — before its return type is read below.
             self.ensure_inferred(&InferKey::Fn(declared.clone()), expr.span);
             if let Some(signature) = self.functions.get(&declared).cloned() {
+                self.record_semantic_reference(callee.span, signature.span, ReferenceRole::Call);
                 self.require_visible(signature.span, signature.shared, callee, "function");
                 self.record_direct_function_call(signature.span, expr.span);
                 return self.check_direct_call(expr, &signature);

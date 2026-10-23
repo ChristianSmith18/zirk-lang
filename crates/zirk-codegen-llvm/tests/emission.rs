@@ -11,7 +11,7 @@ mod common;
 
 use inkwell::context::Context;
 use zirk_ast::{Ident, ModuleDecl};
-use zirk_codegen_llvm::{emit, symbols};
+use zirk_codegen_llvm::{emit, emit_with_sources, symbols};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::lower;
 use zirk_lexer::tokenize;
@@ -141,6 +141,38 @@ fn bundled_standard_modules(sources: &mut SourceMap, sink: &mut DiagnosticSink) 
 fn the_minimal_program_verifies() {
     let ir = llvm_ir("fn main(): Void { }");
     assert!(ir.contains("define void @zk_main()"));
+}
+
+#[test]
+fn native_debug_emission_maps_source_lines_parameters_and_locals() {
+    let _llvm = common::llvm_lock();
+    let source_text = "fn add(left: Int32, right: Int32): Int32 {\n    return left + right;\n}\n\nfn main(): Void {\n    inmut base: Int32 = 10;\n    inmut result = add(base, 5);\n}\n";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("/workspace/debug_main.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        !sink.has_errors(),
+        "debug fixture must be valid:\n{}",
+        sink.render(RenderStyle::Human)
+    );
+    let ir = lower(&program, &checked);
+
+    let context = Context::create();
+    let module = emit_with_sources(&context, &ir, "debug_test", &sources);
+    module
+        .verify()
+        .expect("source debug metadata must produce a valid LLVM module");
+    let text = module.print_to_string().to_string();
+    assert!(text.contains("!DICompileUnit"));
+    assert!(text.contains("!DILocation(line: 2"));
+    assert!(text.contains(r#"name: "left""#));
+    assert!(text.contains(r#"name: "base""#));
+    assert!(text.contains("debug_main.zrk"));
+    assert!(text.contains("/workspace"));
 }
 
 #[test]
