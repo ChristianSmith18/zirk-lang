@@ -1377,26 +1377,40 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.builder.unset_current_debug_location();
         if let (Some(debug), Some(subprogram)) = (self.debug, self.subprogram) {
             for (index, slot) in function.slots.iter().enumerate() {
+                // Names wrapped in angle brackets are compiler-generated
+                // implementation slots (GC roots, exception guards, call
+                // temporaries, and similar). They are not Zirk declarations;
+                // publishing them to DWARF makes native debuggers show
+                // internal storage beside the user's locals.
+                if slot.name.starts_with('<') {
+                    continue;
+                }
                 let slot_id = ir::SlotId(index as u32);
                 let file = debug.file(slot.span.file);
                 let (line, _) = debug
                     .sources
                     .file(slot.span.file)
                     .line_column(slot.span.start);
-                let variable = if let Some(parameter_index) = function
+                let is_parameter = function
                     .params
                     .iter()
-                    .position(|parameter| *parameter == slot_id)
-                {
-                    debug.builder.create_parameter_variable(
+                    .any(|parameter| *parameter == slot_id);
+                let variable = if is_parameter {
+                    // Parameters are copied into Zirk slots by the function
+                    // prologue. Describing them as formal LLVM arguments
+                    // makes LLDB treat the stack slot as live before that
+                    // copy, exposing uninitialized stack contents at entry.
+                    // Their source name and type remain intact; the location
+                    // is attached once the slot is initialized below.
+                    debug.builder.create_auto_variable(
                         subprogram.as_debug_info_scope(),
                         &slot.name,
-                        parameter_index as u32 + 1,
                         file,
                         line,
                         debug_type(&debug.builder, slot.ty),
                         true,
                         DIFlags::PUBLIC,
+                        0,
                     )
                 } else {
                     debug.builder.create_auto_variable(
@@ -1527,23 +1541,21 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
         // Parameters arrive as values and are stored into their slots, so
         // reading them is uniform with any other local.
+        let mut parameter_debug_declarations = Vec::new();
+        let mut last_parameter_store = None;
         for (index, slot) in function.params.iter().enumerate() {
             let value = llvm_function
                 .get_nth_param(index as u32)
                 .expect("declared parameter");
-            if let (Some(debug), Some(subprogram)) = (self.debug, self.subprogram) {
-                let location = debug.location(
-                    function.slots[slot.0 as usize].span,
-                    subprogram.as_debug_info_scope(),
-                    self.context,
-                );
-                self.builder.set_current_debug_location(location);
-            }
+            self.builder.unset_current_debug_location();
             let store = self
                 .builder
                 .build_store(self.slots[slot], value)
                 .expect("parameter store");
-            self.declare_debug_slot(*slot, function.slots[slot.0 as usize].span, store);
+            last_parameter_store = Some(store);
+            if self.debug_variables.contains_key(slot) {
+                parameter_debug_declarations.push(*slot);
+            }
         }
 
         for block in &function.blocks {
@@ -1565,6 +1577,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 .as_ref()
                 .expect("verified IR always has a terminator");
             self.emit_terminator(terminator);
+        }
+
+        if let Some(next_instruction) = last_parameter_store
+            .and_then(|store| store.get_next_instruction())
+        {
+            for slot in parameter_debug_declarations {
+                let span = function.slots[slot.0 as usize].span;
+                self.declare_debug_slot(slot, span, next_instruction);
+            }
         }
     }
 

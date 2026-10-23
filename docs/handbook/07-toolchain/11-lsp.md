@@ -15,11 +15,22 @@ hints, canonical formatting, and semantic tokens negotiated with the client.
 For clients that support versioned workspace edits, the server also provides
 quick fixes for deprecated numeric type spellings and `Void?`.
 
+Hovering an imported name reports the resolved declaration kind and signature or
+type, together with its source module. For `exported_name -> LocalName`, the
+hover explains the exported declaration and the local alias. Hovering a module
+path distinguishes standard-library modules from local modules.
+
 The negotiated semantic-token legend separates functions, methods, type kinds,
 parameters, locals, module variables, fields, and imported names. Declaration,
 reference, standard-library, and import roles are modifiers; a resolved alias
 uses the target symbol's semantic kind. If semantic analysis cannot classify a
-name, the TextMate grammar remains the lexical fallback.
+name, the TextMate grammar remains the lexical fallback. A Zirk file opened
+inside a workspace also gets semantic coloring when it is not reachable from
+the project's entry point: the server analyzes that open file as a standalone
+root and caches the result against the current document and workspace snapshot.
+The standalone pass supplies semantic tokens and diagnostics for that open
+document; project navigation and workspace queries continue to use the
+compiler-loaded project graph.
 
 The server analyzes the current workspace through the compiler's project and
 module-loading rules. Open files are supplied as in-memory overlays, including
@@ -76,9 +87,9 @@ object's DWARF sections in the executable. The editor's native target launches
 `lldb-dap`; the interpreter target continues to use `zirk-dap`. The current
 DWARF language code is C because DWARF does not define a Zirk language code.
 Native debugging depends on a compatible LLDB installation and remains target
-toolchain-specific. The native path is experimental until breakpoint, stepping,
-stack, and local-value behavior is accepted in Devin. Browser debugging is
-unsupported.
+toolchain-specific. Breakpoints, stepping, stack frames, and local values have
+been accepted in Devin on macOS; this does not establish acceptance for other
+native toolchains. Browser debugging is unsupported.
 
 Range formatting, automatic import insertion, and broader diagnostic fixes
 also remain planned work.

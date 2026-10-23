@@ -603,6 +603,132 @@ pub fn hover_text(entry: &TypeMapEntry) -> String {
     }
 }
 
+/// Import declarations are represented by semantic references rather than
+/// ordinary type-map entries. Build an import-specific hover from the same
+/// compiler-resolved target so aliases and module paths explain what they
+/// refer to without guessing from the spelling.
+fn import_hover_content(
+    program: &zirk_ast::Program,
+    semantics: &SemanticIndex,
+    file: FileId,
+    offset: u32,
+) -> Option<(String, Span)> {
+    fn contains(span: Span, file: FileId, offset: u32) -> bool {
+        span.file == file && span.start <= offset && offset < span.end
+    }
+
+    fn declaration_text(symbol: &zirk_sema::SemanticSymbol) -> String {
+        use SemanticSymbolKind as Kind;
+
+        let typed_name = |label: &str| match symbol.type_text.as_deref() {
+            Some(ty) => format!("{label} {}: {ty}", symbol.name),
+            None => format!("{label} {}", symbol.name),
+        };
+        match symbol.kind {
+            Kind::Function | Kind::Method => match symbol.type_text.as_deref() {
+                Some(signature) if signature.starts_with("fn") => {
+                    format!("fn {}{}", symbol.name, &signature[2..])
+                }
+                _ => format!("fn {}", symbol.name),
+            },
+            Kind::Variable => typed_name("variable"),
+            Kind::Parameter => typed_name("parameter"),
+            Kind::Field => typed_name("field"),
+            Kind::Type => format!("type {}", symbol.name),
+            Kind::Class => format!("class {}", symbol.name),
+            Kind::Record => format!("record {}", symbol.name),
+            Kind::Contract => format!("interface {}", symbol.name),
+            Kind::Enum => format!("enum {}", symbol.name),
+            Kind::EnumVariant => format!("variant {}", symbol.name),
+            Kind::TypeAlias => match symbol.type_text.as_deref() {
+                Some(target) => format!("type {} = {target}", symbol.name),
+                None => format!("type {}", symbol.name),
+            },
+            Kind::TypeParameter => format!("type parameter {}", symbol.name),
+            Kind::Module => format!("module {}", symbol.name),
+            Kind::Import => format!("import {}", symbol.name),
+        }
+    }
+
+    fn visit(
+        program: &zirk_ast::Program,
+        semantics: &SemanticIndex,
+        file: FileId,
+        offset: u32,
+    ) -> Option<(String, Span)> {
+        for import in &program.imports {
+            let source = &import.source;
+            let source_span = source.span();
+            if contains(source_span, file, offset) {
+                let (module, description) = match source {
+                    zirk_ast::ImportSource::Package { path, .. } => {
+                        let description = if path.starts_with("std.") {
+                            "standard library module"
+                        } else {
+                            "package module"
+                        };
+                        (format!("module {path}"), description)
+                    }
+                    zirk_ast::ImportSource::Local { path, .. } => {
+                        (format!("module \"{path}\""), "local module")
+                    }
+                };
+                return Some((
+                    format!("```zirk\n{module}\n```\n\n{description}"),
+                    source_span,
+                ));
+            }
+
+            for item in &import.names {
+                let alias_hit = item
+                    .alias
+                    .as_ref()
+                    .is_some_and(|alias| contains(alias.span, file, offset));
+                let source_name_hit = contains(item.name.span, file, offset);
+                if !alias_hit && !source_name_hit {
+                    continue;
+                }
+
+                let Some(target) = semantics
+                    .reference_at_position(file, item.name.span.start)
+                    .and_then(|reference| semantics.symbol(reference.target))
+                else {
+                    continue;
+                };
+                let declaration = declaration_text(target);
+                let binding = item.alias.as_ref().map(|alias| alias.name.as_str());
+                let relation = match binding {
+                    Some(alias) => format!("as `{alias}`"),
+                    None => format!("as `{}`", item.name.name),
+                };
+                let origin = source.path();
+                let details = if target.is_standard_library {
+                    format!("Standard library export, imported {relation} from `{origin}`.")
+                } else {
+                    format!("Imported {relation} from `{origin}`.")
+                };
+                return Some((
+                    format!("```zirk\n{declaration}\n```\n\n{details}"),
+                    if alias_hit {
+                        item.alias.as_ref().expect("alias hit implies alias").span
+                    } else {
+                        item.name.span
+                    },
+                ));
+            }
+        }
+
+        for module in &program.modules {
+            if let Some(found) = visit(&module.body, semantics, file, offset) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    visit(program, semantics, file, offset)
+}
+
 /// A compiler diagnostic translated for LSP: the file it belongs to (by the
 /// name its `SourceFile` was registered under) plus the editor-facing
 /// diagnostic itself.
@@ -963,10 +1089,23 @@ fn imported_symbol_kind(
 
 fn semantic_token_entries(
     index: &zirk_sema::SemanticIndex,
+    program: &zirk_ast::Program,
     sources: &SourceMap,
     file_id: FileId,
     legend: &SemanticTokensLegend,
 ) -> Vec<SemanticTokenEntry> {
+    fn is_aliased_import_name(program: &zirk_ast::Program, span: Span) -> bool {
+        program.imports.iter().any(|import| {
+            import
+                .names
+                .iter()
+                .any(|item| item.alias.is_some() && item.name.span == span)
+        }) || program
+            .modules
+            .iter()
+            .any(|module| is_aliased_import_name(&module.body, span))
+    }
+
     let mut tokens = HashMap::new();
     let mut add = |span: Span,
                    kind: zirk_sema::SemanticSymbolKind,
@@ -1034,6 +1173,15 @@ fn semantic_token_entries(
         );
     }
     for reference in index.references() {
+        // The exported spelling in `source -> LocalName` is intentionally
+        // muted by the TextMate grammar. Let that scope provide its gray color
+        // instead of covering it with the exported symbol's semantic color;
+        // the local alias still receives its semantic token as a declaration.
+        if reference.role == zirk_sema::ReferenceRole::Import
+            && is_aliased_import_name(program, reference.span)
+        {
+            continue;
+        }
         if let Some(symbol) = index.symbol(reference.target) {
             let mut modifiers = legend
                 .token_modifiers
@@ -1117,7 +1265,7 @@ fn semantic_tokens_for(
     let file_id = file_id_for_uri(&frontend.sources, uri)?;
     let index = &frontend.checked.semantic_index;
     Some(encode_semantic_tokens(
-        semantic_token_entries(index, &frontend.sources, file_id, legend),
+        semantic_token_entries(index, &frontend.program, &frontend.sources, file_id, legend),
         range,
         index.snapshot_id().to_string(),
     ))
@@ -1242,6 +1390,11 @@ struct Document {
     version: i32,
     /// Analysis of `text` at `version`, absent until the first pass lands.
     analysis: Option<Arc<Analysis>>,
+    /// A standalone analysis used only when the open file is outside the
+    /// workspace entry's loaded import graph. Project analysis remains the
+    /// source of truth for workspace queries; this lets an explicitly opened
+    /// orphan file still receive compiler-backed semantic colors.
+    semantic_fallback: Option<Arc<Analysis>>,
     /// URIs diagnostics were published to, so a clean run can clear them —
     /// an absent publish would leave last run's squiggles behind forever.
     published_uris: Vec<Url>,
@@ -1409,6 +1562,86 @@ impl Backend {
         }
     }
 
+    /// Returns the project snapshot for a file in the loaded module graph.
+    /// If the user explicitly opens another Zirk file in that workspace,
+    /// analyze that file as an independent root for semantic highlighting
+    /// and document diagnostics. The fallback is versioned by the document
+    /// and invalidated with the workspace snapshot, so it cannot color newer
+    /// text with stale results.
+    async fn analysis_for_semantic_tokens(&self, uri: &Url) -> Option<Arc<Analysis>> {
+        self.ensure_analysis(uri).await;
+
+        let (project_analysis, version, path, overlays) = {
+            let state = self.state.lock().unwrap();
+            let document = state.documents.get(uri)?;
+            let project_analysis = document.analysis.as_ref()?.clone();
+            if project_analysis
+                .frontend
+                .as_ref()
+                .and_then(|frontend| file_id_for_uri(&frontend.sources, uri))
+                .is_some()
+            {
+                return Some(project_analysis);
+            }
+            if let Some(fallback) = &document.semantic_fallback {
+                return Some(fallback.clone());
+            }
+
+            let path = uri.to_file_path().ok()?;
+            let root = workspace_root(&path);
+            let overlays = state
+                .documents
+                .iter()
+                .filter_map(|(open_uri, open_document)| {
+                    let open_path = open_uri.to_file_path().ok()?;
+                    (workspace_root(&open_path) == root)
+                        .then(|| (open_path, open_document.text.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            (project_analysis, document.version, path, overlays)
+        };
+
+        let fallback = tokio::task::spawn_blocking(move || analyze_with_overlays(&path, &overlays))
+            .await
+            .ok()
+            .map(Arc::new)?;
+        {
+            let mut state = self.state.lock().unwrap();
+            let document = state.documents.get_mut(uri)?;
+            if document.version != version
+                || !document
+                    .analysis
+                    .as_ref()
+                    .is_some_and(|analysis| Arc::ptr_eq(analysis, &project_analysis))
+            {
+                return None;
+            }
+            document.semantic_fallback = Some(fallback.clone());
+            if !document.published_uris.contains(uri) {
+                document.published_uris.push(uri.clone());
+            }
+        }
+
+        // The project entry analysis intentionally excludes files that are
+        // outside its import graph. Publish the standalone pass's diagnostics
+        // too, so the editor does not wait forever for a notification that
+        // the project analysis cannot produce for this document.
+        let mut diagnostics = Vec::new();
+        for diagnostic in &fallback.diagnostics {
+            let (file, lsp) = to_lsp_diagnostic(diagnostic);
+            let target = file
+                .and_then(|file| Url::from_file_path(&file).ok())
+                .unwrap_or_else(|| uri.clone());
+            if target == *uri {
+                diagnostics.push(lsp);
+            }
+        }
+        self.client
+            .publish_diagnostics(uri.clone(), diagnostics, Some(version))
+            .await;
+        Some(fallback)
+    }
+
     /// Runs the analysis for `uri`'s current text and publishes the outcome.
     ///
     /// Results are applied only when the document's version still matches the
@@ -1490,6 +1723,7 @@ impl Backend {
                 .is_some_and(|path| affected_roots.contains(&workspace_root(&path)))
             {
                 document.analysis = None;
+                document.semantic_fallback = None;
                 invalidated.push(uri.clone());
             }
         }
@@ -1588,6 +1822,7 @@ impl Backend {
                 for open_uri in overlay_versions.keys() {
                     if let Some(document) = state.documents.get_mut(open_uri) {
                         document.analysis = None;
+                        document.semantic_fallback = None;
                         previously.extend(std::mem::take(&mut document.published_uris));
                     }
                 }
@@ -1595,6 +1830,7 @@ impl Backend {
                 for open_uri in overlay_versions.keys() {
                     if let Some(document) = state.documents.get_mut(open_uri) {
                         document.analysis = Some(analysis.clone());
+                        document.semantic_fallback = None;
                     }
                 }
                 Some((analysis, previously.into_iter().collect::<Vec<_>>()))
@@ -1696,6 +1932,7 @@ impl Backend {
                     text,
                     version,
                     analysis: None,
+                    semantic_fallback: None,
                     published_uris,
                     semantic_token_history,
                 },
@@ -1717,6 +1954,7 @@ impl Backend {
             for open_uri in &uris {
                 if let Some(document) = state.documents.get_mut(open_uri) {
                     document.analysis = None;
+                    document.semantic_fallback = None;
                 }
             }
             uris
@@ -1850,6 +2088,7 @@ impl LanguageServer for Backend {
             for open_uri in &remaining {
                 if let Some(document) = state.documents.get_mut(open_uri) {
                     document.analysis = None;
+                    document.semantic_fallback = None;
                 }
             }
             remaining
@@ -1881,6 +2120,22 @@ impl LanguageServer for Backend {
         };
         let file = result.sources.file(file_id);
         let offset = file.offset_at_utf16(position.line, position.character);
+        if let Some((text, span)) = import_hover_content(
+            &result.program,
+            &result.checked.semantic_index,
+            file_id,
+            offset,
+        ) {
+            let (sl, sc) = file.line_column_utf16(span.start);
+            let (el, ec) = file.line_column_utf16(span.end);
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: text,
+                }),
+                range: Some(Range::new(Position::new(sl, sc), Position::new(el, ec))),
+            }));
+        }
         let Some(entry) = best_hover_entry_in_file(&result.checked.type_map, file_id, offset)
         else {
             return Ok(None);
@@ -2503,7 +2758,9 @@ impl LanguageServer for Backend {
         params: SemanticTokensParams,
     ) -> RpcResult<Option<SemanticTokensResult>> {
         let uri = params.text_document.uri;
-        self.ensure_analysis(&uri).await;
+        let Some(analysis) = self.analysis_for_semantic_tokens(&uri).await else {
+            return Ok(None);
+        };
         let tokens = {
             let mut state = self.state.lock().unwrap();
             let Some(legend) = state.semantic_token_legend.clone() else {
@@ -2512,10 +2769,7 @@ impl LanguageServer for Backend {
             let Some(document) = state.documents.get_mut(&uri) else {
                 return Ok(None);
             };
-            let Some(analysis) = &document.analysis else {
-                return Ok(None);
-            };
-            let Some(tokens) = semantic_tokens_for(analysis, &uri, None, &legend) else {
+            let Some(tokens) = semantic_tokens_for(&analysis, &uri, None, &legend) else {
                 return Ok(None);
             };
             remember_semantic_tokens(&mut document.semantic_token_history, tokens.clone());
@@ -2529,7 +2783,9 @@ impl LanguageServer for Backend {
         params: SemanticTokensDeltaParams,
     ) -> RpcResult<Option<SemanticTokensFullDeltaResult>> {
         let uri = params.text_document.uri;
-        self.ensure_analysis(&uri).await;
+        let Some(analysis) = self.analysis_for_semantic_tokens(&uri).await else {
+            return Ok(None);
+        };
         let result = {
             let mut state = self.state.lock().unwrap();
             let Some(legend) = state.semantic_token_legend.clone() else {
@@ -2538,10 +2794,7 @@ impl LanguageServer for Backend {
             let Some(document) = state.documents.get_mut(&uri) else {
                 return Ok(None);
             };
-            let Some(analysis) = &document.analysis else {
-                return Ok(None);
-            };
-            let Some(current) = semantic_tokens_for(analysis, &uri, None, &legend) else {
+            let Some(current) = semantic_tokens_for(&analysis, &uri, None, &legend) else {
                 return Ok(None);
             };
             let previous = document
@@ -2567,18 +2820,17 @@ impl LanguageServer for Backend {
         params: SemanticTokensRangeParams,
     ) -> RpcResult<Option<SemanticTokensRangeResult>> {
         let uri = params.text_document.uri;
-        self.ensure_analysis(&uri).await;
+        let Some(analysis) = self.analysis_for_semantic_tokens(&uri).await else {
+            return Ok(None);
+        };
         let state = self.state.lock().unwrap();
         let Some(legend) = state.semantic_token_legend.as_ref() else {
             return Ok(None);
         };
-        let Some(document) = state.documents.get(&uri) else {
+        if !state.documents.contains_key(&uri) {
             return Ok(None);
-        };
-        let Some(analysis) = &document.analysis else {
-            return Ok(None);
-        };
-        let Some(tokens) = semantic_tokens_for(analysis, &uri, Some(params.range), legend) else {
+        }
+        let Some(tokens) = semantic_tokens_for(&analysis, &uri, Some(params.range), legend) else {
             return Ok(None);
         };
         Ok(Some(SemanticTokensRangeResult::Tokens(tokens)))
@@ -2761,6 +3013,7 @@ mod tests {
                     text: String::new(),
                     version,
                     analysis: None,
+                    semantic_fallback: None,
                     published_uris: Vec::new(),
                     semantic_token_history: VecDeque::new(),
                 },
@@ -2817,6 +3070,73 @@ mod tests {
         let analysis = analyze(&path, "fn broken(x: Int32) {\n    return x + ;\n}\n");
         assert!(analysis.frontend.is_none());
         assert!(!analysis.diagnostics.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn semantic_tokens_analyze_open_files_outside_the_project_import_graph() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic-workspace");
+        let entry = fixture.join("src/main.zrk");
+        let detached = fixture.join("src/debug_main.zrk");
+        let entry_text = fs::read_to_string(&entry).unwrap();
+        let detached_text = fs::read_to_string(&detached).unwrap();
+        let detached_uri = Url::from_file_path(&detached).unwrap();
+        let project_analysis = Arc::new(analyze_with_overlays(
+            &fixture,
+            &HashMap::from([
+                (entry, entry_text),
+                (detached.clone(), detached_text.clone()),
+            ]),
+        ));
+        assert!(
+            file_id_for_uri(
+                &project_analysis.frontend.as_ref().unwrap().sources,
+                &detached_uri,
+            )
+            .is_none(),
+            "the fixture file is intentionally not imported by the project entry"
+        );
+
+        let (service, _socket, state) = service_with_state();
+        state.lock().unwrap().documents.insert(
+            detached_uri.clone(),
+            Document {
+                text: detached_text,
+                version: 1,
+                analysis: Some(project_analysis),
+                semantic_fallback: None,
+                published_uris: Vec::new(),
+                semantic_token_history: VecDeque::new(),
+            },
+        );
+
+        let standalone = service
+            .inner()
+            .analysis_for_semantic_tokens(&detached_uri)
+            .await
+            .expect("an opened standalone Zirk file gets semantic analysis");
+        let frontend = standalone.frontend.as_ref().expect("valid standalone file");
+        assert!(file_id_for_uri(&frontend.sources, &detached_uri).is_some());
+        let legend = SemanticTokensLegend {
+            token_types: SEMANTIC_TOKEN_TYPES
+                .iter()
+                .map(|token_type| SemanticTokenType::new(token_type))
+                .collect(),
+            token_modifiers: SEMANTIC_TOKEN_MODIFIERS
+                .iter()
+                .map(|modifier| SemanticTokenModifier::new(modifier))
+                .collect(),
+        };
+        let tokens = semantic_tokens_for(&standalone, &detached_uri, None, &legend)
+            .expect("standalone file produces semantic tokens");
+        assert!(!tokens.data.is_empty());
+
+        let cached = service
+            .inner()
+            .analysis_for_semantic_tokens(&detached_uri)
+            .await
+            .expect("the standalone semantic snapshot is cached");
+        assert!(Arc::ptr_eq(&standalone, &cached));
     }
 
     #[test]
@@ -2966,6 +3286,93 @@ mod tests {
         assert_eq!(hover_text(entry), "fn square(n: Int32): Int32");
         assert!(entry.inferred);
         assert_eq!(entry.span.file, file.id());
+    }
+
+    #[test]
+    fn import_hovers_describe_export_kind_alias_and_source_module() {
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/semantic-workspace");
+        let entry = fixture.join("src/main.zrk");
+        let text = fs::read_to_string(&entry).unwrap();
+        let analysis = analyze(&entry, &text);
+        let frontend = analysis.frontend.expect("valid semantic fixture");
+        let file = frontend.sources.file(FileId::ENTRY);
+        let semantics = &frontend.checked.semantic_index;
+        let hover_at = |needle: &str, relative_offset: usize| {
+            let offset = text.find(needle).unwrap() + relative_offset;
+            import_hover_content(&frontend.program, semantics, FileId::ENTRY, offset as u32)
+                .unwrap()
+                .0
+        };
+
+        let identity = "identity -> keep";
+        let function_hover = hover_at(identity, 2);
+        assert!(
+            function_hover.contains("fn identity(value: T): T"),
+            "{function_hover}"
+        );
+        assert!(function_hover.contains("Imported as `keep` from `./domain/geometry`"));
+        let alias_hover = hover_at(identity, "identity -> ".len() + 1);
+        assert!(
+            alias_hover.contains("fn identity(value: T): T"),
+            "{alias_hover}"
+        );
+
+        let standard_export_hover = hover_at("stdout", 1);
+        assert!(
+            standard_export_hover.contains("module stdout"),
+            "{standard_export_hover}"
+        );
+        assert!(standard_export_hover.contains("Standard library export"));
+
+        let contract_hover = hover_at("Named -> NamedValue", 1);
+        assert!(
+            contract_hover.contains("interface Named"),
+            "{contract_hover}"
+        );
+        let record_hover = hover_at("User, Named", 1);
+        assert!(record_hover.contains("record User"), "{record_hover}");
+
+        let standard_module_hover = hover_at("std.io", 2);
+        assert!(standard_module_hover.contains("module std.io"));
+        assert!(standard_module_hover.contains("standard library module"));
+        let local_module_hover = hover_at("./domain/geometry", 3);
+        assert!(local_module_hover.contains("module \"./domain/geometry\""));
+        assert!(local_module_hover.contains("local module"));
+
+        let typed_root = scratch("import-hover-types");
+        let source_dir = typed_root.join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        let typed_entry = source_dir.join("main.zrk");
+        fs::write(
+            source_dir.join("types.zrk"),
+            "share type UserId = Int32;\nshare class Account { construct() { } }\n",
+        )
+        .unwrap();
+        let typed_text = "import { UserId, Account } from \"./types\";\nfn main(): Void { inmut id: UserId = 5; }\n";
+        let typed_analysis = analyze(&typed_entry, typed_text);
+        let typed_frontend = typed_analysis.frontend.expect("valid type import fixture");
+        let typed_semantics = &typed_frontend.checked.semantic_index;
+        let typed_hover_at = |needle: &str| {
+            let offset = typed_text.find(needle).unwrap() as u32;
+            import_hover_content(
+                &typed_frontend.program,
+                typed_semantics,
+                FileId::ENTRY,
+                offset,
+            )
+            .unwrap()
+            .0
+        };
+        let alias_type_hover = typed_hover_at("UserId");
+        assert!(
+            alias_type_hover.contains("type UserId = Int32"),
+            "{alias_type_hover}"
+        );
+        let class_hover = typed_hover_at("Account");
+        assert!(class_hover.contains("class Account"), "{class_hover}");
+
+        assert_eq!(file.id(), FileId::ENTRY);
     }
 
     #[test]
@@ -3713,6 +4120,7 @@ mod tests {
                 text,
                 version: 1,
                 analysis: None,
+                semantic_fallback: None,
                 published_uris: Vec::new(),
                 semantic_token_history: VecDeque::new(),
             },
@@ -4056,6 +4464,32 @@ mod tests {
         assert_eq!(import_declaration.3, token_type_index("function"));
         assert_ne!(import_declaration.4 & modifier_bit("declaration"), 0);
         assert_ne!(import_declaration.4 & modifier_bit("import"), 0);
+        let aliased_source_offset = text.find("identity -> keep").unwrap() as u32;
+        let (aliased_source_line, aliased_source_character) = direct_frontend
+            .sources
+            .entry()
+            .line_column_utf16(aliased_source_offset);
+        assert!(
+            !tokens.iter().any(|token| {
+                token.0 == aliased_source_line && token.1 == aliased_source_character
+            }),
+            "the exported spelling in an aliased import must keep its muted TextMate color"
+        );
+        let aliased_type_source_offset = text.find("Named -> NamedValue").unwrap() as u32;
+        let (aliased_type_line, aliased_type_character) = direct_frontend
+            .sources
+            .entry()
+            .line_column_utf16(aliased_type_source_offset);
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| { token.0 == aliased_type_line && token.1 == aliased_type_character }),
+            "the exported type spelling in an aliased import must also stay muted"
+        );
+        let imported_type_alias = token_for("NamedValue }");
+        assert_eq!(imported_type_alias.3, token_type_index("interface"));
+        assert_ne!(imported_type_alias.4 & modifier_bit("declaration"), 0);
+        assert_ne!(imported_type_alias.4 & modifier_bit("import"), 0);
         let local_declaration = token_for("total = 0");
         assert_eq!(local_declaration.3, token_type_index("local"));
         assert_ne!(local_declaration.4 & modifier_bit("declaration"), 0);
@@ -4554,6 +4988,61 @@ mod tests {
                 .unwrap();
             assert!(!hover.result().unwrap().is_null());
             assert_eq!(snapshot_id(), cached_snapshot_id);
+        }
+
+        for (request_id, (needle, relative_offset, expected)) in [
+            ("stdout", 1, "module stdout"),
+            ("identity -> keep", 0, "fn identity(value: T): T"),
+            (
+                "identity -> keep",
+                "identity -> ".len() + 1,
+                "Imported as `keep`",
+            ),
+            ("Named -> NamedValue", 1, "interface Named"),
+            (
+                "Named -> NamedValue",
+                "Named -> ".len() + 1,
+                "interface Named",
+            ),
+            (
+                "Named -> NamedValue",
+                "Named -> ".len() + 1,
+                "Imported as `NamedValue`",
+            ),
+            ("User, Named", 1, "record User"),
+            ("std.io", 2, "module std.io"),
+            ("./domain/geometry", 3, "module \"./domain/geometry\""),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let offset = (text.find(needle).unwrap() + relative_offset) as u32;
+            let (hover_line, hover_character) =
+                direct_frontend.sources.entry().line_column_utf16(offset);
+            let hover = server
+                .ready()
+                .await
+                .unwrap()
+                .call(
+                    Request::build("textDocument/hover")
+                        .params(serde_json::json!({
+                            "textDocument": {"uri": uri.clone()},
+                            "position": {"line": hover_line, "character": hover_character}
+                        }))
+                        .id(30 + request_id as i64)
+                        .finish(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let result = hover.result().unwrap();
+            let value = result["contents"]["value"]
+                .as_str()
+                .expect("hover returns markdown");
+            assert!(
+                value.contains(expected),
+                "expected `{expected}` in hover response {value}"
+            );
         }
 
         let changed_text = text.replace("stdout.println(total);", "stdout.println(user.name());");

@@ -171,6 +171,14 @@ fn native_debug_emission_maps_source_lines_parameters_and_locals() {
     assert!(text.contains("!DILocation(line: 2"));
     assert!(text.contains(r#"name: "left""#));
     assert!(text.contains(r#"name: "base""#));
+    assert!(
+        !text.contains(r#"name: "left", arg:"#),
+        "parameter values must use their initialized Zirk slots, not pre-prologue storage"
+    );
+    assert!(
+        !text.contains("name: \"<"),
+        "DWARF must omit compiler-generated slots from user-visible locals"
+    );
     assert!(text.contains("debug_main.zrk"));
     assert!(text.contains("/workspace"));
 }

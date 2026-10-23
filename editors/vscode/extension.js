@@ -2,6 +2,7 @@ const vscode = require('vscode');
 const { spawn, spawnSync } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 
 const LANGUAGE_ID = 'zirk';
 const DIAGNOSTIC_SOURCE = 'zirk';
@@ -703,6 +704,56 @@ function findLanguageServer(context) {
         ?? findOnAnyPath(['zirk-lsp']);
 }
 
+/**
+ * Stages an extension-bundled native executable in extension-owned global
+ * storage before launching it. Devin can SIGKILL a process started directly
+ * from its managed extension directory, even when that same binary runs from
+ * a workspace or temporary directory. Configured, workspace, and PATH
+ * executables keep their original locations.
+ */
+function stageBundledExecutable(context, executable, label) {
+    const bundledDirectory = path.resolve(context.extensionPath, 'bin');
+    const resolvedExecutable = path.resolve(executable);
+    if (path.dirname(resolvedExecutable) !== bundledDirectory) {
+        return executable;
+    }
+
+    const storageDirectory = context.globalStorageUri?.fsPath ?? context.globalStoragePath;
+    if (!storageDirectory) {
+        outputChannel.appendLine(`Extension storage is unavailable; launching bundled ${label} in place.`);
+        return executable;
+    }
+
+    const digest = crypto.createHash('sha256')
+        .update(fs.readFileSync(executable))
+        .digest('hex')
+        .slice(0, 16);
+    const runtimeDirectory = path.join(storageDirectory, 'native-tools', digest);
+    const stagedExecutable = path.join(runtimeDirectory, path.basename(executable));
+    if (!fs.existsSync(stagedExecutable)) {
+        fs.mkdirSync(runtimeDirectory, { recursive: true });
+        const temporaryExecutable = `${stagedExecutable}.${process.pid}.${Date.now()}.tmp`;
+        try {
+            fs.copyFileSync(executable, temporaryExecutable);
+            fs.chmodSync(temporaryExecutable, 0o755);
+            try {
+                fs.renameSync(temporaryExecutable, stagedExecutable);
+            } catch (error) {
+                if (!fs.existsSync(stagedExecutable)) {
+                    throw error;
+                }
+                fs.rmSync(temporaryExecutable, { force: true });
+            }
+        } catch (error) {
+            fs.rmSync(temporaryExecutable, { force: true });
+            throw error;
+        }
+    }
+
+    outputChannel.appendLine(`Using bundled ${label} from extension storage: ${stagedExecutable}`);
+    return stagedExecutable;
+}
+
 function registerDebugAdapter(context) {
     const configurationProvider = vscode.debug.registerDebugConfigurationProvider('zirk', {
         provideDebugConfigurations(folder) {
@@ -740,6 +791,17 @@ function registerDebugAdapter(context) {
                 vscode.window.showErrorMessage('Zirk debugging requires a .zrk program. Open a Zirk file or set "program" in launch.json.');
                 return undefined;
             }
+            return resolved;
+        },
+        // VS Code substitutes variables such as `${workspaceFolder}` only
+        // after resolveDebugConfiguration. Native compilation needs a real
+        // source and working-directory path, so defer the build to this hook.
+        async resolveDebugConfigurationWithSubstitutedVariables(folder, configuration) {
+            const resolved = { ...configuration };
+            if (!resolved.program) {
+                vscode.window.showErrorMessage('Zirk debugging requires a .zrk program. Open a Zirk file or set "program" in launch.json.');
+                return undefined;
+            }
 
             if (resolved.target === 'native') {
                 const sourcePath = path.resolve(resolved.program);
@@ -757,10 +819,12 @@ function registerDebugAdapter(context) {
                     return undefined;
                 }
                 try {
-                    const executable = await buildNativeDebugProgram(compiler, sourcePath, resolved.cwd);
+                    const cwd = resolved.cwd || folder?.uri.fsPath || path.dirname(sourcePath);
+                    outputChannel?.appendLine(`Building native debug target: source=${sourcePath}, cwd=${cwd}`);
+                    const executable = await buildNativeDebugProgram(compiler, sourcePath, cwd);
                     outputChannel?.appendLine(`Native debug executable: ${executable}`);
                     resolved.program = executable;
-                    resolved.cwd = resolved.cwd || path.dirname(sourcePath);
+                    resolved.cwd = cwd;
                 } catch (error) {
                     outputChannel?.appendLine(`Native debug build failed: ${error.message}`);
                     vscode.window.showErrorMessage(`Zirk native debug build failed: ${error.message}`);
@@ -785,7 +849,18 @@ function registerDebugAdapter(context) {
                 outputChannel?.appendLine(`Native debugger running: ${executable}`);
                 return new vscode.DebugAdapterExecutable(executable, [], { cwd });
             }
-            const executable = findDebugAdapter(context, session.configuration);
+            const bundledOrConfigured = findDebugAdapter(context, session.configuration);
+            let executable;
+            try {
+                executable = bundledOrConfigured
+                    ? stageBundledExecutable(context, bundledOrConfigured, 'zirk-dap')
+                    : undefined;
+            } catch (error) {
+                const message = `The bundled zirk-dap could not be prepared: ${error.message ?? error}`;
+                outputChannel?.appendLine(message);
+                vscode.window.showErrorMessage(message);
+                return undefined;
+            }
             if (!executable) {
                 const message = 'The zirk-dap executable was not found. Build it with `cargo build -p zirk-dap`, add it to PATH, or set zirk.dapPath.';
                 outputChannel?.appendLine(message);
@@ -803,26 +878,32 @@ function registerDebugAdapter(context) {
 
 function buildNativeDebugProgram(compiler, sourcePath, cwd) {
     return new Promise((resolve, reject) => {
+        const workingDirectory = cwd || path.dirname(sourcePath);
         const child = spawn(compiler, ['build', '--debug-info', sourcePath], {
-            cwd: cwd || path.dirname(sourcePath),
+            cwd: workingDirectory,
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         let stdout = '';
         let stderr = '';
         child.stdout.on('data', chunk => { stdout += chunk.toString(); });
         child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-        child.on('error', reject);
+        child.on('error', error => {
+            reject(new Error(`could not start compiler '${compiler}' from '${workingDirectory}': ${error.message}`));
+        });
         child.on('close', code => {
             if (code !== 0) {
                 reject(new Error((stderr || stdout || `compiler exited with ${code}`).trim()));
                 return;
             }
             const executable = stdout.trim().split(/\r?\n/).at(-1);
-            if (!executable || !fs.existsSync(executable)) {
+            const executablePath = executable
+                ? path.resolve(workingDirectory, executable)
+                : undefined;
+            if (!executablePath || !fs.existsSync(executablePath)) {
                 reject(new Error('the compiler did not produce an executable path'));
                 return;
             }
-            resolve(path.resolve(cwd || path.dirname(sourcePath), executable));
+            resolve(executablePath);
         });
     });
 }
@@ -884,13 +965,23 @@ async function startLanguageClient(context) {
         return false;
     }
 
-    const executable = findLanguageServer(context);
-    if (!executable) {
+    const bundledOrConfigured = findLanguageServer(context);
+    if (!bundledOrConfigured) {
         setLanguageStatus('$(warning) Zirk: CLI fallback', 'The language server was not found; CLI features remain active');
         outputChannel.appendLine('No zirk-lsp executable found; falling back to the CLI bridge.');
         outputChannel.appendLine('Build it with `cargo build -p zirk-lsp`.');
         return false;
     }
+    let executable;
+    try {
+        executable = stageBundledExecutable(context, bundledOrConfigured, 'zirk-lsp');
+    } catch (error) {
+        setLanguageStatus('$(warning) Zirk: CLI fallback', 'The bundled language server could not be prepared; CLI features remain active');
+        outputChannel.appendLine(`Bundled zirk-lsp could not be prepared: ${error.message ?? error}`);
+        outputChannel.appendLine('Falling back to the CLI bridge.');
+        return false;
+    }
+    outputChannel.appendLine(`Starting zirk-lsp: ${executable}`);
 
     const client = new LanguageClient(
         'zirk-lsp',
