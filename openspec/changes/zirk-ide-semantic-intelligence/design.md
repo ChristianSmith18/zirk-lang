@@ -151,3 +151,9 @@ Record analysis, hover, completion, and workspace-symbol latency in Devin agains
 | Large | 1.87 | 6.73 | 0.08 | 7.10 |
 
 These are server-process measurements only. They exclude Devin startup, extension activation, editor scheduling, and rendering. The Devin latency baseline and evidence-based thresholds in tasks 1.3 and 4.6 remain open; these local numbers must not be reported as editor latency.
+
+## Companion Site Audit
+
+**Website sync and review (2026-10-23):** The companion site was regenerated from source revision `5d8903b862e1a7f02b18e19398671564a680c149`. All 372 handbook documents and routes validated. The site-owned project-status catalog now reflects delivered compiler-backed LSP providers and interpreter DAP support, keeps Devin and native-debugger acceptance open, and describes `std.net`, optional HTTP/3, browser Fetch limits, and the outstanding Windows HTTP/3 WebSocket cleanup failure. The site syntax theme now maps standard modules to orange, module-path separators to white, external modules to neutral text, imported values and aliases to blue, imported types to green, and aliased source names to muted gray.
+
+Site verification passed `yarn content:verify`, `yarn content:validate`, `yarn content:test` (82 tests), and `yarn build` (378 prerendered routes; existing bundle and SCSS budget warnings remain). The site changes are committed separately as `f1da43cb9e8e6d06a4c2ad506b4b5f2bf13e30a4`. Devin visual acceptance is still pending: the desktop automation reported macOS locked on the latest check, despite the user having reported unlocking it.
