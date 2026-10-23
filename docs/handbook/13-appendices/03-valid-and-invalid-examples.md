@@ -13,10 +13,13 @@ Invalid: `null` cannot inhabit `String`.
 inmut name: String = null;
 ```
 
-Valid: expected failure is matched exhaustively. Invalid: using `?` to propagate `Result`—that operator is excluded from Zirk 1.x. Each handbook feature page contains additional focused pairs.
+Valid: expected failure is matched exhaustively. Each handbook feature page
+contains additional focused pairs.
 
-Valid: `_ = operation()` explicitly discards a `Result`. Invalid:
-`operation();` when its value is `Result`. Valid: `catch NetworkError(error)`.
+Valid: `operation();` runs a `Result`-returning operation and raises its
+failure. Valid: `_ = operation()` deliberately discards either Result outcome.
+Invalid: using `?` to propagate `Result`—that operator is excluded from Zirk 1.x.
+Valid: `catch NetworkError(error)`.
 Invalid: historical `catch<NetworkError> error`. Valid: a library requests and
 an application grants one scoped operation. Invalid: treating a `.zkinit`
 edit as developer approval or reusing approval after moving the project.

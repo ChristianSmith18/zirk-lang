@@ -1130,6 +1130,15 @@ fn valid_record_literal_forms() {
 }
 
 #[test]
+fn valid_quoted_key_object_is_a_json_document_string() {
+    let source = "{\n    \"status\": \"ok\",\n    \"nested\": { \"count\": 3 }\n}";
+    let Expr::Str(json) = expression(source) else {
+        panic!("a quoted-key object literal must produce JSON text");
+    };
+    assert_eq!(json.value, source);
+}
+
+#[test]
 fn valid_postfix_index_and_slice_still_parse_after_a_receiver() {
     assert_eq!(shape(&expression("values[0]")), "values[0]");
     assert_eq!(shape(&expression("values[1:4:2]")), "values[1:4:2]");

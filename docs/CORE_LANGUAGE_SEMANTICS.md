@@ -20,6 +20,9 @@ In particular, a Result expression is preserved by direct `match` and
 explicitly Result-typed contexts; ordinary value contexts project `Ok(T)` to
 `T` and `Error(E)` to `null` as defined in
 [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md).
+In standalone statement position, `Ok` discards its payload and `Error` raises
+the throwable error or wraps it in a catchable `NativeError`; `_ =` deliberately
+discards either outcome.
 
 ## 1. Values, references, places, and projections
 

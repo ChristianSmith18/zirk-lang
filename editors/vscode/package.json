@@ -25,32 +25,7 @@
   "contributes": {
     "configurationDefaults": {
       "[zirk]": {
-        "editor.semanticHighlighting.enabled": true,
-        "editor.semanticTokenColorCustomizations": {
-          "enabled": true,
-          "rules": {
-            "namespace": "#F4A261",
-            "type": "#32D4C6",
-            "class": "#34D399",
-            "interface": "#34D399",
-            "struct": "#34D399",
-            "enum": "#34D399",
-            "enumMember": "#FF6B81",
-            "typeParameter": "#A78BFA",
-            "parameter": {
-              "foreground": "#B8B8C3",
-              "fontStyle": "italic"
-            },
-            "local": "#F7F7FA",
-            "variable": "#F7F7FA",
-            "property": "#F7C65C",
-            "function": "#39C6FF",
-            "method": "#38BDF8",
-            "*.declaration": { "fontStyle": "bold" },
-            "*.reference": { "fontStyle": "italic" },
-            "*.import": { "fontStyle": "italic" }
-          }
-        }
+        "editor.semanticHighlighting.enabled": true
       }
     },
     "configuration": {
@@ -79,7 +54,7 @@
         "zirk.brandColors": {
           "type": "boolean",
           "default": true,
-          "description": "Apply the Zirk brand syntax palette (zirk-lang-site colors) to .zrk files, replacing the current theme's colors for Zirk scopes only."
+          "description": "Apply the Zirk brand palette to syntax and semantic tokens in Zirk files while preserving the active theme in other languages."
         },
         "zirk.lspPath": {
           "type": "string",

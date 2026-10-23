@@ -9922,7 +9922,6 @@ impl<'a> Checker<'a> {
             Stmt::Expr(s) => {
                 self.preserve_result_exprs.insert(s.expr.span());
                 let ty = self.check_expr(&s.expr);
-                self.require_result_consumed(ty, s.span);
                 // A `Never` result diverges the way `throw` does: nothing
                 // after it in this block runs. It is what lets
                 // `fn f() { fatalError("x"); }` infer `Never`
@@ -12184,10 +12183,9 @@ impl<'a> Checker<'a> {
         let value = self.check_expr(&stmt.value);
         self.expected_type = saved_expected;
 
-        // `_ = expr;` discards `value` deliberately — the escape hatch a
-        // mandatory-consumption type like `Result` needs
-        // (`Self::require_result_consumed`) — rather than assigning to a
-        // real binding named `_`.
+        // `_ = expr;` discards `value` deliberately rather than assigning to
+        // a real binding named `_`. For Result this also suppresses the normal
+        // failure-to-exception behavior used by standalone expression statements.
         if let AssignTarget::Name(name) = &stmt.target
             && name.name == "_"
         {
@@ -19703,28 +19701,6 @@ impl<'a> Checker<'a> {
         let instance = self.intern_instance(GenericInstance { class: id, args });
         self.generic_constructions.insert(expr.span, instance);
         Type::of(Base::Instance(instance))
-    }
-
-    /// Rejects a `Result<T,E>` produced by an expression statement and
-    /// never consumed (`docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md`
-    /// section 2: "ignoring it is a compile-time error"). `_ = expr;`
-    /// (`Self::check_assign`'s own `_` handling) is the explicit escape
-    /// hatch, and it is a `Stmt::Assign`, not a `Stmt::Expr` — so it never
-    /// reaches this check at all.
-    fn require_result_consumed(&mut self, ty: Type, span: Span) {
-        let Base::EnumInstance(inst) = ty.base else {
-            return;
-        };
-        if self.native_result != Some(self.enum_instances[inst as usize].enum_id) {
-            return;
-        }
-        self.error(
-            codes::DISCARDED_RESULT,
-            span,
-            "a `Result` must be handled",
-            "an operation that can fail must be matched or checked, not silently dropped",
-            Some("use `match` to inspect the outcome, consume it in a value context, or use `_ = expr;` to discard it deliberately".into()),
-        );
     }
 
     /// Gives removed Result extraction helpers a targeted migration

@@ -11,12 +11,12 @@ return match load(path) {
 
 Translate errors at abstraction boundaries when callers need domain meaning; preserve the original cause for diagnostics where safe.
 
-There is no automatic conversion between `Result.Error` and a thrown
-exception. The specified `or_throw` boundary requires an explicit mapper, and
-a callback passed to a Result composition operation preserves its declared
-`throws` effect instead of absorbing the exception into `E`. The composition
-operations are specified but not implemented yet (see [Result](01-result.md)).
-Translate errors explicitly with `match` at the boundary instead.
+In a value context, there is no automatic conversion between `Result.Error`
+and a thrown exception. In statement position, a failed Result throws its
+`Throwable` error or wraps another error as `NativeError`. Use direct `match`
+to handle or translate errors without throwing, or use `try/catch` to recover
+from the statement effect. The composition operations are specified but not
+implemented yet (see [Result](01-result.md)).
 
 ---
 

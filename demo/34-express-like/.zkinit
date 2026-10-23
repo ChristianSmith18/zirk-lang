@@ -1,0 +1,8 @@
+project "demo-express-like-http-server"
+kind application
+entry "main.zrk"
+permissions {
+    network {
+        listen: { addresses: ["127.0.0.1:8081"]; during: runtime; }
+    }
+}

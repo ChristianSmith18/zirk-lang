@@ -153,7 +153,7 @@ native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `Result<T,E>` | yes | yes | yes | yes | yes | yes | Native `enum Result<T,E>`; mandatory consumption. |
+| `Result<T,E>` | yes | yes | yes | yes | yes | yes | Native `enum Result<T,E>`; contextual nullable projection and statement-position failure propagation. |
 | `_ = expr` discard | yes | yes | yes | yes | yes | yes | — |
 
 ## Phase 4b — Exceptions

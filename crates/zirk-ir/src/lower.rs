@@ -6292,7 +6292,9 @@ impl<'a> FunctionLowering<'a> {
             ast::Stmt::Continue(s) => self.lower_continue(s),
             ast::Stmt::Return(s) => self.lower_return(s),
             ast::Stmt::Expr(s) => {
-                self.lower_expr_for_effect(&s.expr);
+                if !self.lower_discarded_result(&s.expr, s.span) {
+                    self.lower_expr_for_effect(&s.expr);
+                }
             }
             ast::Stmt::Block(b) => self.lower_block(b),
             ast::Stmt::Throw(s) => self.lower_throw(s),
@@ -17739,25 +17741,30 @@ impl<'a> FunctionLowering<'a> {
             }
         };
 
+        self.lower_throw_value(exception, stmt.span);
+    }
+
+    /// Raises an already-lowered throwable using the same pending-exception,
+    /// catch dispatch, cancellation-cleanup and suppressed-error behavior as
+    /// an explicit `throw` statement.
+    fn lower_throw_value(&mut self, exception: Operand, span: Span) {
         // A `throw` inside a `catch` carries the previously-caught exception as
         // its suppressed cause (`Throwable.suppressed()`).
-        if stmt.value.is_some()
-            && let Some((slot, ty)) = self.current_catch
-        {
-            let suppressed = self.emit(InstKind::Load(slot), ty, stmt.span);
+        if let Some((slot, ty)) = self.current_catch {
+            let suppressed = self.emit(InstKind::Load(slot), ty, span);
             self.emit_effect(
                 InstKind::SetSuppressed {
                     exception,
                     suppressed,
                 },
-                stmt.span,
+                span,
             );
         }
 
-        self.emit_effect(InstKind::Throw(exception), stmt.span);
+        self.emit_effect(InstKind::Throw(exception), span);
         if self.cancellation_cleanup_depth > 0 {
             let throwable_ty = IrType::Object(self.throwable_object_id());
-            let _ = self.emit(InstKind::TakePendingException, throwable_ty, stmt.span);
+            let _ = self.emit(InstKind::TakePendingException, throwable_ty, span);
             return;
         }
         // Dispatches to a local `catch` that covers it, or — finding
@@ -17766,7 +17773,114 @@ impl<'a> FunctionLowering<'a> {
         // check reaches (`Self::lower_throws_check`), since a `throw`
         // statement is just that check with the "was something pending"
         // test already known to be true.
-        self.lower_pending_exception_dispatch(stmt.span);
+        self.lower_pending_exception_dispatch(span);
+    }
+
+    /// An unconsumed `Result<T, E>` in statement position is the concise
+    /// effect form: success is discarded, a throwable `E` is raised unchanged,
+    /// and any other `E` becomes a catchable `NativeError` carrying its text.
+    /// A direct `match` or a Result-typed value context still keeps both
+    /// variants available to the caller.
+    fn lower_discarded_result(&mut self, expr: &ast::Expr, span: Span) -> bool {
+        let Some(source_ty) = self.checked.expr_types.get(&expr.span()).copied() else {
+            return false;
+        };
+        let Base::EnumInstance(instance_id) = source_ty.base else {
+            return false;
+        };
+        let instance = &self.checked.enum_instances[instance_id as usize];
+        if self.checked.native_result != Some(instance.enum_id) {
+            return false;
+        }
+        let error_semantic_ty = instance.args[1];
+
+        let IrType::Enum(enum_id) = self.ir_type(source_ty) else {
+            unreachable!("a Result expression has an enum IR representation")
+        };
+        let layout = &self.module.enums[enum_id as usize];
+        let error_field = layout.variants[1][0];
+        let error_ty = self.ir_type(error_semantic_ty);
+        let result = self.lower_expr(expr);
+        let result_slot = self.spill(result, IrType::Enum(enum_id), span);
+        let stored = self.emit(InstKind::Load(result_slot), IrType::Enum(enum_id), span);
+        let discriminant = self.emit(
+            InstKind::Discriminant(stored),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let succeeded = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: discriminant,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success = self.new_block();
+        let failure = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: succeeded,
+            then_block: success,
+            else_block: failure,
+        });
+
+        self.current = failure;
+        let result_value = self.emit(InstKind::Load(result_slot), IrType::Enum(enum_id), span);
+        let error_value = (error_ty != IrType::Void).then(|| {
+            self.emit(
+                InstKind::LoadField {
+                    object: result_value,
+                    index: error_field,
+                },
+                error_ty,
+                span,
+            )
+        });
+        let exception = if let (Some(error_value), Base::Class(class_id)) =
+            (error_value, error_semantic_ty.base)
+            && self.is_throwable_class(class_id)
+        {
+            error_value
+        } else {
+            let native_error = self
+                .checked
+                .native_exceptions
+                .expect("Result statement propagation uses the Throwable hierarchy")
+                .native_error;
+            let message = if let Some(error_value) = error_value {
+                self.lower_to_string(error_value, error_ty, span)
+            } else {
+                self.const_string("Result failed", span)
+            };
+            let exception = self.emit(
+                InstKind::Alloc(native_error),
+                IrType::Object(native_error),
+                span,
+            );
+            let reason = self.module.objects[native_error as usize]
+                .field_index("reason")
+                .expect("NativeError exposes its reason field to lowering")
+                as u32;
+            self.emit_effect(
+                InstKind::StoreField {
+                    object: exception,
+                    index: reason,
+                    value: message,
+                },
+                span,
+            );
+            exception
+        };
+        self.lower_throw_value(exception, span);
+        self.terminate(Terminator::Jump(done));
+
+        self.current = success;
+        self.terminate(Terminator::Jump(done));
+        self.current = done;
+        true
     }
 
     /// After *every* call (roadmap Phase 4b, design D1; unconditional since

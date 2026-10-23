@@ -34,8 +34,10 @@ implementation capacity is not a public program concern.
 
 ## Formatting
 
-Native interpolation evaluates Zirk expressions inside `{}`. `format` instead
-binds declared placeholders beginning with `:`:
+Native string interpolation evaluates Zirk expressions inside `{}`. A colon
+inside an ordinary string is literal text; it does not interpolate a variable.
+The planned `std.text.format` function uses `:name` placeholders only in the
+format template passed to that function:
 
 ```zirk
 inmut greeting = "Hello {user.name}";
@@ -43,7 +45,8 @@ inmut summary = format(":name has :count messages", name:, count:);
 inmut equation = format(":0 + :1 = :2", left, right, result);
 ```
 
-`\:` emits a literal colon-placeholder prefix. A format follows `|`:
+Within a future format template, `\:` emits a literal colon-placeholder
+prefix. A format follows `|`:
 
 ```zirk
 format("Total: :amount|.2", amount:);

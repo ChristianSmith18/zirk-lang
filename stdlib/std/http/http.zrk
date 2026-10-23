@@ -683,8 +683,9 @@ share class HTTPResponse {
         return HTTPResponse.checked(status_code, HTTPResponse.utf8_bytes(body), headers);
     }
 
-    // Constructs a JSON response from an already serialized JSON document.
-    // Serialization stays explicit so values cannot be encoded ambiguously.
+    // Constructs a JSON response from serialized JSON. A quoted-key object
+    // literal is captured as its exact JSON source text by the parser.
+    // Runtime values use HTTPJsonSerializable so their encoding stays explicit.
     static from_json(status_code: Int32, body: String): HTTPResponse {
         mut headers: Array<Byte> = [1, 0, 0, 0, 12, 0, 16, 0, 0, 0,
             99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101,

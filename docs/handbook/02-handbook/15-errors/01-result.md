@@ -32,7 +32,7 @@ Projection is available only when `T?` has a runtime representation. `Void`,
 `Decimal`, and opaque `Regex` do not currently have one, so use `match` for
 those payloads; ordinary value use is a compile-time error.
 
-A Result used as a standalone expression statement remains a compile-time error. Write `_ = operation()` only when deliberately discarding it.
+A Result used as a standalone expression statement is an effect: `Ok(value)` discards the value, while `Error(error)` throws. A `Throwable` error is thrown unchanged; any other error becomes a catchable `NativeError` with the error's text as its reason. Use `match` or keep the Result in an explicitly typed binding when you want to inspect an error without throwing. Write `_ = operation()` only when deliberately discarding both outcomes.
 
 ## API
 

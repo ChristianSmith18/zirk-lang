@@ -32,7 +32,8 @@ const typeMaps = new Map();
 
 // Brand syntax palette (zirk-lang-site tokens). Every scope ends in `.zirk`,
 // so the rules only ever touch Zirk files — the active theme stays in charge
-// of everything else. Applied/removed at runtime by `applyBrandPalette`.
+// of everything else. Applied before starting the asynchronous language server
+// so its startup time cannot leave the editor in the theme's fallback colors.
 const BRAND_TEXTMATE_RULES = [
     // keywords declarativas: class, fn, import, trait…
     { scope: ['keyword.declaration.zirk', 'keyword.control.import.zirk', 'storage.type.function.zirk'], settings: { foreground: '#8E6CFF' } },
@@ -87,10 +88,52 @@ const BRAND_TEXTMATE_RULES = [
     { scope: ['keyword.operator.zirk', 'keyword.operator.alias.zirk', 'keyword.operator.cast.zirk', 'keyword.operator.pipe.zirk', 'keyword.operator.range.zirk'], settings: { foreground: '#A78BFA' } },
     { scope: ['punctuation.section.array.begin.zirk', 'punctuation.section.array.end.zirk', 'punctuation.section.brackets.begin.zirk', 'punctuation.section.brackets.end.zirk'], settings: { foreground: '#8E6CFF' } },
     // puntuación de interpolación `{`/`}` dentro de strings
-    { scope: ['punctuation.section.embedded.begin.zirk', 'punctuation.section.embedded.end.zirk', 'punctuation.definition.placeholder.zirk', 'punctuation.separator.placeholder.zirk'], settings: { foreground: '#8E6CFF' } },
+    { scope: ['punctuation.section.embedded.begin.zirk', 'punctuation.section.embedded.end.zirk'], settings: { foreground: '#8E6CFF' } },
     // comentarios normales (// y /* */)
     { scope: ['comment.line.double-slash.zirk', 'comment.block.zirk'], settings: { foreground: '#A3A3AF', fontStyle: 'italic' } },
 ];
+
+// Semantic tokens arrive after TextMate's first paint. These language-qualified
+// selectors keep the same Zirk palette when the language server refines symbol
+// roles, while leaving semantic colors in every other language to its theme.
+const BRAND_SEMANTIC_TOKEN_RULES = {
+    'namespace:zirk': '#F4A261',
+    // User-defined types are green in TextMate (`entity.name.type.zirk`).
+    // Keep semantic refreshes on the same color; only standard-library types
+    // share the cyan used by TextMate's builtin type scope.
+    'type:zirk': '#34D399',
+    'type.defaultLibrary:zirk': '#32D4C6',
+    // Imports carry a semantic modifier that can override TextMate scopes.
+    // Preserve the palette color for each imported symbol kind.
+    'type.import:zirk': '#34D399',
+    'class.import:zirk': '#34D399',
+    'interface.import:zirk': '#34D399',
+    'struct.import:zirk': '#34D399',
+    'enum.import:zirk': '#34D399',
+    'function.import:zirk': '#39C6FF',
+    'method.import:zirk': '#38BDF8',
+    'class:zirk': '#34D399',
+    'interface:zirk': '#34D399',
+    'struct:zirk': '#34D399',
+    'enum:zirk': '#34D399',
+    'enumMember:zirk': '#FF6B81',
+    'typeParameter:zirk': '#A78BFA',
+    'parameter:zirk': { foreground: '#B8B8C3', fontStyle: 'italic' },
+    'local:zirk': '#F7F7FA',
+    'variable:zirk': '#F7F7FA',
+    'variable.import:zirk': '#39C6FF',
+    'variable.defaultLibrary:zirk': '#39C6FF',
+    'property:zirk': '#F7C65C',
+    'function:zirk': '#39C6FF',
+    'function.defaultLibrary:zirk': '#39C6FF',
+    'method:zirk': '#38BDF8',
+    'method.defaultLibrary:zirk': '#38BDF8',
+    '*.declaration:zirk': { fontStyle: 'bold' },
+    '*.reference:zirk': { fontStyle: 'italic' },
+    // Catch imported token kinds not covered above; concrete selectors such as
+    // variable.import and function.import keep their more specific colors.
+    '*.import:zirk': { foreground: '#34D399', fontStyle: 'italic' },
+};
 
 /** True when a textMateRule's scope belongs to Zirk (ours or the user's own). */
 function isZirkScopeRule(rule) {
@@ -112,10 +155,39 @@ async function applyBrandPalette(enabled) {
     if (next.textMateRules.length === 0) {
         delete next.textMateRules;
     }
+    // Avoid writing the same global setting every time the extension activates.
+    // Rewriting it causes a theme refresh, which is the visible color switch
+    // users saw while the language server was starting.
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+        try {
+            await editorConfig.update('tokenColorCustomizations', next, vscode.ConfigurationTarget.Global);
+        } catch (err) {
+            outputChannel?.appendLine(`[palette] could not update tokenColorCustomizations: ${err}`);
+        }
+    }
+
+    const currentSemantic = editorConfig.get('semanticTokenColorCustomizations') || {};
+    const currentSemanticRules = currentSemantic.rules || {};
+    const semanticRules = { ...currentSemanticRules };
+    for (const selector of Object.keys(BRAND_SEMANTIC_TOKEN_RULES)) {
+        delete semanticRules[selector];
+    }
+    if (enabled) {
+        Object.assign(semanticRules, BRAND_SEMANTIC_TOKEN_RULES);
+    }
+    const nextSemantic = { ...currentSemantic };
+    if (Object.keys(semanticRules).length > 0) {
+        nextSemantic.rules = semanticRules;
+    } else {
+        delete nextSemantic.rules;
+    }
+    if (JSON.stringify(currentSemantic) === JSON.stringify(nextSemantic)) {
+        return;
+    }
     try {
-        await editorConfig.update('tokenColorCustomizations', next, vscode.ConfigurationTarget.Global);
+        await editorConfig.update('semanticTokenColorCustomizations', nextSemantic, vscode.ConfigurationTarget.Global);
     } catch (err) {
-        outputChannel?.appendLine(`[palette] could not update tokenColorCustomizations: ${err}`);
+        outputChannel?.appendLine(`[palette] could not update semanticTokenColorCustomizations: ${err}`);
     }
 }
 
@@ -133,6 +205,10 @@ const DEPRECATED_TYPES = new Map([
 
 async function activate(context) {
     outputChannel = vscode.window.createOutputChannel(OUTPUT_CHANNEL_NAME);
+    // VS Code first paints TextMate tokens with the active theme. Install the
+    // Zirk-only overrides before any asynchronous language-server startup so
+    // the file does not sit in the theme palette while the server initializes.
+    await applyBrandPalette(vscode.workspace.getConfiguration(CONFIG_SECTION).get('brandColors', true));
     diagnosticCollection = vscode.languages.createDiagnosticCollection(DIAGNOSTIC_SOURCE);
 
     context.subscriptions.push(outputChannel, diagnosticCollection);
@@ -263,7 +339,6 @@ async function activate(context) {
 
     context.subscriptions.push(openDisposable, saveDisposable, changeDisposable, closeDisposable, activeEditorDisposable);
 
-    applyBrandPalette(vscode.workspace.getConfiguration(CONFIG_SECTION).get('brandColors', true));
     const configDisposable = vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration(`${CONFIG_SECTION}.brandColors`)) {
             applyBrandPalette(vscode.workspace.getConfiguration(CONFIG_SECTION).get('brandColors', true));

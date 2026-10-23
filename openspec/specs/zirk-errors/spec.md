@@ -6,8 +6,8 @@ throwable provenance, and the extensible throwable hierarchy.
 
 ## Requirements
 
-### Requirement: Expected failure uses mandatory Result handling
-The language SHALL define `Result<T,E>` as `Ok(T)` or `Error(E)`. A direct `match` over a Result expression and a value context whose resolved expected type is explicitly `Result<...>` SHALL preserve both variants. In every other value-demanding context, the language SHALL project `Ok(value)` to `value` and `Error(_)` to `null`, producing `T?`, when `T` has a runtime nullable representation. A Result with a payload that has no nullable representation SHALL require explicit matching in value contexts and SHALL produce a compile-time diagnostic otherwise. Projection SHALL discard the error payload; code that needs the error SHALL preserve the Result and inspect it with `match`. A Result used as a standalone expression statement SHALL remain a must-use error unless explicitly discarded with `_ = expression`.
+### Requirement: Expected failure uses Result
+The language SHALL define `Result<T,E>` as `Ok(T)` or `Error(E)`. A direct `match` over a Result expression and a value context whose resolved expected type is explicitly `Result<...>` SHALL preserve both variants. In every other value-demanding context, the language SHALL project `Ok(value)` to `value` and `Error(_)` to `null`, producing `T?`, when `T` has a runtime nullable representation. A Result with a payload that has no nullable representation SHALL require explicit matching in value contexts and SHALL produce a compile-time diagnostic otherwise. Projection SHALL discard the error payload; code that needs the error SHALL preserve the Result and inspect it with `match`. In standalone expression statement position, a Result SHALL discard an `Ok` payload and raise an `Error`: a `Throwable` error SHALL be raised unchanged, and any other error SHALL be wrapped in a catchable `NativeError` whose reason is its string representation (or `Result failed` for `Void`). `_ = expression` SHALL deliberately discard either outcome without raising.
 
 The public Result API SHALL retain `map`, `map_error`, `and_then`, `or_else`, and `or_throw` as composition operations. It SHALL NOT expose status, extraction, fallback, or unwrap helpers (`is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`, `get_or_else`, `unwrap`, or `unwrap_error`); callers SHALL use direct `match` for inspection or contextual projection for value use.
 
@@ -35,9 +35,25 @@ The public Result API SHALL retain `map`, `map_error`, `and_then`, `or_else`, an
 - **WHEN** `inmut port = Env.get<Int32>("PORT") ?? 8080;` is evaluated
 - **THEN** `port` is the parsed integer on success or `8080` when projection produces `null`
 
-#### Scenario: Result is ignored
-- **WHEN** a `Result`-producing expression appears as an unused statement
-- **THEN** compilation fails and suggests handling it or writing `_ = expression`
+#### Scenario: Successful Result is used as a statement
+- **WHEN** a `Result`-producing expression evaluates to `Ok(value)` in statement position
+- **THEN** the expression completes and discards `value`
+
+#### Scenario: Failed Result with a Throwable error is used as a statement
+- **WHEN** a `Result`-producing expression evaluates to `Error(error)` in statement position and `error` implements `Throwable`
+- **THEN** the same throwable is raised and can be caught by ordinary `try/catch`
+
+#### Scenario: Failed Result with another error is used as a statement
+- **WHEN** a `Result`-producing expression evaluates to `Error(error)` in statement position and `error` is not a `Throwable`
+- **THEN** a catchable `NativeError` is raised with the error text as its reason
+
+#### Scenario: Result failure is handled without raising
+- **WHEN** a caller directly matches a failed Result or assigns it to a value explicitly typed as Result
+- **THEN** it can inspect the original `Error` value without exception conversion
+
+#### Scenario: Result failure is deliberately discarded
+- **WHEN** a caller writes `_ = operation()`
+- **THEN** the Result is evaluated and either outcome is discarded without raising
 
 #### Scenario: Redundant Result helper calls are rejected
 - **WHEN** source calls `result.ok_or_null()`, `result.unwrap()`, or `result.is_error()`
@@ -45,7 +61,7 @@ The public Result API SHALL retain `map`, `map_error`, `and_then`, `or_else`, an
 
 ### Requirement: Explicit and implicit exceptions remain distinct
 
-The language SHALL require every explicit `throw` to be caught or declared in `throws`, SHALL include declared exception sets in callable compatibility, and SHALL allow typed implicit `RuntimeError` failures to be caught without requiring them in a signature. No implicit conversion SHALL occur between `Result.Error` and an exception.
+The language SHALL require every explicit `throw` to be caught or declared in `throws`, SHALL include declared exception sets in callable compatibility, and SHALL allow typed implicit `RuntimeError` failures to be caught without requiring them in a signature. Result-to-exception conversion SHALL occur only for a Result expression used as a standalone statement, according to the Expected failure uses Result requirement above.
 
 This pass (`native-runtime-errors-catcheable`) makes the implicit-`RuntimeError` half of this requirement real for several compiler-known safety checks: division by zero, an out-of-range shift amount, a negative string-repeat count, and a `BinaryFloat` operation producing `NaN`. Each throws a concrete, catchable `RuntimeError` subclass (`DivisionByZeroError`, `InvalidShiftError`, `InvalidRepeatError`, `FloatNanError`) instead of aborting the process unconditionally. `FloatNanError` applies to the IEEE 754 binary `BinaryFloat` family only; the exact-decimal `Float` type has no `NaN`. A `Float` operation whose exact result exceeds the 128-bit coefficient budget raises `ArithmeticOverflowError`, and a `Float` division or modulo by zero raises `DivisionByZeroError`. Arithmetic overflow and invalid-cast failures still abort via `fatalError` regardless of any enclosing `try`/`catch`, pending a follow-up pass.
 

@@ -1,0 +1,56 @@
+// DEMO 34 — Servidor HTTP estilo Express: middleware, rutas y parámetro dinámico.
+
+import { HTTPMethod, HTTPNext, HTTPRequest, HTTPResponse, HTTPRouter, HTTPRouteParameters, HTTPServer } from std.http;
+import { stderr, stdout } from std.io;
+
+fn home(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return HTTPResponse.from_text(200, "Zirk HTTP server is running");
+}
+
+fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    inmut name = "custom_status";
+    return HTTPResponse.from_json(200, {
+        "{name}": null
+    });
+}
+
+fn user_by_id(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return match params.get("id") {
+        null => HTTPResponse.from_text(400, "Missing user id");
+        id => HTTPResponse.from_text(200, "User id: " + id);
+    };
+}
+
+fn log_request(request: HTTPRequest, next: HTTPNext): HTTPResponse {
+    stdout.println(request.method(), request.target());
+    return next.proceed(request);
+}
+
+fn configure_routes(router: HTTPRouter): Boolean {
+    try {
+        router.add_middleware(log_request);
+        router.route(HTTPMethod.Get, "/", home);
+        router.route(HTTPMethod.Get, "/health", health);
+        router.route(HTTPMethod.Get, "/users/:id", user_by_id);
+    } catch RuntimeError(error) {
+        stderr.println("Could not configure HTTP routes:", error.message());
+        return false;
+    }
+    return true;
+}
+
+fn main(): Void {
+    inmut router = HTTPRouter();
+    if !configure_routes(router) { return; }
+
+    match HTTPServer.bind("tcp://127.0.0.1:8081") {
+        Error(error) => stderr.println(error);
+        Ok(listener) => {
+            stdout.println("Listening on http://127.0.0.1:8081");
+            match router.serve_forever(listener) {
+                Ok(count) => stdout.println("served connections:", count);
+                Error(error) => stderr.println(error);
+            }
+        }
+    }
+}

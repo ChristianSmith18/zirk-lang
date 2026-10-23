@@ -1032,6 +1032,19 @@ HTTPResponse.try_with_headers(200, body, headers)
 JSON serialization and syntax validation remain the caller's responsibility.
 Use `try_with_headers` to attach a validated repeated-header collection.
 
+For a fixed JSON body, write a quoted-key object literal directly. Zirk keeps
+the object's source as the JSON text passed to `from_json`:
+
+```zirk
+HTTPResponse.from_json(200, {
+    "status": "ok",
+    "count": 3
+});
+```
+
+This form is literal JSON data; its values are not Zirk expressions. Use
+`HTTPJsonSerializable<T>` when the body contains runtime values.
+
 For a streamed server response, use
 `HTTPResponse.from_stream(status, headers, producer)`. The producer receives a
 zero-based `UInt64` chunk index and returns one `Array<Byte>`; an empty array

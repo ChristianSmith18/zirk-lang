@@ -3752,6 +3752,12 @@ impl<'a> Parser<'a> {
     /// position is only ever a range bound. The legacy `a..b..step` spelling
     /// still parses, with a migration warning.
     fn parse_range(&mut self) -> Option<Expr> {
+        // A quoted-key object is a JSON document literal. It is represented
+        // as its source text so APIs such as `HTTPResponse.from_json` can take
+        // a readable JSON body without a second layer of string escaping.
+        if self.is_json_document_literal() {
+            return self.parse_json_document_literal(self.peek_span());
+        }
         // A leading `{` is either a record/object literal (`{ ...src, f: v }`)
         // or a braced range bound (`{offset}..{limit}`). Record literals are
         // recognized by `...` or by an identifier immediately followed by `:`
@@ -3767,6 +3773,60 @@ impl<'a> Parser<'a> {
             return self.parse_range_from(start, false);
         }
         Some(start)
+    }
+
+    fn is_json_document_literal(&self) -> bool {
+        matches!(self.peek(), TokenKind::LBrace)
+            && matches!(self.peek_at(1), TokenKind::Str(_))
+            && matches!(self.peek_at(2), TokenKind::Colon)
+    }
+
+    /// Captures a JSON object literal as a String containing its exact source
+    /// text. Values are JSON data, not Zirk expressions; use the
+    /// `HTTPJsonSerializable` contract when fields need runtime expressions.
+    fn parse_json_document_literal(&mut self, open: Span) -> Option<Expr> {
+        let start = open.start as usize;
+        let mut depth = 0usize;
+        let mut end = open.end as usize;
+        let mut closed = false;
+        while self.pos < self.tokens.len() {
+            let token = &self.tokens[self.pos];
+            match token.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => {
+                    depth -= 1;
+                    end = token.span.end as usize;
+                    self.pos += 1;
+                    if depth == 0 {
+                        closed = true;
+                        break;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            end = token.span.end as usize;
+            self.pos += 1;
+        }
+        if !closed {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                open,
+                "unterminated JSON object literal",
+                "expected `}` to close the JSON document",
+                None,
+            );
+            return None;
+        }
+        let span = Span {
+            file: open.file,
+            start: open.start,
+            end: end as u32,
+        };
+        Some(Expr::Str(StrLit {
+            value: self.source.text()[start..end].to_owned(),
+            span,
+        }))
     }
 
     /// Whether the `{` at the cursor starts a record/object literal.

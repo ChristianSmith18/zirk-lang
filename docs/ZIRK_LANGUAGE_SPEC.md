@@ -23,6 +23,13 @@ character prefix of the opening delimiter from every non-empty content line.
 The closing delimiter is alone on a line at or right of that edge; violations
 and unclosed literals are diagnostics.
 
+A quoted-key object expression such as `{"status": "ok"}` is a JSON document
+literal. It evaluates to a `String` containing the exact source text, so it can
+be passed directly to APIs that accept serialized JSON. Its values are JSON
+data literals, not Zirk expressions; runtime values use an explicit
+serialization API. Record literals use unquoted field names, as in
+`{status: "ok"}`.
+
 Conventions:
 
 - variables, functions, methods, parameters and files: `snake_case`;

@@ -1,6 +1,6 @@
 # ADR-024: Contextual `Result` Value Projection
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-026](ADR-026-result-statement-effects.md)
 - **Date:** 2026-10-21
 - **Decision owners:** Zirk language authors
 
@@ -23,7 +23,7 @@ value use of `Result` with these payloads is rejected with guidance to use
 `match`. Extending nullable runtime representations is a separate language
 and runtime change.
 
-A bare Result expression statement remains a compile-time error; `_ = expression` is still the explicit discard. Projection applies to the outer Result only. Printing and interpolation are value-demanding contexts and therefore project before nullable rendering (`<Null>` on failure). An explicitly invoked `result.to_string()` on a Result-typed receiver retains the enum's `Ok(...)` or `Error(...)` representation.
+A bare Result expression statement remains a compile-time error; `_ = expression` is still the explicit discard. This statement-position rule was superseded by ADR-026. Projection applies to the outer Result only. Printing and interpolation are value-demanding contexts and therefore project before nullable rendering (`<Null>` on failure). An explicitly invoked `result.to_string()` on a Result-typed receiver retains the enum's `Ok(...)` or `Error(...)` representation.
 
 Remove the redundant Result inspection/extraction/fallback/unwrap methods `is_ok`, `is_error`, `ok_or_null`, `error_or_null`, `get_or`, `get_or_else`, `unwrap`, and `unwrap_error`. Remove `Env.get_or_null` and `Env.get_or`; the single environment retrieval API is `Env.get<T>(name): Result<T, EnvironmentError>`. Keep Result composition operations that preserve the Result distinction.
 
@@ -32,7 +32,7 @@ Remove the redundant Result inspection/extraction/fallback/unwrap methods `is_ok
 - `Env.get<Int32>("PORT") ?? 8080` uses the fallback for every `Error`, including permission denial, parse failure, missing values, and host errors. A direct `match` remains necessary when these outcomes need different behavior.
 - Source code using the removed methods requires migration. This is a language and standard-library compatibility break and must be described in the release notes and public handbook.
 - The checker and every lowering target must agree on the single projection boundary and preserve Result values in explicit contexts.
-- `Result` expression statements remain must-use, so projection cannot silently turn an unconsumed failure into an ignored nullable value.
+- At the time of this decision, `Result` expression statements remained must-use. ADR-026 replaces this requirement with failure propagation in statement position.
 
 ## Alternatives Considered
 

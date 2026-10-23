@@ -225,9 +225,9 @@ tracked as Phase 5+ or follow-up work.
 
 ### Phase 4a — Expected errors
 
-**Status: complete for its scoped delivery.** Implements `Result<T,E>`,
-exhaustive handling, mandatory consumption, and explicit `_ = expression`
-discard.
+**Status: complete for its scoped delivery.** Implements `Result<T,E>` and
+exhaustive handling. Standalone Result statements discard success and propagate
+failure as an exception; `_ = expression` deliberately discards either outcome.
 
 ### Phase 4b — Exceptions
 

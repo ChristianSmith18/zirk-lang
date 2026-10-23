@@ -35,8 +35,10 @@ other value-demanding context, `Ok(value)` projects to `value` and `Error(_)`
 projects to `null`, producing `T?`. This projection intentionally discards the
 error payload. Code that needs the typed failure uses direct `match` or stores
 the result in a binding explicitly typed `Result<T,E>`. A Result used as a
-standalone expression statement is still a compile-time error; deliberate
-discard is `_ = operation()`.
+standalone expression statement is an effect: `Ok` discards its value, while
+`Error` throws its `Throwable` unchanged or wraps another error in a catchable
+`NativeError`. Use direct `match` to inspect or handle the error without
+throwing. `_ = operation()` deliberately discards both outcomes.
 
 ```zirk
 map<U>(transform: Fn(T) => U): Result<U,E>

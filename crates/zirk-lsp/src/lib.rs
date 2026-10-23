@@ -1094,6 +1094,18 @@ fn semantic_token_entries(
     file_id: FileId,
     legend: &SemanticTokensLegend,
 ) -> Vec<SemanticTokenEntry> {
+    fn is_import_binding_name(program: &zirk_ast::Program, span: Span) -> bool {
+        program.imports.iter().any(|import| {
+            import
+                .names
+                .iter()
+                .any(|item| item.bound_name().span == span)
+        }) || program
+            .modules
+            .iter()
+            .any(|module| is_import_binding_name(&module.body, span))
+    }
+
     fn is_aliased_import_name(program: &zirk_ast::Program, span: Span) -> bool {
         program.imports.iter().any(|import| {
             import
@@ -1142,6 +1154,13 @@ fn semantic_token_entries(
     };
 
     for symbol in index.symbols() {
+        // Import declarations already have precise TextMate scopes for their
+        // exported/local spellings. Semantic import symbols can be reported as
+        // generic `variable` tokens while the index is incomplete, which
+        // overrides those scopes with the wrong palette color.
+        if is_import_binding_name(program, symbol.selection_span) {
+            continue;
+        }
         let declaration_modifier = legend
             .token_modifiers
             .iter()
@@ -1173,6 +1192,11 @@ fn semantic_token_entries(
         );
     }
     for reference in index.references() {
+        if reference.role == zirk_sema::ReferenceRole::Import
+            && is_import_binding_name(program, reference.span)
+        {
+            continue;
+        }
         // The exported spelling in `source -> LocalName` is intentionally
         // muted by the TextMate grammar. Let that scope provide its gray color
         // instead of covering it with the exported symbol's semantic color;
@@ -4451,6 +4475,17 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
+        let unaliased_import_offset = text.find("stdout }").unwrap() as u32;
+        let (unaliased_import_line, unaliased_import_character) = direct_frontend
+            .sources
+            .entry()
+            .line_column_utf16(unaliased_import_offset);
+        assert!(
+            !tokens.iter().any(|token| {
+                token.0 == unaliased_import_line && token.1 == unaliased_import_character
+            }),
+            "an unaliased import binding keeps its TextMate import scope"
+        );
         let token_for = |needle: &str| {
             let offset = text.find(needle).unwrap() as u32;
             let (line, character) = direct_frontend.sources.entry().line_column_utf16(offset);
@@ -4460,10 +4495,17 @@ mod tests {
                 .copied()
                 .unwrap_or_else(|| panic!("semantic token missing for `{needle}`"))
         };
-        let import_declaration = token_for("keep }");
-        assert_eq!(import_declaration.3, token_type_index("function"));
-        assert_ne!(import_declaration.4 & modifier_bit("declaration"), 0);
-        assert_ne!(import_declaration.4 & modifier_bit("import"), 0);
+        let import_declaration_offset = text.find("keep }").unwrap() as u32;
+        let (import_declaration_line, import_declaration_character) = direct_frontend
+            .sources
+            .entry()
+            .line_column_utf16(import_declaration_offset);
+        assert!(
+            !tokens.iter().any(|token| {
+                token.0 == import_declaration_line && token.1 == import_declaration_character
+            }),
+            "the local import binding keeps its TextMate import scope"
+        );
         let aliased_source_offset = text.find("identity -> keep").unwrap() as u32;
         let (aliased_source_line, aliased_source_character) = direct_frontend
             .sources
@@ -4486,10 +4528,17 @@ mod tests {
                 .any(|token| { token.0 == aliased_type_line && token.1 == aliased_type_character }),
             "the exported type spelling in an aliased import must also stay muted"
         );
-        let imported_type_alias = token_for("NamedValue }");
-        assert_eq!(imported_type_alias.3, token_type_index("interface"));
-        assert_ne!(imported_type_alias.4 & modifier_bit("declaration"), 0);
-        assert_ne!(imported_type_alias.4 & modifier_bit("import"), 0);
+        let imported_type_offset = text.find("NamedValue }").unwrap() as u32;
+        let (imported_type_line, imported_type_character) = direct_frontend
+            .sources
+            .entry()
+            .line_column_utf16(imported_type_offset);
+        assert!(
+            !tokens.iter().any(|token| {
+                token.0 == imported_type_line && token.1 == imported_type_character
+            }),
+            "the local type import keeps its TextMate import scope"
+        );
         let local_declaration = token_for("total = 0");
         assert_eq!(local_declaration.3, token_type_index("local"));
         assert_ne!(local_declaration.4 & modifier_bit("declaration"), 0);

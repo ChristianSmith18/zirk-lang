@@ -2204,12 +2204,11 @@ fn invalid_result_cannot_be_reimplemented() {
 }
 
 #[test]
-fn invalid_result_discarded_as_a_bare_statement() {
-    let output = rejected(
+fn valid_result_used_as_a_bare_statement() {
+    accepted(
         "fn load(): Result<Int32, String> { return Ok(5); }\n\
          fn main(): Void { load(); }",
     );
-    assert!(output.contains(codes::DISCARDED_RESULT.as_str()));
 }
 
 #[test]

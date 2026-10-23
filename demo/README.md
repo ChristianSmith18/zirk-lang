@@ -14,6 +14,7 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ./target/debug/zirk check demo/31-net/main.zrk
 ./target/debug/zirk check demo/32-http-client/main.zrk
 ./target/debug/zirk check demo/33-http-server/main.zrk
+./target/debug/zirk check demo/34-express-like/main.zrk
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
@@ -28,6 +29,12 @@ usa `./target/debug/zirk permissions approve demo/30-environment` (o el proyecto
 correspondiente) y confirma el alcance mostrado. Para probar HTTP, inicia
 primero el servidor 33 y luego ejecuta el cliente 32 en otra terminal. El demo
 31 abre una conexión TCP real a `example.com:443`; necesita red disponible.
+El demo 34 es un servidor de ejecución continua en `127.0.0.1:8081`; aprueba
+su permiso con `./target/debug/zirk permissions approve demo/34-express-like`,
+ejecútalo pasando la carpeta del proyecto con
+`./target/debug/zirk run demo/34-express-like` y prueba `GET /`,
+`GET /health` y `GET /users/42` desde otra terminal. Pasar `main.zrk`
+directamente omite el contexto de permisos del proyecto.
 
 ## Convenciones de los ejemplos
 
@@ -83,6 +90,7 @@ primero el servidor 33 y luego ejecuta el cliente 32 en otra terminal. El demo
 | [`31-net/`](31-net/) | Cliente TCP, inspección del peer y cierre del recurso. |
 | [`32-http-client/`](32-http-client/) | Cliente HTTP, `GET`, `QUERY`, status y consumo del body como texto. |
 | [`33-http-server/`](33-http-server/) | Servidor HTTP acotado, router, rutas `GET`/`QUERY` y respuestas JSON. |
+| [`34-express-like/`](34-express-like/) | Servidor HTTP persistente, middleware de registro, rutas `GET`, parámetro dinámico y respuestas JSON/texto. |
 
 ## Cobertura y límites actuales
 

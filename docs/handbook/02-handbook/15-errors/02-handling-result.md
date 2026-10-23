@@ -26,7 +26,7 @@ match result {
 }
 ```
 
-A Result-producing expression used as a standalone statement is still an error. `_ = load(path);` is the explicit discard form.
+A Result-producing expression used as a standalone statement discards success and throws failure. Use `_ = load(path);` only to deliberately discard both outcomes.
 
 ---
 
