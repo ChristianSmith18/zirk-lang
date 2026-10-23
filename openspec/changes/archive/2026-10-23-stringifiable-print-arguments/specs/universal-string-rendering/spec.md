@@ -14,6 +14,21 @@ Every value-producing type SHALL answer `to_string(): String`, through a compile
 - **WHEN** `Void` or `Never` is printed, converted, or interpolated
 - **THEN** a diagnostic states that it has no text form
 
+#### Scenario: Result success prints its value
+
+- **WHEN** `println(Env.get("APP_MODE"))` receives `Ok("production")`
+- **THEN** it prints `production`
+
+#### Scenario: Result failure prints nullable absence
+
+- **WHEN** `println(Env.get("APP_MODE"))` receives `Error(permission_error)`
+- **THEN** it prints the established null marker `<Null>` without rendering or exposing the error payload
+
+#### Scenario: Explicit Result stringification preserves the variant
+
+- **WHEN** `inmut result: Result<Int32, E> = Ok(5); result.to_string()` is invoked
+- **THEN** it renders `Ok(5)`
+
 #### Scenario: Class replaces the standard rendering
 
 - **WHEN** a class declares `#override to_string(): String { return this.text; }` and an instance is printed

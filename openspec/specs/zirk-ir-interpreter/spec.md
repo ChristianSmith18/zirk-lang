@@ -210,3 +210,141 @@ The repository SHALL maintain browser-compatible conformance fixtures that execu
 #### Scenario: Engine behavior diverges
 - **WHEN** a fixture produces different observable behavior between native and interpreted execution
 - **THEN** verification fails with the fixture name and differing observations
+
+### Requirement: Execution trace is an opt-in, bounded, read-only observation channel
+
+When tracing is enabled, the interpreter SHALL emit an ordered trace of object allocation, field write, method call, method return, and throw events, each stamped with a sequence number, plus output markers that record where each accepted output event falls in that order. Allocation events SHALL carry the class name and a per-run object id assigned in allocation order. Field-write events SHALL carry the object id, field name, declared type, and a rendered value bounded in length. The trace SHALL be bounded by configured event and byte limits, SHALL NOT be readable by the interpreted program, and SHALL NOT change the program's output, completion, failure category, or instruction-limit behavior.
+
+#### Scenario: Object lifecycle is traced
+- **WHEN** a traced program constructs an object and assigns one of its fields
+- **THEN** the trace contains an allocation event for that object followed by a field-write event naming the field
+- **AND** both carry increasing sequence numbers
+
+#### Scenario: Trace interleaves with output
+- **WHEN** a traced program prints between two field writes
+- **THEN** the output marker's sequence number falls between the two field-write sequence numbers and names the output event index
+
+#### Scenario: Object-valued field renders as a reference
+- **WHEN** a traced program assigns an object to a field of another object
+- **THEN** the field-write event renders the value as a reference to the target's object id and does not render the target's contents
+
+#### Scenario: Tracing does not change behavior
+- **WHEN** the same program runs with tracing enabled and disabled
+- **THEN** output, completion, failure category, and the instruction count at which a limit trips are identical
+
+#### Scenario: Trace budget is exhausted
+- **WHEN** the number of events or bytes would exceed the configured trace limit
+- **THEN** recording stops and the trace is marked truncated
+- **AND** the program continues to run normally
+
+#### Scenario: Object ids are deterministic
+- **WHEN** a program runs twice with identical input and limits
+- **THEN** both traces contain identical object ids and sequence numbers
+
+### Requirement: Output pieces of one line form one logical event
+
+The interpreter SHALL treat consecutive writes to the same standard stream that are not separated by a line break as one logical output line. It SHALL count such a line once against the output-event allowance, and the captured host SHALL deliver the pieces of a line as a single event whose text is their concatenation. Byte accounting, stream separation, and ordering SHALL be unchanged.
+
+#### Scenario: Several writes in one `println`
+
+- **WHEN** an interpreted `println("a", 2)` writes `a`, a space, `2`, and a line break
+- **THEN** the host observes one event with text `a 2\n`
+- **AND** one output event is counted
+
+#### Scenario: Interleaved streams
+
+- **WHEN** a program writes part of a line to stdout and then to stderr
+- **THEN** each stream's text stays in order and the two streams are not merged into one event
+
+### Requirement: Deep clone executes on the interpreter heap
+
+The interpreter SHALL execute deep `clone()` with the graph semantics of the language specification: every reference object reachable from the receiver through cloneable members SHALL receive a new identity, sharing inside the source graph SHALL be preserved inside the cloned graph, cycles SHALL terminate and mirror the source cycle among new identities, and the runtime class of each object SHALL decide its layout regardless of the static receiver type. The operation SHALL grant no host authority.
+
+#### Scenario: Clone is independent of the source
+- **WHEN** an interpreted program clones an object and then mutates a field of a nested object in the clone
+- **THEN** the corresponding field in the source graph is unchanged and the output matches native execution
+
+#### Scenario: Shared child stays shared
+- **WHEN** two fields of the cloned root refer to one child before cloning
+- **THEN** the cloned fields refer to one new child distinct from the source child
+
+#### Scenario: Cyclic graph
+- **WHEN** a cloned object graph contains a field that refers back to an ancestor
+- **THEN** the clone completes without unbounded recursion and the cloned cycle refers to the new ancestor
+
+#### Scenario: Clone through a supertype reference
+- **WHEN** a program clones a subclass instance through a variable declared with its superclass type
+- **THEN** the clone has the subclass's runtime type and fields
+
+#### Scenario: Callables inside the graph
+- **WHEN** a closure that captured an object is cloned and the original object is then mutated
+- **THEN** the cloned closure observes the captured value as it was at clone time, matching native execution
+
+### Requirement: Deep clone work is bounded
+
+Deep clone SHALL be charged against the configured instruction budget and heap limit before it allocates, and exhausting either SHALL end execution with the existing `limit-exceeded` result without a partially visible clone and without mutating the source graph.
+
+#### Scenario: Clone exceeds the heap limit
+- **WHEN** cloning a graph would exceed the configured heap limit
+- **THEN** execution ends with a `limit-exceeded` result naming `heap`
+- **AND** the source graph is unchanged
+
+#### Scenario: Clone exceeds the instruction budget
+- **WHEN** the work to clone a graph would exceed the remaining instruction budget
+- **THEN** execution ends with a `limit-exceeded` result naming `instructions`
+
+### Requirement: Object-oriented programs execute with native-equivalent behavior
+
+The interpreter SHALL execute the delivered object-oriented surface — classes with constructors, fields, `this`, visibility, single inheritance with `super` and `#override`, abstract classes, interfaces, traits with default implementations, static members, static nested, `inner` and local classes, generic classes and methods, and objects held in collections — with the same normalized output, completion category and runtime failure category as the native pipeline. A construct SHALL be documented as browser-supported only when a shared conformance fixture exercises it in both engines.
+
+#### Scenario: Override selected by runtime type
+- **WHEN** an interpreted program calls an overridden method through a variable declared with the superclass type
+- **THEN** the override of the runtime class executes
+- **AND** the output matches native execution
+
+#### Scenario: Interface and trait dispatch
+- **WHEN** an interpreted program calls an interface method and a trait default method on instances of different classes
+- **THEN** each call executes the implementation selected by the class's contract table
+- **AND** a default implementation runs only for classes that do not override it
+
+#### Scenario: Abstract class instantiated through a subclass
+- **WHEN** an interpreted program constructs a concrete subclass of an abstract class and calls an abstract method through the abstract type
+- **THEN** the subclass implementation executes and the output matches native execution
+
+#### Scenario: Polymorphic collection
+- **WHEN** an interpreted program stores instances of several subclasses in a `List<Supertype>` and calls the same method on each element
+- **THEN** each element dispatches to its own implementation in iteration order
+
+#### Scenario: Identity versus structural equality
+- **WHEN** an interpreted program compares two distinct class instances with equal field values using `is` and `==`
+- **THEN** `is` is false and the equality result matches native execution
+
+#### Scenario: Static and nested classes
+- **WHEN** an interpreted program reads and writes a static member and instantiates a static nested class, an `inner` class that captures its enclosing instance, and a local class
+- **THEN** each observes the same state and produces the same output as native execution
+
+#### Scenario: Exception thrown from a method
+- **WHEN** a method of an interpreted object throws a typed exception that a caller catches by supertype
+- **THEN** the handler runs with the original exception identity and the output matches native execution
+
+### Requirement: Unsupported object-model constructs fail as capability diagnostics
+
+When a verified module uses an object-model construct that the browser interpreter does not execute, preflight SHALL report a structured capability diagnostic that names the construct, and the entrypoint SHALL NOT execute. The interpreter SHALL NOT surface such a case as an internal failure.
+
+#### Scenario: Construct lowers to an excluded instruction
+- **WHEN** a program uses an object-model feature whose lowering requires a browser-excluded instruction
+- **THEN** the run result is a capability failure that identifies the feature and its source location
+- **AND** no output from the program is produced
+
+### Requirement: Browser object-model coverage is fixture-backed and discoverable
+
+The repository SHALL keep a checked-in catalog that lists each documented object-model construct with its browser verdict and the conformance fixture that evidences it, and the support matrix and Feature Status SHALL derive their object-model claims from that catalog.
+
+#### Scenario: Construct without a passing fixture
+- **WHEN** a documented object-model construct has no passing shared fixture
+- **THEN** the catalog marks it unclaimed
+- **AND** public documentation does not describe it as browser-supported
+
+#### Scenario: Catalog drift
+- **WHEN** a fixture named by the catalog is removed or fails in either engine
+- **THEN** repository verification fails and names the construct and fixture
