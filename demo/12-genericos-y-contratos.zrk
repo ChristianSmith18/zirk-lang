@@ -1,22 +1,21 @@
 // DEMO 12 — Interfaces genéricas, implementaciones, despacho y protocolos de iteración.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
 interface Named<T> {
-    name(): String;
+    value(): T;
 }
 
 record Tag implements Named<Int32> {
-    name(): String { return "tag"; }
+    value(): Int32 { return 7; }
 }
 
 class Box2 implements Named<Int32> {
     construct() { }
-    name(): String { return "box"; }
+    value(): Int32 { return 9; }
 }
 
-fn show(n: Named<Int32>): String { return n.name(); }
+fn show(n: Named<Int32>): Int32 { return n.value(); }
 
 class Counter implements Iterable<Int32> {
     construct() { }
@@ -36,7 +35,7 @@ class CounterIt implements Iterator<Int32> {
 fn main(): Void {
     inmut t = Tag();
     inmut b = Box2();
-    stdout.println(t.name());
+    stdout.println(t.value());
     stdout.println(show(b));
     for i in Counter() {
         stdout.println(i);

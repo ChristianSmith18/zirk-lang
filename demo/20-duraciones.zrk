@@ -1,57 +1,21 @@
 // DEMO 20 — Literales con unidades y aritmética de Duration.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
 // Literales `Duration`, operaciones aritméticas, comparaciones e impresión.
 fn main(): Void {
-    // Las duraciones se imprimen normalizadas a la unidad mayor que corresponda.
-    stdout.println(500ns);
-    stdout.println(500us);
-    stdout.println(250ms);
-    stdout.println(2s);
-    stdout.println(90m);
-    stdout.println(1w);
+    stdout.println("units:", 500ns, 500us, 250ms, 2s, 90m, 1w);
+    stdout.println("fractional:", 1.5s, 1.500000001s);
+    stdout.println("arithmetic:", 1s + 500ms, 2s - 500ms, -250ms);
+    stdout.println("scalar operations:", 2 * 250ms, 1s / 4, 1s * 2.5);
+    // Dividir dos duraciones produce una razón Float64.
+    stdout.println("ratio:", 1s / 250ms);
+    stdout.println("comparisons:", 1s > 250ms, 1s == 1000ms, 500ms <= 500ms);
 
-    // Los literales fraccionarios se convierten a un número exacto de nanosegundos.
-    stdout.println(1.5s);
-    stdout.println(1.500000001s);
-
-    // Suma y resta de duraciones, y negación unaria.
-    stdout.println(1s + 500ms);
-    stdout.println(2s - 500ms);
-    stdout.println(-250ms);
-
-    // Multiplicación y división por escalares; `*` admite ambos órdenes.
-    stdout.println(2 * 250ms);
-    stdout.println(250ms * 2);
-    stdout.println(1s / 4);
-    stdout.println(1s * 2.5);
-    stdout.println(1s / 2.0);
-
-    // `Duration / Duration` produce una razón `Float64`, no otra duración.
-    stdout.println(1s / 250ms);
-
-    // Las comparaciones se realizan sobre el total de nanosegundos.
-    stdout.println(1s > 250ms);
-    stdout.println(1s == 1000ms);
-    stdout.println(500ms <= 500ms);
-
-    // `to_string()`, `String(...)` e interpolación muestran el mismo formato.
+    // Conversión explícita e interpolación comparten el formato normalizado.
     inmut d = 1500ms;
-    stdout.println(d.to_string());
     stdout.println(String(d));
     stdout.println("elapsed {1s + 500ms}");
-
-    // Componentes de signo y magnitud de `Duration`.
     inmut neg = -1500ms;
-    stdout.println(neg.abs().to_string());
-    stdout.println(neg.sign().to_string());
-    stdout.println(neg.is_zero().to_string());
-    stdout.println(neg.is_positive().to_string());
-    stdout.println(neg.is_negative().to_string());
-    inmut zero = 0ns;
-    stdout.println(zero.is_zero().to_string());
-    stdout.println(zero.sign().to_string());
-    stdout.println(d.is_positive().to_string());
+    stdout.println("sign and magnitude:", neg.abs(), neg.sign(), neg.is_negative());
 }

@@ -1,5 +1,4 @@
 // DEMO 15 — Resource<E> y match with con cierre automático en las salidas.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
@@ -62,8 +61,8 @@ fn open_file(name: String, fail: Boolean): Result<FakeFile, OpenError> {
     return Ok(FakeFile(name));
 }
 
-    // Un `return` dentro de la rama que posee el recurso lo cierra antes de
-    // abandonar la función.
+// Un `return` dentro de la rama que posee el recurso lo cierra antes de
+// abandonar la función.
 fn read_then_return_early(name: String): Int32 {
     match open_file(name, false) with file {
         Ok(file) => {

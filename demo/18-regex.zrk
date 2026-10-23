@@ -1,5 +1,4 @@
 // DEMO 18 — Literales de expresiones regulares, búsqueda, grupos y reemplazo.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 

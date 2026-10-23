@@ -1,5 +1,4 @@
 // DEMO 26 — Mutex<T>.with y vista prestada protegida durante el callback.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
@@ -13,7 +12,7 @@ record State {
 }
 
 fn main(): Void {
-    inmut mutex: Mutex<State> = Mutex(State(inner: Inner(count: 4), label: "re" + "tained"));
+    inmut mutex: Mutex<State> = Mutex(State(inner: Inner(count: 4), label: "retained"));
     inmut result = mutex.with (
         (view: State): Int32 => {
         inmut old_length = view.label.length;

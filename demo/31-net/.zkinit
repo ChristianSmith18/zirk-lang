@@ -1,0 +1,11 @@
+project {
+    name: "demo-net";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+permissions {
+    network {
+        connect: { origins: ["tcp://example.com:443"]; during: runtime; }
+    }
+}

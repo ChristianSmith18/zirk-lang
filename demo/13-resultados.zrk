@@ -1,5 +1,4 @@
 // DEMO 13 — Result<T,E>, construcción, consumo y match exhaustivo.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
@@ -29,8 +28,10 @@ fn main(): Void {
 
     // Ordinary value use projects Ok(value) to value and every Error to null.
     // `??` therefore applies the fallback to every error, not only absence.
-    stdout.println(ok ?? -1);
-    stdout.println(error ?? -1);
+    inmut fallback_value = divide(10, 2) ?? -1;
+    inmut fallback_error = divide(10, 0) ?? -1;
+    stdout.println(fallback_value);
+    stdout.println(fallback_error);
 
     // Un `Result` debe analizarse o comprobarse. Si se quiere descartar de
     // forma deliberada, `_ = expresión;` expresa esa decisión.

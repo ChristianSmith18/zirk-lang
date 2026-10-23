@@ -1,0 +1,11 @@
+project {
+    name: "demo-http-client";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+permissions {
+    network {
+        connect: { origins: ["http://127.0.0.1:8080"]; during: runtime; }
+    }
+}

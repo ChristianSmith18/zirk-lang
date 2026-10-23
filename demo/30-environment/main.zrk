@@ -1,0 +1,19 @@
+// DEMO 30 — Lectura tipada y permisos explícitos de entorno.
+
+import { Env } from std.environment;
+import { stdout } from std.io;
+
+fn main(): Void {
+    // Env.get<T> mantiene el error tipado; `??` lo proyecta y usa un fallback
+    // para cualquier error, incluida una denegación de permisos.
+    inmut mode = Env.get("APP_MODE") ?? "development";
+    inmut workers = Env.get<Int32>("WORKERS") ?? 4;
+    stdout.println("mode:", mode);
+    stdout.println("workers:", workers);
+
+    // Usa match cuando debas distinguir un valor ausente, inválido o no autorizado.
+    match Env.get<Int32>("WORKERS") {
+        Ok(count) => stdout.println("configured workers:", count);
+        Error(error) => stdout.println(error);
+    }
+}

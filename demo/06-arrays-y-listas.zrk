@@ -1,5 +1,4 @@
 // DEMO 06 — Secuencias de longitud fija, listas mutables, indexación e iteración.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 

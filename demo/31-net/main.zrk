@@ -1,0 +1,17 @@
+// DEMO 31 — Conexión TCP, inspección del peer y cierre del recurso.
+
+import { TCPStream } from std.net::tcp;
+import { stderr, stdout } from std.io;
+
+fn main(): Void {
+    match TCPStream.connect("tcp://example.com:443") {
+        Ok(stream) => {
+            match stream.peer_address() {
+                Ok(peer) => stdout.println("peer:", peer);
+                Error(error) => stderr.println(error);
+            }
+            _ = stream.close();
+        }
+        Error(error) => stderr.println(error);
+    }
+}

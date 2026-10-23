@@ -1,12 +1,9 @@
 // DEMO 11 — Valores producto heterogéneos y acceso/destructuración.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
 fn main(): Void {
     inmut t = (1, "hello");
-    stdout.println(t[0]);
-    stdout.println(t[1]);
     match t {
         (a, b) => {
             stdout.println(a);

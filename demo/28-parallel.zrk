@@ -1,24 +1,13 @@
 // DEMO 28 — Región CPU paralela con división de trabajo sobre una colección.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
-// `parallel { for x in coll { ... } }` distribuye el recorrido entre los
-// workers disponibles. El cuerpo no puede usar `return`, `break`, `continue`
-// ni `throw`, ni reasignar nombres capturados. Tampoco puede capturar una
-// referencia `mut`. Al cerrar la región, los workers terminan antes de que
-// continúe el código secuencial posterior.
-
-fn touch(n: Int32): Int32 {
-    return n * n;
-}
+// `Parallel.each` divide el cálculo entre workers y conserva el orden de la
+// lista resultante. Después, `reduce` combina esos resultados.
 
 fn main(): Void {
     inmut::strict values: List<Int32> = [1, 2, 3, 4, 5];
-    parallel {
-        for v in values {
-            touch(v);
-        }
-    }
-    stdout.println("done");
+    inmut squares = Parallel.each(values, (value: Int32): Int32 => value * value);
+    inmut sum = squares.parallel.reduce(0, (total: Int32, value: Int32): Int32 => total + value);
+    stdout.println(sum);
 }

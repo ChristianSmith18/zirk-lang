@@ -1,28 +1,29 @@
 // DEMO 27 — Atomic<T>, operaciones RMW y órdenes de memoria.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
 fn main(): Void {
+    // Este ejemplo recorre las operaciones secuencialmente; el orden de memoria
+    // solo adquiere sentido de sincronización cuando existe otro hilo participante.
     inmut value = Atomic(3);
-    stdout.println(value.load().to_string());
+    stdout.println(value.load());
     value.store(9);
-    stdout.println(value.exchange(12).to_string());
-    stdout.println(value.fetch_add(4).to_string());
-    stdout.println(value.fetch_sub(2).to_string());
+    stdout.println(value.exchange(12));
+    stdout.println(value.fetch_add(4));
+    stdout.println(value.fetch_sub(2));
 
     match value.compare_exchange(14, 20) {
-        Result.Ok(observed) => stdout.println("exchanged " + observed.to_string());
-        Result.Error(observed) => stdout.println("changed " + observed.to_string());
+        Result.Ok(observed) => stdout.println("exchanged", observed);
+        Result.Error(observed) => stdout.println("changed", observed);
     }
     match value.compare_exchange(14, 21) {
-        Result.Ok(observed) => stdout.println("unexpected exchange " + observed.to_string());
-        Result.Error(observed) => stdout.println("not exchanged " + observed.to_string());
+        Result.Ok(observed) => stdout.println("unexpected exchange", observed);
+        Result.Error(observed) => stdout.println("not exchanged", observed);
     }
-    stdout.println(value.load().to_string());
+    stdout.println(value.load());
     unsafe {
         value.store(15, AtomicOrder.release);
-        stdout.println(value.load(AtomicOrder.acquire).to_string());
+        stdout.println(value.load(AtomicOrder.acquire));
     }
 
     inmut invalid = AtomicOrder.release;
@@ -31,5 +32,5 @@ fn main(): Void {
     } catch InvalidArgumentError(_) {
         stdout.println("invalid ordering caught");
     }
-    stdout.println(value.load().to_string());
+    stdout.println(value.load());
 }

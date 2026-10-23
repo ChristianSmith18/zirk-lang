@@ -1,0 +1,11 @@
+project {
+    name: "demo-environment";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+permissions {
+    environment {
+        read: { names: ["APP_MODE", "WORKERS"]; during: runtime; }
+    }
+}

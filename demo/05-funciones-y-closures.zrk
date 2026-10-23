@@ -1,5 +1,4 @@
 // DEMO 05 — Funciones como valores, tipos Fn, lambdas, capturas y recursión.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 

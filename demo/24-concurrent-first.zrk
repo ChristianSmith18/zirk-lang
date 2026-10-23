@@ -1,5 +1,4 @@
 // DEMO 24 — Selección por orden de finalización de Concurrent.of(...).first().
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
@@ -10,8 +9,6 @@ fn main(): Void {
         return 1;
     },
         (): Int32 => 2,
-    ).first(
-
-    );
+    ).first();
     stdout.println(winner);
 }

@@ -1,21 +1,19 @@
 // DEMO 21 — Channel<T>, envío/recepción tipados, capacidad y cierre.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
-
 import { stdout } from std.io;
+
+fn send_value(channel: Channel<Int32>): Void {
+    channel.send(42);
+}
 
 // Canal tipado y acotado: creación, envío y recepción indirectos, y cierre
 // idempotente. El tipo del canal determina el tipo de los valores enviados.
 fn main(): Void {
     inmut channel: Channel<Int32> = Channel(1);
-    channel.send(7);
-    inmut send_status = channel.try_send(8);
-    inmut receive_status = channel.try_receive();
-    channel.send(9);
+    concurrent {
+        spawn send_value(channel);
+    }
     inmut received = channel.receive();
-    inmut queued = channel.length;
-    inmut limit = channel.capacity;
-    inmut closed = channel.is_closed;
+    stdout.println(received);
     channel.close();
-    inmut drained = channel.drain();
-    stdout.println("channel-ok");
+    stdout.println(channel.is_closed);
 }

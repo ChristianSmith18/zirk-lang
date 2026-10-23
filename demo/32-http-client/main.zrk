@@ -1,0 +1,35 @@
+// DEMO 32 — Cliente HTTP: GET, QUERY con contenido y lectura del body.
+
+import { HTTP, URL } from std.http;
+import { stderr, stdout } from std.io;
+
+fn main(): Void {
+    match URL.parse("http://127.0.0.1:8080/users") {
+        Error(error) => stderr.println(error);
+        Ok(url) => {
+            match HTTP.get(url) {
+                Error(error) => stderr.println(error);
+                Ok(response) => {
+                    stdout.println("GET status:", response.status_code());
+                    match response.text() {
+                        Ok(body) => stdout.println(body);
+                        Error(error) => stderr.println(error);
+                    }
+                    _ = response.close();
+                }
+            }
+
+            match HTTP.query(url, "\{\"active\":true\}") {
+                Error(error) => stderr.println(error);
+                Ok(response) => {
+                    stdout.println("QUERY status:", response.status_code());
+                    match response.text() {
+                        Ok(body) => stdout.println(body);
+                        Error(error) => stderr.println(error);
+                    }
+                    _ = response.close();
+                }
+            }
+        }
+    }
+}

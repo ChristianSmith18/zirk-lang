@@ -47,6 +47,8 @@ const BRAND_TEXTMATE_RULES = [
     { scope: 'storage.type.zirk', settings: { foreground: '#32D4C6' } },
     // clases/contratos de usuario (Capitalized)
     { scope: ['entity.name.type.zirk', 'entity.name.class.zirk'], settings: { foreground: '#34D399' } },
+    // tipos importados y alias de tipo
+    { scope: ['entity.name.type.imported.zirk', 'entity.name.type.import.alias.zirk'], settings: { foreground: '#34D399' } },
     // declaración de fn/método
     { scope: 'entity.name.function.zirk', settings: { foreground: '#39C6FF' } },
     // llamadas
@@ -55,8 +57,11 @@ const BRAND_TEXTMATE_RULES = [
     { scope: ['string.quoted.double.zirk', 'string.quoted.triple.zirk', 'string.regexp.zirk', 'constant.character.zirk'], settings: { foreground: '#FF4FA3' } },
     // números y duraciones
     { scope: ['constant.numeric.integer.zirk', 'constant.numeric.float.zirk', 'constant.numeric.hex.zirk', 'constant.numeric.octal.zirk', 'constant.numeric.binary.zirk', 'constant.numeric.duration.zirk'], settings: { foreground: '#60A5FA' } },
-    // constantes: true, false, null, Ok, Err, Some, None
+    // constantes booleanas y opcionales
     { scope: 'constant.language.zirk', settings: { foreground: '#FF6B81' } },
+    // variantes Result: éxito en verde, error en coral
+    { scope: 'constant.language.result-success.zirk', settings: { foreground: '#34D399' } },
+    { scope: 'constant.language.result-error.zirk', settings: { foreground: '#FF6B81' } },
     // this / super / outer
     { scope: 'variable.language.zirk', settings: { foreground: '#FFD166' } },
     // decoradores @name
@@ -64,8 +69,14 @@ const BRAND_TEXTMATE_RULES = [
     // marcadores #name (#override)
     { scope: 'comment.line.marker.zirk', settings: { foreground: '#6A6A75' } },
     // módulos en imports: std.io y similares
-    { scope: 'support.class.zirk', settings: { foreground: '#F4A261' } },
-    // nombres importados sin alias ({ stdout }, { describe })
+    { scope: 'support.module.standard.zirk', settings: { foreground: '#F4A261' } },
+    // rutas de paquetes externos como texto neutral
+    { scope: 'support.module.external.zirk', settings: { foreground: '#D4D4D8' } },
+    // separador de submódulo estándar
+    { scope: 'punctuation.separator.module-path.zirk', settings: { foreground: '#F7F7FA' } },
+    // funciones y valores importados y alias de valor
+    { scope: ['variable.other.imported.zirk', 'variable.other.import.alias.zirk'], settings: { foreground: '#39C6FF' } },
+    // nombres importados sin alias (otros contextos)
     { scope: 'variable.other.readwrite.zirk', settings: { foreground: '#F7F7FA' } },
     // builtins: stdin/stdout/stderr, println, assert…
     { scope: ['support.variable.zirk', 'support.function.zirk'], settings: { foreground: '#39C6FF' } },

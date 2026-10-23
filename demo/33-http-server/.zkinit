@@ -1,0 +1,11 @@
+project {
+    name: "demo-http-server";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+permissions {
+    network {
+        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
+    }
+}

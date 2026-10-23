@@ -52,36 +52,60 @@
           "match": "\\bfrom\\b"
         },
         {
-          "name": "support.class.zirk",
-          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*(\\.[a-zA-Z_][a-zA-Z0-9_]*)*(::[a-zA-Z_][a-zA-Z0-9_]*)?\\b"
+          "name": "meta.import.items.zirk",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.braces.zirk" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.braces.zirk" }
+          },
+          "patterns": [
+            {
+              "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([A-Z][a-zA-Z0-9_]*)\\b",
+              "captures": {
+                "1": { "name": "comment.line.marker.zirk" },
+                "2": { "name": "keyword.operator.alias.zirk" },
+                "3": { "name": "entity.name.type.import.alias.zirk" }
+              }
+            },
+            {
+              "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([a-z_][a-zA-Z0-9_]*)\\b",
+              "captures": {
+                "1": { "name": "comment.line.marker.zirk" },
+                "2": { "name": "keyword.operator.alias.zirk" },
+                "3": { "name": "variable.other.import.alias.zirk" }
+              }
+            },
+            {
+              "name": "entity.name.type.imported.zirk",
+              "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+            },
+            {
+              "name": "variable.other.imported.zirk",
+              "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+            },
+            {
+              "name": "punctuation.separator.comma.zirk",
+              "match": ","
+            }
+          ]
         },
         {
-          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([A-Z][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "comment.line.marker.zirk" },
-            "2": { "name": "keyword.operator.alias.zirk" },
-            "3": { "name": "entity.name.type.zirk" }
-          }
+          "name": "support.module.standard.zirk",
+          "begin": "\\bstd\\b",
+          "end": "(?=;)",
+          "patterns": [
+            {
+              "name": "punctuation.separator.module-path.zirk",
+              "match": "::"
+            }
+          ]
         },
         {
-          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(->)\\s*([a-z_][a-zA-Z0-9_]*)\\b",
-          "captures": {
-            "1": { "name": "comment.line.marker.zirk" },
-            "2": { "name": "keyword.operator.alias.zirk" },
-            "3": { "name": "variable.other.readwrite.zirk" }
-          }
-        },
-        {
-          "name": "keyword.operator.alias.zirk",
-          "match": "->"
-        },
-        {
-          "name": "entity.name.type.zirk",
-          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\b"
-        },
-        {
-          "name": "variable.other.readwrite.zirk",
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\b"
+          "name": "support.module.external.zirk",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*(?:::[a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)?\\b"
         },
         {
           "include": "#strings"
@@ -141,7 +165,7 @@
           "patterns": [
             {
               "name": "constant.character.escape.zirk",
-              "match": "\\\\(n|t|r|\\\\|\"|:)"
+              "match": "\\\\(n|t|r|\\\\|\"|:|\\{|\\})"
             },
             {
               "match": "(?<!\\\\)(:)([a-zA-Z_][a-zA-Z0-9_]*|[0-9]+)(?:(\\|)([a-zA-Z0-9_\\-\\.\\#\\*\\+\\%]+))?",
@@ -154,7 +178,7 @@
             },
             {
               "name": "source.zirk",
-              "begin": "\\{",
+              "begin": "(?<!\\\\)\\{",
               "end": "\\}",
               "beginCaptures": {
                 "0": { "name": "punctuation.section.embedded.begin.zirk" }
@@ -301,7 +325,15 @@
       "patterns": [
         {
           "name": "constant.language.zirk",
-          "match": "\\b(true|false|null|Ok|Err|Some|None)\\b"
+          "match": "\\b(true|false|null|Err|Some|None)\\b"
+        },
+        {
+          "name": "constant.language.result-success.zirk",
+          "match": "\\bOk\\b"
+        },
+        {
+          "name": "constant.language.result-error.zirk",
+          "match": "\\bError\\b"
         },
         {
           "name": "variable.language.zirk",
@@ -375,7 +407,7 @@
         },
         {
           "name": "keyword.operator.cast.zirk",
-          "match": "\\bis\\b"
+          "match": "\\b(is|as)\\b"
         },
         {
           "name": "keyword.operator.zirk",

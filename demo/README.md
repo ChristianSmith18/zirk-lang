@@ -10,6 +10,10 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ./target/debug/zirk check demo/01-tipos-y-conversiones.zrk
 ./target/debug/zirk run demo/01-tipos-y-conversiones.zrk
 ./target/debug/zirk run demo/29-proyecto-y-modulos/src/main.zrk
+./target/debug/zirk check demo/30-environment/main.zrk
+./target/debug/zirk check demo/31-net/main.zrk
+./target/debug/zirk check demo/32-http-client/main.zrk
+./target/debug/zirk check demo/33-http-server/main.zrk
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
@@ -17,6 +21,13 @@ Desde la raíz del repositorio, con el compilador ya construido:
 El archivo `demo/29-proyecto-y-modulos/src/domain/geometry.zrk` es un módulo
 importado, no un programa independiente. Comprueba el ejemplo desde su
 entrypoint `src/main.zrk`.
+
+Los demos 30–33 son proyectos independientes con su propio `.zkinit`. Sus
+permisos declaran el acceso que necesitan, pero no lo aprueban: para ejecutarlos
+usa `./target/debug/zirk permissions approve demo/30-environment` (o el proyecto
+correspondiente) y confirma el alcance mostrado. Para probar HTTP, inicia
+primero el servidor 33 y luego ejecuta el cliente 32 en otra terminal. El demo
+31 abre una conexión TCP real a `example.com:443`; necesita red disponible.
 
 ## Convenciones de los ejemplos
 
@@ -68,9 +79,13 @@ entrypoint `src/main.zrk`.
 | [`27-atomics.zrk`](27-atomics.zrk) | Atomic<T>, operaciones RMW y órdenes de memoria. |
 | [`28-parallel.zrk`](28-parallel.zrk) | Región CPU paralela con división de trabajo sobre una colección. |
 | [`29-proyecto-y-modulos/`](29-proyecto-y-modulos/) | Proyecto `.zkinit`, entrypoint, `import` local y `share`. |
+| [`30-environment/`](30-environment/) | `Env.get`, parsing genérico, proyección de `Result`, fallbacks y permiso por nombre. |
+| [`31-net/`](31-net/) | Cliente TCP, inspección del peer y cierre del recurso. |
+| [`32-http-client/`](32-http-client/) | Cliente HTTP, `GET`, `QUERY`, status y consumo del body como texto. |
+| [`33-http-server/`](33-http-server/) | Servidor HTTP acotado, router, rutas `GET`/`QUERY` y respuestas JSON. |
 
 ## Cobertura y límites actuales
 
-Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. El catálogo de estado es la fuente para esas restricciones.
+Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos, además de las vistas actuales de `std.environment`, `std.net` y `std.http`. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. Los ejemplos de red requieren permiso aprobado, una conexión accesible y, para el cliente HTTP, el servidor local del demo 33. El catálogo de estado es la fuente para las restricciones por backend.
 
 No presento como implementadas las construcciones que el catálogo marca como pendientes o excluidas: entre ellas `async fn` y `await`, `task`/`select`, generadores `fn gen`, `|>`, `map`/`filter`/`reduce` funcionales, decoradores `fn dec`, `Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, `Once<T>`, atomics de punteros y adquisición/publicación de paquetes externos.

@@ -1,5 +1,4 @@
 // DEMO 01 — Familias enteras con signo y sin signo, conversiones y operaciones bit a bit.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
@@ -12,7 +11,7 @@ fn main(): Void {
     inmut a = 100;
     inmut a8 = Int8(a);
     inmut b8 = Int8(20);
-    stdout.println(Int32(a8 + b8));
+    stdout.println(a8 + b8);
 
     // Aritmética comprobada y comparación con enteros sin signo.
     inmut u8 = UInt8(200);
@@ -25,20 +24,20 @@ fn main(): Void {
     inmut x64: Int64 = a;
     inmut y64 = Int64(3);
     inmut z64 = x64 * y64;
-    stdout.println(Int32(z64));
+    stdout.println(z64);
 
     inmut w128: Int128 = z64;
-    stdout.println(Int32(w128));
+    stdout.println(w128);
 
     // `-` requiere un ancho con signo; `~` y las operaciones de bits admiten ambos.
     inmut n = UInt32(10);
-    stdout.println(Int32(n << 2));
-    stdout.println(Int32(n >> 1));
+    stdout.println(n << 2);
+    stdout.println(n >> 1);
     stdout.println(~a);
 
     // División y resto con comprobación.
     inmut p = Int64(100);
     inmut q = Int64(7);
-    stdout.println(Int32(p / q));
-    stdout.println(Int32(p % q));
+    stdout.println(p / q);
+    stdout.println(p % q);
 }

@@ -1,0 +1,29 @@
+// DEMO 33 — Servidor HTTP con rutas GET y QUERY y un límite de solicitudes.
+
+import { HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouter, HTTPRouteParameters, HTTPServer } from std.http;
+import { stderr, stdout } from std.io;
+
+fn list_users(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return HTTPResponse.from_json(200, "[\{\"id\":1,\"name\":\"Ada\"\}]");
+}
+
+fn query_users(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
+    return HTTPResponse.from_json(200, "[\{\"id\":1,\"active\":true\}]");
+}
+
+fn main(): Void {
+    inmut router = HTTPRouter();
+    _ = router.route(HTTPMethod.Get, "/users", list_users);
+    _ = router.route(HTTPMethod.Query, "/users", query_users);
+
+    match HTTPServer.bind("tcp://127.0.0.1:8080") {
+        Error(error) => stderr.println(error);
+        Ok(listener) => {
+            stdout.println("Listening on http://127.0.0.1:8080");
+            match router.serve_and_close(listener, 10) {
+                Ok(count) => stdout.println("served connections:", count);
+                Error(error) => stderr.println(error);
+            }
+        }
+    }
+}

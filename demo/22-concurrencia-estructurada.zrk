@@ -1,5 +1,4 @@
 // DEMO 22 — Bloques concurrent, spawn y espera estructurada al salir del ámbito.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 

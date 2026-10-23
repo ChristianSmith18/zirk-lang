@@ -1,5 +1,4 @@
 // DEMO 25 — Trabajo nativo administrado con resultado tipado y raíces GC.
-// Esta muestra está tomada de una forma cubierta por el corpus ejecutable del compilador.
 
 import { stdout } from std.io;
 
