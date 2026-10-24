@@ -8,7 +8,7 @@ type UserLookup = Result<User, LookupError>;
 
 Aliases improve readability for long generic, union, or callable types. Because the aliased and original types are equivalent, an alias does not enforce a domain boundary.
 
-Use a record or class when accidental interchange must be rejected. Avoid chains of aliases that obscure the actual public contract.
+Use a contract when structural compatibility is intended, or a class when accidental interchange must be rejected. Avoid chains of aliases that obscure the actual public contract.
 
 An alias preserves the complete operator and member set of its target because it is the same static type. It cannot hide an unsafe operation or add a capability.
 

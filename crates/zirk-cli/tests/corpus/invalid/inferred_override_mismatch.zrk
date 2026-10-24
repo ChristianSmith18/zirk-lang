@@ -1,6 +1,6 @@
 // An inferred method still has to satisfy the contract: `Sized` asks for
 // `Int32` and this body gives `String`.
-interface Sized {
+contract Sized {
     size(): Int32;
 }
 

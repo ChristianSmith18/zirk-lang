@@ -234,13 +234,8 @@ pub struct AssociatedField {
     pub span: Span,
 }
 
-/// `class User { ... }` or `record Point { ... }`.
-///
-/// One AST shape for the two: they share fields, methods and construction
-/// machinery, and differ only in which rules the checker applies to a given
-/// [`ClassKind`] — a record rejects `extends`, a custom `construct`, and
-/// mutation, and is written as a compact declaration (`Self::to_record_style`
-/// folds it into the same shape the parser gives a `record`).
+/// A nominal class declaration. Legacy `record` syntax is parsed only to
+/// provide a migration diagnostic and is recovered as a class node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClassDecl {
     pub name: Ident,
@@ -251,15 +246,11 @@ pub struct ClassDecl {
     /// The class this one extends, if any.
     ///
     /// At most one: `ZIRK_LANGUAGE_SPEC.md` section 7 admits a single base
-    /// class, and several contracts. Always `None` for a record,
-    /// which the grammar accepts and the checker rejects — the same
-    /// treatment as any other rule tied to `kind`.
+    /// class and several contracts.
     pub extends: Option<Ident>,
     pub fields: Vec<FieldDecl>,
     /// Every `construct` the class declares. More than one is allowed when
     /// their effective signatures differ (`ZIRK_LANGUAGE_SPEC.md` section 7).
-    /// Always empty for a record: construction is always the
-    /// implicit named constructor over `fields`.
     pub constructors: Vec<ConstructDecl>,
     pub methods: Vec<MethodDecl>,
     /// Classes declared inside this one's body. They are static nested
@@ -282,9 +273,6 @@ pub struct ClassDecl {
 pub enum ClassKind {
     /// Identity, state, inheritance, a custom `construct`.
     Class,
-    /// A nominal value: named-only construction, structural equality, no
-    /// identity, no inheritance, no mutation.
-    Record,
     /// `abstract class Name { ... }`: a nominal set of required attributes
     /// and `abstract fn` signatures, with no constructor, method body,
     /// allocated state or layout contribution of its own. A concrete class
@@ -296,27 +284,26 @@ impl ClassKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             ClassKind::Class => "class",
-            ClassKind::Record => "record",
             ClassKind::Abstract => "abstract class",
         }
     }
 }
 
-/// `interface Serializable { ... }` or `trait Printable { ... }`
+/// `contract Serializable { ... }` or `trait Printable { ... }`.
 ///
-/// One node for both: `ZIRK_LANGUAGE_SPEC.md` section 7 separates them by a
-/// single thing — a trait may carry implementation. Everything else about them
-/// is identical, and modelling them apart would duplicate every rule to say
-/// the same. The keyword is kept because the spec distinguishes them and so
-/// must the diagnostic: writing a body in an `interface` is a mistake that
-/// deserves to be named as one.
+/// Both share one node because traits add default operation bodies to the
+/// property-and-operation shape declared by contracts. Properties are
+/// requirements only; they never carry storage or initializers here.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractDecl {
     pub name: Ident,
     pub kind: ContractKind,
     pub type_params: Vec<TypeParam>,
-    /// Contracts this contract extends or re-exports (`interface A implements B`).
+    /// Contracts this contract extends or re-exports (`contract A implements B`).
     pub implements: Vec<TypeRef>,
+    /// Required instance properties. Contracts specify their shape and
+    /// mutability; they never provide storage or initial values.
+    pub properties: Vec<FieldDecl>,
     pub methods: Vec<MethodDecl>,
     /// Marked `share`, so other files of the crate may name it.
     pub shared: bool,
@@ -326,7 +313,7 @@ pub struct ContractDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractKind {
     /// Signatures only.
-    Interface,
+    Contract,
     /// Signatures, and bodies for the ones it chooses to supply.
     Trait,
 }
@@ -334,7 +321,7 @@ pub enum ContractKind {
 impl ContractKind {
     pub const fn as_str(self) -> &'static str {
         match self {
-            ContractKind::Interface => "interface",
+            ContractKind::Contract => "contract",
             ContractKind::Trait => "trait",
         }
     }
@@ -1028,9 +1015,9 @@ pub enum Expr {
     /// a `List<T>` destination context selects a list. A range element is
     /// expanded in place.
     Collection(CollectionLiteralExpr),
-    /// `{ ...source, field: value }` — a record/object literal with an
+    /// `{ ...source, field: value }` — a dynamic object literal with an
     /// optional spread source and explicit field values.
-    Record(RecordLiteralExpr),
+    Object(ObjectLiteralExpr),
     /// `if c { a } else { b }` used where a value is expected.
     ///
     /// The node is the same one the statement form uses: what changes is the
@@ -1151,7 +1138,7 @@ impl Expr {
             Expr::Call(e) => e.span,
             Expr::Range(e) => e.span,
             Expr::Collection(e) => e.span,
-            Expr::Record(e) => e.span,
+            Expr::Object(e) => e.span,
             Expr::If(e) => e.span,
             Expr::This(e) => e.span,
             Expr::Super(e) => e.span,
@@ -1268,32 +1255,36 @@ pub struct SpreadElement {
 
 /// One element of a record/object literal.
 #[derive(Debug, Clone, PartialEq)]
-pub enum RecordLiteralElement {
-    Field(RecordLiteralField),
+pub enum ObjectLiteralElement {
+    Field(ObjectLiteralField),
     Spread(SpreadElement),
 }
 
-impl RecordLiteralElement {
+impl ObjectLiteralElement {
     pub fn span(&self) -> Span {
         match self {
-            RecordLiteralElement::Field(f) => f.span,
-            RecordLiteralElement::Spread(s) => s.span,
+            ObjectLiteralElement::Field(f) => f.span,
+            ObjectLiteralElement::Spread(s) => s.span,
         }
     }
 }
 
 /// `field: value` in a record/object literal.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordLiteralField {
+pub struct ObjectLiteralField {
+    /// The static key spelling. Quoted string keys are stored here without
+    /// quotes; interpolated keys use an empty placeholder and `dynamic_key`.
     pub name: Ident,
+    /// A runtime-computed key, such as `"{name}"`.
+    pub dynamic_key: Option<Expr>,
     pub value: Expr,
     pub span: Span,
 }
 
 /// `{ ...source, field: value, ... }` — a record/object literal.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordLiteralExpr {
-    pub elements: Vec<RecordLiteralElement>,
+pub struct ObjectLiteralExpr {
+    pub elements: Vec<ObjectLiteralElement>,
     pub span: Span,
 }
 
@@ -1483,9 +1474,9 @@ pub enum Pattern {
     /// `[first, ...rest]` — a collection pattern with an optional final rest
     /// binding.
     Collection(CollectionPattern),
-    /// `{ id, ...details }` — a record pattern with optional field bindings and
+    /// `{ id, ...details }` — an object pattern with optional field bindings and
     /// an optional final rest binding.
-    Record(RecordPattern),
+    Object(ObjectPattern),
     /// `re'pattern' name?` — matches a `String` scrutinee against the regex
     /// and optionally binds the resulting `Regex.Match` to `name`.
     Regex(RegexPattern),
@@ -1515,7 +1506,7 @@ impl Pattern {
             Pattern::Null(l) => l.span,
             Pattern::Tuple(t) => t.span,
             Pattern::Collection(c) => c.span,
-            Pattern::Record(r) => r.span,
+            Pattern::Object(r) => r.span,
             Pattern::Regex(r) => r.span,
         }
     }
@@ -1528,7 +1519,7 @@ impl Pattern {
             Pattern::Collection(c) => {
                 c.elements.iter().all(|p| p.is_irrefutable()) && c.rest.is_some()
             }
-            Pattern::Record(r) => r.fields.iter().all(|f| f.is_irrefutable()) && r.rest.is_some(),
+            Pattern::Object(r) => r.fields.iter().all(|f| f.is_irrefutable()) && r.rest.is_some(),
             _ => false,
         }
     }
@@ -1542,7 +1533,7 @@ impl Pattern {
     }
 }
 
-impl RecordPatternField {
+impl ObjectPatternField {
     /// A record field pattern (`name` or `field: binding`) is always
     /// irrefutable: it binds one name.
     pub fn is_irrefutable(&self) -> bool {
@@ -1590,8 +1581,8 @@ pub struct CollectionPattern {
 /// `{ id, name: n, ...details }` in pattern position — a fixed field selection
 /// and an optional final `...rest` binding that collects the remaining fields.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordPattern {
-    pub fields: Vec<RecordPatternField>,
+pub struct ObjectPattern {
+    pub fields: Vec<ObjectPatternField>,
     /// Final `...rest` binding, if present.
     pub rest: Option<Ident>,
     pub span: Span,
@@ -1600,7 +1591,7 @@ pub struct RecordPattern {
 /// One field of a record pattern. The shorthand `name` binds `name` to the
 /// field `name`; the long form `field: binding` binds `binding` to `field`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordPatternField {
+pub struct ObjectPatternField {
     pub name: Ident,
     pub binding: Option<Ident>,
     pub span: Span,

@@ -1,7 +1,7 @@
 # Keywords
 
 Core declarations and control words include `fn`, `gen`, `yield`, `class`,
-`interface`, `trait`, `record`, `enum`, `type`, `construct`, `share`, `import`,
+`contract`, `trait`, `enum`, `type`, `construct`, `share`, `import`,
 `use`, `mut`, `inmut`, `if`, `else`, `match`, `with`, `for`, `in`,
 `while`, `do`, `loop`, `break`, `continue`, `return`, `try`, `catch`, `finally`,
 `throw`, `throws`, `unsafe`, `commit`, `task`, `await`, `select`, `parallel`, `thread`, `abstract`,
@@ -26,3 +26,6 @@ Reserved literals/types include `true`, `false`, `null`, `Void`, `Never`, `Null`
 ---
 
 **Previous:** [← Reference](README.md) · **Next:** [ Operators and Precedence](02-operators-and-precedence.md)
+
+
+`interface` and `record` are reserved legacy keywords and produce migration diagnostics; they are not valid declaration forms.

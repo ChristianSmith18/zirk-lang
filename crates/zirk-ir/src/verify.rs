@@ -203,6 +203,7 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::ThreadRun { .. }
             | InstKind::SafepointPoll
             | InstKind::Alloc(_)
+            | InstKind::ObjectNew
             | InstKind::AtomicNew { .. }
             | InstKind::MakeClosure { .. }
             | InstKind::MakeCallable { .. }
@@ -576,6 +577,9 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             IrType::Map(id) => id < module.map_types.len() as u32,
             IrType::Set(id) => id < module.set_types.len() as u32,
             IrType::Nullable(Nullable::Contract(_)) => true,
+            IrType::ObjectAny
+            | IrType::Dynamic
+            | IrType::Nullable(Nullable::ObjectAny | Nullable::Dynamic) => true,
             IrType::Void
             | IrType::Never
             | IrType::Int(_)
@@ -1779,7 +1783,10 @@ fn verify_instruction(
                     report,
                 );
                 if let Some(ty) = type_of(object)
-                    && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+                    && !matches!(
+                        ty,
+                        IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+                    )
                 {
                     report(format!(
                         "{position}: casts {}, which is neither an object nor a contract",
@@ -1800,7 +1807,10 @@ fn verify_instruction(
             }
             expect(inst.ty, IrType::Boolean, position, "IsInstance", report);
             if let Some(ty) = type_of(object)
-                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+                && !matches!(
+                    ty,
+                    IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+                )
             {
                 report(format!(
                     "{position}: tests {}, which is neither an object nor a contract",
@@ -1811,14 +1821,20 @@ fn verify_instruction(
 
         InstKind::Retype(operand) => {
             if let Some(ty) = type_of(operand)
-                && !matches!(ty, IrType::Object(_) | IrType::Contract(_))
+                && !matches!(
+                    ty,
+                    IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+                )
             {
                 report(format!(
                     "{position}: retypes {}, which is neither an object nor a contract",
                     ty.as_str()
                 ));
             }
-            if !matches!(inst.ty, IrType::Object(_) | IrType::Contract(_)) {
+            if !matches!(
+                inst.ty,
+                IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+            ) {
                 report(format!(
                     "{position}: Retype declares {}, which is neither an object nor a contract",
                     inst.ty.as_str()
@@ -2204,6 +2220,240 @@ fn verify_instruction(
                         ));
                     }
                 }
+            }
+        }
+
+        InstKind::ObjectNew => expect(inst.ty, IrType::ObjectAny, position, "ObjectNew", report),
+
+        InstKind::ObjectSeal { object } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ObjectSeal",
+                report,
+            );
+            if let Some(actual) = type_of(object)
+                && actual != IrType::ObjectAny
+            {
+                report(format!(
+                    "{position}: ObjectSeal receiver is {}, expected Object",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::DynamicObjectUnbox { value } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::ObjectAny),
+                position,
+                "DynamicObjectUnbox",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: DynamicObjectUnbox receives {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::ObjectConform { object, .. } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ObjectConform",
+                report,
+            );
+            if let Some(actual) = type_of(object)
+                && actual != IrType::ObjectAny
+            {
+                report(format!(
+                    "{position}: ObjectConform receiver is {}, expected Object",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::DynamicPack { value } => {
+            expect(inst.ty, IrType::Dynamic, position, "DynamicPack", report);
+            if let Some(source) = type_of(value)
+                && matches!(
+                    source,
+                    IrType::Void | IrType::Never | IrType::BorrowedView { .. }
+                )
+            {
+                report(format!(
+                    "{position}: DynamicPack cannot box {}",
+                    source.as_str()
+                ));
+            }
+        }
+
+        InstKind::DynamicIsType { value, .. } => {
+            expect(inst.ty, IrType::Boolean, position, "DynamicIsType", report);
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: DynamicIsType receives {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+        }
+
+        InstKind::DynamicUnbox { value, tag } => {
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: DynamicUnbox receives {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if inst.ty.dynamic_tag() != Some(*tag) {
+                report(format!(
+                    "{position}: DynamicUnbox tag {tag:#x} does not match result type {}",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+
+        InstKind::ObjectSet { object, key, value } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ObjectSet",
+                report,
+            );
+            for (operand, expected, label) in [
+                (object, IrType::ObjectAny, "receiver"),
+                (key, IrType::String, "key"),
+                (value, IrType::Dynamic, "value"),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: ObjectSet {label} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::ObjectGet { object, key } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "ObjectGet",
+                report,
+            );
+            for (operand, expected, label) in [
+                (object, IrType::ObjectAny, "receiver"),
+                (key, IrType::String, "key"),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != expected
+                {
+                    report(format!(
+                        "{position}: ObjectGet {label} is {}, expected {}",
+                        actual.as_str(),
+                        expected.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::ObjectMerge {
+            destination,
+            source,
+        } => {
+            expect(inst.ty, IrType::Void, position, "ObjectMerge", report);
+            for (operand, label) in [(destination, "destination"), (source, "source")] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::ObjectAny
+                {
+                    report(format!(
+                        "{position}: ObjectMerge {label} is {}, expected Object",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::ObjectRest {
+            object,
+            excluded_keys,
+        } => {
+            expect(inst.ty, IrType::ObjectAny, position, "ObjectRest", report);
+            if let Some(actual) = type_of(object)
+                && actual != IrType::ObjectAny
+            {
+                report(format!(
+                    "{position}: ObjectRest source is {}, expected Object",
+                    actual.as_str()
+                ));
+            }
+            for key in excluded_keys {
+                if let Some(actual) = type_of(key)
+                    && actual != IrType::String
+                {
+                    report(format!(
+                        "{position}: ObjectRest exclusion is {}, expected String",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+
+        InstKind::JsonStringifyDynamic { value } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(crate::Nullable::String),
+                position,
+                "JsonStringifyDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonStringifyDynamic value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonParseDynamic {
+            document,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "JsonParseDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(document)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonParseDynamic document is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonParseDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
             }
         }
 
@@ -7763,7 +8013,10 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             *success_order,
             *failure_order,
         ],
-        InstKind::Alloc(_) => Vec::new(),
+        InstKind::Alloc(_) | InstKind::ObjectNew => Vec::new(),
+        InstKind::ObjectSeal { object } => vec![*object],
+        InstKind::DynamicObjectUnbox { value } => vec![*value],
+        InstKind::ObjectConform { object, .. } => vec![*object],
         InstKind::BuildValue { fields, .. } => fields.clone(),
         InstKind::BuildEnum { fields, .. } => fields.clone(),
         InstKind::Discriminant(operand) => vec![*operand],
@@ -7801,6 +8054,24 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         }
         InstKind::LoadField { object, .. } => vec![*object],
         InstKind::StoreField { object, value, .. } => vec![*object, *value],
+        InstKind::DynamicPack { value } => vec![*value],
+        InstKind::DynamicIsType { value, .. } | InstKind::DynamicUnbox { value, .. } => {
+            vec![*value]
+        }
+        InstKind::ObjectSet { object, key, value } => vec![*object, *key, *value],
+        InstKind::ObjectGet { object, key } => vec![*object, *key],
+        InstKind::ObjectMerge {
+            destination,
+            source,
+        } => vec![*destination, *source],
+        InstKind::ObjectRest {
+            object,
+            excluded_keys,
+        } => std::iter::once(*object)
+            .chain(excluded_keys.iter().copied())
+            .collect(),
+        InstKind::JsonStringifyDynamic { value } => vec![*value],
+        InstKind::JsonParseDynamic { document, .. } => vec![*document],
         InstKind::Unary { operand, .. } => vec![*operand],
         InstKind::Binary { left, right, .. } => vec![*left, *right],
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],

@@ -1,9 +1,9 @@
 // Los ciclos de `implements` entre contratos deben detectarse.
-interface A implements B {
+contract A implements B {
     a(): Int32;
 }
 
-interface B implements A {
+contract B implements A {
     b(): Int32;
 }
 

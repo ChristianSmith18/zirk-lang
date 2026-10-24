@@ -8,4 +8,4 @@ them. This unit defines handling, propagation, provenance and boundaries.
 
 ---
 
-**Previous:** [← Interface, Trait, or Class?](../09-interfaces-and-traits/05-interface-vs-trait-vs-class.md) · **Next:** [ Result](01-result.md)
+**Previous:** [← Contract, Trait, or Class?](../09-interfaces-and-traits/05-interface-vs-trait-vs-class.md) · **Next:** [ Result](01-result.md)

@@ -25,7 +25,7 @@ returning an `Iterator<T>` from `iterator()`.
 The contract is covariant and yields independent projections:
 
 ```zirk
-interface Iterable<out T> {
+contract Iterable<out T> {
     iterator(): Iterator<T>;
 }
 ```

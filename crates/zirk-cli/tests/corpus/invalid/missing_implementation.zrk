@@ -1,4 +1,4 @@
-interface Describable {
+contract Describable {
     describe(): String;
 }
 

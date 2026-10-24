@@ -1,0 +1,12 @@
+import { stdout } from std.io;
+
+contract Runner<T> {
+    run(value: T): T;
+}
+
+fn run_int(value: Int32): Int32 { return value + 1; }
+
+fn main(): Void {
+    inmut runner: Runner<Int32> = { run: run_int };
+    stdout.println(runner.run(41));
+}

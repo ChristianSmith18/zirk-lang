@@ -16,4 +16,4 @@ single-pass pipelines, use `.iterator()` and `collect()`.
 
 ---
 
-**Previous:** [← Class or Record?](../10-data-types/08-class-or-record.md) · **Next:** [ Arrays](01-arrays.md)
+**Previous:** [← Class, Contract, or Object?](../10-data-types/08-class-or-record.md) · **Next:** [ Arrays](01-arrays.md)

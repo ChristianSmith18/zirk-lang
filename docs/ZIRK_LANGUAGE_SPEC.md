@@ -23,17 +23,17 @@ character prefix of the opening delimiter from every non-empty content line.
 The closing delimiter is alone on a line at or right of that edge; violations
 and unclosed literals are diagnostics.
 
-A quoted-key object expression such as `{"status": "ok"}` is a JSON document
-literal. It evaluates to a `String` containing the exact source text, so it can
-be passed directly to APIs that accept serialized JSON. Its values are JSON
-data literals, not Zirk expressions; runtime values use an explicit
-serialization API. Record literals use unquoted field names, as in
-`{status: "ok"}`.
+Object literals are ordinary Zirk expressions. Bare identifier keys denote
+their literal names, quoted keys may contain arbitrary strings, and quoted
+interpolated keys use the same conversion as string interpolation:
+`{status: "ok", "{dynamic_key}": value}`. Values are normal Zirk expressions.
+JSON is produced by `JSON.stringify`; a quoted-key object literal is not a
+serialized JSON document.
 
 Conventions:
 
 - variables, functions, methods, parameters and files: `snake_case`;
-- classes, interfaces, traits, records and enums: `UpperCamelCase`;
+- classes, contracts, traits and enums: `UpperCamelCase`;
 - constants and globals: `UPPER_SNAKE_CASE`;
 - named parameters: `name: value`;
 - aliases in imports and destructuring: `Original -> Alias`.
@@ -115,11 +115,14 @@ signed/unsigned integers through 64 bits when the target provides that width.
 
 ## 3. Type system
 
-Typing is static with inference. `Object` is the conceptual semantic root; it
-does not require every value to be heap allocated or boxed. Types are grouped
-as compiler primitives, native values, native references, user-defined values
-or references, and special types. Capabilities such as equality, comparison,
-hashing, cloning, iteration and arithmetic come from contracts.
+Typing is static with inference. `Object` is the common reference-object view
+for dynamic objects and class instances; it is not a root type for scalars,
+tuples, or enums. `Dynamic` is a tagged value used when a property's concrete
+type is not statically known, and requires checked narrowing before typed use.
+Types are grouped as compiler primitives, native values, native references,
+user-defined values or references, and special types. Capabilities such as
+equality, comparison, hashing, cloning, iteration and arithmetic come from
+contracts.
 
 Fundamental families:
 
@@ -139,7 +142,7 @@ Fundamental families:
   aliasing and an adaptive internal index/cache;
 - immutable native temporal values `Date`, `Time`, `DateTime`, `Instant`,
   `ZonedDateTime`, `TimeZone`, `Duration` and `Period`;
-- special `Void`, `Never` and `Null`, plus `Object` and collection families.
+- special `Void`, `Never`, `Null`, `Object`, `Dynamic` and collection families.
 
 There is no numeric truthiness. `Boolean?` admits `null`; `Boolean` does not.
 There is no `undefined`.
@@ -186,7 +189,8 @@ mirror their literals, and opaque handles render `<TypeName>`.
 `T?` is equivalent to `T | Null`. Safe access uses `?.` and the fallback value
 uses `??`.
 
-- `==` and `!=`: structural equality.
+- `==` and `!=`: type-defined value equality; classes and `Object` do not infer
+  structural equality.
 - `is`: same instance, only for types with observable identity.
 - Comparators: `<`, `<=`, `>`, `>=`, per the contracts of the type.
 - Logical: `&&`, `||`, `!`, booleans only.
@@ -249,13 +253,14 @@ mut message: String = match result {
 ```
 
 Patterns admit compatible values, types, enum variants, unions, complete-match
-regex literals, comma-grouped alternatives, wildcards and nested record/payload
+regex literals, comma-grouped alternatives, wildcards and nested object/payload
 forms. Pattern guards are not part of Zirk: conditional logic belongs in the
 branch body. A demonstrably unreachable branch is an error. Pattern bindings
-are projection reads and therefore independent values. Records and tuples may
-be destructured directly when irrefutable; an algebraic enum is unpacked only
-inside `match`. Rest destructuring `[first, ...rest]`, `{ field, ...rest }`,
-and explicit `...value` spread in calls and collection literals is supported.
+are projection reads and therefore independent values. Tuples may be
+destructured directly when irrefutable; object property patterns are partial,
+and an algebraic enum is unpacked only inside `match`. Rest destructuring
+`[first, ...rest]`, `{ field, ...rest }`, and explicit `...value` spread in
+calls and collection literals is supported.
 
 Commas group alternative patterns before one `=>` body. A regex literal is a
 string pattern, and nested patterns compose:
@@ -308,7 +313,7 @@ parameter is an ordered read-only `Iterable<T>` inside the function body. The
 same `...expr` syntax expands any `Iterable<T>` into positional arguments,
 array/list literals, and `Array(...)`/`List(...)` constructor calls. Rest
 destructuring `[first, ...rest]` collects remaining ordered elements, and
-`{ field, ...rest }` collects remaining record fields.
+`{ field, ...rest }` collects remaining object properties.
 There is no traditional overloading; unions, generics or different names are
 used instead.
 
@@ -368,6 +373,16 @@ constructor execution. A constructor may finalize an `inmut` attribute before
 the instance becomes available. There is no property declaration or implicit
 accessor dispatch; APIs use ordinary `get_` and `set_` methods.
 
+`contract` is the structural declaration for required properties and
+operations. `Object` is the open, identity-bearing object type; it accepts
+class instances and object literals, but not scalars, tuples, or enums. A
+property read through an open `Object` has type `Dynamic`; checked narrowing
+makes a concrete type available. Dynamic object properties preserve nested
+reference identity when read. Object literals use `{ name: value }`, quoted
+keys, and quoted interpolated keys such as `"{dynamic_key}"`; computed access
+uses `object[key]`. Successful contract conformance seals the existing key set
+across aliases while preserving extra properties on the object.
+
 A `class` constructor parameter carrying one or more member modifiers declares
 and initializes a field with the same name. For example,
 `construct(public name: String, private inmut id: UInt64)` is equivalent to
@@ -398,7 +413,7 @@ positional inference. After the first named argument, every remaining argument
 must be named. Repeated labels, missing shorthand variables and shorthand on a
 member expression are compile-time errors.
 
-Inside a `class`, `abstract class`, `interface`, `trait` or `record` body a
+Inside a `class`, `abstract class`, `contract` or `trait` body a
 method is declared without `fn`: `name(params): Return { ... }`, while a field
 keeps `name: Type;`. `fn` remains only for top-level functions, function types
 (`fn(Int32): Void`), `fn dec`, `unsafe fn` and `extern "C" fn`; writing `fn`
@@ -418,7 +433,7 @@ default; private/static methods do not. Replacing an inherited concrete
 implementation — a base-class method or a trait default — requires the
 `#override` member marker, written on its own line above the method; the method
 keeps exact parameter contracts and may narrow the result. Satisfying an
-`abstract class` or `interface` requirement needs no marker, and writing
+`abstract class` or `contract` requirement needs no marker, and writing
 `#override` where nothing is overridden is an error (a warning when it merely
 satisfies a signature-only requirement). `#override` applies only to instance
 methods, never to fields, constructors, nested classes or `static` members.
@@ -427,9 +442,9 @@ Classes are inheritable by default, and `final` opts out: a `final class`
 cannot be extended (it may still implement contracts and be instantiated) and a
 `final` method cannot be overridden. `final` and `abstract` on the same class
 are contradictory and rejected; a `final` method inside a `final class` is
-redundant and produces a warning. `final` on fields, constructors, interfaces,
-traits or records is an error — attribute mutability is covered by
-`mut`/`inmut`/`inmut::strict` and records are already non-inheritable.
+redundant and produces a warning. `final` on fields, constructors, contracts,
+or traits is an error — attribute mutability is covered by
+`mut`/`inmut`/`inmut::strict`.
 
 A class body may also declare nested classes. `class Nested {}` is a static
 nested class: pure namespacing under the canonical name `Outer.Nested`, with no
@@ -448,13 +463,18 @@ a closure is the idiomatic replacement.
 
 An `abstract class` is instead a nominal set of required attributes and
 `abstract` method signatures with no constructor, body, allocated state or
-layout contribution; a class adopts it with `implements`. Interfaces contain behavior
-signatures only. Traits contain behavior requirements and reusable bodies but
-no attributes or constructors. Interfaces, traits and abstract classes compose
-through `implements`; cycles/incompatible requirements fail, and a class
-resolves competing trait defaults with the `#override` marker and
-`TraitName.super.method()`. Capability derivation is always requested
-explicitly.
+layout contribution; a class adopts it with `implements`. A `contract` is the
+single structural declaration for required properties and operation signatures.
+Properties specify types and mutability but have no storage or defaults;
+operations specify signatures but have no bodies. Traits retain reusable
+operation bodies and compose with classes through `implements`. Classes and
+open dynamic objects may satisfy multiple contracts. Static shapes are checked
+at compile time; a value known only as `Object` is checked at runtime.
+Successful conformance seals the object's complete existing key set across
+aliases, retains extra properties, and exposes only declared members through
+the contract view. Cycles and incompatible requirements fail. Competing trait
+defaults still require `#override` or `TraitName.super.method()`.
+Capability derivation is always requested explicitly.
 
 Generics use `<T>` and combined constraints use `from A & B`:
 
@@ -480,8 +500,7 @@ Additional data types:
   `match`; enums are data-only and declare no user methods;
 - aliases via `type`;
 - unions `A | B`;
-- immutable nominal records with named construction, type defaults, methods
-  without mutation and structural field equality;
+- open reference objects with dynamic string-keyed properties and identity;
 - immutable heterogeneous tuples typed `Tuple(A, B)`, constructed `(a, b)` and
   indexed only by compile-time integer literal `tuple.n`;
 - fixed-length arrays written as `T[]`, canonically sized as `T[n]`, or
@@ -493,9 +512,10 @@ capabilities. A traditional enum exposes native `.name` and `.value`, plus
 explicit name/value lookup, without implicit mapping conversion or declaration
 order. Domain behavior for any enum is an external function using `match`.
 
-A normal class has identity and state; a record represents data. `clone()`
-exists only through an explicit trait and may be derived when every field is
-cloneable.
+A normal class has identity, declared state and behavior; an `Object` has
+identity and an open set of dynamic properties. Neither gains structural
+equality or implicit copying. `clone()` exists only through an explicit
+capability and may be derived when every reachable value is cloneable.
 
 ## 8. Iteration and functional style
 

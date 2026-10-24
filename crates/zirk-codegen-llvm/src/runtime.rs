@@ -535,6 +535,40 @@ pub mod symbols {
     pub const MAP_GET: &str = "zirk_rt_map_get";
     /// `zirk_rt_map_remove(map, key) -> i32`.
     pub const MAP_REMOVE: &str = "zirk_rt_map_remove";
+    /// Allocates a managed dynamic object with stable reference identity.
+    pub const OBJECT_NEW: &str = "zirk_rt_object_new";
+    /// Returns one dynamic object's own property count.
+    pub const OBJECT_LENGTH: &str = "zirk_rt_object_length";
+    /// Returns a key at its deterministic insertion-order index.
+    pub const OBJECT_KEY_AT: &str = "zirk_rt_object_key_at";
+    /// Sets a tagged property and reports a sealed-key-set violation.
+    pub const OBJECT_SET: &str = "zirk_rt_object_set";
+    /// Reads a tagged property into caller-provided tag/value slots.
+    pub const OBJECT_GET: &str = "zirk_rt_object_get";
+    pub const OBJECT_GET_BYTES: &str = "zirk_rt_object_get_bytes";
+    pub const IS_OPEN_OBJECT: &str = "zirk_rt_is_open_object";
+    /// Removes a property unless the object has been sealed.
+    pub const OBJECT_REMOVE: &str = "zirk_rt_object_remove";
+    /// Seals an object's current property-key set.
+    pub const OBJECT_SEAL: &str = "zirk_rt_object_seal";
+    /// Checks contract property tags and seals the object on success.
+    pub const OBJECT_CONFORM: &str = "zirk_rt_object_conform";
+    /// `zirk_rt_dynamic_object_unbox(value, object_out) -> i32`.
+    pub const DYNAMIC_OBJECT_UNBOX: &str = "zirk_rt_dynamic_object_unbox";
+    /// `zirk_rt_object_spread(object) -> *mut c_void`.
+    pub const OBJECT_SPREAD: &str = "zirk_rt_object_spread";
+    /// `zirk_rt_object_rest(object, excluded_keys, count) -> *mut c_void`.
+    pub const OBJECT_REST: &str = "zirk_rt_object_rest";
+    /// `zirk_rt_object_merge(destination, source) -> i32`.
+    pub const OBJECT_MERGE: &str = "zirk_rt_object_merge";
+    /// Copies a typed Zirk value into a managed, collector-aware Dynamic box.
+    pub const DYNAMIC_VALUE_NEW: &str = "zirk_rt_dynamic_value_new";
+    /// Reads the runtime type tag from a Dynamic box.
+    pub const DYNAMIC_VALUE_TAG: &str = "zirk_rt_dynamic_value_tag";
+    /// Copies a Dynamic payload to a typed destination after tag validation.
+    pub const DYNAMIC_VALUE_COPY_TO: &str = "zirk_rt_dynamic_value_copy_to";
+    pub const JSON_STRINGIFY_DYNAMIC: &str = "zirk_rt_json_stringify_dynamic";
+    pub const JSON_PARSE_DYNAMIC: &str = "zirk_rt_json_parse_dynamic";
     /// `zirk_rt_set_new_with_layout(element_offsets, count,
     /// string_content_elements) -> *mut c_void`.
     pub const SET_NEW_WITH_LAYOUT: &str = "zirk_rt_set_new_with_layout";
@@ -790,6 +824,7 @@ pub struct Runtime<'ctx> {
     pub http_server_websocket_serve_http3_once: FunctionValue<'ctx>,
     pub alloc: FunctionValue<'ctx>,
     pub contract_table: FunctionValue<'ctx>,
+    pub missing_contract: FunctionValue<'ctx>,
     pub str_concat: FunctionValue<'ctx>,
     pub str_repeat: FunctionValue<'ctx>,
     pub check_cast: FunctionValue<'ctx>,
@@ -897,6 +932,25 @@ pub struct Runtime<'ctx> {
     pub map_contains_key: FunctionValue<'ctx>,
     pub map_get: FunctionValue<'ctx>,
     pub map_remove: FunctionValue<'ctx>,
+    pub object_new: FunctionValue<'ctx>,
+    pub object_length: FunctionValue<'ctx>,
+    pub object_key_at: FunctionValue<'ctx>,
+    pub object_set: FunctionValue<'ctx>,
+    pub object_get: FunctionValue<'ctx>,
+    pub object_get_bytes: FunctionValue<'ctx>,
+    pub is_open_object: FunctionValue<'ctx>,
+    pub object_remove: FunctionValue<'ctx>,
+    pub object_seal: FunctionValue<'ctx>,
+    pub object_conform: FunctionValue<'ctx>,
+    pub dynamic_object_unbox: FunctionValue<'ctx>,
+    pub object_spread: FunctionValue<'ctx>,
+    pub object_rest: FunctionValue<'ctx>,
+    pub object_merge: FunctionValue<'ctx>,
+    pub dynamic_value_new: FunctionValue<'ctx>,
+    pub dynamic_value_tag: FunctionValue<'ctx>,
+    pub dynamic_value_copy_to: FunctionValue<'ctx>,
+    pub json_stringify_dynamic: FunctionValue<'ctx>,
+    pub json_parse_dynamic: FunctionValue<'ctx>,
     pub set_new: FunctionValue<'ctx>,
     pub set_length: FunctionValue<'ctx>,
     pub set_is_empty: FunctionValue<'ctx>,
@@ -2643,6 +2697,131 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             .fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
+    let object_new = module.add_function(symbols::OBJECT_NEW, ptr.fn_type(&[], false), external);
+    let object_length = module.add_function(
+        symbols::OBJECT_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let object_key_at = module.add_function(
+        symbols::OBJECT_KEY_AT,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let object_set = module.add_function(
+        symbols::OBJECT_SET,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let object_get = module.add_function(
+        symbols::OBJECT_GET,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let object_get_bytes = module.add_function(
+        symbols::OBJECT_GET_BYTES,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), i64.into(), ptr.into()], false),
+        external,
+    );
+    let is_open_object = module.add_function(
+        symbols::IS_OPEN_OBJECT,
+        context.i32_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let object_remove = module.add_function(
+        symbols::OBJECT_REMOVE,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let object_seal = module.add_function(
+        symbols::OBJECT_SEAL,
+        context.i32_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let object_conform = module.add_function(
+        symbols::OBJECT_CONFORM,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let dynamic_object_unbox = module.add_function(
+        symbols::DYNAMIC_OBJECT_UNBOX,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let object_spread = module.add_function(
+        symbols::OBJECT_SPREAD,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let object_rest = module.add_function(
+        symbols::OBJECT_REST,
+        ptr.fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let object_merge = module.add_function(
+        symbols::OBJECT_MERGE,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let dynamic_value_new = module.add_function(
+        symbols::DYNAMIC_VALUE_NEW,
+        ptr.fn_type(
+            &[
+                context.i32_type().into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let dynamic_value_tag = module.add_function(
+        symbols::DYNAMIC_VALUE_TAG,
+        context.i32_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let dynamic_value_copy_to = module.add_function(
+        symbols::DYNAMIC_VALUE_COPY_TO,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let json_stringify_dynamic = module.add_function(
+        symbols::JSON_STRINGIFY_DYNAMIC,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let json_parse_dynamic = module.add_function(
+        symbols::JSON_PARSE_DYNAMIC,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), context.i32_type().into(), ptr.into()], false),
+        external,
+    );
     let set_new = module.add_function(
         symbols::SET_NEW_WITH_LAYOUT,
         ptr.fn_type(&[ptr.into(), i64.into(), context.bool_type().into()], false),
@@ -3144,6 +3323,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         http_server_websocket_serve_http3_once,
         alloc,
         contract_table,
+        missing_contract,
         str_concat,
         str_repeat,
         check_cast,
@@ -3206,6 +3386,25 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         map_contains_key,
         map_get,
         map_remove,
+        object_new,
+        object_length,
+        object_key_at,
+        object_set,
+        object_get,
+        object_get_bytes,
+        is_open_object,
+        object_remove,
+        object_seal,
+        object_conform,
+        dynamic_object_unbox,
+        object_spread,
+        object_rest,
+        object_merge,
+        dynamic_value_new,
+        dynamic_value_tag,
+        dynamic_value_copy_to,
+        json_stringify_dynamic,
+        json_parse_dynamic,
         set_new,
         set_length,
         set_is_empty,

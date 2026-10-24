@@ -1,0 +1,57 @@
+import { JSON } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut payload: Object = { status: "ok", count: 3 };
+    try {
+        inmut encoded: String = JSON.stringify(payload);
+        stdout.println(encoded);
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    mut cyclic: Object = { seed: 0 };
+    cyclic.self = cyclic;
+    try {
+        inmut encoded_cycle: String = JSON.stringify(cyclic);
+        stdout.println(encoded_cycle);
+    } catch JsonConversionError(_) {
+        stdout.println("cycle rejected");
+    }
+
+    try {
+        inmut parsed: Dynamic = JSON.parse("\{\"name\":\"Ada\",\"scores\":[7,8]\}");
+        stdout.println(JSON.stringify(parsed));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut exact: Dynamic = JSON.parse("\{\"nothing\":null,\"unicode\":\"雪🙂\",\"large\":123456789012345678901234567890123456789\}");
+        stdout.println(JSON.stringify(exact));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    inmut key = "dynamic";
+    inmut dynamic_key: Object = { "{key}": "value" };
+    try {
+        stdout.println(JSON.stringify(dynamic_key));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut invalid: Dynamic = JSON.parse("\{\"status\": \}");
+        stdout.println(JSON.stringify(invalid));
+    } catch JsonConversionError(_) {
+        stdout.println("invalid JSON caught");
+    }
+
+    try {
+        inmut duplicate: Dynamic = JSON.parse("\{\"key\":1,\"key\":2\}");
+        stdout.println(JSON.stringify(duplicate));
+    } catch JsonConversionError(_) {
+        stdout.println("duplicate key caught");
+    }
+}

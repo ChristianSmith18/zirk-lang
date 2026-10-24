@@ -13,15 +13,16 @@ enum LoadState {
 
 The enum represents exactly one variant at a time. `match` narrows the variant and exposes its associated values. This models state machines without nullable fields whose valid combinations must be explained separately.
 
-Consider the object-shaped alternative:
+A dynamic `Object` can model an open payload shape, but it does not enforce
+that only one state is present:
 
 ```zirk
-record LooseLoadState {
-    loading: Boolean;
-    progress: Decimal?;
-    document: Document?;
-    error: LoadError?;
-}
+inmut state: Object = {
+    loading: false,
+    progress: null,
+    document: document,
+    error: null
+};
 ```
 
 It permits contradictory states: loading and failed at once, or ready without a

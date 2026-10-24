@@ -53,4 +53,4 @@ fn normalize(value: String | Int32): String {
 
 ---
 
-**Previous:** [← Type Aliases](06-type-aliases.md) · **Next:** [ Class or Record?](08-class-or-record.md)
+**Previous:** [← Type Aliases](06-type-aliases.md) · **Next:** [ Class, Contract, or Object?](08-class-or-record.md)

@@ -1,6 +1,6 @@
 import { stdout } from std.io;
 
-interface Container<T> {
+contract Container<T> {
     get(): T;
 }
 

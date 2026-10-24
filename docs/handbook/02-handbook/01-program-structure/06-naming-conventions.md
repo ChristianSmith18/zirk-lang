@@ -3,11 +3,11 @@
 Names communicate category before a reader follows a definition. Zirk's official conventions are:
 
 - `snake_case` for variables, functions, methods, parameters, and filenames;
-- `UpperCamelCase` for classes, interfaces, traits, records, and enums;
+- `UpperCamelCase` for classes, contracts, traits, and enums;
 - `UPPER_SNAKE_CASE` for constants and application globals.
 
 ```zirk
-record BuildResult {
+contract BuildResult {
     output_path: String;
 }
 

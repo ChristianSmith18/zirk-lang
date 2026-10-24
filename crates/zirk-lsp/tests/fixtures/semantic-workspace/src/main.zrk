@@ -8,7 +8,7 @@ fn read_name(value: NamedValue): String {
 
 fn main(): Void {
     mut total = 0;
-    inmut user = User(display_name: "Ada");
+    inmut user = User("Ada");
     inmut named: NamedValue = user;
     inmut name = keep(user.name());
 

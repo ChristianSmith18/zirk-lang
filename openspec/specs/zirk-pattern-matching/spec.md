@@ -15,16 +15,31 @@ Every statement or expression match over a closed domain SHALL be exhaustive. Pa
 - **WHEN** a match branch appends `if condition` to a pattern
 - **THEN** parsing fails and conditional logic must be placed in the branch body
 
-### Requirement: Pattern forms and reachability
-Match SHALL support compatible values, types, enum variants, union alternatives, full-match regex literals, comma-grouped alternatives, wildcards, and nested record/payload patterns. A demonstrably unreachable later pattern SHALL be an error; uncertain regex overlap SHALL preserve source order without a false diagnostic.
+### Requirement: Dynamic object patterns are partial tests
+Object property patterns SHALL test key presence and match the selected values without mutating the source. Because `Object` is open, an object pattern SHALL NOT make a match exhaustive; a wildcard or other exhaustive fallback SHALL be required. Missing keys SHALL make that pattern fail rather than raise a missing-property error.
 
-#### Scenario: Catch-all shadows branch
-- **WHEN** `_` precedes a later literal branch
-- **THEN** compilation fails because the later branch is unreachable
+#### Scenario: Object pattern matches present keys
+- **WHEN** an object with `name` and `active` is matched against `{ name: value }`
+- **THEN** the pattern matches and binds the `name` value
 
-### Requirement: Pattern binding copy semantics
-Every attribute, tuple element, or enum payload bound by a pattern SHALL be an independent logical value and SHALL require deep Clone for reference data. Records and tuples MAY be destructured directly when irrefutable; algebraic enums SHALL only be unpacked inside match. Ordered collection patterns and record patterns MAY contain one final `...name` rest binding that collects the remaining elements or fields.
+#### Scenario: Object pattern with a missing key fails safely
+- **WHEN** an object without `name` is matched against `{ name: value }`
+- **THEN** the pattern does not match and no runtime error is raised
 
-#### Scenario: Enum destructuring outside match
-- **WHEN** `inmut Ready(document) = state` is declared
-- **THEN** compilation fails and recommends exhaustive match
+#### Scenario: Object patterns require a fallback
+- **WHEN** a match over `Object` contains only property patterns and no wildcard
+- **THEN** the checker reports that the match is not exhaustive
+
+### Requirement: Dynamic property bindings preserve reference identity
+When a dynamic object pattern binds a reference-valued property, the binding SHALL refer to the same object identity. Scalar values SHALL retain their ordinary value semantics. A binding whose type remains `Dynamic` SHALL require safe narrowing before concrete use.
+
+#### Scenario: Nested object binding keeps identity
+- **WHEN** an object pattern binds a nested object property and that nested object is mutated
+- **THEN** the mutation is visible through both references
+
+### Requirement: Tuple and enum pattern bindings retain value semantics
+Tuple elements and enum payloads SHALL retain their existing pattern binding and copy rules. Dynamic object patterns SHALL use the reference-preserving rules defined for object properties and SHALL NOT change tuple or enum exhaustiveness.
+
+#### Scenario: Enum payload pattern remains exhaustive
+- **WHEN** a match destructures every variant of an algebraic enum
+- **THEN** the checker verifies exhaustive coverage and binds each payload using its declared type

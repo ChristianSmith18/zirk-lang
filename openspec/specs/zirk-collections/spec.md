@@ -121,14 +121,6 @@ Iteration SHALL use `Iteration<T>.Item/Done`, yield independent copies, and make
 - **WHEN** `inmut values: List<Int32> = [...source]` is constructed
 - **THEN** the list contains every source element and remains independently resizable
 
-### Requirement: Record field spread is distinct from collection spread
-
-Record/object spread SHALL copy named fields and SHALL preserve nominal record shape. It SHALL not be implemented by iterating a record as `Iterable<T>`, and collection spread SHALL not copy named fields.
-
-#### Scenario: Field spread preserves record shape
-- **WHEN** a `UserProfile` is constructed with `{ ...profile, name: "Grace" }`
-- **THEN** the result remains a `UserProfile` with the source fields and the override
-
 ### Requirement: Negative indexing counts from the end
 
 `Array<T>`, `List<T>`, and `String` index/slice reads and writes SHALL
@@ -283,23 +275,11 @@ are integer scalar families and `Duration`. `Range<T>` SHALL satisfy
 
 ### Requirement: Remove value class references
 
-Any collection example or test that used `value class` for domain types SHALL be migrated to `record` or `class` as appropriate. The compiler SHALL no longer recognize the `value class` declaration form.
+Any collection example or test that used `value class` for domain types SHALL be migrated to `class`, `Object`, tuples, or enums according to whether it needs identity, open properties, positional values, or a closed set of alternatives. The compiler SHALL no longer recognize the `value class` declaration form.
 
 #### Scenario: Collection of domain values
-- **WHEN** `record UserId { value: UInt64; }` is used in a `List<UserId>`
-- **THEN** the program compiles and the list contains independent `UserId` values
-
-### Requirement: Collection elements retain nested managed references
-
-`Array<T>` and `List<T>` SHALL preserve every managed reference nested in a supported `T`, including references in tuples, records, enums, nullable values, and closures. Growth, slicing, cloning, and element replacement SHALL preserve valid tracing metadata.
-
-#### Scenario: Composite array element is the only owner
-- **WHEN** an array is the only reachable owner of an object nested in one of its composite elements and collection runs
-- **THEN** the object remains valid while that array element remains reachable
-
-#### Scenario: Composite list is resized and collected
-- **WHEN** a list containing composite reference-bearing elements grows or shrinks and collection runs
-- **THEN** all live element references remain valid and removed-element references are no longer retained by stale metadata
+- **WHEN** a class representing a domain identity is used in a `List<UserId>`
+- **THEN** the program compiles and list elements retain their class reference identity
 
 ### Requirement: Collection representation is checked before code generation
 
@@ -312,3 +292,14 @@ Every collection element type accepted by semantic analysis SHALL have defined s
 #### Scenario: Supported composite element is lowered
 - **WHEN** a supported composite element type is used in an array or list
 - **THEN** lowering and code generation preserve its layout and managed-reference paths
+
+### Requirement: Collections preserve dynamic object identity and tracing
+Collections SHALL retain dynamic `Object` values as managed references. Copying a collection element SHALL preserve the referenced object's identity; collection growth, slicing, cloning, replacement, and garbage collection SHALL keep all reachable dynamic property values valid alongside references in tuples, enums, nullable values, and closures.
+
+#### Scenario: List retains an object value
+- **WHEN** a dynamic object is inserted into a list and the original binding goes out of scope
+- **THEN** the object remains reachable through the list
+
+#### Scenario: Collection copy preserves object identity
+- **WHEN** a collection containing an object is copied under the collection's ordinary copy rules
+- **THEN** any copied element still refers to the same object identity

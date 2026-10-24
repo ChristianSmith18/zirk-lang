@@ -39,19 +39,21 @@ An ordered collection pattern MAY contain one `...name` rest binding, which SHAL
 - **WHEN** `[first, ...remaining]` destructures `[10]`
 - **THEN** `remaining` is an empty collection
 
-### Requirement: Object and record spread
+### Requirement: Dynamic object spread and rest
+Object spread SHALL create a new open `Object` and copy the source's enumerable string-keyed properties in deterministic insertion order. Explicit properties SHALL override copied properties. Copying SHALL preserve contained value identity rather than deep-cloning nested reference values. Object rest SHALL create a new open `Object` containing the unselected keys. Object spread SHALL NOT require `Iterable<T>`.
 
-Record/object expressions SHALL support field-based spread using `{ ...source, field: value }` when an expected nominal record/object shape is available. Spread fields SHALL be copied in source order and explicit fields SHALL override earlier fields. Object spread SHALL NOT require `Iterable<T>` and SHALL NOT be interchangeable with collection spread.
+#### Scenario: Spread copies keys and applies an override
+- **WHEN** `{ ...profile, name: "Grace" }` is evaluated
+- **THEN** it creates a distinct object with all source keys and the new `name` value
 
-#### Scenario: Record spread with override
-- **WHEN** `{ ...profile, name: "Grace" }` is evaluated as a `UserProfile`
-- **THEN** all fields are copied from `profile` and only `name` is replaced
+#### Scenario: Spread preserves nested object identity
+- **WHEN** a source object contains a nested object and is spread
+- **THEN** the result's corresponding property refers to the same nested object
 
-#### Scenario: Record rest destructuring
-- **WHEN** `{ id, ...details }` destructures a `UserProfile`
-- **THEN** `id` receives the selected field and `details` contains every remaining named field
+#### Scenario: Object rest collects unselected keys
+- **WHEN** `{ id, ...details }` destructures an object with `id`, `name`, and `active`
+- **THEN** `details` is an open `Object` containing `name` and `active`
 
-#### Scenario: Object spread requires a shape
-- **WHEN** `{ ...value }` is written without a record/object expected type
-- **THEN** the checker emits a diagnostic instead of creating an untyped dictionary
-
+#### Scenario: Object spread is distinct from iterable spread
+- **WHEN** an object is used in `{ ...source }`
+- **THEN** named properties are copied without requiring `Iterable<T>`

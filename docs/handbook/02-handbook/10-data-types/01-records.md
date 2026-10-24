@@ -1,84 +1,51 @@
-# Records
+# Objects and Contracts
 
-A record groups named fields into structural data.
+Zirk uses `Object` for open, identity-bearing data and `contract` for a named
+structural requirement. These roles replace the former `record` and
+`interface` split.
 
 ```zirk
-record Point {
+contract PointLike {
     x: Decimal;
     y: Decimal;
 }
+
+mut point: Object = { x: 10.0, y: 20.0 };
+point.x = 11.0;
+
+inmut view: PointLike = point;
 ```
 
-Records suit messages, configuration, coordinates, and other data whose
-attributes are the primary contract. Construction is named-only; an omitted
-attribute receives its declared type's default.
+A bare identifier key is its literal string name. Quoted keys allow arbitrary
+strings, and quoted interpolation computes a string key using ordinary Zirk
+interpolation:
 
 ```zirk
-inmut first = Point(x: 10.0, y: 20.0);
-inmut second = Point(x: 10.0, y: 20.0);
-
-first == second; // true: equal field values
+inmut key = "custom_status";
+inmut response: Object = {
+    status: "ok",
+    "{key}": null
+};
+response["count"] = 3;
 ```
 
-A record is immutable after construction. Updating one field means constructing
-a new record, commonly with destructuring:
+Unknown reads through `Object` have type `Dynamic` and require checked narrowing
+before concrete use. Missing direct reads raise a catchable missing-property
+error; use the presence-safe lookup operation when absence is expected.
+Object assignment and contract views preserve identity. A successful contract
+check validates required members and seals the complete existing key set across
+aliases. Extra properties remain on the same object, but contract views expose
+only the declared members. Mutability rules still govern changes to values.
 
-```zirk
-inmut { x, y } = first;
-inmut moved = Point(x: x + 1.0, y: y);
-```
+Use a class when construction invariants, nominal identity, inheritance, or
+encapsulated behavior matter. Use tuples for compact positional value groups
+and enums for closed alternatives. Dynamic objects do not gain automatic deep
+copy or structural equality; use explicit clone/equality behavior when needed.
 
-Records have a nominal declared type but value-oriented, structural semantics:
-two records of different declared types are not interchangeable merely because
-their fields happen to look alike.
-
-Records may define non-mutating methods that compute from their contents. They
-cannot declare a custom `construct`, mutate an attribute, inherit from a class,
-or acquire reference identity. Use an external factory returning `Result` when
-creation requires validation beyond the built-in type checks.
-
-Derived equality compares every field. Derived hashing is available only when every field is hashable and must agree with equality: equal records always hash equally. A record containing an unhashable field can still exist, but cannot derive hashing or serve as a hashed collection key.
-
-Prefer a class when observable identity, lifecycle, inheritance, or substantial encapsulated behavior is central. Prefer an algebraic enum when a value is one of several variants rather than one fixed product of fields.
-
-## API
-
-A nominal type with structural value semantics: immutable after construction,
-named-only construction, derived equality (and hashing when every field is
-hashable).
-
-### Properties
-
-| Member | Type | Description | Status |
-| --- | --- | --- | --- |
-| `type` | `Type` | Universal member | specified |
-| declared fields | declared types | Read-only projections | implemented |
-
-### Methods
-
-| Signature | Returns | Description | Status |
-| --- | --- | --- | --- |
-| `Point(x:, y:)` | `Point` | Named-only construction; omitted fields take the declared default | implemented |
-| `r.to_string()` | `String` | Universal member | implemented |
-| `r.clone()` | `Point` | Derived `Clone` when every field is `Clone` | implemented |
-| user methods | varies | Non-mutating computed methods only | implemented |
-
-Records cannot declare a custom `construct`, mutate an attribute, inherit from
-a class, or acquire reference identity. `==` compares every field (delivered by
-`fase-3-structural-equality`). Use an external factory returning `Result` for
-validation beyond built-in checks.
-
-### Examples
-
-```zirk
-record Point { x: Decimal; y: Decimal; }
-
-inmut first = Point(x: 10.0, y: 20.0);
-first == Point(x: 10.0, y: 20.0);   // true
-
-inmut { x, y } = first;
-inmut moved = Point(x: x + 1.0, y: y);
-```
+JSON objects parse to ordinary `Object` values and arrays to `List<Dynamic>`.
+Use `JSON.stringify` to serialize JSON-compatible values, or implement the
+`JSONCodec<T>` contract for explicit typed conversion. See [`std.json`](../../04-standard-library/13-std-json.md)
+and the [migration guide](../../../MIGRATING_FROM_RECORD_INTERFACE.md).
 
 ---
 

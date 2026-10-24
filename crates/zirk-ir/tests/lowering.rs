@@ -242,13 +242,16 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 24] = [
+const NATIVE_FAILURE_CODES: [&str; 27] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
     "E_FLOAT_NAN",
     "E_ARITHMETIC_OVERFLOW",
     "E_INVALID_CAST",
+    "E_MISSING_PROPERTY",
+    "E_CONTRACT_VIOLATION",
+    "E_JSON_CONVERSION",
     "E_INDEX_OUT_OF_BOUNDS",
     "E_NATIVE_ERROR",
     // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step is
@@ -513,6 +516,26 @@ fn spread_and_rest_operators_lower_to_valid_ir() {
              mut [first, ...remaining] = values;\n\
          }";
     compile(source);
+
+    let object = compile(
+        "fn main(): Void {\n\
+             inmut profile: Object = { id: 7, name: \"Ada\", active: true };\n\
+             inmut { id, ... details } = profile;\n\
+         }",
+    );
+    let lowered = instructions(object.function("main").expect("main exists"));
+    assert!(
+        lowered
+            .iter()
+            .any(|instruction| matches!(instruction, InstKind::ObjectGet { .. })),
+        "object-pattern bindings use dynamic property reads"
+    );
+    assert!(
+        lowered
+            .iter()
+            .any(|instruction| matches!(instruction, InstKind::ObjectRest { .. })),
+        "object rest is an explicit, verified IR operation"
+    );
 }
 
 #[test]
@@ -1938,7 +1961,7 @@ fn a_class_implementing_an_abstract_class_and_an_interface_dispatches_both() {
         "abstract class Shape {
              abstract  area(): Int32;
          }
-         interface Describable {
+         contract Describable {
               describe(): String;
          }
          class Circle implements Shape, Describable {
@@ -1988,7 +2011,7 @@ fn a_class_implementing_an_abstract_class_and_an_interface_dispatches_both() {
 #[test]
 fn a_call_through_a_contract_goes_through_its_table() {
     let module = compile(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          class User implements Describable {
              construct() { }
               describe(): String { return \"user\"; }
@@ -2071,55 +2094,50 @@ fn two_different_instantiations_get_two_layouts() {
     assert_ne!(specialized[0].fields[0].ty, specialized[1].fields[0].ty);
 }
 
-// --- Records (roadmap task 11.5) --------------------------------------------
+// --- Dynamic objects ---------------------------------------------------------
 
 #[test]
-fn a_record_becomes_a_value_layout_not_an_object() {
-    let module = compile(
-        "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
+fn an_object_literal_uses_the_managed_object_layout() {
+    let module = compile("fn main(): Void { mut point: Object = { x: 1, y: 2 }; }");
+    let main = module.function("main").expect("main exists");
+    assert!(
+        instructions(main)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ObjectNew))
     );
-
-    let id = module.object_id("Point").expect("Point is a record") as usize;
-    assert_eq!(module.values[id].name, "Point");
-    assert_eq!(module.values[id].fields.len(), 2);
-    // Its `ObjectLayout` counterpart is the empty placeholder nothing reads.
-    assert!(module.objects[id].fields.is_empty());
+    assert!(
+        !module.values.iter().any(|layout| layout.name == "Point"),
+        "a dynamic object literal does not create a named value layout"
+    );
 }
 
 #[test]
-fn constructing_a_record_builds_a_value_with_no_allocation() {
-    let module = compile(
-        "record Point { x: Int32; y: Int32; }\nfn main(): Void { mut p = Point(x: 1, y: 2); }",
-    );
-    let id = module.object_id("Point").expect("Point is a record");
+fn constructing_an_object_literal_allocates_and_sets_its_properties() {
+    let module = compile("fn main(): Void { mut point: Object = { x: 1, y: 2 }; }");
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
-
-    assert!(
+    assert!(kinds.iter().any(|kind| matches!(kind, InstKind::ObjectNew)));
+    assert_eq!(
         kinds
             .iter()
-            .any(|k| matches!(k, InstKind::BuildValue { class, fields } if *class == id && fields.len() == 2)),
-        "a record is packaged, not allocated"
-    );
-    assert!(
-        !kinds.iter().any(|k| matches!(k, InstKind::Alloc(_))),
-        "nothing here needs storage the runtime provides"
+            .filter(|kind| matches!(kind, InstKind::ObjectSet { .. }))
+            .count(),
+        2
     );
 }
 
 #[test]
-fn a_record_field_reads_by_position_like_an_objects() {
+fn a_dynamic_object_field_read_uses_named_property_lookup() {
     let module = compile(
-        "record Point { x: Int32; y: Int32; }
-         fn main(): Void { mut p = Point(x: 1, y: 2); stdout.println(p.y); }",
+        "fn main(): Void { mut point: Object = { x: 1, y: 2 }; stdout.println(point.y as Int32); }",
     );
     let main = module.function("main").expect("main exists");
 
     assert!(
         instructions(main)
             .iter()
-            .any(|k| matches!(k, InstKind::LoadField { index: 1, .. })),
-        "field access does not need its own instruction kind"
+            .any(|kind| matches!(kind, InstKind::ObjectGet { .. })),
+        "dynamic access uses its named property"
     );
 }
 
@@ -2320,6 +2338,65 @@ fn a_class_to_class_cast_checks_the_target_descriptor() {
             .iter()
             .any(|k| matches!(k, InstKind::CheckedCast { .. })),
         "CheckedCast is no longer emitted for user `as`/`<T>` casts"
+    );
+}
+
+#[test]
+fn an_open_object_view_can_be_narrowed_to_a_class() {
+    let module = compile(
+        "class Box { } fn main(): Void { mut object: Object = Box(); mut box_value = object as? Box; }",
+    );
+    let target = module
+        .objects
+        .iter()
+        .position(|layout| layout.name == "Box")
+        .unwrap() as u32;
+    let main = module.function("main").unwrap();
+    assert!(instructions(main).iter().any(
+        |kind| matches!(kind, InstKind::IsInstance { target_class, .. } if *target_class == target)
+    ));
+}
+
+#[test]
+fn dynamic_object_literals_lower_interpolated_keys_and_tagged_values() {
+    let module = compile(
+        "fn build(key: String): Object { return { status: \"ok\", \"{key}\": true, nested: { count: 2 } }; } fn main(): Void { mut data = build(\"custom\"); }",
+    );
+    let build = module.function("build").unwrap();
+    let kinds = instructions(build);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::ObjectNew))
+            .count(),
+        2
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::DynamicPack { .. }))
+            .count(),
+        4
+    );
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::ObjectSet { .. }))
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn dynamic_object_literal_spread_merges_in_source_order() {
+    let module = compile(
+        "fn build(source: Object): Object { return { ...source, name: \"Ada\" }; } fn main(): Void { }",
+    );
+    let build = module.function("build").unwrap();
+    assert!(
+        instructions(build)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ObjectMerge { .. }))
     );
 }
 
@@ -3452,25 +3529,20 @@ fn a_native_slice_slot_is_never_a_gc_root() {
     );
 }
 
-// --- Value-to-contract boxing (fase-3-value-type-contract-dispatch, design D1) ---
+// --- Class-to-contract views -------------------------------------------------
 
-const BOXED_POINT: &str = "interface Describable {  describe(): String; }
-    record Point implements Describable {
+const BOXED_POINT: &str = "contract Describable {  describe(): String; }
+    class Point implements Describable {
         x: Int32;
         y: Int32;
+        construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
          describe(): String { return \"point\"; }
     }";
 
-/// Converting a `record` value into a reference of a contract
-/// it implements lowers to an allocation of the value's own layout id (the
-/// two tables share an id space, `IrType::Value`/`IrType::Object` doc
-/// comment), one `LoadField`/`StoreField` pair per field copying its inline
-/// value in, and finally a `Retype` into the contract's own static type
-/// (task 2.1/2.3).
 #[test]
 fn a_value_to_contract_conversion_boxes_then_retypes() {
     let module = compile(&format!(
-        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(x: 1, y: 2); mut d: Describable = p; }}"
+        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(1, 2); mut d: Describable = p; }}"
     ));
     let main = module.function("main").expect("main exists");
     let kinds = instructions(main);
@@ -3487,21 +3559,13 @@ fn a_value_to_contract_conversion_boxes_then_retypes() {
         "boxing allocates the value's own layout id, found {kinds:?}"
     );
 
-    let load_fields = kinds
-        .iter()
-        .filter(|k| matches!(k, InstKind::LoadField { .. }))
-        .count();
-    let store_fields = kinds
-        .iter()
-        .filter(|k| matches!(k, InstKind::StoreField { .. }))
-        .count();
     assert_eq!(
-        load_fields, 2,
-        "one LoadField per field of Point, found {kinds:?}"
-    );
-    assert_eq!(
-        store_fields, 2,
-        "one StoreField per field of Point, found {kinds:?}"
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::Alloc(_)))
+            .count(),
+        1,
+        "the class instance is allocated once and the contract view aliases it: {kinds:?}"
     );
 
     assert!(
@@ -3510,15 +3574,10 @@ fn a_value_to_contract_conversion_boxes_then_retypes() {
     );
 }
 
-/// The box's own descriptor is built the same way a class's is: its
-/// `ObjectLayout` carries a real `ContractTable` for the interface it
-/// implements, populated the same way `check_conformance` populates a
-/// class's (task 2.1, design D1/D2's own premise that `CallContract` cannot
-/// tell the two apart).
 #[test]
 fn a_boxed_value_type_gets_a_real_contract_table() {
     let module = compile(&format!(
-        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(x: 1, y: 2); mut d: Describable = p; }}"
+        "{BOXED_POINT}\nfn main(): Void {{ mut p = Point(1, 2); mut d: Describable = p; }}"
     ));
     let point = module
         .objects
@@ -3534,16 +3593,11 @@ fn a_boxed_value_type_gets_a_real_contract_table() {
     assert_eq!(point.fields.len(), 2, "Point's own two fields, boxed");
 }
 
-/// A call through the interface-typed reference to a boxed record still
-/// goes through the ordinary `CallContract` dispatch — confirming design
-/// D2/task 3.3 at the IR level: nothing about the receiver being a boxed
-/// value, rather than a class instance, changes which instruction the call
-/// lowers to.
 #[test]
 fn a_call_through_a_boxed_value_type_uses_the_ordinary_contract_dispatch() {
     let module = compile(&format!(
         "{BOXED_POINT}\nfn announce(d: Describable): String {{ return d.describe(); }}\n\
-         fn main(): Void {{ mut p = Point(x: 1, y: 2); mut s = announce(p); }}"
+         fn main(): Void {{ mut p = Point(1, 2); mut s = announce(p); }}"
     ));
     let announce = module.function("announce").expect("announce exists");
 
@@ -3555,18 +3609,12 @@ fn a_call_through_a_boxed_value_type_uses_the_ordinary_contract_dispatch() {
     );
 }
 
-/// Design D3: the box is read-only after construction — no `StoreField`
-/// ever targets it again anywhere else in a program that never attempts
-/// one. A negative check, not just the absence of a compile error (task
-/// 2.3/4.4): every `StoreField` in the whole module either targets an
-/// ordinary class's own field write, or is one of the exact two
-/// construction-time writes boxing `Point` performs above.
 #[test]
 fn nothing_ever_writes_to_a_box_again_after_its_construction() {
     let module = compile(&format!(
         "{BOXED_POINT}\nfn announce(d: Describable): String {{ return d.describe(); }}\n\
          fn main(): Void {{
-             mut p = Point(x: 1, y: 2);
+             mut p = Point(1, 2);
              mut d: Describable = p;
              stdout.println(announce(p));
          }}"

@@ -155,7 +155,7 @@ For non-void generated task results, the scheduler's one-word result is an
 opaque pointer to a managed box. The box stores the exact target LLVM layout
 of `T`, and its descriptor traces nested references until `Job.wait()` consumes
 the result. The branch thunk roots the box before running user code and fills
-it before publishing task completion; inline records, enums, and wide scalars
+it before publishing task completion; inline tuples, enums, and wide scalars
 are not reinterpreted as pointers or truncated to one word. Void-like results
 use the zero word. This result transport does not expose `Outcome<T>` or
 enable the still-gated completion combinators.
@@ -349,6 +349,13 @@ Requirements:
 - `Weak<T>` does not keep a referent alive and upgrades through `Option<T>`;
 - dependent native/resource/internal views cannot escape their owner;
 - deep cloning preserves internal sharing and cycles in a new identity graph.
+
+`Object` values and class instances are identity-bearing managed references.
+Dynamic properties carry runtime type tags and descriptor-visible references so
+the collector traces nested objects, collections and callables. Contract
+conformance seals the key set on the shared object allocation; the seal is
+alias-visible and does not alter object identity. Tuples and enums retain their
+value layouts; there is no record-only inline representation.
 
 There are no general-purpose destructors whose timing is observable. Memory
 release is not used to manage files, sockets, locks or processes.

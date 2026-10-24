@@ -44,7 +44,7 @@ republishes the verdicts under `objectModel`.
 | static-members | `docs/handbook/02-handbook/08-classes-and-objects/09-static-members` | supported | fixture `oop-static-mutable`; corpus `static_field`; corpus `static_method_call` |
 | object-identity | `docs/handbook/02-handbook/08-classes-and-objects/10-object-identity` | supported | fixture `oop-identity-aliasing`; corpus `identity_and_equality` |
 | equality-contract | `docs/handbook/02-handbook/08-classes-and-objects/10-object-identity` | supported | fixture `oop-equality-contract`; corpus `structural_equality` |
-| deep-clone | `docs/handbook/02-handbook/08-classes-and-objects/11-cloning` | excluded | corpus `clone_record`; corpus `callable_clone` |
+| deep-clone | `docs/handbook/02-handbook/08-classes-and-objects/11-cloning` | excluded | corpus `callable_clone` |
 | nested-inner-local-classes | `docs/handbook/02-handbook/08-classes-and-objects/12-nested-classes` | supported | fixture `oop-nested-inner-local` |
 | interfaces | `docs/handbook/02-handbook/09-interfaces-and-traits/01-interfaces` | supported | fixture `oop-interface-trait-default`; corpus `contracts`; corpus `diamond_contracts` |
 | contract-composition | `docs/handbook/02-handbook/09-interfaces-and-traits/02-implementing-contracts` | supported | corpus `transitive_contracts`; corpus `generic_contract_composition` |

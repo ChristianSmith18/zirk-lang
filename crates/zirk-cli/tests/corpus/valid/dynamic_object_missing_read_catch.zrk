@@ -1,0 +1,10 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut value = { status: "ok" };
+    try {
+        value.missing;
+    } catch MissingPropertyError(error) {
+        stdout.println("missing property caught");
+    }
+}

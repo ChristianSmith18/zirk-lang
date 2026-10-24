@@ -17,7 +17,7 @@ Zirk SHALL declare non-repeatable decorators with `fn dec` and repeatable decora
 
 ### Requirement: Decorator targets are minimal and typed
 
-Zirk 1.x SHALL support decorator target blocks only for `class`, `attribute`, `function`, `method`, and `parameter`. Parameter targets SHALL include initialization parameters. Method targets SHALL permit inspection of bodyless abstract, interface, and trait method signatures but SHALL permit wrapping only when an implementation body exists.
+Zirk 1.x SHALL support decorator target blocks only for `class`, `attribute`, `function`, `method`, and `parameter`. Parameter targets SHALL include initialization parameters. Method targets SHALL permit inspection of bodyless abstract-class, contract, and trait method signatures but SHALL permit wrapping only when an implementation body exists.
 
 #### Scenario: Framework module is decorated
 
@@ -141,7 +141,7 @@ Contiguous applications of a `repeatable fn dec` SHALL be processed as one logic
 
 ### Requirement: Repeatable arguments are accessed through application records
 
-Parameters in a repeatable decorator declaration SHALL define the typed argument schema of each application. Inside grouped expansion, concrete values SHALL be accessed through an explicitly bound application record such as `application.arguments.name`; no single ambiguous parameter value SHALL be injected into the group body.
+Parameters in a repeatable decorator declaration SHALL define the typed argument schema of each application. Inside grouped expansion, concrete values SHALL be accessed through an explicitly bound application value such as `application.arguments.name`; no single ambiguous parameter value SHALL be injected into the group body.
 
 #### Scenario: Application argument is iterated
 

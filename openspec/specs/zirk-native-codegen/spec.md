@@ -102,29 +102,17 @@ The backend SHALL translate the explicit nullity check produced by the lowering 
 - **WHEN** an operation on a value of a non-nullable type is translated
 - **THEN** the generated code includes no nullity comparison
 
-### Requirement: Object layout
-
-The backend SHALL translate a type with identity into a structure whose header precedes its fields, and whose inherited fields precede its own.
-
-#### Scenario: Shared prefix
-- **WHEN** a base class and a subclass are translated
-- **THEN** the prefix of the subclass's structure matches that of the base
-
-#### Scenario: Inline record field
-- **WHEN** a `record` is a field of another declaration
-- **THEN** it is translated without an intermediate pointer
-
 ### Requirement: Method tables
 
-The backend SHALL emit one method table per type with virtual methods, and one per implemented interface.
+The backend SHALL emit one method table per type with virtual methods and one dispatch table per implemented contract.
 
 #### Scenario: Stable index on inheritance
 - **WHEN** a subclass inherits a virtual method
 - **THEN** it occupies the same index as in its base's table
 
-#### Scenario: Dispatch through an interface
-- **WHEN** a method is called through an interface
-- **THEN** the generated code looks up that interface's table in the descriptor and dispatches through it
+#### Scenario: Dispatch through a contract
+- **WHEN** an operation is called through a contract view
+- **THEN** the generated code looks up that contract's table in the descriptor and dispatches through it
 
 ### Requirement: Checked cast
 
@@ -182,17 +170,6 @@ The backend SHALL emit, for every site where `println`/`print`/an interpolation 
 #### Scenario: Conversion of an overridable user type
 - **WHEN** code is emitted to print a value of a type whose `to_string()` can be overridden by a subclass
 - **THEN** the call goes through the same table as any other virtual method of the object
-
-### Requirement: Native code generation supports value-type field pointers
-The LLVM backend SHALL emit `getelementptr` over `ValueLayout` for `PointerFromField` when the container is a pointer to a `record`.
-
-#### Scenario: PointerFromField over record
-- **WHEN** the IR contains `PointerFromField { object: Pointer<Value>, index: n }`
-- **THEN** the backend emits a GEP using the `ValueLayout` of the record, with no object header offset
-
-#### Scenario: PointerFromField over object unchanged
-- **WHEN** the IR contains `PointerFromField { object: Object(id), index: n }`
-- **THEN** the backend continues to emit a GEP using the `ObjectLayout` with the usual object header offset
 
 ### Requirement: Native code generation supports string grapheme offset
 The LLVM backend SHALL declare and call `zirk_str_grapheme_offset` to implement `StringGraphemeOffset`.
@@ -393,3 +370,18 @@ edge.
 #### Scenario: atomic op carries its ordering
 - **WHEN** codegen processes `counter.fetch_add(1)`
 - **THEN** it emits an LLVM atomicrmw with sequentially consistent ordering
+
+### Requirement: Native code generation supports dynamic objects and contract checks
+The native backend SHALL emit operations for dynamic object creation, string-keyed property access, writes, safe lookup, spread, rest, and contract conformance. Contract checks and missing-property failures SHALL enter the ordinary catchable runtime error path. Dynamic values SHALL preserve runtime tags and managed-reference metadata.
+
+#### Scenario: Read a typed contract property
+- **WHEN** native code reads a property through a contract-typed object
+- **THEN** it uses the checked contract member type and the underlying object identity
+
+#### Scenario: Read a dynamic property
+- **WHEN** native code reads a property from `Object` without a known key type
+- **THEN** it returns a tagged `Dynamic` value with its runtime type preserved
+
+#### Scenario: Contract validation failure is catchable
+- **WHEN** a runtime contract check finds a missing or incompatible requirement
+- **THEN** generated code raises the contract error through the normal exception mechanism

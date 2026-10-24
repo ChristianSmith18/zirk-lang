@@ -337,8 +337,19 @@ pub enum HeapEntry {
     Object {
         layout: u32,
         fields: Vec<Value>,
+        properties: Vec<(String, Value)>,
+        sealed: bool,
     },
-    Record {
+    DynamicObject {
+        properties: Vec<(String, Value)>,
+        sealed: bool,
+    },
+    DynamicValue {
+        ty: IrType,
+        value: Box<Value>,
+    },
+    JsonNumber(String),
+    Tuple {
         layout: u32,
         fields: Vec<Value>,
     },
@@ -537,6 +548,17 @@ impl Heap {
         self.entries.push(entry);
         self.used_bytes = next;
         Ok(id)
+    }
+
+    fn charge(&mut self, bytes: usize, limits: InterpreterLimits) -> Result<(), LimitFailure> {
+        let Some(next) = self.used_bytes.checked_add(bytes) else {
+            return Err(LimitFailure::Heap);
+        };
+        if next > limits.heap_bytes {
+            return Err(LimitFailure::Heap);
+        }
+        self.used_bytes = next;
+        Ok(())
     }
 
     pub fn get(&self, id: HeapId) -> Option<&HeapEntry> {
@@ -1548,14 +1570,14 @@ impl<'module> Interpreter<'module> {
             ));
         };
         match entry {
-            HeapEntry::Object { layout, fields } => {
+            HeapEntry::Object { layout, fields, .. } => {
                 if let Some(layout) = self.module.objects.get(*layout as usize) {
                     for (field, value) in layout.fields.iter().zip(fields) {
                         add(field.name.clone(), field.ty, value);
                     }
                 }
             }
-            HeapEntry::Record { layout, fields } => {
+            HeapEntry::Tuple { layout, fields } => {
                 if let Some(layout) = self.module.values.get(*layout as usize) {
                     for (field, value) in layout.fields.iter().zip(fields) {
                         add(field.name.clone(), field.ty, value);
@@ -1635,12 +1657,17 @@ impl<'module> Interpreter<'module> {
                     .get(*layout as usize)
                     .map(|layout| layout.name.clone())
                     .unwrap_or_else(|| "<object>".into()),
-                Some(HeapEntry::Record { layout, .. }) => self
+                Some(HeapEntry::DynamicObject { properties, .. }) => {
+                    format!("<Object {} properties>", properties.len())
+                }
+                Some(HeapEntry::DynamicValue { ty, value }) => self.debug_render_value(*ty, value),
+                Some(HeapEntry::JsonNumber(value)) => value.clone(),
+                Some(HeapEntry::Tuple { layout, .. }) => self
                     .module
                     .values
                     .get(*layout as usize)
                     .map(|layout| layout.name.clone())
-                    .unwrap_or_else(|| "<record>".into()),
+                    .unwrap_or_else(|| "<tuple>".into()),
                 Some(HeapEntry::Enum {
                     layout, variant, ..
                 }) => self
@@ -1667,7 +1694,7 @@ impl<'module> Interpreter<'module> {
     fn debug_has_children(&self, ty: IrType, value: &Value) -> bool {
         let Value::Heap(id) = value else { return false };
         match self.heap.get(*id) {
-            Some(HeapEntry::Object { .. } | HeapEntry::Record { .. } | HeapEntry::Enum { .. }) => {
+            Some(HeapEntry::Object { .. } | HeapEntry::Tuple { .. } | HeapEntry::Enum { .. }) => {
                 true
             }
             Some(HeapEntry::Array(_) | HeapEntry::List(_)) => {
@@ -1702,6 +1729,8 @@ impl<'module> Interpreter<'module> {
                 .get(index as usize)
                 .map(|layout| layout.name.clone())
                 .unwrap_or_else(|| format!("Object#{index}")),
+            IrType::ObjectAny => "Object".into(),
+            IrType::Dynamic => "Dynamic".into(),
             IrType::Contract(index) => format!("Contract#{index}"),
             IrType::Value(index) => self
                 .module
@@ -2367,6 +2396,8 @@ impl<'module> Interpreter<'module> {
                 HeapEntry::Object {
                     layout: pending.response_class_id,
                     fields,
+                    properties: Vec::new(),
+                    sealed: false,
                 },
                 bytes,
                 self.limits,
@@ -2497,7 +2528,7 @@ impl<'module> Interpreter<'module> {
             return self.internal("pending exception metadata is unavailable", None);
         };
         let (category, message) = match self.heap.get(id) {
-            Some(HeapEntry::Object { layout, fields }) => {
+            Some(HeapEntry::Object { layout, fields, .. }) => {
                 let name = self
                     .module
                     .objects
@@ -3276,26 +3307,91 @@ impl<'module> Interpreter<'module> {
                 args,
             } => {
                 let receiver = self.value(frame_index, *object)?;
-                let layout = self.object_layout(frame_index, *object)?;
-                let callee = self
-                    .module
-                    .objects
-                    .get(layout as usize)
+                let dynamic_object_id = match &receiver {
+                    Value::Heap(id) => Some(*id),
+                    _ => None,
+                };
+                let class_layout = dynamic_object_id.and_then(|id| match self.heap.get(id) {
+                    Some(HeapEntry::Object { layout, .. }) => Some(*layout),
+                    _ => None,
+                });
+                let class_callee = class_layout
+                    .and_then(|layout| self.module.objects.get(layout as usize))
                     .and_then(|layout| layout.contracts.iter().find(|table| table.contract == *contract))
                     .and_then(|table| table.methods.get(*index as usize))
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExecutionFault::Internal(format!(
-                            "CallContract references missing contract {contract} method {index} on object layout {layout}"
-                        ))
-                    })?;
-                self.push_dispatch_frame(
-                    &callee,
-                    receiver,
-                    args,
-                    frame_index,
-                    result_value_id(instruction),
-                )?;
+                    .cloned();
+                if let Some(callee) = class_callee {
+                    self.push_dispatch_frame(
+                        &callee,
+                        receiver,
+                        args,
+                        frame_index,
+                        result_value_id(instruction),
+                    )?;
+                } else {
+                    // A structurally conforming open Object stores operation
+                    // values as ordinary tagged callable properties. Invoke
+                    // that closure with its captures and the contract args;
+                    // unlike a class method it has no implicit `this` value.
+                    let method_name = self
+                        .module
+                        .contracts
+                        .get(*contract as usize)
+                        .and_then(|contract| contract.methods.get(*index as usize))
+                        .ok_or_else(|| ExecutionFault::Internal(format!(
+                            "CallContract references missing contract {contract} method {index}"
+                        )))?;
+                    let Some(object_id) = dynamic_object_id else {
+                        return Err(ExecutionFault::Internal(
+                            "CallContract receiver is not an object".into(),
+                        ));
+                    };
+                    let property = match self.heap.get(object_id) {
+                        Some(HeapEntry::DynamicObject { properties, .. })
+                        | Some(HeapEntry::Object { properties, .. }) => properties
+                            .iter()
+                            .find(|(key, _)| key == method_name)
+                            .map(|(_, value)| value.clone()),
+                        _ => None,
+                    }
+                    .ok_or_else(|| ExecutionFault::Internal(format!(
+                        "conforming object is missing callable property `{method_name}`"
+                    )))?;
+                    let Value::Heap(box_id) = property else {
+                        return Err(ExecutionFault::Internal(
+                            "contract operation property is not a callable box".into(),
+                        ));
+                    };
+                    let callable = match self.heap.get(box_id) {
+                        Some(HeapEntry::DynamicValue { value, .. }) => value.as_ref(),
+                        _ => return Err(ExecutionFault::Internal(
+                            "contract operation property is not a Dynamic callable".into(),
+                        )),
+                    };
+                    let Value::Heap(closure_id) = callable else {
+                        return Err(ExecutionFault::Internal(
+                            "contract operation property does not contain a closure".into(),
+                        ));
+                    };
+                    let (target, captures) = match self.heap.get(*closure_id) {
+                        Some(HeapEntry::Closure { target, captures }) =>
+                            (target.clone(), captures.clone()),
+                        _ => return Err(ExecutionFault::Internal(
+                            "contract operation property references a non-closure".into(),
+                        )),
+                    };
+                    let function = self.module.functions.iter().position(|function| function.name == target)
+                        .ok_or_else(|| ExecutionFault::Internal(format!(
+                            "callable references unavailable interpreted function {target:?}"
+                        )))?;
+                    let mut arguments = captures;
+                    arguments.extend(args.iter().map(|operand| self.value(frame_index, *operand))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(ExecutionFault::Internal)?);
+                    self.push_frame(function, arguments, Some(ReturnDestination {
+                        caller_value: result_value_id(instruction),
+                    })).map_err(ExecutionFault::Limit)?;
+                }
                 Ok(instruction.result.map(|_| Value::Undefined))
             }
             InstKind::MakeClosure {
@@ -3776,6 +3872,8 @@ impl<'module> Interpreter<'module> {
                         HeapEntry::Object {
                             layout: *layout,
                             fields: vec![Value::Undefined; fields],
+                            properties: Vec::new(),
+                            sealed: false,
                         },
                         bytes,
                         self.limits,
@@ -3788,6 +3886,509 @@ impl<'module> Interpreter<'module> {
                     }
                 }
                 Ok(Some(Value::Heap(id)))
+            }
+            InstKind::ObjectNew => {
+                let bytes = std::mem::size_of::<HeapEntry>();
+                let id = self
+                    .heap
+                    .allocate(
+                        HeapEntry::DynamicObject {
+                            properties: Vec::new(),
+                            sealed: false,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Some(Value::Heap(id)))
+            }
+            InstKind::ObjectSeal { object } => {
+                let Value::Heap(object_id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectSeal receiver is not a heap object".into(),
+                    ));
+                };
+                let Some(
+                    HeapEntry::DynamicObject { sealed, .. }
+                    | HeapEntry::Object { sealed, .. },
+                ) = self.heap.get_mut(object_id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectSeal receiver is not an open dynamic object".into(),
+                    ));
+                };
+                *sealed = true;
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    0,
+                    IntWidth::I32,
+                ))))
+            }
+            InstKind::DynamicObjectUnbox { value } => {
+                let dynamic = self.value(frame_index, *value)?;
+                let object = match dynamic {
+                    Value::Heap(dynamic_id) => match self.heap.get(dynamic_id) {
+                        Some(HeapEntry::DynamicValue { ty, value })
+                            if matches!(ty, IrType::Object(_) | IrType::ObjectAny) =>
+                        {
+                            match value.as_ref() {
+                                Value::Heap(_) => Some(value.clone()),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Ok(Some(Value::Nullable(object)))
+            }
+            InstKind::ObjectConform {
+                object,
+                contract,
+                requirements,
+            } => {
+                let Value::Heap(object_id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectConform receiver is not a heap object".into(),
+                    ));
+                };
+                let class_implements = match self.heap.get(object_id) {
+                    Some(HeapEntry::Object { layout, .. }) => self
+                        .module
+                        .objects
+                        .get(*layout as usize)
+                        .is_some_and(|layout| {
+                            layout.contracts.iter().any(|table| table.contract == *contract)
+                        }),
+                    _ => false,
+                };
+                let status = if class_implements {
+                    0
+                } else {
+                    let properties = match self.heap.get(object_id) {
+                        Some(
+                            HeapEntry::DynamicObject { properties, .. }
+                            | HeapEntry::Object { properties, .. },
+                        ) => properties,
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "ObjectConform receiver is not an open object".into(),
+                            ));
+                        }
+                    };
+                    let mut status = 0;
+                    for (index, requirement) in requirements.iter().enumerate() {
+                        let sidecar = properties
+                            .iter()
+                            .find(|(key, _)| key == &requirement.key)
+                            .map(|(_, value)| value);
+                        let declared = match self.heap.get(object_id) {
+                            Some(HeapEntry::Object { layout, fields, .. }) => self
+                                .module
+                                .objects
+                                .get(*layout as usize)
+                                .and_then(|layout| layout.field_index(&requirement.key))
+                                .and_then(|field_index| {
+                                    self.module.objects[*layout as usize]
+                                        .fields
+                                        .get(field_index)
+                                        .zip(fields.get(field_index))
+                                }),
+                            _ => None,
+                        };
+                        let Some((actual_tag, _value)) = sidecar
+                            .map(|value| {
+                                let tag = match value {
+                                    Value::Heap(id) => match self.heap.get(*id) {
+                                        Some(HeapEntry::DynamicValue { ty, .. }) => ty.dynamic_tag(),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                };
+                                (tag, value)
+                            })
+                            .or_else(|| declared.map(|(field, value)| (field.ty.dynamic_tag(), value)))
+                        else {
+                            status = 1;
+                            break;
+                        };
+                        let tag_matches = match (requirement.tag, actual_tag) {
+                            (0, _) => true,
+                            (0x6_0000, Some(tag)) => tag & 0xffff_0000 == 0x6_0000,
+                            (expected, actual) => actual == Some(expected),
+                        };
+                        if !tag_matches {
+                            status = 2;
+                            break;
+                        }
+                        let _ = index;
+                    }
+                    status
+                };
+                if status == 0 {
+                    match self.heap.get_mut(object_id) {
+                        Some(
+                            HeapEntry::DynamicObject { sealed, .. }
+                            | HeapEntry::Object { sealed, .. },
+                        ) => *sealed = true,
+                        _ => {
+                            return Err(ExecutionFault::Internal(
+                                "ObjectConform receiver is not an open object".into(),
+                            ));
+                        }
+                    }
+                }
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    status as u128,
+                    IntWidth::I32,
+                ))))
+            }
+            InstKind::DynamicPack { value } => {
+                let source = self.value(frame_index, *value)?;
+                if self.operand_type(frame_index, *value) == Some(IrType::Dynamic) {
+                    return Ok(Some(source));
+                }
+                let ty = self.operand_type(frame_index, *value).ok_or_else(|| {
+                    ExecutionFault::Internal("DynamicPack source has no IR type".into())
+                })?;
+                let bytes = std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>();
+                let id = self
+                    .heap
+                    .allocate(
+                        HeapEntry::DynamicValue {
+                            ty,
+                            value: Box::new(source),
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Some(Value::Heap(id)))
+            }
+            InstKind::DynamicIsType { value, tag } => {
+                let matches = match self.value(frame_index, *value)? {
+                    Value::Heap(id) => matches!(
+                        self.heap.get(id),
+                        Some(HeapEntry::DynamicValue { ty, .. })
+                            if ty.dynamic_tag() == Some(*tag)
+                    ),
+                    _ => false,
+                };
+                Ok(Some(Value::Boolean(matches)))
+            }
+            InstKind::DynamicUnbox { value, tag } => {
+                let Value::Heap(id) = self.value(frame_index, *value)? else {
+                    return Err(ExecutionFault::Internal(
+                        "DynamicUnbox source is not a managed box".into(),
+                    ));
+                };
+                match self.heap.get(id) {
+                    Some(HeapEntry::DynamicValue { ty, value })
+                        if ty.dynamic_tag() == Some(*tag) => Ok(Some((**value).clone())),
+                    _ => Err(ExecutionFault::Internal(
+                        "DynamicUnbox executed without a matching checked tag".into(),
+                    )),
+                }
+            }
+            InstKind::ObjectSet { object, key, value } => {
+                let Value::Heap(object_id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectSet receiver is not a heap object".into(),
+                    ));
+                };
+                let key = self.string_operand(frame_index, *key)?;
+                let value = self.value(frame_index, *value)?;
+                let class_field = match self.heap.get(object_id) {
+                    Some(HeapEntry::Object { layout, .. }) => self
+                        .module
+                        .objects
+                        .get(*layout as usize)
+                        .and_then(|layout| layout.field_index(&key))
+                        .map(|index| (*layout, index)),
+                    _ => None,
+                };
+                if let Some((layout_id, field_index)) = class_field {
+                    let dynamic = match &value {
+                        Value::Heap(id) => match self.heap.get(*id) {
+                            Some(HeapEntry::DynamicValue { ty, value }) => {
+                                Some((*ty, (**value).clone()))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let Some((ty, unboxed)) = dynamic else {
+                        return Ok(Some(Value::Int(IntegerValue::from_bits(2, IntWidth::I32))));
+                    };
+                    let expected = self.module.objects[layout_id as usize].fields[field_index].ty;
+                    if ty != expected {
+                        return Ok(Some(Value::Int(IntegerValue::from_bits(2, IntWidth::I32))));
+                    }
+                    let Some(HeapEntry::Object { fields, .. }) = self.heap.get_mut(object_id) else {
+                        unreachable!();
+                    };
+                    fields[field_index] = unboxed;
+                    return Ok(Some(Value::Int(IntegerValue::from_bits(0, IntWidth::I32))));
+                }
+                let (exists, sealed) = match self.heap.get(object_id) {
+                    Some(
+                        HeapEntry::DynamicObject { properties, sealed }
+                        | HeapEntry::Object {
+                            properties, sealed, ..
+                        },
+                    ) => (
+                        properties.iter().any(|(name, _)| name == &key),
+                        *sealed,
+                    ),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ObjectSet receiver is not an open dynamic object".into(),
+                        ));
+                    }
+                };
+                if !exists && sealed {
+                    return Ok(Some(Value::Int(IntegerValue::from_bits(
+                        1,
+                        IntWidth::I32,
+                    ))));
+                }
+                if !exists {
+                    let bytes = std::mem::size_of::<(String, Value)>()
+                        .saturating_add(key.len());
+                    self.heap
+                        .charge(bytes, self.limits)
+                        .map_err(ExecutionFault::Limit)?;
+                }
+                let Some(
+                    HeapEntry::DynamicObject { properties, sealed }
+                    | HeapEntry::Object {
+                        properties, sealed, ..
+                    },
+                ) = self.heap.get_mut(object_id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectSet receiver is not an open dynamic object".into(),
+                    ));
+                };
+                if let Some((_, existing)) = properties.iter_mut().find(|(name, _)| name == &key) {
+                    *existing = value;
+                } else if *sealed {
+                    return Ok(Some(Value::Int(IntegerValue::from_bits(
+                        1,
+                        IntWidth::I32,
+                    ))));
+                } else {
+                    properties.push((key, value));
+                }
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    0,
+                    IntWidth::I32,
+                ))))
+            }
+            InstKind::ObjectGet { object, key } => {
+                let Value::Heap(object_id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectGet receiver is not a heap object".into(),
+                    ));
+                };
+                let key = self.string_operand(frame_index, *key)?;
+                let value = match self.heap.get(object_id) {
+                    Some(
+                        HeapEntry::DynamicObject { properties, .. }
+                        | HeapEntry::Object { properties, .. },
+                    ) => properties
+                        .iter()
+                        .find(|(name, _)| name == &key)
+                        .map(|(_, value)| value.clone()),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ObjectGet receiver is not an open dynamic object".into(),
+                        ));
+                    }
+                };
+                let value = value.or_else(|| match self.heap.get(object_id) {
+                    Some(HeapEntry::Object { layout, fields, .. }) => {
+                        let layout = self.module.objects.get(*layout as usize)?;
+                        let index = layout.field_index(&key)?;
+                        let field_type = layout.fields.get(index)?.ty;
+                        let field_value = fields.get(index)?.clone();
+                        let id = self
+                            .heap
+                            .allocate(
+                                HeapEntry::DynamicValue {
+                                    ty: field_type,
+                                    value: Box::new(field_value),
+                                },
+                                std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>(),
+                                self.limits,
+                            )
+                            .ok()?;
+                        Some(Value::Heap(id))
+                    }
+                    _ => None,
+                });
+                Ok(Some(Value::Nullable(value.map(Box::new))))
+            }
+            InstKind::ObjectMerge {
+                destination,
+                source,
+            } => {
+                let Value::Heap(destination_id) = self.value(frame_index, *destination)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectMerge destination is not a heap object".into(),
+                    ));
+                };
+                let Value::Heap(source_id) = self.value(frame_index, *source)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectMerge source is not a heap object".into(),
+                    ));
+                };
+                let source_properties = match self.heap.get(source_id) {
+                    Some(
+                        HeapEntry::DynamicObject { properties, .. }
+                        | HeapEntry::Object { properties, .. },
+                    ) => properties.clone(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ObjectMerge source is not an open dynamic object".into(),
+                        ));
+                    }
+                };
+                let (new_keys, sealed) = match self.heap.get(destination_id) {
+                    Some(
+                        HeapEntry::DynamicObject { properties, sealed }
+                        | HeapEntry::Object {
+                            properties, sealed, ..
+                        },
+                    ) => (
+                        source_properties
+                            .iter()
+                            .filter(|(key, _)| {
+                                !properties.iter().any(|(existing, _)| existing == key)
+                            })
+                            .map(|(key, _)| key.len())
+                            .collect::<Vec<_>>(),
+                        *sealed,
+                    ),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ObjectMerge destination is not an open dynamic object".into(),
+                        ));
+                    }
+                };
+                if sealed && !new_keys.is_empty() {
+                    return Err(ExecutionFault::Runtime {
+                        category: "ContractViolationError".into(),
+                        message: "cannot add properties to a sealed object".into(),
+                    });
+                }
+                let added_bytes = new_keys.into_iter().fold(0usize, |total, key_len| {
+                    total.saturating_add(std::mem::size_of::<(String, Value)>())
+                        .saturating_add(key_len)
+                });
+                self.heap
+                    .charge(added_bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                let Some(
+                    HeapEntry::DynamicObject { properties, sealed }
+                    | HeapEntry::Object {
+                        properties, sealed, ..
+                    },
+                ) = self.heap.get_mut(destination_id) else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectMerge destination is not an open dynamic object".into(),
+                    ));
+                };
+                for (key, value) in source_properties {
+                    if let Some((_, existing)) = properties.iter_mut().find(|(name, _)| name == &key)
+                    {
+                        *existing = value;
+                    } else if *sealed {
+                        return Err(ExecutionFault::Runtime {
+                            category: "ContractViolationError".into(),
+                            message: format!("cannot add property `{key}` to a sealed object"),
+                        });
+                    } else {
+                        properties.push((key, value));
+                    }
+                }
+                Ok(None)
+            }
+            InstKind::ObjectRest { object, excluded_keys } => {
+                let Value::Heap(source_id) = self.value(frame_index, *object)? else {
+                    return Err(ExecutionFault::Internal(
+                        "ObjectRest source is not a heap object".into(),
+                    ));
+                };
+                let excluded = excluded_keys
+                    .iter()
+                    .map(|key| self.string_operand(frame_index, *key))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let properties = match self.heap.get(source_id) {
+                    Some(
+                        HeapEntry::DynamicObject { properties, .. }
+                        | HeapEntry::Object { properties, .. },
+                    ) => properties
+                        .iter()
+                        .filter(|(key, _)| !excluded.iter().any(|excluded| excluded == key))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "ObjectRest source is not an open object".into(),
+                        ));
+                    }
+                };
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    + properties.iter().fold(0usize, |total, (key, _)| {
+                        total.saturating_add(std::mem::size_of::<(String, Value)>())
+                            .saturating_add(key.len())
+                    });
+                let id = self
+                    .heap
+                    .allocate(
+                        HeapEntry::DynamicObject {
+                            properties,
+                            sealed: false,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Some(Value::Heap(id)))
+            }
+            InstKind::JsonStringifyDynamic { value } => {
+                let value = self.value(frame_index, *value)?;
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let encoded = self.json_value(&value, &mut active, 0, &mut budget)
+                    .and_then(|value| serde_json::to_string(&value).map_err(|_| ()))
+                    .ok();
+                let result = if let Some(encoded) = encoded {
+                    let string = self.allocate_string(encoded)?;
+                    Value::Nullable(Some(Box::new(Value::Heap(string))))
+                } else {
+                    Value::Nullable(None)
+                };
+                Ok(Some(result))
+            }
+            InstKind::JsonParseDynamic {
+                document,
+                list_dynamic_id,
+            } => {
+                let document = self.string_operand(frame_index, *document)?;
+                let parsed = zirk_runtime_core::json::validate_document(&document)
+                    .ok()
+                    .and_then(|()| serde_json::from_str::<serde_json::Value>(&document).ok());
+                let value = if let Some(parsed) = parsed {
+                    let mut budget = 100_000usize;
+                    Some(Box::new(self.json_dynamic_value(
+                        parsed,
+                        *list_dynamic_id,
+                        0,
+                        &mut budget,
+                    )?))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(value)))
             }
             InstKind::BuildValue { class, fields } => {
                 let fields = fields
@@ -3809,7 +4410,7 @@ impl<'module> Interpreter<'module> {
                     std::mem::size_of::<HeapEntry>() + fields.len() * std::mem::size_of::<Value>();
                 self.heap
                     .allocate(
-                        HeapEntry::Record {
+                        HeapEntry::Tuple {
                             layout: *class,
                             fields,
                         },
@@ -3887,7 +4488,7 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 let position = match entry {
-                    HeapEntry::Object { .. } | HeapEntry::Record { .. } => *index as usize,
+                    HeapEntry::Object { .. } | HeapEntry::Tuple { .. } => *index as usize,
                     HeapEntry::Enum {
                         layout, variant, ..
                     } => {
@@ -3920,7 +4521,7 @@ impl<'module> Interpreter<'module> {
                 };
                 let fields = match entry {
                     HeapEntry::Object { fields, .. }
-                    | HeapEntry::Record { fields, .. }
+                    | HeapEntry::Tuple { fields, .. }
                     | HeapEntry::Enum { fields, .. } => fields,
                     _ => unreachable!(),
                 };
@@ -3939,7 +4540,7 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 let value = self.value(frame_index, *value)?;
-                let Some(HeapEntry::Object { layout, fields }) = self.heap.get_mut(id) else {
+                let Some(HeapEntry::Object { layout, fields, .. }) = self.heap.get_mut(id) else {
                     return Err(ExecutionFault::Internal(
                         "StoreField writes a heap value that is not an object".into(),
                     ));
@@ -5004,7 +5605,16 @@ impl<'module> Interpreter<'module> {
             .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
             .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
         self.heap
-            .allocate(HeapEntry::Object { layout, fields }, bytes, self.limits)
+            .allocate(
+                HeapEntry::Object {
+                    layout,
+                    fields,
+                    properties: Vec::new(),
+                    sealed: false,
+                },
+                bytes,
+                self.limits,
+            )
             .map(Value::Heap)
             .map_err(ExecutionFault::Limit)
     }
@@ -6015,11 +6625,40 @@ impl<'module> Interpreter<'module> {
         let result = self.clone_value(root, &mut cloned, &mut pending)?;
         while let Some(destination) = pending.pop() {
             let patched = match self.heap.get(destination).cloned() {
-                Some(HeapEntry::Object { layout, fields }) => HeapEntry::Object {
+                Some(HeapEntry::Object {
                     layout,
-                    fields: self.clone_values(fields, &mut cloned, &mut pending)?,
+                    fields,
+                    properties,
+                    sealed,
+                }) => {
+                    let mut cloned_properties = Vec::with_capacity(properties.len());
+                    for (key, value) in properties {
+                        cloned_properties
+                            .push((key, self.clone_value(value, &mut cloned, &mut pending)?));
+                    }
+                    HeapEntry::Object {
+                        layout,
+                        fields: self.clone_values(fields, &mut cloned, &mut pending)?,
+                        properties: cloned_properties,
+                        sealed,
+                    }
+                }
+                Some(HeapEntry::DynamicObject { properties, sealed }) => {
+                    let mut cloned_properties = Vec::with_capacity(properties.len());
+                    for (key, value) in properties {
+                        cloned_properties
+                            .push((key, self.clone_value(value, &mut cloned, &mut pending)?));
+                    }
+                    HeapEntry::DynamicObject {
+                        properties: cloned_properties,
+                        sealed,
+                    }
+                }
+                Some(HeapEntry::DynamicValue { ty, value }) => HeapEntry::DynamicValue {
+                    ty,
+                    value: Box::new(self.clone_value(*value, &mut cloned, &mut pending)?),
                 },
-                Some(HeapEntry::Record { layout, fields }) => HeapEntry::Record {
+                Some(HeapEntry::Tuple { layout, fields }) => HeapEntry::Tuple {
                     layout,
                     fields: self.clone_values(fields, &mut cloned, &mut pending)?,
                 },
@@ -6109,9 +6748,14 @@ impl<'module> Interpreter<'module> {
                     | HeapEntry::Regex(_)
                     | HeapEntry::Range(_)
                     | HeapEntry::RuntimeError { .. } => return Ok(Value::Heap(source)),
+                    HeapEntry::JsonNumber(_) => return Ok(Value::Heap(source)),
                     HeapEntry::Object { fields, .. }
-                    | HeapEntry::Record { fields, .. }
+                    | HeapEntry::Tuple { fields, .. }
                     | HeapEntry::Enum { fields, .. } => (entry.clone(), fields.len()),
+                    HeapEntry::DynamicObject { properties, .. } => {
+                        (entry.clone(), properties.len())
+                    }
+                    HeapEntry::DynamicValue { .. } => (entry.clone(), 1),
                     HeapEntry::Closure { captures, .. } => (entry.clone(), captures.len()),
                     HeapEntry::Array(values) | HeapEntry::List(values) | HeapEntry::Set(values) => {
                         (entry.clone(), values.len())
@@ -6224,7 +6868,7 @@ impl<'module> Interpreter<'module> {
                     Some(object) => format!("#{object}"),
                     None => String::new(),
                 },
-                Some(HeapEntry::Record { .. }) => "<record>".into(),
+                Some(HeapEntry::Tuple { .. }) => "<tuple>".into(),
                 Some(HeapEntry::Enum { .. }) => "<enum>".into(),
                 Some(HeapEntry::List(_)) => "<list>".into(),
                 Some(HeapEntry::Array(_)) => "<array>".into(),
@@ -6389,6 +7033,166 @@ impl<'module> Interpreter<'module> {
                 "ToString is not defined for {value:?}"
             ))),
         }
+    }
+
+    fn json_value(
+        &self,
+        value: &Value,
+        active: &mut std::collections::HashSet<HeapId>,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Result<serde_json::Value, ()> {
+        if depth > 128 || *budget == 0 {
+            return Err(());
+        }
+        *budget -= 1;
+        match value {
+            Value::Int(value) => {
+                let text = if value.width.signed() {
+                    value.signed().to_string()
+                } else {
+                    value.unsigned().to_string()
+                };
+                serde_json::from_str(&text).map_err(|_| ())
+            }
+            Value::Float {
+                width: FloatWidth::F128,
+                ..
+            } => Err(()),
+            Value::Float { text, .. } | Value::Decimal(text) => {
+                serde_json::from_str(text).map_err(|_| ())
+            }
+            Value::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
+            Value::Nullable(None) => Ok(serde_json::Value::Null),
+            Value::Nullable(Some(value)) => self.json_value(value, active, depth + 1, budget),
+            Value::Heap(id) => match self.heap.get(*id).ok_or(())? {
+                HeapEntry::String(value) | HeapEntry::Char(value) => {
+                    Ok(serde_json::Value::String(value.clone()))
+                }
+                HeapEntry::JsonNumber(value) => serde_json::from_str(value).map_err(|_| ()),
+                HeapEntry::DynamicValue { value, .. } => {
+                    self.json_value(value, active, depth + 1, budget)
+                }
+                HeapEntry::DynamicObject { properties, .. }
+                | HeapEntry::Object { properties, .. } => {
+                    if !active.insert(*id) {
+                        return Err(());
+                    }
+                    let mut result = serde_json::Map::new();
+                    for (key, value) in properties {
+                        result.insert(
+                            key.clone(),
+                            self.json_value(value, active, depth + 1, budget)?,
+                        );
+                    }
+                    active.remove(id);
+                    Ok(serde_json::Value::Object(result))
+                }
+                HeapEntry::Array(values) | HeapEntry::List(values) => {
+                    if !active.insert(*id) {
+                        return Err(());
+                    }
+                    let mut result = Vec::with_capacity(values.len());
+                    for value in values {
+                        result.push(self.json_value(value, active, depth + 1, budget)?);
+                    }
+                    active.remove(id);
+                    Ok(serde_json::Value::Array(result))
+                }
+                _ => Err(()),
+            },
+            _ => Err(()),
+        }
+    }
+
+    fn json_dynamic_value(
+        &mut self,
+        value: serde_json::Value,
+        list_dynamic_id: u32,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Result<Value, ExecutionFault> {
+        if depth > zirk_runtime_core::json::MAX_NESTING_DEPTH || *budget == 0 {
+            return Err(ExecutionFault::Runtime {
+                category: "JsonConversionError".into(),
+                message: "JSON document exceeds the supported nesting or value limit".into(),
+            });
+        }
+        *budget -= 1;
+        let (ty, value) = match value {
+            serde_json::Value::Null => (
+                IrType::Nullable(zirk_ir::Nullable::ObjectAny),
+                Value::Nullable(None),
+            ),
+            serde_json::Value::Bool(value) => (IrType::Boolean, Value::Boolean(value)),
+            serde_json::Value::String(value) => {
+                (IrType::String, Value::Heap(self.allocate_string(value)?))
+            }
+            serde_json::Value::Number(number) => {
+                let token = number.to_string();
+                let bytes = std::mem::size_of::<HeapEntry>() + token.len();
+                let id = self
+                    .heap
+                    .allocate(HeapEntry::JsonNumber(token), bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                (IrType::Dynamic, Value::Heap(id))
+            }
+            serde_json::Value::Array(values) => {
+                let mut result = Vec::with_capacity(values.len());
+                for value in values {
+                    result.push(self.json_dynamic_value(
+                        value,
+                        list_dynamic_id,
+                        depth + 1,
+                        budget,
+                    )?);
+                }
+                let bytes =
+                    std::mem::size_of::<HeapEntry>() + result.len() * std::mem::size_of::<Value>();
+                let id = self
+                    .heap
+                    .allocate(HeapEntry::List(result), bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                (IrType::List(list_dynamic_id), Value::Heap(id))
+            }
+            serde_json::Value::Object(properties) => {
+                let mut result = Vec::with_capacity(properties.len());
+                let mut bytes = std::mem::size_of::<HeapEntry>();
+                for (key, value) in properties {
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<(String, Value)>())
+                        .saturating_add(key.len());
+                    result.push((
+                        key,
+                        self.json_dynamic_value(value, list_dynamic_id, depth + 1, budget)?,
+                    ));
+                }
+                let id = self
+                    .heap
+                    .allocate(
+                        HeapEntry::DynamicObject {
+                            properties: result,
+                            sealed: false,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map_err(ExecutionFault::Limit)?;
+                (IrType::ObjectAny, Value::Heap(id))
+            }
+        };
+        let bytes = std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>();
+        self.heap
+            .allocate(
+                HeapEntry::DynamicValue {
+                    ty,
+                    value: Box::new(value),
+                },
+                bytes,
+                self.limits,
+            )
+            .map(Value::Heap)
+            .map_err(ExecutionFault::Limit)
     }
 
     fn ensure_string_allocation_fits(&self, text_bytes: usize) -> Result<(), ExecutionFault> {
@@ -6628,6 +7432,18 @@ impl<'module> Interpreter<'module> {
             .ok_or_else(|| format!("operand {operand:?} is unavailable"))
     }
 
+    fn operand_type(&self, frame_index: usize, operand: zirk_ir::Operand) -> Option<IrType> {
+        let function_index = self.frames.get(frame_index)?.function;
+        self.module
+            .functions
+            .get(function_index)?
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find(|instruction| instruction.result == Some(operand.0))
+            .map(|instruction| instruction.ty)
+    }
+
     fn object_layout(
         &self,
         frame_index: usize,
@@ -6793,9 +7609,9 @@ impl<'module> Interpreter<'module> {
         }
     }
 
-    /// Value records and algebraic enums are compared by their visible
-    /// fields. Objects retain reference identity: giving records a heap slot
-    /// is only an arena implementation detail, never a language observable.
+    /// Tuples and algebraic enums are compared by their visible fields.
+    /// Objects retain reference identity: heap allocation is not structural
+    /// equality for reference values.
     fn value_equals(&self, left: HeapId, right: HeapId) -> bool {
         if left == right {
             return true;
@@ -6807,11 +7623,11 @@ impl<'module> Interpreter<'module> {
             (Some(HeapEntry::Char(left)), Some(HeapEntry::Char(right)))
             | (Some(HeapEntry::Regex(left)), Some(HeapEntry::Regex(right))) => left == right,
             (
-                Some(HeapEntry::Record {
+                Some(HeapEntry::Tuple {
                     layout: left_layout,
                     fields: left_fields,
                 }),
-                Some(HeapEntry::Record {
+                Some(HeapEntry::Tuple {
                     layout: right_layout,
                     fields: right_fields,
                 }),
@@ -7074,6 +7890,8 @@ pub const fn type_support(ty: IrType) -> BrowserSupport {
         | IrType::Closure(_)
         | IrType::Callable(_)
         | IrType::Object(_)
+        | IrType::ObjectAny
+        | IrType::Dynamic
         | IrType::Contract(_)
         | IrType::Value(_)
         | IrType::Enum(_) => BrowserSupport::Direct,
@@ -7396,6 +8214,19 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::DependentFrom { .. }
         | InstKind::PinObject { .. }
         | InstKind::UnpinObject { .. } => BrowserSupport::Excluded,
+        InstKind::ObjectNew
+        | InstKind::ObjectSeal { .. }
+        | InstKind::DynamicObjectUnbox { .. }
+        | InstKind::ObjectConform { .. }
+        | InstKind::DynamicPack { .. }
+        | InstKind::DynamicIsType { .. }
+        | InstKind::DynamicUnbox { .. }
+        | InstKind::ObjectSet { .. }
+        | InstKind::ObjectGet { .. }
+        | InstKind::ObjectMerge { .. }
+        | InstKind::ObjectRest { .. }
+        | InstKind::JsonStringifyDynamic { .. }
+        | InstKind::JsonParseDynamic { .. } => BrowserSupport::RuntimeCore,
     }
 }
 
@@ -10036,7 +10867,7 @@ mod tests {
     }
 
     #[test]
-    fn records_and_enums_preserve_fields_and_discriminants() {
+    fn tuples_and_enums_preserve_fields_and_discriminants() {
         use zirk_ir::{EnumLayout, ObjectField, Operand, ValueLayout};
         let span = Span::empty(0);
         let ty = IrType::Int(IntWidth::I32);
@@ -10113,7 +10944,7 @@ mod tests {
     }
 
     #[test]
-    fn records_are_structural_values_but_keep_object_identity_separate() {
+    fn tuples_are_structural_values_but_keep_object_identity_separate() {
         use zirk_ir::{ObjectField, Operand, ValueLayout};
         let span = Span::empty(0);
         let int_type = IrType::Int(IntWidth::I32);
@@ -10563,6 +11394,478 @@ mod tests {
                 value: Some(int(IntWidth::I32, 42))
             }
         );
+    }
+
+    #[test]
+    fn dynamic_object_get_preserves_the_boxed_property_in_the_interpreter() {
+        use zirk_ir::{Nullable, StringId};
+        let span = Span::empty(0);
+        let instructions = vec![
+            Instruction {
+                result: Some(ValueId(0)),
+                kind: InstKind::ObjectNew,
+                ty: IrType::ObjectAny,
+                span,
+            },
+            Instruction {
+                result: Some(ValueId(1)),
+                kind: InstKind::ConstString(StringId(0)),
+                ty: IrType::String,
+                span,
+            },
+            Instruction {
+                result: Some(ValueId(2)),
+                kind: InstKind::ConstString(StringId(1)),
+                ty: IrType::String,
+                span,
+            },
+            Instruction {
+                result: Some(ValueId(3)),
+                kind: InstKind::DynamicPack {
+                    value: Operand(ValueId(2)),
+                },
+                ty: IrType::Dynamic,
+                span,
+            },
+            Instruction {
+                result: Some(ValueId(4)),
+                kind: InstKind::ObjectSet {
+                    object: Operand(ValueId(0)),
+                    key: Operand(ValueId(1)),
+                    value: Operand(ValueId(3)),
+                },
+                ty: IrType::Int(IntWidth::I32),
+                span,
+            },
+            Instruction {
+                result: Some(ValueId(5)),
+                kind: InstKind::ObjectGet {
+                    object: Operand(ValueId(0)),
+                    key: Operand(ValueId(1)),
+                },
+                ty: IrType::Nullable(Nullable::Dynamic),
+                span,
+            },
+        ];
+        let module = Module {
+            strings: vec!["message".into(), "hello".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Nullable(Nullable::Dynamic),
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions,
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(5))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Nullable(Some(boxed))),
+        } = interpreter.run_main()
+        else {
+            panic!("the property lookup returns a present Dynamic value")
+        };
+        let Value::Heap(id) = *boxed else {
+            panic!("the property value is represented by a Dynamic box")
+        };
+        assert!(matches!(
+            interpreter.heap.get(id),
+            Some(HeapEntry::DynamicValue {
+                ty: IrType::String,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn class_instances_retain_dynamic_properties_in_the_interpreter() {
+        use zirk_ir::{Nullable, ObjectLayout, StringId};
+        let span = Span::empty(0);
+        let module = Module {
+            strings: vec!["note".into(), "hello".into()],
+            objects: vec![ObjectLayout {
+                name: "Box".into(),
+                fields: Vec::new(),
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: vec![0],
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Nullable(Nullable::Dynamic),
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::Retype(Operand(ValueId(0))),
+                            ty: IrType::ObjectAny,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::ConstString(StringId(0)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstString(StringId(1)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::DynamicPack {
+                                value: Operand(ValueId(3)),
+                            },
+                            ty: IrType::Dynamic,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(5)),
+                            kind: InstKind::ObjectSet {
+                                object: Operand(ValueId(1)),
+                                key: Operand(ValueId(2)),
+                                value: Operand(ValueId(4)),
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(6)),
+                            kind: InstKind::ObjectGet {
+                                object: Operand(ValueId(1)),
+                                key: Operand(ValueId(2)),
+                            },
+                            ty: IrType::Nullable(Nullable::Dynamic),
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(6))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Nullable(Some(boxed))),
+        } = interpreter.run_main()
+        else {
+            panic!("class property lookup returns a present Dynamic value")
+        };
+        let Value::Heap(id) = *boxed else {
+            panic!("the class property is represented by a Dynamic box")
+        };
+        assert!(matches!(
+            interpreter.heap.get(id),
+            Some(HeapEntry::DynamicValue {
+                ty: IrType::String,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn class_declared_fields_are_read_and_written_through_object_views() {
+        use zirk_ir::{Nullable, ObjectField, ObjectLayout, StringId};
+        let span = Span::empty(0);
+        let module = Module {
+            strings: vec!["name".into(), "Ada".into(), "Grace".into()],
+            objects: vec![ObjectLayout {
+                name: "User".into(),
+                fields: vec![ObjectField {
+                    name: "name".into(),
+                    ty: IrType::String,
+                }],
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: vec![0],
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Nullable(Nullable::Dynamic),
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::ConstString(StringId(1)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: None,
+                            kind: InstKind::StoreField {
+                                object: Operand(ValueId(0)),
+                                index: 0,
+                                value: Operand(ValueId(1)),
+                            },
+                            ty: IrType::Void,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::Retype(Operand(ValueId(0))),
+                            ty: IrType::ObjectAny,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstString(StringId(0)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::ConstString(StringId(2)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(5)),
+                            kind: InstKind::DynamicPack {
+                                value: Operand(ValueId(4)),
+                            },
+                            ty: IrType::Dynamic,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(6)),
+                            kind: InstKind::ObjectSet {
+                                object: Operand(ValueId(2)),
+                                key: Operand(ValueId(3)),
+                                value: Operand(ValueId(5)),
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(7)),
+                            kind: InstKind::ObjectGet {
+                                object: Operand(ValueId(2)),
+                                key: Operand(ValueId(3)),
+                            },
+                            ty: IrType::Nullable(Nullable::Dynamic),
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(7))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Nullable(Some(boxed))),
+        } = interpreter.run_main()
+        else {
+            panic!("class property lookup should return a present Dynamic value")
+        };
+        let Value::Heap(id) = *boxed else {
+            panic!("class property lookup should box its declared value")
+        };
+        let Some(HeapEntry::DynamicValue {
+            ty: IrType::String,
+            value,
+        }) = interpreter.heap.get(id)
+        else {
+            panic!("class property lookup should preserve the declared String type")
+        };
+        let Value::Heap(string) = **value else {
+            panic!("the dynamic String payload should retain its managed handle")
+        };
+        assert_eq!(
+            interpreter.heap.get(string),
+            Some(&HeapEntry::String("Grace".into()))
+        );
+    }
+
+    #[test]
+    fn sealed_dynamic_object_rejects_a_new_key_with_a_contract_status() {
+        use zirk_ir::{ObjectLayout, StringId};
+        let span = Span::empty(0);
+        let module = Module {
+            strings: vec!["new_key".into(), "value".into()],
+            objects: vec![ObjectLayout {
+                name: "Box".into(),
+                fields: Vec::new(),
+                contracts: Vec::new(),
+                methods: Vec::new(),
+                ancestors: vec![0],
+            }],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Int(IntWidth::I32),
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::Alloc(0),
+                            ty: IrType::Object(0),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::Retype(Operand(ValueId(0))),
+                            ty: IrType::ObjectAny,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::ObjectSeal {
+                                object: Operand(ValueId(1)),
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::ConstString(StringId(0)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(4)),
+                            kind: InstKind::ConstString(StringId(1)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(5)),
+                            kind: InstKind::DynamicPack {
+                                value: Operand(ValueId(4)),
+                            },
+                            ty: IrType::Dynamic,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(6)),
+                            kind: InstKind::ObjectSet {
+                                object: Operand(ValueId(1)),
+                                key: Operand(ValueId(3)),
+                                value: Operand(ValueId(5)),
+                            },
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(6))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        assert_eq!(
+            interpreter.run_main(),
+            ExecutionResult::Completed {
+                value: Some(int(IntWidth::I32, 1))
+            }
+        );
+    }
+
+    #[test]
+    fn dynamic_values_can_be_checked_and_unboxed_by_type_tag() {
+        use zirk_ir::StringId;
+        let span = Span::empty(0);
+        let tag = IrType::String.dynamic_tag().unwrap();
+        let module = Module {
+            strings: vec!["payload".into()],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::String,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstString(StringId(0)),
+                            ty: IrType::String,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::DynamicPack {
+                                value: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Dynamic,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::DynamicIsType {
+                                value: Operand(ValueId(1)),
+                                tag,
+                            },
+                            ty: IrType::Boolean,
+                            span,
+                        },
+                        Instruction {
+                            result: Some(ValueId(3)),
+                            kind: InstKind::DynamicUnbox {
+                                value: Operand(ValueId(1)),
+                                tag,
+                            },
+                            ty: IrType::String,
+                            span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(3))))),
+                }],
+                entry: BlockId(0),
+                span,
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::Completed {
+            value: Some(Value::Heap(id)),
+        } = interpreter.run_main()
+        else {
+            panic!("the checked Dynamic payload returns its original String")
+        };
+        assert!(matches!(
+            interpreter.heap.get(id),
+            Some(HeapEntry::String(text)) if text == "payload"
+        ));
     }
 
     #[test]

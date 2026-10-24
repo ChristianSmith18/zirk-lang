@@ -130,7 +130,7 @@ free boundaries.
 ## 4. Deterministic resources
 
 ```zirk
-interface Resource<E from Error> {
+contract Resource<E from Error> {
     close(): Result<Void, E>;
     is_closed(): Boolean;
 }

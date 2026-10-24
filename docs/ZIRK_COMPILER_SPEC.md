@@ -122,8 +122,10 @@ package.zpkg
 └── documentation
 ```
 
-`public.api` exposes only types, signatures, traits, interfaces, decorator
-contracts and documentation. The portable implementation is transformed to the
+`public.api` exposes only types, signatures, contracts, traits, decorator
+contracts and documentation. Dynamic object layouts remain runtime-managed;
+contract views expose declared structural members without changing identity.
+The portable implementation is transformed to the
 target during the application build. Core, runtime, stdlib, dependencies and
 application code must all align to the same target and ABI.
 

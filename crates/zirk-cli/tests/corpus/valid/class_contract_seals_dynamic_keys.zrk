@@ -1,0 +1,33 @@
+import { stdout } from std.io;
+
+contract Named {
+    mut name: String;
+}
+
+class User implements Named {
+    mut name: String;
+
+    construct(name: String) {
+        this.name = name;
+    }
+}
+
+fn main(): Void {
+    mut user = User("Ada");
+    inmut open: Object = user;
+    open.extra = "kept";
+
+    inmut named: Named = user;
+    stdout.println(named.name);
+    named.name = "Grace";
+    stdout.println(open.name as String);
+    try {
+        open.another = "rejected";
+        stdout.println("unexpected key insertion");
+    } catch ContractViolationError(error) {
+        stdout.println("contract sealed the dynamic key set");
+    }
+
+    inmut extra: String = open.extra as String;
+    stdout.println("retained extra property:", extra);
+}

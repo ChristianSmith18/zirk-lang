@@ -1,0 +1,18 @@
+import { stdout } from std.io;
+
+class Inner {
+    a: Int32;
+    construct(a: Int32) { this.a = a; }
+}
+class Outer {
+    inner: Inner;
+    construct(inner: Inner) { this.inner = inner; }
+}
+
+fn main(): Void {
+    mut o: Outer = Outer(Inner(7));
+    unsafe {
+        mut p: Pointer<Int32> = Pointer.from (o.inner.a);
+        stdout.println(p.read());
+    }
+}

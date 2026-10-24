@@ -8,26 +8,6 @@ This is where the rules of `ZIRK_LANGUAGE_SPEC.md` that most often surprise some
 
 ## Requirements
 
-### Requirement: Runtime type identity is safe and representation-independent
-Every value and declared type MUST expose compiler-provided `Type` identity.
-Identity SHALL distinguish constructed generic arguments and provide broad
-`TypeKind`, safe names, and declared implements/extends relationships without
-exposing layout, private members, or optimized representation. Value type
-observation and checked casts SHALL remain separate operations.
-
-#### Scenario: Interface value contains a concrete class
-- **WHEN** `value` is declared as an interface and contains an implementing class instance
-- **THEN** `value.type()` identifies the concrete class
-- **AND** the interface's own kind remains available through `InterfaceName.type()`
-
-#### Scenario: Constructed generic types share optimized code
-- **WHEN** two constructed generic types reuse an implementation representation
-- **THEN** their `Type` identities remain distinct when their type arguments differ
-
-#### Scenario: A user-declared generic enum instantiates like a compiler-native one
-- **WHEN** a program declares `enum Bar<T> { ... }` and instantiates it as `Bar<Int32>`
-- **THEN** the instantiation lowers to its own concrete layout, the same mechanism already used for `Result<T,E>`
-
 ### Requirement: Structural runtime metadata is explicitly generated
 General runtime reflection MUST NOT enumerate members, invoke string-named
 methods, access fields dynamically, retain decorators automatically, or expose
@@ -477,43 +457,6 @@ User-defined types SHALL implement language operator contracts through reserved 
 - **WHEN** application code attempts to replace `_add` on `String` or a numeric native type
 - **THEN** the checker rejects reopening the native type
 
-### Requirement: Value, enum, array, iteration, and generator semantics
-Records SHALL be immutable with structural field equality; an unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index; all arrays SHALL have fixed length; contextual collection literals SHALL infer `Array<T>` by default or select `List<T>` from context; range elements and constructor arguments SHALL expand before element-type unification and allocation; fixed declarations `T[n]` SHALL produce an `Array<T>` with exactly `n` slots; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Holding a `record` through a contract-typed reference SHALL NOT grant it observable identity or a mutation path back to the original value.
-
-#### Scenario: Enum default and explicit mapping
-- **WHEN** `Direction.North` has no mapping and `Code.North` maps to `"N"`
-- **THEN** their observable mapped strings are `"North"` and `"N"` respectively, while both values retain their enum types
-
-#### Scenario: Fixed inferred array
-- **WHEN** an array literal contains three elements
-- **THEN** its length is fixed at three and append/remove operations are rejected
-
-#### Scenario: Contextual list typing
-
-- **WHEN** `inmut xs: List<Int32> = [0..3]` is written
-- **THEN** the literal type is `List<Int32>` and its length is `3`
-
-#### Scenario: Fixed array typing
-
-- **WHEN** `inmut xs: Int32[6];` is declared
-- **THEN** `xs` has fixed `Array<Int32>` type and length `6`
-
-#### Scenario: Structural field equality compares every field
-- **WHEN** `==` compares two values of the same `record` type
-- **THEN** the result is the conjunction of each field's own equality, recursing into a nested `record` field
-
-#### Scenario: Structural field equality short-circuits on the first difference
-- **WHEN** two `record` values differ in their first field
-- **THEN** `==` evaluates `false` without necessarily comparing the remaining fields
-
-#### Scenario: A contract-typed view of a record grants no new identity
-- **WHEN** the same `record` value is held through two separately-produced contract-typed references
-- **THEN** `is` between them is not guaranteed `true`, and neither reference exposes a way to mutate the original value's storage
-
-#### Scenario: String iteration
-- **WHEN** a string is consumed by `for ... in`
-- **THEN** iteration produces the string's public character units in order
-
 ### Requirement: Bound callable cloning and pipelines
 `clone(receiver.method)` SHALL produce a local callable bound to the same receiver and preserving the method's parameters, result, effects, errors, permissions, and safety contract without cloning the receiver. The pipe operator SHALL pass its left value into the next ordinary function and SHALL NOT require that function to be a method of the value's class.
 
@@ -524,13 +467,6 @@ Records SHALL be immutable with structural field equality; an unmapped tradition
 #### Scenario: Pure-function pipeline
 - **WHEN** `users |> filter(is_active) |> map(to_summary)` is checked
 - **THEN** each stage is checked as an ordinary typed function receiving the previous stage's result
-
-### Requirement: Public type taxonomy
-The language SHALL distinguish compiler primitives, native reference types, user-defined value/reference types, and special types while retaining `Object` as their conceptual root. Storage inline or behind a reference SHALL NOT remove a value from the common type and contract system.
-
-#### Scenario: Primitive with methods
-- **WHEN** an `Int32` value invokes `abs()` or `to_string()`
-- **THEN** the operation resolves through its native capabilities without boxing being observable
 
 ### Requirement: Fractional scalar family names
 
@@ -723,13 +659,6 @@ The final language type system SHALL support structural `Fn` adaptation, escapin
 - **WHEN** the current compiler phase does not yet implement escaping closures
 - **THEN** its diagnostic identifies the delivery phase while documentation retains the final legal Fn semantics
 
-### Requirement: Default initialization and immutable data
-Every omitted attribute SHALL receive its type default. Construction MAY finalize an `inmut` attribute before the object becomes available. Records and tuples SHALL remain immutable values; enums SHALL remain closed data without user methods; collections SHALL enforce referent permissions and strict aliases.
-
-#### Scenario: Omitted class attribute
-- **WHEN** an Int32 class attribute has no initializer and construct does not replace it
-- **THEN** its value is zero after construction
-
 ### Requirement: Failure effects and Result consumption are checked
 The checker SHALL require explicit exceptions to be handled or declared, SHALL propagate declared exception sets through calls and callable compatibility, SHALL permit documented implicit `RuntimeError` exceptions without signature declaration, and SHALL reject an unconsumed `Result` except through explicit discard.
 
@@ -765,26 +694,6 @@ Transferability and shareability SHALL be compiler-derived, non-forgeable proper
 - **WHEN** a class safely encapsulates mutable state behind a supported mutex
 - **THEN** the compiler may derive sharing without exposing an ordinary user-implemented marker
 
-### Requirement: Nominal types and subtyping
-
-The checker SHALL treat every class, record and enum as a distinct nominal type, and SHALL accept a value where one of its superclasses or an implemented contract is expected.
-
-#### Scenario: Subclass where base is expected
-- **WHEN** an instance of `Admin` is passed to a parameter of type `User`
-- **THEN** the check succeeds
-
-#### Scenario: Implementation where contract is expected
-- **WHEN** an instance is passed to a parameter whose type is a contract it implements
-- **THEN** the check succeeds
-
-#### Scenario: Two types with the same shape are not the same type
-- **WHEN** two classes declare the same fields and one is assigned where the other is expected
-- **THEN** a diagnostic is emitted: equivalence is by name, not by shape
-
-#### Scenario: Base where subclass is expected
-- **WHEN** an instance of `User` is passed to a parameter of type `Admin`
-- **THEN** a diagnostic is emitted
-
 ### Requirement: Member resolution
 
 The checker SHALL resolve an `expr.member` access against the type of `expr` and its inheritance chain, respecting visibility.
@@ -812,17 +721,6 @@ The checker SHALL reject a local declaration that hides another still-visible lo
 #### Scenario: Parameter and capture collision
 - **WHEN** a lambda declares parameter `prefix` and reads `this.prefix`
 - **THEN** `prefix` resolves to the parameter and `this.prefix` to the outer capture
-
-### Requirement: Object reference strictness
-
-For class references, `mut` SHALL permit rebinding and mutating the object,
-`inmut` SHALL prevent only rebinding, and `inmut::strict` SHALL prevent
-reachable mutation. A strict reference SHALL NOT become a mutable alias or be
-acquired while a mutable alias remains accessible.
-
-#### Scenario: Mutable clone from a strict reference
-- **WHEN** a strict object implements `Clone` and is cloned to a `mut` binding
-- **THEN** the independent clone can be mutated without altering the original object
 
 ### Requirement: Constructor resolution
 
@@ -1038,18 +936,6 @@ The checker SHALL apply the `Transfer` and `Share` rules at every concurrent-bra
 - **WHEN** a branch body captures `users[0]` rather than `users`
 - **THEN** the child receives the independent projected value and the parent's later list mutations do not affect it
 
-### Requirement: Object spread and rest typing
-
-Object spread SHALL require a known nominal record/object shape, SHALL verify field compatibility and override types, and SHALL produce a value of that shape. Object rest destructuring SHALL bind selected fields to their declared types and the remainder to a record-compatible type containing exactly the unselected fields.
-
-#### Scenario: Object spread type checking
-- **WHEN** `{ ...profile, active: false }` is assigned to `UserProfile`
-- **THEN** the expression has type `UserProfile` and `active` is `Boolean`
-
-#### Scenario: Invalid object spread field
-- **WHEN** an object spread adds an unknown field to a nominal record
-- **THEN** a field/type diagnostic is emitted
-
 ### Requirement: Job handle type
 
 `Job<T>` SHALL be a known one-parameter generic type. `spawn expr` SHALL be typed
@@ -1199,3 +1085,92 @@ only inside an `unsafe` context. Outside `unsafe`, an atomic operation SHALL use
 #### Scenario: relaxed outside unsafe
 - **WHEN** `counter.load(order: AtomicOrder.relaxed)` is checked outside `unsafe`
 - **THEN** compilation fails
+
+### Requirement: Object and Dynamic have distinct typing roles
+`Object` SHALL type reference-based dynamic objects only and SHALL NOT accept scalar values through implicit widening. `Dynamic` SHALL represent a runtime-tagged value obtained from an object property whose static type is unknown. A `Dynamic` value SHALL require a checked type test, pattern match, or checked cast before use as a concrete type.
+
+#### Scenario: Scalar does not widen to Object
+- **WHEN** an `Int32` is assigned to `Object`
+- **THEN** the checker rejects the assignment
+
+#### Scenario: Dynamic access requires narrowing
+- **WHEN** a `Dynamic` value is passed to a function requiring `String` without a check
+- **THEN** the checker reports that narrowing is required
+
+### Requirement: Runtime type identity remains concrete under contract views
+Runtime type identity SHALL identify the concrete class or `Object` allocation. Viewing a value through a contract SHALL NOT create a distinct runtime type identity or alter the underlying object's identity. Contract compatibility SHALL remain a structural type-checking operation.
+
+#### Scenario: Contract view preserves the concrete runtime type
+- **WHEN** a class instance or dynamic object is held through a contract-typed binding
+- **THEN** runtime type inspection identifies the underlying class or `Object`, not a new nominal contract type
+
+### Requirement: Nominal classes and structural contracts are distinct
+Classes and enums SHALL retain nominal type identity. Class references SHALL be assignable to the `Object` reference view without changing identity; scalars, tuples, and enums SHALL NOT widen to `Object`. A value SHALL be accepted by a contract type when it structurally satisfies the contract, even if it does not declare a nominal inheritance relationship. Two class types with the same shape SHALL remain distinct.
+
+#### Scenario: Dynamic object conforms structurally
+- **WHEN** an object has all required contract properties and operations with compatible types
+- **THEN** it is accepted through that contract view
+
+#### Scenario: Same-shaped classes remain distinct
+- **WHEN** a value of one class is assigned to another class with the same members
+- **THEN** the checker rejects the assignment
+
+#### Scenario: Class reference widens to Object
+- **WHEN** an instance of a class is assigned to `Object`
+- **THEN** the reference identity is preserved and dynamic property access becomes available
+
+### Requirement: Reference mutability applies to classes and dynamic objects
+For class and `Object` references, `mut` SHALL permit rebinding and referent mutation, `inmut` SHALL prevent rebinding while permitting referent mutation, and `inmut::strict` SHALL prevent reachable mutation. A strict reference SHALL NOT become a mutable alias or be acquired while a mutable alias remains accessible.
+
+#### Scenario: Strict dynamic object prevents property mutation
+- **WHEN** an object is reachable only through an `inmut::strict Object` binding and code writes one of its properties
+- **THEN** the checker rejects the mutation
+
+### Requirement: Collections and enum semantics remain unchanged
+An unmapped traditional enum case SHALL expose its exact case name as its default string value and no implicit numeric index. Arrays SHALL have fixed length; contextual collection literals SHALL infer `Array<T>` by default or select `List<T>` from context; range elements SHALL expand before type unification and allocation; `String` SHALL be iterable; and a generator SHALL be both `Iterator<T>` and `Iterable<T>` while preserving locals between yields. Tuples and enums SHALL retain their documented value behavior. Dynamic objects SHALL use reference identity and SHALL NOT gain structural equality implicitly.
+
+#### Scenario: Enum default and explicit mapping
+- **WHEN** `Direction.North` has no mapping and `Code.North` maps to `"N"`
+- **THEN** their observable mapped strings are `"North"` and `"N"` respectively, while both retain their enum types
+
+#### Scenario: Fixed inferred array
+- **WHEN** an array literal contains three elements
+- **THEN** its length is fixed at three and append/remove operations are rejected
+
+#### Scenario: Contextual list typing
+- **WHEN** `inmut xs: List<Int32> = [0..3]` is written
+- **THEN** the literal has type `List<Int32>` and length `3`
+
+#### Scenario: String iteration
+- **WHEN** a string is consumed by `for ... in`
+- **THEN** iteration produces the string's public character units in order
+
+### Requirement: Object property operations obey mutability and presence
+Named and computed access on `Object` SHALL resolve dynamically unless a statically known contract view supplies a type. Adding, replacing, and removing properties SHALL follow existing reference mutability, including the distinction between `inmut` and `inmut::strict`. Reading a missing property directly SHALL raise a catchable missing-property error; an explicit presence-safe lookup SHALL return an optional result without throwing. Once any contract is successfully applied, no alias SHALL add or remove keys.
+
+#### Scenario: Mutable object adds a property
+- **WHEN** a property is assigned through a mutable `Object` binding before contract conformance
+- **THEN** the property is added with its runtime value type preserved
+
+#### Scenario: Strict binding cannot mutate properties
+- **WHEN** a property is assigned through an `inmut::strict Object` binding
+- **THEN** the checker rejects the mutation
+
+#### Scenario: Direct read of a missing property
+- **WHEN** code reads a missing key with direct property access
+- **THEN** a catchable missing-property error is raised
+
+#### Scenario: Presence-safe lookup
+- **WHEN** code uses the explicit safe lookup for a missing key
+- **THEN** it receives the absent result and no exception is raised
+
+### Requirement: Contract views enforce structural types
+Assignment to a contract type SHALL expose only the contract's declared properties and operations. Required members SHALL be checked statically when shape information is available and dynamically otherwise. Property writes through the contract view SHALL satisfy the declared property type and mutability. Successful dynamic conformance SHALL seal the complete existing object key set across aliases.
+
+#### Scenario: Contract view permits a declared mutable property
+- **WHEN** a mutable contract view writes a type-compatible mutable property
+- **THEN** the write succeeds on the underlying object
+
+#### Scenario: Contract view rejects an undeclared key
+- **WHEN** code accesses an undeclared property through a contract-typed value
+- **THEN** the checker reports that the property is not part of the contract

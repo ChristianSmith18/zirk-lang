@@ -173,15 +173,6 @@ An `unsafe { ... }` block whose journal has not been committed by `commit { ... 
 - **WHEN** `commit { ... }` is executed inside `unsafe { ... }` before a `return`/`break`/`continue`
 - **THEN** the journal is committed and no `JournalRollback` is emitted for that `unsafe` frame
 
-### Requirement: inmut::strict applies to field declarations
-
-A field declared `inmut::strict` SHALL be unwritable through any projection, regardless of whether its container is `mut` or `inmut`.
-
-#### Scenario: Strict field written through mut container
-
-- **WHEN** a `record R { x: inmut::strict Int32 }` exists and code writes `r.x = 5` even though `r` is `mut`
-- **THEN** compilation fails with a strict-field write diagnostic
-
 ### Requirement: inmut::strict rejects mutating method calls
 
 An `inmut::strict` reference SHALL NOT be used as the receiver of a method that mutates `this`. Since `mut` is no longer a written method modifier, the compiler SHALL infer mutating methods: a method mutates if its body writes to `this.*` (directly or through a place rooted at `this`) or calls another method on `this` that mutates, computed by fixed-point over the call graph. The diagnostic for a rejected call SHALL identify the mutation chain (call → callee → the `this` write) so the reason is visible without any user-written marker. Methods with no analyzable body (for example `extern "C"`) SHALL be assumed mutating for this check.
@@ -321,3 +312,25 @@ Garbage-collector marking and deep cloning SHALL terminate for finite reachable 
 #### Scenario: Deep graph is cloned
 - **WHEN** a finite clonable graph contains a long chain and shared or cyclic edges
 - **THEN** cloning preserves graph identity relationships without native stack overflow
+
+### Requirement: Strict field immutability applies to object properties
+A property declared `inmut::strict` by a class or contract SHALL NOT be writable through any projection, regardless of whether its containing reference is `mut` or `inmut`.
+
+#### Scenario: Strict contract property written through mutable object
+- **WHEN** a mutable object conforms to a contract with an `inmut::strict` property and code writes that property
+- **THEN** compilation fails with a strict-property write diagnostic
+
+### Requirement: Dynamic object mutation follows reference mutability
+Adding, replacing, or removing a dynamic property SHALL be treated as mutation of the referenced object and SHALL follow existing alias rules: `inmut` prevents rebinding but permits referent mutation, while `inmut::strict` prevents reachable mutation. A successful contract conformance SHALL seal the object's key set without changing its identity or bypassing strict-reference restrictions on property values.
+
+#### Scenario: Strict alias prevents dynamic mutation
+- **WHEN** a program adds a dynamic property while an `inmut::strict` alias to the same object remains accessible
+- **THEN** the checker rejects the write under the existing mutable-alias rules
+
+#### Scenario: Contract sealing is visible through aliases
+- **WHEN** one alias successfully applies a contract to an object
+- **THEN** every alias observes the sealed key set and cannot add or remove properties
+
+#### Scenario: Nested references remain managed
+- **WHEN** a dynamic property stores a managed object reference
+- **THEN** ownership, lifetime, transfer, and collection rules apply to that reference as they do to other managed object fields

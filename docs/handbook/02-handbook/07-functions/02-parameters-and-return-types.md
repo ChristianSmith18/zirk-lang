@@ -33,7 +33,7 @@ The rules:
 - A body that never returns a value infers `Void`; one where every path diverges infers `Never`.
 - The explicit annotation stays a contract when written: the inferred type and the annotation must match.
 - Inference cannot resolve a recursion cycle on its own — `fn a() { return a(); }` has no anchor. Annotate at least one member of the cycle.
-- Signatures without a body still require the annotation: `interface` and `abstract` members, `extern` declarations and `fn dec` have nothing to infer from.
+- Signatures without a body still require the annotation: `contract` and `abstract` members, `extern` declarations and `fn dec` have nothing to infer from.
 - The entrypoint rule is unchanged: `fn main() { }` infers `Void` and is valid; a `main` whose body returns a value is not.
 
 Tooling sees the inferred type: `zirk check --types` reports each declaration with `"inferred": true`, and the editor hover shows the resolved signature either way.

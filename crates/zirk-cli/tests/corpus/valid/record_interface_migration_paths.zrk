@@ -1,0 +1,36 @@
+import { stdout } from std.io;
+
+// Migration targets for former record/interface use cases.
+contract Named {
+    name: String;
+}
+
+class User {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+enum Status { Ready, Failed }
+
+fn preserve<T>(value: T): T { return value; }
+
+fn main(): Void {
+    inmut structural: Named = { name: "Ada" };
+    stdout.println(structural.name);
+
+    mut identity = User("Grace");
+    inmut same_identity = identity;
+    stdout.println(identity is same_identity);
+
+    inmut pair = (7, "tuple");
+    stdout.println(pair[0]);
+
+    inmut status: Status = Status.Ready;
+    stdout.println(status.to_string());
+
+    inmut preserved: String = preserve("generic");
+    stdout.println(preserved);
+
+    inmut dynamic: Dynamic = 42;
+    stdout.println(dynamic as Int32);
+}

@@ -56,6 +56,8 @@ mod http_api {
 }
 #[path = "../src/native_slice.rs"]
 mod native_slice;
+#[path = "../src/object.rs"]
+mod object;
 #[path = "../src/pool.rs"]
 mod pool;
 #[path = "../src/range.rs"]

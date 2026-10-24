@@ -219,7 +219,7 @@ fn package_directories(entries: &HashMap<String, PathBuf>) -> HashMap<String, Pa
 /// logical identity is fixed and their trusted host bindings remain governed
 /// by `zirk_sema::stdlib` rather than source syntax.
 fn standard_package_roots() -> HashMap<String, PathBuf> {
-    ["io", "environment", "http", "net"]
+    ["io", "environment", "http", "json", "net"]
         .into_iter()
         .map(|package| {
             let entry = absolute_normalize(
@@ -258,6 +258,8 @@ fn standard_source(path: &Path) -> Option<&'static str> {
         )),
         "http/package.zrk" => Some(include_str!("../../../stdlib/std/http/package.zrk")),
         "http/http.zrk" => Some(include_str!("../../../stdlib/std/http/http.zrk")),
+        "json/package.zrk" => Some(include_str!("../../../stdlib/std/json/package.zrk")),
+        "json/json.zrk" => Some(include_str!("../../../stdlib/std/json/json.zrk")),
         "net/package.zrk" => Some(include_str!("../../../stdlib/std/net/package.zrk")),
         "net/tcp.zrk" => Some(include_str!("../../../stdlib/std/net/tcp.zrk")),
         "net/dns.zrk" => Some(include_str!("../../../stdlib/std/net/dns.zrk")),
@@ -575,12 +577,12 @@ mod tests {
     }
 
     #[test]
-    fn interface_network_source_is_bundled_with_the_standard_package() {
+    fn network_interfaces_source_is_bundled_with_the_standard_package() {
         let path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std/net/interfaces.zrk");
         let source = standard_source(&absolute_normalize(&path)).unwrap();
         assert!(source.contains("package std.net.interfaces;"));
-        assert!(source.contains("share record NetworkInterfaceAddress"));
+        assert!(source.contains("share class NetworkInterfaceAddress"));
         assert!(source.contains("network.inspect.interfaces"));
         assert!(zirk_sema::stdlib::standard_module("std.net::interfaces").is_some());
     }

@@ -1,4 +1,4 @@
-interface Container<T> {
+contract Container<T> {
     get(): T;
 }
 

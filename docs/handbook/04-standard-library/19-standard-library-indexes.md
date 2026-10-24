@@ -135,7 +135,7 @@ This index lists prominent entry types rather than every helper or enum.
 | `HTTP.get_cached`, `HTTP.request_cached` | [`std.http`](12-std-http.md) | opt-in bounded response cache with freshness and conditional revalidation |
 | `HTTPRouter`, `HTTPRouteHandler`, `HTTPRouteParameters`, `HTTPMiddleware`, `HTTPNext`, `HTTPFormData`, `HTTPMultipartData`, `HTTPMultipartPart`, `HTTPMultipartBuilder` | [`std.http`](12-std-http.md) | bounded routing, route callbacks, middleware, URL-encoded forms, parsed multipart parts, and in-memory multipart bodies |
 | `CookieJar`, `HTTPEventStream`, `HTTPEvent`, `HTTPServerEvent`, `SSEResponse`, `HTTPWebSocket`, `HTTPWebSocketMessage` | [`std.http`](12-std-http.md) | client events, bounded server event framing, state, and typed WebSocket messages |
-| `JSONValue`, `JSONNumber`, `JSONCodec<T>` | [`std.json`](13-std-json.md) | exact JSON and typed conversion |
+| `JSON`, `JSONCodec<T>`, `JsonConversionError` | [`std.json`](13-std-json.md) | ordinary `Object`/`Dynamic` JSON values and explicit typed codecs |
 | `SecretBytes`, key types and `SealedMessage<A>` | [`std.crypto`](14-std-crypto.md) | secret-safe cryptographic material |
 | `Type`, `TypeKind` | [`std.reflect`](16-std-reflect.md) | representation-independent runtime identity |
 | `System`, `Platform`, `Signal` | [`std.system`](17-std-system.md) | portable system boundary |

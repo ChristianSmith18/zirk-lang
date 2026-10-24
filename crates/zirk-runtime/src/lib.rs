@@ -82,6 +82,7 @@ pub mod network_api;
 mod network_future;
 pub(crate) mod network_interfaces;
 pub mod network_transport;
+mod object;
 pub mod permissions;
 // The `parallel` CPU-region worker pool (`ADR-019`, `parallel-cpu-regions`).
 // Staged at pool size 1 until the stop-the-world safepoint collector lands;
@@ -156,6 +157,7 @@ pub use managed_blocking::{
     ManagedCallThunk, zirk_rt_thread_run,
 };
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
+pub use object::*;
 pub use pool::{zirk_rt_pool_join, zirk_rt_pool_submit, zirk_rt_safepoint_poll};
 pub use range::{
     zirk_range_element_at, zirk_range_end, zirk_range_inclusive, zirk_range_length, zirk_range_new,

@@ -1,51 +1,54 @@
 import { stdout } from std.io;
 
-// Records lower inline, with no allocation and no indirection
-// (roadmap task 11.5, ADR-003): construction, field access,
-// passing to and returning from a function, nesting one inside another,
-// and living behind a nullable all work the same as any other value.
-record Point {
+// Named class values are managed references with identity; compact data uses
+// tuples, while dynamic named data uses Object literals.
+class Point {
     x: Int32;
     y: Int32;
+    construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
 }
 
-record Line {
+class Line {
     start: Point;
     end: Point;
+    construct(start: Point, end: Point) { this.start = start; this.end = end; }
 }
 
-record Money { amount: Int32; currency: String; }
+class Money {
+    amount: Int32;
+    currency: String;
+    construct(amount: Int32, currency: String) { this.amount = amount; this.currency = currency; }
+}
 
-record Config {
+class Config {
     name: String;
     count: Int32;
+    construct(name: String, count: Int32) { this.name = name; this.count = count; }
 }
 
 fn doubleMoney(m: Money): Money {
-    return Money(amount: m.amount * 2, currency: m.currency);
+    return Money(m.amount * 2, m.currency);
 }
 
 fn main(): Void {
-    mut p = Point(x: 1, y: 2);
-    stdout.println(p.x);
-    stdout.println(p.y);
+    mut point = Point(1, 2);
+    stdout.println(point.x);
+    stdout.println(point.y);
 
-    mut l = Line(start: Point(x: 0, y: 0), end: Point(x: 3, y: 4));
-    stdout.println(l.start.x);
-    stdout.println(l.end.y);
+    mut line = Line(Point(0, 0), Point(3, 4));
+    stdout.println(line.start.x);
+    stdout.println(line.end.y);
 
-    mut m = Money(amount: 100, currency: "USD");
-    mut doubled = doubleMoney(m);
+    mut money = Money(100, "USD");
+    mut doubled = doubleMoney(money);
     stdout.println(doubled.amount);
     stdout.println(doubled.currency);
 
-    // Omitted fields take their type's default.
-    mut c = Config(name: "x");
-    stdout.println(c.name);
-    stdout.println(c.count);
+    mut config = Config("x", 0);
+    stdout.println(config.name);
+    stdout.println(config.count);
 
-    // Nullable, including safe navigation.
-    mut present: Point? = Point(x: 7, y: 8);
+    mut present: Point? = Point(7, 8);
     mut absent: Point? = null;
     stdout.println(present?.x ?? 0);
     stdout.println(absent?.x ?? 0);

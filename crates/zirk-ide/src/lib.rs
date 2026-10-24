@@ -292,10 +292,7 @@ fn parse_exported_names(path: &Path) -> Vec<CompletionCandidate> {
         push(&function.name.name, SemanticSymbolKind::Function);
     }
     for class in program.classes.iter().filter(|item| item.shared) {
-        let kind = match class.kind {
-            zirk_ast::ClassKind::Class | zirk_ast::ClassKind::Abstract => SemanticSymbolKind::Class,
-            zirk_ast::ClassKind::Record => SemanticSymbolKind::Record,
-        };
+        let kind = SemanticSymbolKind::Class;
         push(&class.name.name, kind);
     }
     for contract in program.contracts.iter().filter(|item| item.shared) {
@@ -561,7 +558,6 @@ impl<'a> IdeSnapshot<'a> {
                         && matches!(
                             candidate.kind,
                             SemanticSymbolKind::Class
-                                | SemanticSymbolKind::Record
                                 | SemanticSymbolKind::Enum
                                 | SemanticSymbolKind::Contract
                         )

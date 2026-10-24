@@ -17,8 +17,8 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-009](./ADR-009-eliminacion-de-codigo-muerto-al-enlazar.md) | Dead code elimination at link time | accepted |
 | [ADR-010](./ADR-010-ubicaciones-multiarchivo.md) | Locations spanning multiple files | accepted |
 | [ADR-011](./ADR-011-identidad-e-igualdad-de-string.md) | Identity, equality, and normalization of `String` | accepted |
-| [ADR-012](./ADR-012-layout-de-objetos.md) | Object layout: separate header, records/value classes inline without one | accepted |
-| [ADR-013](./ADR-013-forma-del-despacho.md) | Shape of dispatch: direct by default, own or contract table only when needed | accepted |
+| [ADR-012](./ADR-012-layout-de-objetos.md) | Historical object layout; record/value assumptions superseded | superseded in part by ADR-027 |
+| [ADR-013](./ADR-013-forma-del-despacho.md) | Historical dispatch; interface and record restrictions superseded | superseded in part by ADR-027 |
 | [ADR-014](./ADR-014-representacion-de-char.md) | `Char` shares `String`'s opaque representation | accepted |
 | [ADR-015](./ADR-015-declaracion-extern.md) | Native `extern "C" fn` declaration syntax | accepted |
 | [ADR-016](./ADR-016-module-system.md) | Module, import and entrypoint system | accepted |
@@ -27,6 +27,7 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-021](./ADR-021-package-and-module-boundaries.md) | Package and module boundaries | accepted |
 | [ADR-022](./ADR-022-browser-execution-trace.md) | Browser execution trace is an observation channel | accepted |
 | [ADR-023](./ADR-023-concurrency-completion-contracts.md) | Safe completion contracts for Phase 5 concurrency | accepted |
+| [ADR-027](./ADR-027-contract-object-model.md) | Structural contracts and open dynamic objects replace interfaces and records | accepted; implementation in progress |
 
 ## Status of Phase 0 pending items
 

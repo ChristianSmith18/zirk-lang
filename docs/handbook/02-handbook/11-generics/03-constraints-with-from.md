@@ -18,7 +18,7 @@ fn stable_key<T from Hashable & Equatable & Clone>(value: T): T {
 
 A call with a type that does not satisfy `Display` fails at the call site with the missing contract. The implementation cannot call operations outside the declared constraint merely because current callers happen to provide them.
 
-A constraint may be an interface, trait, abstract requirement class, concrete
+A constraint may be a contract, trait, abstract requirement class, concrete
 base, or native contract. Failure diagnostics identify the chosen argument and
 every missing requirement at the call site.
 

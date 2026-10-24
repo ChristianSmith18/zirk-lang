@@ -402,33 +402,30 @@ core.
 
 ## 11. `std.json`
 
-Every public JSON type uses the uppercase acronym: `JSONValue`, `JSONNumber`,
-`JSONCodec<T>`, `JSONLimits`, `JSONPath`, `JSONPointer`, and `JSON*Error`.
-`JSONValue` is a mutable in-memory Zirk tree with Null, Boolean, exact
-`JSONNumber`, String, Array and insertion-ordered Object variants.
+The implemented `std.json` surface converts strict JSON text to ordinary Zirk
+values. `JSON.parse(document): Dynamic` represents objects as `Object`, arrays
+as `List<Dynamic>`, and scalars as their native Zirk types. An internal tagged
+number preserves exact JSON number text until checked numeric conversion. There
+is no second public JSON object tree.
 
-The conversion surface is `JSON.parse` (text to tree), `JSON.stringify` (tree or
-typed value to text), `JSON.decode<T>` (text to typed value), `JSON.to_value`
-and `JSON.from_value<T>`; there is no redundant `JSON.encode`. Parse is strict
-UTF-8 standard JSON, rejects duplicate keys unconditionally, preserves exact
-number text, and rejects NaN/infinity. Errors include stable code, location,
-path and bounded redacted context. Configurable safe defaults limit bytes,
-depth, strings, collection members and number length.
+`JSON.stringify(value: Dynamic): String` serializes JSON-compatible ordinary
+Zirk values. It rejects malformed or duplicate-key input, cycles, and runtime
+values with no JSON representation through catchable `JsonConversionError`.
+Input is limited to 16 MiB and nesting depth 128. Duplicate keys are compared
+after escape decoding. Serialization does not return partial output.
 
-Typed conversion uses compiler-generated or manually implemented ordinary
-`JSONCodec<T>` values and never runtime field scanning. Supported class and
-attribute decorators configure generated codecs without adding record as a
-decorator target or retaining decorator applications. Missing/unknown fields
-are errors unless nullable/optional/default or explicitly allowed. Traditional
-enums become JSON strings; algebraic enums use discriminated objects; temporal
-and byte values require explicit codecs. Constructors and invariants are never
-bypassed.
+Typed conversion is explicit through `JSONCodec<T>`, a structural contract
+with `decode(value: Dynamic): T` and `encode(value: T): Dynamic`.
+`JSON.decode<T>(document, codec)` parses then delegates validation and
+construction to the codec. `JSON.encode(value, codec)` delegates to the codec
+then stringifies its ordinary JSON-compatible value. Codecs must call normal
+constructors and may validate contract shapes; the runtime does not use
+reflection or bypass invariants.
 
-Compact, pretty and canonical output are distinct. Cycles return
-`JSONCycleError`. `JSONReader`/`JSONWriter` support bounded streaming and expose
-task-aware underlying I/O without hiding suspension. JSON Pointer is included;
-JSON5, Schema, advanced JSONPath, Patch, other formats, ORM and domain validation
-remain packages.
+Configurable limits, typed `JSONPath`/`JSONPointer`, generated codecs, streaming
+reader/writer APIs, pretty/canonical output, schema validation, and JSON5 are not
+part of the implemented surface. The handbook records this boundary; the feature
+status catalog remains the implementation evidence.
 
 ## 12. `std.crypto`
 

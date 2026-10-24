@@ -5,7 +5,7 @@ import { Stringifiable } from std.io;
 
 // Static conversion protocol used by Environment.get<T>. Primitive parsing
 // is compiler-provided; application types can implement the same contract.
-share interface EnvironmentParsable<T> {
+share contract EnvironmentParsable<T> {
     static parse(text: String): Result<T, String>;
 }
 

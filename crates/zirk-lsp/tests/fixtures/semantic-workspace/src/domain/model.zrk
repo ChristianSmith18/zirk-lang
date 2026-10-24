@@ -1,9 +1,11 @@
-share interface Named {
+share contract Named {
     name(): String;
 }
 
-share record User implements Named {
+share class User implements Named {
     display_name: String;
+
+    construct(display_name: String) { this.display_name = display_name; }
 
     name(): String {
         return this.display_name;

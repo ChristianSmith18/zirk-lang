@@ -2,11 +2,12 @@
 
 import { stdout } from std.io;
 
-interface Named<T> {
+contract Named<T> {
     value(): T;
 }
 
-record Tag implements Named<Int32> {
+class Tag implements Named<Int32> {
+    construct() { }
     value(): Int32 { return 7; }
 }
 

@@ -13,12 +13,13 @@ enum Shape {
     Dot
 }
 
-record Point {
+class Point {
     x: Int32;
     y: Int32;
+    construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
 }
 
-interface Printable {
+contract Printable {
     to_string(): String;
 }
 
@@ -117,8 +118,8 @@ fn main(): Void {
     stdout.println(10 .. 0: -2);
     stdout.println(0s .. 10s: 2s);
 
-    // Records, classes, and the surface name of a block-local class.
-    stdout.println(Point(x: 1, y: 2));
+    // Classes and the surface name of a block-local class.
+    stdout.println(Point(1, 2));
     stdout.println(Person("Ana", 30));
     stdout.println(Doc("hi"));
     class Local {

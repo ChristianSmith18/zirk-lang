@@ -178,10 +178,13 @@ behavior belong in packages built on this module.
 > adding the matching text or JSON content type. JSON syntax and serialization
 > remain the caller's responsibility.
 > Server handlers can construct UTF-8 responses with
-> `HTTPResponse.from_text(status, text)` and pre-serialized JSON responses with
-> `HTTPResponse.from_json(status, json)`. These set the corresponding
-> `Content-Type` header; JSON serialization and validation remain the caller's
-> responsibility.
+> `HTTPResponse.from_text(status, text)`, JSON responses from ordinary Zirk
+> objects with `HTTPResponse.from_json(status, object)`, and responses from
+> pre-serialized JSON text with `HTTPResponse.from_json_text(status, json)`.
+> Object serialization uses `JSON.stringify` and throws a catchable
+> `JsonConversionError` for cycles or values without a JSON representation.
+> The text constructor preserves the supplied bytes as text and does not
+> validate JSON syntax.
 > Typed response decoding is available as `decode_json<T>(response)` for types
 > that implement `HTTPJsonParsable<T>` with a static `parse_json(String)`;
 > this generic top-level function uses compile-time specialization. A parser
@@ -622,7 +625,7 @@ client.post(url:, stream: source)
 ```
 
 Passing more than one is a compile-time error when statically visible and a
-typed configuration error otherwise. `json` uses the generated `JSONCodec<T>`;
+typed configuration error otherwise. `json` validates and sends a JSON document; typed values can be converted explicitly with `std.json.JSONCodec<T>`;
 `text` defaults to UTF-8; `form` uses form URL encoding; and `multipart` creates
 a caller-supplied multipart boundary. Streaming bodies do not
 require their full content in memory and apply backpressure to their producer.
@@ -1023,7 +1026,8 @@ The current public constructors are:
 ```zirk
 HTTPResponse.from_bytes(200, body)
 HTTPResponse.from_text(201, "Created")
-HTTPResponse.from_json(200, serialized_json)
+HTTPResponse.from_json(200, { status: "ok", count: 3 })
+HTTPResponse.from_json_text(200, serialized_json)
 HTTPResponse.try_with_headers(200, body, headers)
 ```
 
@@ -1032,18 +1036,20 @@ HTTPResponse.try_with_headers(200, body, headers)
 JSON serialization and syntax validation remain the caller's responsibility.
 Use `try_with_headers` to attach a validated repeated-header collection.
 
-For a fixed JSON body, write a quoted-key object literal directly. Zirk keeps
-the object's source as the JSON text passed to `from_json`:
+For a JSON body, write a regular object literal. Keys and values are Zirk
+expressions; an interpolated quoted key is converted to its string value:
 
 ```zirk
+inmut key = "status";
 HTTPResponse.from_json(200, {
-    "status": "ok",
-    "count": 3
+    "{key}": "ok",
+    count: 3
 });
 ```
 
-This form is literal JSON data; its values are not Zirk expressions. Use
-`HTTPJsonSerializable<T>` when the body contains runtime values.
+Use `HTTPResponse.from_json_text` only when the application already has a JSON
+document string. `HTTPJsonSerializable<T>` remains available for typed codec
+integration.
 
 For a streamed server response, use
 `HTTPResponse.from_stream(status, headers, producer)`. The producer receives a

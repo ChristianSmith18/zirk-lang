@@ -7,7 +7,7 @@ method body.
 Abstract classes cannot be instantiated. A concrete class adopts the
 requirements with `implements`, not `extends`.
 
-Use an interface for a pure contract and a trait for reusable behavior that need not establish a single class lineage.
+Use a `contract` for structural properties and operations, and a `trait` for reusable behavior that need not establish a single class lineage.
 
 ```zirk
 abstract class Shape {

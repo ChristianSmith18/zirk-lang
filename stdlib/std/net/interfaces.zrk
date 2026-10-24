@@ -22,7 +22,7 @@ share enum NetworkInterfaceStatus {
     LowerLayerDown,
 }
 
-share record NetworkInterfaceAddress {
+share class NetworkInterfaceAddress {
     name: String;
     index: UInt32?;
     status: NetworkInterfaceStatus;
@@ -31,6 +31,18 @@ share record NetworkInterfaceAddress {
     address: IPAddress;
     prefix_length: UInt8;
     scope_id: UInt32?;
+    construct(name: String, index: UInt32?, status: NetworkInterfaceStatus,
+        is_loopback: Boolean, is_point_to_point: Boolean, address: IPAddress,
+        prefix_length: UInt8, scope_id: UInt32?) {
+        this.name = name;
+        this.index = index;
+        this.status = status;
+        this.is_loopback = is_loopback;
+        this.is_point_to_point = is_point_to_point;
+        this.address = address;
+        this.prefix_length = prefix_length;
+        this.scope_id = scope_id;
+    }
 }
 
 // An explicit, permission-checked snapshot of local interface metadata that
@@ -74,15 +86,8 @@ share class NetworkInterfaces {
                                 Ok(prefix_length) => match NetworkInterfaces.parse_optional_u32(row[7]) {
                                     Error(error) => NetworkInterfaces.decode_error(error);
                                     Ok(scope_id) => NetworkInterfaces.decode_ok(NetworkInterfaceAddress(
-                                        name: row[0],
-                                        index: index,
-                                        status: status,
-                                        is_loopback: is_loopback,
-                                        is_point_to_point: is_point_to_point,
-                                        address: address,
-                                        prefix_length: prefix_length,
-                                        scope_id: scope_id,
-                                    ));
+                                        row[0], index, status, is_loopback, is_point_to_point,
+                                        address, prefix_length, scope_id));
                                 };
                             };
                         };

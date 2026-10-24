@@ -210,6 +210,31 @@ fn bundled_http_server_event_encoder_preserves_bounded_sse_framing() {
 
 // --- Valid programs ---------------------------------------------------------
 
+#[test]
+fn dynamic_object_properties_read_write_and_raise_catchable_missing_errors() {
+    for name in [
+        "dynamic_object_named_read",
+        "class_dynamic_object_properties",
+        "class_contract_seals_dynamic_keys",
+        "dynamic_object_contract_conformance",
+        "dynamic_object_missing_read_catch",
+        "dynamic_cast_mismatch_catch",
+        "json_contract_codec",
+        "object_spread_shallow_copy",
+    ] {
+        let source = corpus("valid").join(format!("{name}.zrk"));
+        let expected = std::fs::read_to_string(source.with_extension("out"))
+            .expect("dynamic object fixture has expected output");
+        let output = zirk("run", &source, name, &[]);
+        assert_eq!(
+            output.status, 0,
+            "{name} failed.\nstdout:\n{}\nstderr:\n{}",
+            output.stdout, output.stderr
+        );
+        assert_eq!(normalize(&output.stdout), normalize(&expected), "{name}");
+    }
+}
+
 /// Every valid program compiles, runs with its declared status, and prints its `.out` file.
 #[test]
 fn the_valid_corpus_compiles_and_produces_the_expected_output() {
@@ -421,8 +446,8 @@ fn concurrent_join_round_trips_nested_managed_record_results() {
     std::fs::write(
         &source,
         "import { stdout } from std.io;\n\
-         record Inner { text: String; }\n\
-         record Outer { prefix: Int64; inner: Inner; }\n\
+         class Inner { text: String; construct(text: String) { this.text = text; } }\n\
+         class Outer { prefix: Int64; inner: Inner; construct(prefix: Int64, inner: Inner) { this.prefix = prefix; this.inner = inner; } }\n\
          enum MaybeText { Some(value: String), None }\n\
          fn make_outer(): Outer { return Outer(prefix: 5, inner: Inner(text: \"task result survived\")); }\n\
          fn make_enum(): MaybeText { return MaybeText.Some(value: \"enum result survived\"); }\n\
@@ -744,25 +769,6 @@ fn mutex_with_mutates_the_protected_payload_across_calls() {
         output.stdout, output.stderr
     );
     assert_eq!(normalize(&output.stdout), "2\n");
-}
-
-#[test]
-fn mutex_roots_nested_record_references_while_mutating_inline_fields() {
-    let source = corpus("valid").join("mutex_with_nested_record.zrk");
-    let output = zirk_with_runtime_env(
-        "run",
-        &source,
-        "mutex_with_nested_record",
-        "mutex_with_nested_record.zrk",
-        &[],
-        &[("ZIRK_GC_THRESHOLD", "1")],
-    );
-    assert_eq!(
-        output.status, 0,
-        "stdout:\n{}\nstderr:\n{}",
-        output.stdout, output.stderr
-    );
-    assert_eq!(normalize(&output.stdout), "8\n");
 }
 
 #[test]
@@ -1330,7 +1336,7 @@ fn generic_function_dispatches_static_contract_method_after_specialization() {
         &[(
             "main.zrk",
             r#"import { stdout } from std.io;
-interface EnvironmentParsable<T> { static parse(text: String): T; }
+contract EnvironmentParsable<T> { static parse(text: String): T; }
 class Port implements EnvironmentParsable<Port> {
     value: String;
     construct(value: String) { this.value = value; }
@@ -1358,7 +1364,7 @@ fn generic_static_contract_can_return_and_destructure_result() {
         &[(
             "main.zrk",
             r#"import { stdout } from std.io;
-interface Parsable<T> { static parse(text: String): Result<T, String>; }
+contract Parsable<T> { static parse(text: String): Result<T, String>; }
 class Port implements Parsable<Port> {
     value: String;
     construct(value: String) { this.value = value; }
@@ -1685,7 +1691,7 @@ fn main(): Void {
     match text_only.text() { Ok(body) => stdout.println(body); Error(error) => stdout.println(error.to_string()); }
     match text_only.bytes() { Ok(_) => stdout.println("duplicate text read accepted"); Error(error) => match error { HTTPError.BodyConsumed => stdout.println("body consumed"); _ => stdout.println("unexpected body error"); } }
     match text.header_values("CONTENT-TYPE") { Ok(values) => stdout.println(values[0]); Error(_) => stdout.println("missing text content type"); }
-    mut json = HTTPResponse.from_json(202, "true");
+    mut json = HTTPResponse.from_json_text(202, "true");
     stdout.println(json.status_code());
     match json.header_values("content-type") { Ok(values) => stdout.println(values[0]); Error(_) => stdout.println("missing json content type"); }
     match HTTPResponse.try_from_text(99, "bad") { Ok(_) => stdout.println("invalid text status accepted"); Error(error) => stdout.println(error.to_string()); }
@@ -1724,9 +1730,9 @@ class ResponseId implements HTTPJsonParsable<ResponseId> {
     }
 }
 fn main(): Void {
-    mut valid = HTTPResponse.from_json(200, "42");
+    mut valid = HTTPResponse.from_json_text(200, "42");
     match decode_json<ResponseId>(valid) { Ok(value) => stdout.println(value.value); Error(error) => stdout.println(error.to_string()); }
-    mut malformed = HTTPResponse.from_json(200, "not-json");
+    mut malformed = HTTPResponse.from_json_text(200, "not-json");
     match decode_json<ResponseId>(malformed) { Ok(_) => stdout.println("invalid JSON accepted"); Error(error) => stdout.println(error.to_string()); }
     mut invalid_text = HTTPResponse.from_bytes(200, [255 as Byte]);
     match decode_json<ResponseId>(invalid_text) { Ok(_) => stdout.println("invalid UTF-8 accepted"); Error(error) => stdout.println(error.to_string()); }

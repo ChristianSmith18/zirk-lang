@@ -4,7 +4,7 @@ import { stdout } from std.io;
 // a present receiver runs the call, an absent one short-circuits to null,
 // dispatch works both through a class and through a contract, and a method
 // that already returns a nullable type isn't double-wrapped.
-interface Speaker {
+contract Speaker {
     speak(): String;
 }
 

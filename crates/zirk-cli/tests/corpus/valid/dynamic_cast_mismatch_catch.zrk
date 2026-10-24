@@ -1,0 +1,11 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut data = { count: 1 };
+    try {
+        inmut text: String = data.count as String;
+        stdout.println(text);
+    } catch InvalidCastError(error) {
+        stdout.println("dynamic cast mismatch caught");
+    }
+}

@@ -1,0 +1,39 @@
+import { stdout } from std.io;
+
+// Two classes share one contract-typed slot and dispatch their own methods.
+contract Shape {
+    name(): String;
+    area(): Int32;
+}
+
+class Circle implements Shape {
+    radius: Int32;
+    construct(radius: Int32) { this.radius = radius; }
+    name(): String { return "circle"; }
+    area(): Int32 { return this.radius * this.radius * 3; }
+}
+
+class Square implements Shape {
+    side: Int32;
+    construct(side: Int32) { this.side = side; }
+    name(): String { return "square"; }
+    area(): Int32 { return this.side * this.side; }
+}
+
+fn describe(shape: Shape): Void {
+    stdout.println(shape.name());
+    stdout.println(shape.area());
+}
+
+fn main(): Void {
+    mut circle = Circle(2);
+    mut square = Square(3);
+
+    mut i = 0;
+    while i < 2 {
+        mut current: Shape = circle;
+        if i == 1 { current = square; }
+        describe(current);
+        i += 1;
+    }
+}

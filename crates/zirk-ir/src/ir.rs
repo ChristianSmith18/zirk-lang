@@ -199,22 +199,18 @@ pub enum IrType {
     /// which class is behind it is what a contract exists not to say, and the
     /// object already carries its own descriptor to answer that at the call.
     Contract(u32),
-    /// A record, identified by its layout in the module.
-    ///
-    /// A value and not a reference: neither has identity (`is` is rejected
-    /// for both, task 8.5/8.6), so nothing observes whether two equal ones
-    /// share storage. Represented inline wherever it is used — a slot, a
-    /// parameter, a field of a containing object — with no allocation and no
-    /// descriptor header (`ZIRK_RUNTIME_SPEC.md` §9, ADR-003; roadmap task
-    /// 11.5). `Base::Class` still carries both a `Value` and an ordinary
-    /// `Object`'s id — `ClassType.kind` says which is which; the id spaces
-    /// are the same table, so nothing here needs its own.
+    /// A reference to an open `Object` whose concrete class is not statically known.
+    ObjectAny,
+    /// A boxed, runtime-tagged value whose concrete Zirk type is not statically known.
+    Dynamic,
+    /// An inline tuple value, identified by its layout in the module. Tuples
+    /// have value semantics and are never reference objects.
     Value(u32),
     /// An algebraic enum — one with at least one variant carrying associated
     /// data — identified by its layout in the module.
     ///
-    /// A value, the same as a record: discriminant plus payload, inline
-    /// wherever it is used, no allocation (roadmap task 11.3). A *traditional*
+    /// A value: discriminant plus payload, inline wherever it is used, no
+    /// allocation (roadmap task 11.3). A *traditional*
     /// enum, none of whose variants carry data, stays `Int32` exactly as
     /// before — this variant exists only once a payload does.
     Enum(u32),
@@ -315,6 +311,8 @@ pub enum Nullable {
     /// pointers is one more rule, and one shape needs none.
     Object(u32),
     Contract(u32),
+    ObjectAny,
+    Dynamic,
     Value(u32),
     Enum(u32),
     Array(u32),
@@ -332,6 +330,8 @@ impl Nullable {
             Nullable::Char => IrType::Char,
             Nullable::Object(id) => IrType::Object(id),
             Nullable::Contract(id) => IrType::Contract(id),
+            Nullable::ObjectAny => IrType::ObjectAny,
+            Nullable::Dynamic => IrType::Dynamic,
             Nullable::Value(id) => IrType::Value(id),
             Nullable::Enum(id) => IrType::Enum(id),
             Nullable::Array(id) => IrType::Array(id),
@@ -350,6 +350,8 @@ impl Nullable {
             IrType::Char => Nullable::Char,
             IrType::Object(id) => Nullable::Object(id),
             IrType::Contract(id) => Nullable::Contract(id),
+            IrType::ObjectAny => Nullable::ObjectAny,
+            IrType::Dynamic => Nullable::Dynamic,
             IrType::Value(id) => Nullable::Value(id),
             IrType::Enum(id) => Nullable::Enum(id),
             IrType::Array(id) => Nullable::Array(id),
@@ -361,6 +363,48 @@ impl Nullable {
 }
 
 impl IrType {
+    /// Stable per-build type identity used by collector-aware Dynamic boxes.
+    /// IDs with a payload come from the IR module's layout tables.
+    pub fn dynamic_tag(self) -> Option<u32> {
+        Some(match self {
+            IrType::Int(width) => 0x100 + width as u32,
+            IrType::Float(width) => 0x200 + width as u32,
+            IrType::Decimal => 0x300,
+            IrType::Boolean => 0x301,
+            IrType::String => 0x302,
+            IrType::Char => 0x303,
+            IrType::Regex => 0x304,
+            IrType::Object(id) => 0x1_0000 + id,
+            IrType::Contract(id) => 0x2_0000 + id,
+            IrType::ObjectAny => 0x3_0000,
+            IrType::Value(id) => 0x4_0000 + id,
+            IrType::Enum(id) => 0x5_0000 + id,
+            IrType::Callable(id) => 0x6_0000 + id,
+            IrType::Closure(id) => 0x7_0000 + id,
+            IrType::Array(id) => 0x8_0000 + id,
+            IrType::List(id) => 0x9_0000 + id,
+            IrType::Map(id) => 0xa_0000 + id,
+            IrType::Set(id) => 0xb_0000 + id,
+            IrType::Channel(id) => 0xc_0000 + id,
+            IrType::Atomic(kind) => 0xd_0000 + kind as u32,
+            IrType::Mutex(id) => 0xe_0000 + id,
+            IrType::Nullable(inner) => 0xf_0000 | (inner.inner().dynamic_tag()? & 0xffff),
+            IrType::Dynamic => return None,
+            IrType::Void
+            | IrType::Never
+            | IrType::BorrowedView { .. }
+            | IrType::Job
+            | IrType::Pointer(_)
+            | IrType::Weak(_)
+            | IrType::JournalHandle
+            | IrType::NativeSlice(_)
+            | IrType::NativeSliceMut(_)
+            | IrType::Dependent(_)
+            | IrType::Pin(_)
+            | IrType::Range => return None,
+        })
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             IrType::Void => "Void",
@@ -382,6 +426,8 @@ impl IrType {
             IrType::Mutex(_) => "Mutex",
             IrType::Object(_) => "object",
             IrType::Contract(_) => "contract",
+            IrType::ObjectAny => "Object",
+            IrType::Dynamic => "Dynamic",
             IrType::Value(_) => "value",
             IrType::Enum(_) => "enum",
             IrType::Nullable(n) => match n {
@@ -396,6 +442,8 @@ impl IrType {
                 Nullable::Char => "Char?",
                 Nullable::Object(_) => "object?",
                 Nullable::Contract(_) => "contract?",
+                Nullable::ObjectAny => "Object?",
+                Nullable::Dynamic => "Dynamic?",
                 Nullable::Value(_) => "value?",
                 Nullable::Enum(_) => "enum?",
                 Nullable::Array(_) => "Array?",
@@ -455,6 +503,8 @@ impl IrType {
             // anything decided here.
             IrType::Object(_)
             | IrType::Contract(_)
+            | IrType::ObjectAny
+            | IrType::Dynamic
             | IrType::Weak(_)
             | IrType::Dependent(_)
             | IrType::Pin(_)
@@ -513,6 +563,14 @@ pub struct ValueId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StringId(pub u32);
 
+/// One statically known property required by a runtime contract check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectConformanceRequirement {
+    pub key: String,
+    /// Exact runtime Dynamic tag, or zero when only key presence is required.
+    pub tag: u32,
+}
+
 /// A compiled module: everything that came from one source file.
 #[derive(Debug, Clone, Default)]
 pub struct Module {
@@ -524,10 +582,10 @@ pub struct Module {
     pub closures: Vec<ClosureLayout>,
     /// Object layouts, indexed by the id [`IrType::Object`] carries.
     pub objects: Vec<ObjectLayout>,
-    /// Record layouts, indexed by the id [`IrType::Value`]
-    /// carries — its own table because they share no shape with
-    /// [`ObjectLayout`]: no header, no dispatch table, no allocation
-    /// (roadmap task 11.5).
+    /// Contract operation metadata, indexed by `IrType::Contract` id.
+    pub contracts: Vec<ContractLayout>,
+    /// Tuple layouts, indexed by the id [`IrType::Value`] carries. These
+    /// inline layouts have no object header or dispatch table.
     pub values: Vec<ValueLayout>,
     /// Algebraic enum layouts, indexed by the id [`IrType::Enum`] carries —
     /// `checked.enums`' own id space, indexed the same way `objects` is
@@ -651,6 +709,14 @@ pub struct ContractTable {
     pub methods: Vec<String>,
 }
 
+/// Runtime-visible operation names for structural contract views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractLayout {
+    pub name: String,
+    /// Non-static operation names in contract index order.
+    pub methods: Vec<String>,
+}
+
 /// One field inside an object layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectField {
@@ -658,8 +724,7 @@ pub struct ObjectField {
     pub ty: IrType,
 }
 
-/// What one record holds — its fields, in declaration order,
-/// and nothing else: no header, no dispatch table (roadmap task 11.5).
+/// What one tuple holds: its inline elements in declaration order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueLayout {
     pub name: String,
@@ -1115,18 +1180,14 @@ pub enum InstKind {
     /// bytes here": the strategy behind it belongs to the runtime, and naming
     /// one here is exactly what ADR-003 forbids the IR to do.
     Alloc(u32),
-    /// Builds a record value from its fields, in declaration
-    /// order — no allocation, no header (roadmap task 11.5): a record's
-    /// construction is packaging, not obtaining storage, so it has no
-    /// `Alloc` counterpart.
+    /// Builds an inline tuple value from its elements in declaration order.
     BuildValue {
         class: u32,
         fields: Vec<Operand>,
     },
     /// Builds an algebraic enum value: the discriminant of `variant`, plus
     /// its own associated fields in declared order — everywhere else in the
-    /// flattened payload is left undefined, the same way a record's omitted
-    /// field never is but nothing here ever reads (roadmap task 11.3).
+    /// flattened payload is left undefined and never read (roadmap task 11.3).
     BuildEnum {
         enum_id: u32,
         variant: u32,
@@ -1274,6 +1335,72 @@ pub enum InstKind {
         object: Operand,
         index: u32,
         value: Operand,
+    },
+    /// Allocates an open, reference-identity object with no declared fields.
+    ObjectNew,
+    /// Seals an object's complete current key set. Returns zero on success.
+    ObjectSeal {
+        object: Operand,
+    },
+    /// Tests whether a boxed Dynamic payload is an object reference. A failed
+    /// check is represented as an absent nullable Object.
+    DynamicObjectUnbox {
+        value: Operand,
+    },
+    /// Validates required object properties and seals the shared key set.
+    /// Returns zero on success and a nonzero status on structural mismatch.
+    ObjectConform {
+        object: Operand,
+        contract: u32,
+        requirements: Vec<ObjectConformanceRequirement>,
+    },
+    /// Copies a statically typed scalar or managed reference into a tagged
+    /// Dynamic runtime box.
+    DynamicPack {
+        value: Operand,
+    },
+    /// Checks the runtime tag of a boxed Dynamic value against a concrete IR type.
+    DynamicIsType {
+        value: Operand,
+        tag: u32,
+    },
+    /// Extracts a Dynamic payload after a successful exact-tag check.
+    DynamicUnbox {
+        value: Operand,
+        tag: u32,
+    },
+    /// Inserts or replaces one tagged property on an open object.
+    ObjectSet {
+        object: Operand,
+        key: Operand,
+        value: Operand,
+    },
+    /// Reads one own property from an open object. Missing properties are
+    /// represented as a nullable Dynamic and must be checked by lowering.
+    ObjectGet {
+        object: Operand,
+        key: Operand,
+    },
+    /// Applies an object's own properties to a destination in source order.
+    ObjectMerge {
+        destination: Operand,
+        source: Operand,
+    },
+    /// Creates a shallow object copy while omitting the selected own keys.
+    ObjectRest {
+        object: Operand,
+        excluded_keys: Vec<Operand>,
+    },
+    /// Serializes a tagged Dynamic JSON tree. Unsupported values, cycles, and
+    /// resource-limit violations return an absent nullable String.
+    JsonStringifyDynamic {
+        value: Operand,
+    },
+    /// Parses JSON text into tagged Dynamic values, using the interned
+    /// `List<Dynamic>` layout for array nodes. Invalid input returns absence.
+    JsonParseDynamic {
+        document: Operand,
+        list_dynamic_id: u32,
     },
 
     Unary {

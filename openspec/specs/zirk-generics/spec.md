@@ -23,15 +23,6 @@ Generic parameters SHALL be invariant by default. `out T` SHALL be legal only in
 - **WHEN** Dog extends Animal and `List<Dog>` is supplied as `List<Animal>`
 - **THEN** compilation fails because List permits insertion
 
-### Requirement: Recursive generics and managed indirection
-
-Verifiable recursive constraints SHALL be accepted. Infinite inline recursive layout SHALL fail and MAY be broken with managed `Box<T>`. Associated types and higher-kinded parameters SHALL remain outside the initial language.
-
-#### Scenario: Recursive record requires Box
-
-- **WHEN** a record directly stores its own type without indirection
-- **THEN** compilation fails with an infinite-size diagnostic and suggests `Box<T>`
-
 ### Requirement: Generic identity and monomorphization
 
 Concrete instantiations SHALL retain distinct static and runtime type identity. Generic bodies SHALL be checked once against constraints; portable IR SHALL retain generic information and final builds MAY monomorphize/share code only when ABI and observable semantics remain unchanged.
@@ -89,22 +80,6 @@ The checker SHALL verify the body of a generic declaration exactly once against 
 - **WHEN** a generic function with a type error is instantiated with three distinct types
 - **THEN** the error is reported exactly once, at the declaration
 
-### Requirement: Specialization during lowering
-
-Lowering SHALL produce one copy per combination of type arguments actually used.
-
-This is what `ZIRK_LANGUAGE_SPEC.md` section 7 calls specializing where appropriate, and it is what allows storing records inline instead of behind a pointer.
-
-#### Scenario: Two instantiations, two copies
-
-- **WHEN** `identity` is used with `Int32` and with `String`
-- **THEN** the IR contains one function for each
-
-#### Scenario: Repeated instantiation
-
-- **WHEN** the same combination of types is used multiple times
-- **THEN** the IR contains a single copy
-
 ### Requirement: Scope of generics in this phase
 
 The checker SHALL NOT support associated types or higher-kinded type
@@ -118,38 +93,6 @@ supporting them would fix semantics that the spec does not fix.
 
 - **WHEN** an associated type or a higher-kinded type parameter is written
 - **THEN** a diagnostic indicating that it is not part of the language is emitted
-
-### Requirement: Generic contract method lowering
-
-When a generic `class` or `record` declares `implements Contract<T, ...>`, the compiler SHALL lower the contract methods with the generic parameters substituted at the call site. The generated vtable entries SHALL support the substituted signatures.
-
-#### Scenario: Generic iterable class
-
-- **WHEN** `class Box<T> implements Iterable<T> { iterator(): Iterator<T> { ... } }` is declared
-- **THEN** `for x in Box<Int32>()` compiles, the `iterator()` method is lowered with `T = Int32`, and `x` is `Int32`
-
-#### Scenario: Generic iterable record
-
-- **WHEN** `record Pair<T, U> implements Iterable<T> { ... }` is declared
-- **THEN** `for x in Pair<Int32, String>()` yields `Int32` values
-
-### Requirement: Generic contract substitution does not corrupt the vtable
-
-The vtable layout for a generic `class`/`record` SHALL remain stable across different instantiations. Contract method offsets SHALL be the same for `Box<Int32>` and `Box<String>`.
-
-#### Scenario: Vtable layout stability
-
-- **WHEN** `Box<Int32>` and `Box<String>` are both instantiated and implement `Iterable<T>`
-- **THEN** the `iterator` method offset is identical in both vtables
-
-### Requirement: Recursion cap on generic substitution
-
-Generic substitution SHALL be guarded against infinite recursion. Mutually recursive generic `class`/`record` definitions and contract instantiations SHALL produce a controlled diagnostic instead of stack overflow.
-
-#### Scenario: Recursive generic alias
-
-- **WHEN** `type Nested<T> = Box<Nested<T>>;` is written
-- **THEN** a diagnostic is emitted before the compiler recurses unboundedly
 
 ### Requirement: Dispatch through a generic contract reference
 
@@ -167,3 +110,35 @@ directly.
 
 - **WHEN** a function declares a parameter of type `Iterable<String>` and is called with a `Box<String>`
 - **THEN** contract calls inside the function dispatch to `Box<String>`'s methods
+
+### Requirement: Generic contracts constrain structural properties and operations
+Generic constraints SHALL accept `contract` declarations and SHALL preserve their substituted property and operation types at each use site. A statically known class or object shape SHALL be checked at compile time. A value whose static type is only `Object` SHALL be checked at runtime and SHALL raise a catchable contract violation if it does not satisfy the instantiated contract.
+
+#### Scenario: Generic class satisfies a substituted contract
+- **WHEN** `Box<Int32>` is passed to a generic function constrained by a contract requiring `value: T`
+- **THEN** the checker substitutes `Int32` and validates the required property type
+
+#### Scenario: Dynamic object fails a generic contract
+- **WHEN** a dynamic object is passed where a runtime-checked `Contract<String>` is required but its property has an incompatible value
+- **THEN** a catchable contract violation is raised before the constrained operation executes
+
+### Requirement: Generic classes preserve contract dispatch layout
+Generic class contract methods SHALL use substituted parameter and result types at every call site. Vtable method offsets SHALL remain stable across generic instantiations that share the same contract declaration.
+
+#### Scenario: Generic class contract dispatch is stable
+- **WHEN** `Box<Int32>` and `Box<String>` both implement the same generic contract
+- **THEN** each dispatches to its own substituted implementation using the corresponding stable vtable layout
+
+### Requirement: Generic recursive substitution is bounded
+Generic substitution SHALL be guarded against infinite recursion. Mutually recursive generic classes, contracts, aliases, and constraints SHALL produce a controlled diagnostic instead of exhausting the compiler stack.
+
+#### Scenario: Recursive generic alias
+- **WHEN** `type Nested<T> = Box<Nested<T>>;` is written
+- **THEN** a diagnostic is emitted before the compiler recurses without bound
+
+### Requirement: Generic specialization remains representation-independent
+Lowering SHALL produce one specialization for each concrete combination of type arguments actually used, and MAY share code only when ABI and observable semantics remain unchanged. This rule SHALL NOT require inline storage for dynamic objects.
+
+#### Scenario: Repeated generic instantiation
+- **WHEN** the same generic function is used multiple times with the same argument types
+- **THEN** the compiler may reuse a single compatible specialization

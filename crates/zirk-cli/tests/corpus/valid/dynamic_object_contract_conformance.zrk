@@ -1,0 +1,48 @@
+import { stdout } from std.io;
+
+contract Named {
+    mut name: String;
+}
+
+contract Runner {
+    run(): Int32;
+}
+
+fn main(): Void {
+    inmut direct: Named = { name: "Grace" };
+    stdout.println("direct literal conforms");
+
+    mut raw: Object = { name: "Ada", extra: 7 };
+    inmut named: Named = raw;
+    stdout.println(named.name);
+    named.name = "Grace";
+    stdout.println(raw.name as String);
+    inmut boxed: Dynamic = raw;
+    inmut dynamic_named: Named = boxed as Named;
+    stdout.println("dynamic object conforms");
+
+    try {
+        raw.later = true;
+        stdout.println("unexpected key insertion");
+    } catch ContractViolationError(error) {
+        stdout.println("contract sealed aliases");
+    }
+
+    mut incomplete: Object = { age: 37 };
+    inmut unknown: Dynamic = incomplete;
+    try {
+        inmut invalid: Named = unknown as Named;
+        stdout.println("unexpected contract conformance");
+    } catch ContractViolationError(error) {
+        stdout.println("missing contract property caught");
+    }
+
+    mut non_callable: Object = { run: 42 };
+    inmut non_callable_dynamic: Dynamic = non_callable;
+    try {
+        inmut invalid_runner: Runner = non_callable_dynamic as Runner;
+        stdout.println("unexpected non-callable conformance");
+    } catch ContractViolationError(error) {
+        stdout.println("non-callable contract property caught");
+    }
+}

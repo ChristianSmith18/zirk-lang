@@ -136,18 +136,6 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     // The layouts come first: a function that builds an object needs the
     // layout it allocates, and a field access needs its offsets.
     //
-    // A record lives in `values`, not `objects` — its
-    // `ObjectLayout` entry here is an empty placeholder that is never read
-    // (`IrType::Value`, not `Object`, is what a value-kind class resolves
-    // to; see `ir_type`) *unless* it implements at least one contract
-    // (`fase-3-value-type-contract-dispatch`, design D1): a value-to-contract
-    // conversion boxes the value into a real, collector-tracked allocation,
-    // and that allocation's descriptor is built by this exact same code
-    // path, parameterized over the value type's own `fields`/`methods`/
-    // `contracts` — sharing its id with the type's own `IrType::Value` entry
-    // (`Base::Class` doc comment: the two tables index the same id space).
-    // A value type that never implements a contract keeps the empty
-    // placeholder, the same way a still-generic template's is.
     let mut objects: Vec<ObjectLayout> = checked
         .classes
         .iter()
@@ -164,9 +152,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             // `ir_type` has nothing to substitute here, and its methods'
             // bodies are never lowered (skipped in the loop below), so a
             // symbol in its table would name a function that does not exist.
-            let is_unboxed_value =
-                matches!(class.kind, ast::ClassKind::Record) && class.contracts.is_empty();
-            if !class.type_params.is_empty() || is_unboxed_value {
+            if !class.type_params.is_empty() {
                 return ObjectLayout {
                     name: class.name.clone(),
                     fields: Vec::new(),
@@ -253,26 +239,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 let supplied = class
                                     .method(&required.name)
                                     .expect("the checker verified conformance");
-                                // A record's own body takes
-                                // `this` by value (`Self::run_method`) — it
-                                // needs the box-unboxing wrapper
-                                // (`box_thunk_symbol`) rather than its own
-                                // symbol directly. A trait default body it
-                                // inherited instead (`from_contract`) is
-                                // already compiled against a generic
-                                // `this: Contract` pointer receiver
-                                // (`Self::run` for a contract body, further
-                                // below) — exactly what `CallContract`
-                                // already passes, value type or not — so
-                                // that one needs no wrapper at all, the same
-                                // as a class's.
-                                if matches!(class.kind, ast::ClassKind::Record)
-                                    && supplied.from_contract.is_none()
-                                {
-                                    box_thunk_symbol(&class.name, &supplied.name)
-                                } else {
-                                    body_symbol(checked, supplied)
-                                }
+                                body_symbol(checked, supplied)
                             })
                             .collect(),
                     })
@@ -306,36 +273,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         id
     });
 
-    // A record's own layout — indexed the same way `objects`
-    // is, sharing `checked.classes`' id space (roadmap task 11.5); an
-    // ordinary class's or a still-generic template's entry here is the
-    // empty placeholder, symmetric with `objects` above.
-    let mut values: Vec<ValueLayout> = checked
-        .classes
-        .iter()
-        .map(|class| {
-            if !class.type_params.is_empty() || !matches!(class.kind, ast::ClassKind::Record) {
-                return ValueLayout {
-                    name: class.name.clone(),
-                    fields: Vec::new(),
-                };
-            }
-            ValueLayout {
-                name: class.name.clone(),
-                fields: class
-                    .fields
-                    .iter()
-                    .map(|field| ObjectField {
-                        name: field.name.clone(),
-                        ty: ir_type(field.ty, instance_base, enum_instance_base, checked),
-                    })
-                    .collect(),
-            }
-        })
-        .collect();
-
-    // Tuple value layouts follow all class layouts: a `Base::Tuple(id)` maps
-    // to `module.values[checked.tuple_base + id]` (roadmap Phase 3b).
+    // Tuples are the only remaining inline value aggregate.
+    let mut values: Vec<ValueLayout> = Vec::new();
     for (id, tuple) in checked.tuple_types.iter().enumerate() {
         values.push(ValueLayout {
             name: format!("Tuple({})", id),
@@ -409,6 +348,19 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
     let mut module = Module {
         objects,
+        contracts: checked
+            .contracts
+            .iter()
+            .map(|contract| ContractLayout {
+                name: contract.name.clone(),
+                methods: contract
+                    .methods
+                    .iter()
+                    .filter(|method| !method.is_static)
+                    .map(|method| method.name.clone())
+                    .collect(),
+            })
+            .collect(),
         values,
         enums,
         ..Module::default()
@@ -2143,47 +2095,6 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         module.functions.extend(lifted);
     }
 
-    // A boxed value's contract-table wrapper (`fase-3-value-type-contract-
-    // dispatch`, design D1/D2, `box_thunk_symbol`'s own doc comment): one
-    // per own-body method a record supplies to satisfy a
-    // contract, unboxing `this` and forwarding into the real by-value body.
-    // Skipped for a still-generic template the same way its own methods
-    // are, and for a method inherited from a trait's default body
-    // (`from_contract`), which already takes a generic `this: Contract`
-    // pointer receiver and needs no wrapper.
-    for (id, class) in checked.classes.iter().enumerate() {
-        let id = id as u32;
-        if !class.type_params.is_empty() || !matches!(class.kind, ast::ClassKind::Record) {
-            continue;
-        }
-        // Two contracts the same class implements may share a method name
-        // (both requiring `describe()`, say) — deduplicated by the symbol
-        // the thunk would get, so the same one is never built twice.
-        let mut built = std::collections::HashSet::new();
-        for &contract in &class.contracts {
-            for required in &checked.contracts[contract as usize].methods {
-                let supplied = class
-                    .method(&required.name)
-                    .expect("the checker verified conformance");
-                if supplied.from_contract.is_some() {
-                    continue;
-                }
-                if !built.insert(supplied.name.clone()) {
-                    continue;
-                }
-                let thunk = FunctionLowering::new(
-                    &mut module,
-                    checked,
-                    &declarations,
-                    instance_base,
-                    enum_instance_base,
-                )
-                .build_box_thunk(id, supplied);
-                module.functions.push(thunk);
-            }
-        }
-    }
-
     // A trait's default body belongs to the contract, not to any class that
     // adopts it: one body, however many classes reuse it.
     for contract in &program.contracts {
@@ -2475,6 +2386,9 @@ fn synthesize_native_failure_bodies<'a>(
         (native.float_nan, "E_FLOAT_NAN"),
         (native.arithmetic_overflow, "E_ARITHMETIC_OVERFLOW"),
         (native.invalid_cast, "E_INVALID_CAST"),
+        (native.missing_property, "E_MISSING_PROPERTY"),
+        (native.contract_violation, "E_CONTRACT_VIOLATION"),
+        (native.json_conversion, "E_JSON_CONVERSION"),
         // Roadmap Phase 4e, `fase-4e-native-slice`: two more native failure
         // classes, built through the exact same
         // `Checker::register_native_failure` closure and needing the same
@@ -3643,24 +3557,6 @@ fn build_stringifiable_box_to_string(id: u32) -> Function {
     }
 }
 
-/// The name a boxed value's contract-table entry for one of its own methods
-/// is emitted under (`fase-3-value-type-contract-dispatch`, design D1/D2).
-///
-/// A `record`'s own method (`Self::method_symbol`) receives
-/// `this` by value (roadmap task 11.5) — `CallContract`'s existing dispatch
-/// always passes the receiver as a pointer (design D2's own premise: it
-/// "cannot distinguish" a boxed value's descriptor from a class's), so a
-/// contract table cannot point straight at that symbol the way a class's own
-/// can. This name is a small wrapper instead: it takes the box's pointer,
-/// rebuilds the inline value from its fields (the box's own layout is
-/// identical to the value's, `Self::lower_box_value`'s own doc comment), and
-/// forwards into the real by-value method — the one, single place this
-/// representation gap is bridged, so `CallContract` itself still needs zero
-/// changes.
-pub fn box_thunk_symbol(class: &str, method: &str) -> String {
-    format!("{class}$boxed${method}")
-}
-
 /// The symbol whose body a method entry actually reaches.
 ///
 /// A class that adopted a trait's default has an entry of its own, but the
@@ -3854,10 +3750,9 @@ fn ir_type(
         // A record is a value, not a reference: neither has
         // identity (roadmap task 11.5). An ordinary class is reached through
         // its address, which is its identity.
-        Base::Class(id) if matches!(checked.classes[id as usize].kind, ast::ClassKind::Record) => {
-            IrType::Value(id)
-        }
         Base::Class(id) => IrType::Object(id),
+        Base::Object => IrType::ObjectAny,
+        Base::Dynamic => IrType::Dynamic,
         Base::Contract(id) => IrType::Contract(id),
         // A contract's dispatch table never depended on its own type
         // arguments — only the id and the method index do (task 10.7) — so
@@ -3959,7 +3854,7 @@ fn ir_type(
         // `checked.range_types`, the handle itself is element-agnostic.
         Base::Range(_) => IrType::Range,
 
-        Base::Tuple(id) => IrType::Value(checked.tuple_base + id),
+        Base::Tuple(id) => IrType::Value(id),
         Base::Unknown | Base::Null | Base::Param(_) | Base::Union(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
@@ -5339,23 +5234,13 @@ impl<'a> FunctionLowering<'a> {
             // widening.
             let value = if actual == base.inner() {
                 value
-            } else if let IrType::Value(id) = actual
-                && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
-            {
-                // A `record` widened directly into `T??`'s
-                // present half where `T` is a contract it implements
-                // (design D1): box first, exactly like the non-nullable
-                // path below, then retag if the box's own id is not
-                // already the destination's.
-                let boxed = self.lower_box_value(value, id, expr.span());
-                if base.inner() == IrType::Object(id) {
-                    boxed
-                } else {
-                    self.emit(InstKind::Retype(boxed), base.inner(), expr.span())
-                }
-            } else if matches!(actual, IrType::Object(_) | IrType::Contract(_))
-                && matches!(base, Nullable::Object(_) | Nullable::Contract(_))
-            {
+            } else if matches!(
+                actual,
+                IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+            ) && matches!(
+                base,
+                Nullable::Object(_) | Nullable::Contract(_) | Nullable::ObjectAny
+            ) {
                 self.emit(InstKind::Retype(value), base.inner(), expr.span())
             } else if Self::is_numeric_ir_type(actual) && Self::is_numeric_ir_type(base.inner()) {
                 self.convert_numeric(value, actual, base.inner(), expr.span())
@@ -5372,23 +5257,33 @@ impl<'a> FunctionLowering<'a> {
             return value;
         }
 
-        // The checker already proved this is a `record`
-        // implementing the contract expected here (design D1,
-        // `fase-3-value-type-contract-dispatch`): unlike a class instance,
-        // whose address already *is* the shape a contract-typed reference
-        // needs, a value type is stored inline with no header — it has to
-        // be boxed into a fresh, collector-tracked allocation first, whose
-        // descriptor is built the same way a class's own is (this value
-        // type's own id doubles as its box's `IrType::Object` id).
-        if let IrType::Value(id) = actual
-            && matches!(expected, IrType::Object(_) | IrType::Contract(_))
-        {
-            let boxed = self.lower_box_value(value, id, expr.span());
-            return if expected == IrType::Object(id) {
-                boxed
-            } else {
-                self.emit(InstKind::Retype(boxed), expected, expr.span())
-            };
+        // `Dynamic` is an explicit tagged container.  Assignability to it is
+        // intentionally broad in sema, but the IR slot still has a distinct
+        // representation and must own the original runtime type tag.  In
+        // particular, an open `Object` cannot be stored in a `Dynamic` slot
+        // by merely retyping its pointer.
+        if expected == IrType::Dynamic {
+            if actual.dynamic_tag().is_some() {
+                return self.emit(InstKind::DynamicPack { value }, expected, expr.span());
+            }
+        }
+
+        if let IrType::Contract(contract) = expected {
+            if actual == IrType::ObjectAny {
+                return self.lower_object_contract_conversion(value, contract, expr.span());
+            }
+        }
+
+        // A statically verified class-to-contract view keeps the class
+        // allocation and identity, while sealing any properties previously
+        // added through aliases typed as Object.
+        if matches!(expected, IrType::Contract(_)) && matches!(actual, IrType::Object(_)) {
+            let open = self.emit(InstKind::Retype(value), IrType::ObjectAny, expr.span());
+            self.emit(
+                InstKind::ObjectSeal { object: open },
+                IrType::Int(IntWidth::I32),
+                expr.span(),
+            );
         }
 
         // The checker already proved this is a subclass, or a contract
@@ -5398,7 +5293,10 @@ impl<'a> FunctionLowering<'a> {
         // object's own address), so there is nothing to check at runtime,
         // only the declared type changes from here on — unlike `as`, whose
         // relation is not proven ahead of time (roadmap task 11.6).
-        if matches!(expected, IrType::Object(_) | IrType::Contract(_)) {
+        if matches!(
+            expected,
+            IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+        ) {
             return self.emit(InstKind::Retype(value), expected, expr.span());
         }
 
@@ -5413,21 +5311,223 @@ impl<'a> FunctionLowering<'a> {
         value
     }
 
-    /// Boxes a `record` value into a fresh, collector-tracked
-    /// allocation (`fase-3-value-type-contract-dispatch`, design D1) — the
-    /// one step that lets it be held through a contract-typed reference.
-    ///
-    /// `id` is the value type's own id, shared between its `IrType::Value`
-    /// entry (`module.values[id]`, its existing inline layout) and its
-    /// `IrType::Object` entry (`module.objects[id]`, built by the same
-    /// class-descriptor code path `zirk_ir::lower_class_body`'s caller
-    /// uses for an ordinary class, populated for a value type only when it
-    /// implements at least one contract). Building the box is nothing but
-    /// an `Alloc` of that same id, then reading each field back out of the
-    /// inline value (`LoadField` already supports an `IrType::Value`
-    /// operand) and writing it into the fresh allocation at the same index
-    /// — no new instruction kind, and no store ever targets the box again
-    /// after this (design D3: the box is read-only from here on).
+    fn contract_object_requirements(&self, contract: u32) -> Vec<ObjectConformanceRequirement> {
+        let contract = &self.checked.contracts[contract as usize];
+        let mut requirements: Vec<_> = contract
+            .properties
+            .iter()
+            .map(|property| {
+                let tag = self.ir_type(property.ty).dynamic_tag().unwrap_or(0);
+                ObjectConformanceRequirement {
+                    key: property.name.clone(),
+                    tag,
+                }
+            })
+            .collect();
+        requirements.extend(
+            contract
+                .methods
+                .iter()
+                .filter(|method| !method.is_static)
+                .map(|method| ObjectConformanceRequirement {
+                    key: method.name.clone(),
+                    // 0x60000 is the Callable tag family. Contract
+                    // conversion must reject a same-named non-callable
+                    // property before it is exposed through a method view.
+                    // Sema checks the exact signature when the literal shape
+                    // is statically known; the call site rechecks its exact
+                    // concrete callable layout before dispatch.
+                    tag: 0x6_0000,
+                }),
+        );
+        requirements
+    }
+
+    fn lower_object_contract_conversion(
+        &mut self,
+        object: Operand,
+        contract: u32,
+        span: Span,
+    ) -> Operand {
+        let object_slot = self.spill(object, IrType::ObjectAny, span);
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        let requirements = self.contract_object_requirements(contract);
+        let status = self.emit(
+            InstKind::ObjectConform {
+                object,
+                contract,
+                requirements,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let failed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::NotEq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed,
+            then_block: fail,
+            else_block: success,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("contract conversion registers ContractViolationError");
+        self.throw_native_failure(
+            native.contract_violation,
+            "object does not satisfy the required contract",
+            span,
+        );
+        self.current = success;
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        self.emit(InstKind::Retype(object), IrType::Contract(contract), span)
+    }
+
+    fn lower_dynamic_contract_conversion(
+        &mut self,
+        value: Operand,
+        contract: u32,
+        span: Span,
+    ) -> Operand {
+        let value_slot = self.spill(value, IrType::Dynamic, span);
+        let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+        let nullable = IrType::Nullable(Nullable::ObjectAny);
+        let object = self.emit(InstKind::DynamicObjectUnbox { value }, nullable, span);
+        let absent = self.emit(InstKind::IsNull(object), IrType::Boolean, span);
+        let object_slot = self.spill(object, nullable, span);
+        let fail = self.new_block();
+        let success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: absent,
+            then_block: fail,
+            else_block: success,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("Dynamic contract conversion registers ContractViolationError");
+        self.throw_native_failure(
+            native.contract_violation,
+            "dynamic value is not an object satisfying the required contract",
+            span,
+        );
+        self.current = success;
+        let object = self.emit(InstKind::Load(object_slot), nullable, span);
+        let object = self.emit(InstKind::Unwrap(object), IrType::ObjectAny, span);
+        self.lower_object_contract_conversion(object, contract, span)
+    }
+
+    fn lower_dynamic_contract_optional_cast(
+        &mut self,
+        value: Operand,
+        contract: u32,
+        span: Span,
+    ) -> Operand {
+        let result_type = IrType::Nullable(Nullable::Contract(contract));
+        let result_slot = self.declare_slot("<optional contract cast>", result_type, span);
+        let value_slot = self.spill(value, IrType::Dynamic, span);
+        let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+        let object_nullable_type = IrType::Nullable(Nullable::ObjectAny);
+        let object = self.emit(
+            InstKind::DynamicObjectUnbox { value },
+            object_nullable_type,
+            span,
+        );
+        let object_nullable_slot = self.spill(object, object_nullable_type, span);
+        let absent = self.emit(InstKind::IsNull(object), IrType::Boolean, span);
+        let absent_block = self.new_block();
+        let conform_block = self.new_block();
+        let continuation = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: absent,
+            then_block: absent_block,
+            else_block: conform_block,
+        });
+
+        self.current = absent_block;
+        let none = self.emit(
+            InstKind::NullValue(Nullable::Contract(contract)),
+            result_type,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, none), span);
+        self.terminate(Terminator::Jump(continuation));
+
+        self.current = conform_block;
+        let object = self.emit(
+            InstKind::Load(object_nullable_slot),
+            object_nullable_type,
+            span,
+        );
+        let object = self.emit(InstKind::Unwrap(object), IrType::ObjectAny, span);
+        let object_slot = self.spill(object, IrType::ObjectAny, span);
+        let requirements = self.contract_object_requirements(contract);
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        let status = self.emit(
+            InstKind::ObjectConform {
+                object,
+                contract,
+                requirements,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let failed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::NotEq,
+                left: status,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let mismatch_block = self.new_block();
+        let success_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed,
+            then_block: mismatch_block,
+            else_block: success_block,
+        });
+
+        self.current = mismatch_block;
+        let none = self.emit(
+            InstKind::NullValue(Nullable::Contract(contract)),
+            result_type,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, none), span);
+        self.terminate(Terminator::Jump(continuation));
+
+        self.current = success_block;
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        let object = self.emit(InstKind::Retype(object), IrType::Contract(contract), span);
+        let wrapped = self.emit(
+            InstKind::Wrap {
+                base: Nullable::Contract(contract),
+                value: object,
+            },
+            result_type,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, wrapped), span);
+        self.terminate(Terminator::Jump(continuation));
+
+        self.current = continuation;
+        self.emit(InstKind::Load(result_slot), result_type, span)
+    }
+
     fn convert_numeric(&mut self, value: Operand, from: IrType, to: IrType, span: Span) -> Operand {
         if from == to {
             return value;
@@ -5469,31 +5569,6 @@ impl<'a> FunctionLowering<'a> {
         let r = ty(right)?;
         let common = l.common_numeric(r)?;
         Some(self.ir_type(common))
-    }
-
-    fn lower_box_value(&mut self, value: Operand, id: u32, span: Span) -> Operand {
-        let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
-        let field_count = self.module.values[id as usize].fields.len();
-        for index in 0..field_count {
-            let field_ty = self.module.values[id as usize].fields[index].ty;
-            let field_value = self.emit(
-                InstKind::LoadField {
-                    object: value,
-                    index: index as u32,
-                },
-                field_ty,
-                span,
-            );
-            self.emit_effect(
-                InstKind::StoreField {
-                    object,
-                    index: index as u32,
-                    value: field_value,
-                },
-                span,
-            );
-        }
-        object
     }
 
     // --- Function ---------------------------------------------------------
@@ -5910,6 +5985,8 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Mutex(_)
             | IrType::Object(_)
             | IrType::Contract(_)
+            | IrType::ObjectAny
+            | IrType::Dynamic
             | IrType::Value(_)
             | IrType::Enum(_)
             // A `Pointer<T>` field is unreachable in a verified program: the
@@ -6197,78 +6274,6 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
-    /// `box_thunk_symbol(class, method)`'s own body
-    /// (`fase-3-value-type-contract-dispatch`, design D1/D2): unbox `this`
-    /// (the box's pointer) back into the inline value `Self::run_method`'s
-    /// real body expects, then forward the call unchanged. This is the one
-    /// wrapper that bridges the box's pointer receiver to the value's own
-    /// by-value one — everywhere else (`CallContract`'s own dispatch,
-    /// `Self::lower_box_value`'s construction) reuses an existing path with
-    /// no change at all.
-    fn build_box_thunk(mut self, class_id: u32, method: &zirk_sema::MethodInfo) -> Function {
-        let span = method.span;
-        let entry = self.new_block();
-        self.current = entry;
-
-        let this_ty = IrType::Object(class_id);
-        let this = self.declare_slot("this", this_ty, span);
-        let object = self.emit(InstKind::Load(this), this_ty, span);
-
-        let field_count = self.module.values[class_id as usize].fields.len();
-        let mut fields = Vec::with_capacity(field_count);
-        for index in 0..field_count {
-            let field_ty = self.module.values[class_id as usize].fields[index].ty;
-            fields.push(self.emit(
-                InstKind::LoadField {
-                    object,
-                    index: index as u32,
-                },
-                field_ty,
-                span,
-            ));
-        }
-        let receiver = self.emit(
-            InstKind::BuildValue {
-                class: class_id,
-                fields,
-            },
-            IrType::Value(class_id),
-            span,
-        );
-
-        let mut params = vec![this];
-        let mut args = vec![receiver];
-        for (index, param) in method.params.iter().enumerate() {
-            let ty = self.ir_type(param.ty);
-            let slot = self.declare_slot(&format!("<box_arg{index}>"), ty, span);
-            params.push(slot);
-            args.push(self.emit(InstKind::Load(slot), ty, span));
-        }
-
-        let return_type = self.ir_type(method.returns);
-        self.return_type = return_type;
-        let callee = method_symbol(&self.checked.classes[class_id as usize].name, &method.name);
-
-        if return_type == IrType::Void {
-            self.emit_effect(InstKind::Call { callee, args }, span);
-            self.terminate(Terminator::Return(None));
-        } else {
-            let result = self.emit(InstKind::Call { callee, args }, return_type, span);
-            self.terminate(Terminator::Return(Some(result)));
-        }
-
-        Function {
-            name: box_thunk_symbol(&self.checked.classes[class_id as usize].name, &method.name),
-            params,
-            return_type,
-            gc_roots: gc_roots_of(self.module, &self.slots),
-            slots: self.slots,
-            blocks: self.blocks,
-            entry,
-            span,
-        }
-    }
-
     fn lower_block(&mut self, block: &ast::Block) {
         self.scopes.push(HashMap::new());
         for stmt in &block.statements {
@@ -6405,7 +6410,7 @@ impl<'a> FunctionLowering<'a> {
                 }
                 self.lower_pattern_bindings(&stmt.pattern, slot, ty, stmt.span);
             }
-            ast::Pattern::Collection(_) | ast::Pattern::Record(_) => {
+            ast::Pattern::Collection(_) | ast::Pattern::Object(_) => {
                 let slot = self.declare_slot("<destructured>", ty, stmt.pattern.span());
                 if let Some((operand, _)) = value {
                     self.emit_effect(InstKind::Store(slot, operand), stmt.span);
@@ -6643,6 +6648,36 @@ impl<'a> FunctionLowering<'a> {
                 }
             }
             ast::AssignTarget::Field(field) => {
+                if matches!(
+                    self.type_of(&field.object, field.object.span()),
+                    IrType::Contract(_)
+                ) {
+                    let object = self.lower_expr(&field.object);
+                    let object_ty = self.type_of_operand(object);
+                    let object_slot = self.spill(object, object_ty, stmt.span);
+                    let key = self.const_string(&field.name.name, field.name.span);
+                    let key_slot = self.spill(key, IrType::String, field.name.span);
+                    let property_ty = self.type_of(&ast::Expr::Field(field.clone()), field.span);
+                    let value = self.lower_expr_as(&stmt.value, property_ty);
+                    let value = self.emit(
+                        InstKind::DynamicPack { value },
+                        IrType::Dynamic,
+                        stmt.value.span(),
+                    );
+                    let value_slot = self.spill(value, IrType::Dynamic, stmt.span);
+                    let object = self.emit(InstKind::Load(object_slot), object_ty, stmt.span);
+                    let object = self.emit(InstKind::Retype(object), IrType::ObjectAny, stmt.span);
+                    let key = self.emit(InstKind::Load(key_slot), IrType::String, stmt.span);
+                    let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, stmt.span);
+                    self.lower_dynamic_object_set(
+                        object,
+                        key,
+                        value,
+                        "cannot change the key set of a sealed object",
+                        stmt.span,
+                    );
+                    return;
+                }
                 if let Some((view_slot, mut path, object_ty)) =
                     self.borrowed_view_field_path(&field.object)
                 {
@@ -6655,6 +6690,32 @@ impl<'a> FunctionLowering<'a> {
                     let view = self.emit(InstKind::Load(view_slot), view_ty, stmt.span);
                     self.emit_effect(
                         InstKind::BorrowViewFieldStore { view, path, value },
+                        stmt.span,
+                    );
+                    return;
+                }
+                if self.type_of(&field.object, field.object.span()) == IrType::ObjectAny {
+                    let object = self.lower_expr(&field.object);
+                    let object_ty = self.type_of_operand(object);
+                    let holder = self.spill(object, object_ty, stmt.span);
+                    let key = self.const_string(&field.name.name, field.name.span);
+                    let key_holder = self.spill(key, IrType::String, stmt.span);
+                    let value = self.lower_expr(&stmt.value);
+                    let value_ty = self.type_of_operand(value);
+                    let value = if value_ty == IrType::Dynamic {
+                        value
+                    } else {
+                        self.emit(InstKind::DynamicPack { value }, IrType::Dynamic, stmt.span)
+                    };
+                    let value_holder = self.spill(value, IrType::Dynamic, stmt.span);
+                    let object = self.emit(InstKind::Load(holder), IrType::ObjectAny, stmt.span);
+                    let key = self.emit(InstKind::Load(key_holder), IrType::String, stmt.span);
+                    let value = self.emit(InstKind::Load(value_holder), IrType::Dynamic, stmt.span);
+                    self.lower_dynamic_object_set(
+                        object,
+                        key,
+                        value,
+                        "cannot change the key set of a sealed object",
                         stmt.span,
                     );
                     return;
@@ -6707,6 +6768,35 @@ impl<'a> FunctionLowering<'a> {
                     // the handle `zirk_str_set` reads.
                     let value = self.lower_expr(&stmt.value);
                     self.lower_string_index_write(index_expr, value, stmt.span);
+                    return;
+                }
+
+                if self.type_of(&index_expr.receiver, index_expr.receiver.span())
+                    == IrType::ObjectAny
+                {
+                    let receiver = self.lower_expr(&index_expr.receiver);
+                    let receiver_slot = self.spill(receiver, IrType::ObjectAny, stmt.span);
+                    let key = self.lower_expr_as(&index_expr.index, IrType::String);
+                    let key_slot = self.spill(key, IrType::String, stmt.span);
+                    let value = self.lower_expr(&stmt.value);
+                    let value_ty = self.type_of_operand(value);
+                    let value = if value_ty == IrType::Dynamic {
+                        value
+                    } else {
+                        self.emit(InstKind::DynamicPack { value }, IrType::Dynamic, stmt.span)
+                    };
+                    let value_slot = self.spill(value, IrType::Dynamic, stmt.span);
+                    let receiver =
+                        self.emit(InstKind::Load(receiver_slot), IrType::ObjectAny, stmt.span);
+                    let key = self.emit(InstKind::Load(key_slot), IrType::String, stmt.span);
+                    let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, stmt.span);
+                    self.lower_dynamic_object_set(
+                        receiver,
+                        key,
+                        value,
+                        "cannot change the key set of a sealed object",
+                        stmt.span,
+                    );
                     return;
                 }
 
@@ -8481,9 +8571,8 @@ impl<'a> FunctionLowering<'a> {
                 result
             }
 
-            // `x == y` / `x != y` where both operands are a `record`/`value
-            // class` (`fase-3-structural-equality`, design D1): a `record`/
-            // `record` never defines `_equals` (the check just above
+            // `x == y` / `x != y` where both operands are tuples: tuple
+            // equality is defined by their elements (the check just above
             // only ever matches `IrType::Object`, never `IrType::Value`),
             // so this is the only place its comparison is built — a
             // conjunction of per-field comparisons, generated at this call
@@ -8492,7 +8581,7 @@ impl<'a> FunctionLowering<'a> {
                 if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
                     && matches!(self.type_of(&e.left, e.left.span()), IrType::Value(_)) =>
             {
-                self.lower_structural_equality(e, span)
+                self.lower_tuple_equality(e, span)
             }
 
             ast::Expr::Binary(e)
@@ -9664,6 +9753,81 @@ impl<'a> FunctionLowering<'a> {
                             )
                         }
                         _ => unreachable!("closed network binding registry"),
+                    };
+                }
+                if let Some(binding) = self.checked.standard_json_calls.get(&e.span) {
+                    let semantic = self.checked.expr_types[&e.span];
+                    let returns = self.ir_type(semantic);
+                    return match binding.as_str() {
+                        "std.json.stringify_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::String);
+                            let encoded = self.emit(
+                                InstKind::JsonStringifyDynamic { value },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(encoded), IrType::Boolean, span);
+                            let encoded_slot = self.spill(encoded, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "value cannot be represented as JSON",
+                                span,
+                            );
+                            self.current = success;
+                            let encoded =
+                                self.emit(InstKind::Load(encoded_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(encoded), returns, span)
+                        }
+                        "std.json.parse_dynamic" => {
+                            let document = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+                            let parsed = self.emit(
+                                InstKind::JsonParseDynamic {
+                                    document,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent = self.emit(InstKind::IsNull(parsed), IrType::Boolean, span);
+                            let parsed_slot = self.spill(parsed, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON document is invalid or exceeds conversion limits",
+                                span,
+                            );
+                            self.current = success;
+                            let parsed = self.emit(InstKind::Load(parsed_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(parsed), returns, span)
+                        }
+                        _ => unreachable!("closed JSON binding registry"),
                     };
                 }
                 if let Some(binding) = self.checked.standard_http_calls.get(&e.span) {
@@ -11109,14 +11273,7 @@ impl<'a> FunctionLowering<'a> {
                     return self.lower_variant_construction(e, enum_id, variant, span);
                 }
                 if let Some(id) = self.construction_class_id(e) {
-                    return if matches!(
-                        self.checked.classes[id as usize].kind,
-                        ast::ClassKind::Record
-                    ) {
-                        self.lower_record_construction(e, id, span)
-                    } else {
-                        self.lower_construction(e, id, span)
-                    };
+                    return self.lower_construction(e, id, span);
                 }
                 let name = self.callee_name(e);
                 if let Some((specialized_name, signature)) =
@@ -11204,7 +11361,7 @@ impl<'a> FunctionLowering<'a> {
             }
             ast::Expr::Range(range) => self.lower_range_value(range, span),
             ast::Expr::Collection(collection) => self.lower_collection_literal(collection, span),
-            ast::Expr::Record(record) => self.lower_record_literal(record, span),
+            ast::Expr::Object(object_literal) => self.lower_object_literal(object_literal, span),
             ast::Expr::Null(_) => {
                 unreachable!("lowering received a construct the checker should have rejected")
             }
@@ -11278,22 +11435,21 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), IrType::Boolean, span)
     }
 
-    /// Lowers `x == y` / `x != y` between two values of the same `record`/
-    /// `record` type (`fase-3-structural-equality`, design D1): both
+    /// Lowers `x == y` / `x != y` between two tuple values: both
     /// operands are lowered once, then compared field by field through
-    /// [`Self::lower_field_conjunction`]; `!=` is the same comparison
+    /// [`Self::lower_tuple_field_conjunction`]; `!=` is the same comparison
     /// negated, the same split every other `Eq`/`NotEq` lowering in this
     /// file already uses.
-    fn lower_structural_equality(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+    fn lower_tuple_equality(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
         let held = self.lower_and_hold(&expr.left, self.opens_blocks(&expr.right));
         let right = self.lower_expr(&expr.right);
         let left = self.reload(held, expr.left.span());
 
         let IrType::Value(id) = self.type_of(&expr.left, expr.left.span()) else {
-            unreachable!("this arm only ever matches a `record` left operand")
+            unreachable!("this arm only ever matches a tuple left operand")
         };
 
-        let result = self.lower_field_conjunction(id, left, right, span);
+        let result = self.lower_tuple_field_conjunction(id, left, right, span);
 
         if expr.op == ast::BinaryOp::NotEq {
             return self.emit(
@@ -11308,15 +11464,14 @@ impl<'a> FunctionLowering<'a> {
         result
     }
 
-    /// ANDs together every field's own equality between two `record`/`value
-    /// class` values of the same layout `id`, short-circuiting on the first
+    /// ANDs together every element's equality between tuples of the same
+    /// layout `id`, short-circuiting on the first
     /// difference — the same block-per-decision shape
     /// [`Self::lower_short_circuit`] uses for `&&`, generalized here from
     /// two operands to however many fields the type declares (design D1).
     ///
-    /// A type with no fields (possible for a `record` with an empty field
-    /// list) is trivially always equal to itself.
-    fn lower_field_conjunction(
+    /// An empty tuple is trivially equal to another empty tuple.
+    fn lower_tuple_field_conjunction(
         &mut self,
         id: u32,
         left: Operand,
@@ -11363,7 +11518,7 @@ impl<'a> FunctionLowering<'a> {
                 field.ty,
                 span,
             );
-            let field_eq = self.lower_field_equality(field.ty, l_field, r_field, span);
+            let field_eq = self.lower_tuple_field_equality(field.ty, l_field, r_field, span);
 
             if index + 1 == fields.len() {
                 // The last field decides the whole result outright, however
@@ -11392,11 +11547,11 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result), IrType::Boolean, span)
     }
 
-    /// One field's own equality, as part of a `record`'s
+    /// One element's equality, as part of a tuple's
     /// derived comparison — `left`/`right` are that field already loaded
     /// from both operands.
     ///
-    /// A nested `record` field recurses the same way its own
+    /// A nested tuple element recurses the same way its own
     /// top-level `==` would (design D1); a `class` reference compares by
     /// whatever the existing rule for that class's own `==` already is —
     /// its own `_equals` if declared, `is` identity otherwise (design D2,
@@ -11410,7 +11565,7 @@ impl<'a> FunctionLowering<'a> {
     /// `Binary { op: Eq }` shape already compares correctly on its own —
     /// the same instruction the pre-existing generic `Eq`/`NotEq` lowering
     /// arm emits for those types outside a `record` too.
-    fn lower_field_equality(
+    fn lower_tuple_field_equality(
         &mut self,
         field_ty: IrType,
         left: Operand,
@@ -11418,7 +11573,7 @@ impl<'a> FunctionLowering<'a> {
         span: Span,
     ) -> Operand {
         match field_ty {
-            IrType::Value(id) => self.lower_field_conjunction(id, left, right, span),
+            IrType::Value(id) => self.lower_tuple_field_conjunction(id, left, right, span),
             IrType::Object(id) => {
                 if let Some(method) = self.checked.classes[id as usize].method("_equals") {
                     let symbol = body_symbol(self.checked, method);
@@ -16631,7 +16786,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Pattern::Tuple(_) => {
                 unreachable!("tuple patterns are not lowered yet")
             }
-            ast::Pattern::Collection(_) | ast::Pattern::Record(_) => {
+            ast::Pattern::Collection(_) | ast::Pattern::Object(_) => {
                 unreachable!("collection and record patterns are not tested this way yet")
             }
             ast::Pattern::Regex(_) => {
@@ -17066,6 +17221,9 @@ impl<'a> FunctionLowering<'a> {
     fn is_native_failure_class(&self, id: u32) -> bool {
         self.checked.native_exceptions.is_some_and(|n| {
             id == n.division_by_zero
+                || id == n.missing_property
+                || id == n.contract_violation
+                || id == n.json_conversion
                 || id == n.invalid_shift
                 || id == n.invalid_repeat
                 || id == n.float_nan
@@ -18521,7 +18679,61 @@ impl<'a> FunctionLowering<'a> {
                     }
                 }
             }
-            ast::Pattern::Record(r) => {
+            ast::Pattern::Object(r) => {
+                if scrutinee_type == IrType::ObjectAny {
+                    let source = self.emit(InstKind::Load(scrutinee), scrutinee_type, span);
+                    let source_slot = self.spill(source, scrutinee_type, span);
+                    let mut excluded_key_slots = Vec::with_capacity(r.fields.len());
+                    for field in &r.fields {
+                        let key_name = field.name.name.as_str();
+                        let key_id = self.module.intern_string(key_name);
+                        let key = self.emit(
+                            InstKind::ConstString(key_id),
+                            IrType::String,
+                            field.name.span,
+                        );
+                        let key_slot = self.spill(key, IrType::String, field.name.span);
+                        excluded_key_slots.push(key_slot);
+                        let source =
+                            self.emit(InstKind::Load(source_slot), scrutinee_type, field.name.span);
+                        let key =
+                            self.emit(InstKind::Load(key_slot), IrType::String, field.name.span);
+                        let value =
+                            self.lower_dynamic_object_get(source, key, key_name, field.name.span);
+                        let binding_name = field
+                            .binding
+                            .as_ref()
+                            .map(|binding| binding.name.as_str())
+                            .unwrap_or(key_name);
+                        let binding_span = field
+                            .binding
+                            .as_ref()
+                            .map(|binding| binding.span)
+                            .unwrap_or(field.name.span);
+                        let binding_slot =
+                            self.declare_slot(binding_name, IrType::Dynamic, binding_span);
+                        self.emit_effect(InstKind::Store(binding_slot, value), binding_span);
+                    }
+                    if let Some(rest) = &r.rest {
+                        let object =
+                            self.emit(InstKind::Load(source_slot), scrutinee_type, rest.span);
+                        let excluded_keys = excluded_key_slots
+                            .iter()
+                            .map(|slot| self.emit(InstKind::Load(*slot), IrType::String, rest.span))
+                            .collect();
+                        let rest_value = self.emit(
+                            InstKind::ObjectRest {
+                                object,
+                                excluded_keys,
+                            },
+                            IrType::ObjectAny,
+                            rest.span,
+                        );
+                        let rest_slot = self.declare_slot(&rest.name, IrType::ObjectAny, rest.span);
+                        self.emit_effect(InstKind::Store(rest_slot, rest_value), rest.span);
+                    }
+                    return;
+                }
                 let fields: Vec<_> = match scrutinee_type {
                     IrType::Object(id) => self.module.objects[id as usize]
                         .fields
@@ -26188,9 +26400,14 @@ impl<'a> FunctionLowering<'a> {
                 ast::InterpolatedPart::Expr(inner) => self.to_string_opens_blocks(inner),
                 ast::InterpolatedPart::Literal(_) => false,
             }),
-            ast::Expr::Record(r) => r.elements.iter().any(|e| match e {
-                ast::RecordLiteralElement::Field(f) => self.opens_blocks(&f.value),
-                ast::RecordLiteralElement::Spread(s) => self.opens_blocks(&s.expr),
+            ast::Expr::Object(r) => r.elements.iter().any(|e| match e {
+                ast::ObjectLiteralElement::Field(f) => {
+                    f.dynamic_key
+                        .as_ref()
+                        .is_some_and(|key| self.opens_blocks(key))
+                        || self.opens_blocks(&f.value)
+                }
+                ast::ObjectLiteralElement::Spread(s) => self.opens_blocks(&s.expr),
             }),
             _ => false,
         }
@@ -26461,182 +26678,61 @@ impl<'a> FunctionLowering<'a> {
         object
     }
 
-    /// Lowers `Point(x: 1, y: 2)`: a record's implicit
-    /// construction (roadmap task 11.5), packaging every field's value in
-    /// declaration order rather than obtaining storage and calling into it
-    /// — there is no `construct` to call, and nothing here allocates.
-    ///
-    /// Arguments are always named (the checker requires it), and match a
-    /// field the same way regardless of the order they were written in; an
-    /// omitted field — one the checker confirmed has a default — takes it.
-    fn lower_record_construction(&mut self, call: &ast::CallExpr, id: u32, span: Span) -> Operand {
-        let field_names: Vec<String> = self.module.values[id as usize]
-            .fields
-            .iter()
-            .map(|f| f.name.clone())
-            .collect();
-        let field_types: Vec<IrType> = self.module.values[id as usize]
-            .fields
-            .iter()
-            .map(|f| f.ty)
-            .collect();
-
-        let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
-        for arg in &call.args {
-            let name = &arg
-                .name
-                .as_ref()
-                .expect("the checker requires named arguments for a record")
-                .name;
-            let index = field_names
-                .iter()
-                .position(|n| n == name)
-                .expect("the checker resolved the field against this layout");
-            given[index] = Some(self.lower_expr_as(&arg.value, field_types[index]));
-        }
-
-        let fields: Vec<Operand> = given
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                value.unwrap_or_else(|| {
-                    self.default_value(field_types[index], span)
-                        .expect("the checker required a default for an omitted field")
-                })
-            })
-            .collect();
-
-        self.emit(
-            InstKind::BuildValue { class: id, fields },
-            IrType::Value(id),
-            span,
-        )
-    }
-
-    /// `{ ...source, field: value, ... }` — a record/object literal with an
-    /// optional spread source and explicit field overrides, processed left to
-    /// right so a later explicit field overrides an earlier spread.
-    fn lower_record_literal(&mut self, record: &ast::RecordLiteralExpr, span: Span) -> Operand {
-        let ty = self.type_of(&ast::Expr::Record(record.clone()), span);
-
-        match ty {
-            IrType::Value(id) => {
-                let field_names: Vec<String> = self.module.values[id as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
-                let field_types: Vec<IrType> = self.module.values[id as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.ty)
-                    .collect();
-
-                let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
-                for element in &record.elements {
-                    match element {
-                        ast::RecordLiteralElement::Spread(s) => {
-                            let source = self.lower_expr(&s.expr);
-                            for index in 0..field_names.len() {
-                                let field_value = self.emit(
-                                    InstKind::LoadField {
-                                        object: source,
-                                        index: index as u32,
-                                    },
-                                    field_types[index],
-                                    span,
-                                );
-                                given[index] = Some(field_value);
-                            }
-                        }
-                        ast::RecordLiteralElement::Field(f) => {
-                            let Some(index) = field_names.iter().position(|n| n == &f.name.name)
-                            else {
-                                continue;
-                            };
-                            let value = self.lower_expr_as(&f.value, field_types[index]);
-                            given[index] = Some(value);
-                        }
-                    }
-                }
-
-                let fields: Vec<Operand> = given
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| {
-                        value.unwrap_or_else(|| {
-                            self.default_value(field_types[index], span)
-                                .expect("the checker required a default for an omitted field")
-                        })
-                    })
-                    .collect();
-
-                self.emit(
-                    InstKind::BuildValue { class: id, fields },
-                    IrType::Value(id),
-                    span,
-                )
-            }
-            IrType::Object(id) => {
-                let object = self.emit(InstKind::Alloc(id), IrType::Object(id), span);
-                let field_names: Vec<String> = self.module.objects[id as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.name.clone())
-                    .collect();
-                let field_types: Vec<IrType> = self.module.objects[id as usize]
-                    .fields
-                    .iter()
-                    .map(|f| f.ty)
-                    .collect();
-
-                let mut given: Vec<Option<Operand>> = vec![None; field_names.len()];
-                for element in &record.elements {
-                    match element {
-                        ast::RecordLiteralElement::Spread(s) => {
-                            let source = self.lower_expr(&s.expr);
-                            for index in 0..field_names.len() {
-                                let field_value = self.emit(
-                                    InstKind::LoadField {
-                                        object: source,
-                                        index: index as u32,
-                                    },
-                                    field_types[index],
-                                    span,
-                                );
-                                given[index] = Some(field_value);
-                            }
-                        }
-                        ast::RecordLiteralElement::Field(f) => {
-                            let Some(index) = field_names.iter().position(|n| n == &f.name.name)
-                            else {
-                                continue;
-                            };
-                            let value = self.lower_expr_as(&f.value, field_types[index]);
-                            given[index] = Some(value);
-                        }
-                    }
-                }
-
-                for (index, value) in given.into_iter().enumerate() {
-                    let value = value.unwrap_or_else(|| {
-                        self.default_value(field_types[index], span)
-                            .expect("the checker required a default for an omitted field")
-                    });
+    /// Lowers an open object literal, preserving source order and applying
+    /// spread and explicit fields from left to right.
+    fn lower_object_literal(
+        &mut self,
+        object_literal: &ast::ObjectLiteralExpr,
+        span: Span,
+    ) -> Operand {
+        let ty = self.type_of(&ast::Expr::Object(object_literal.clone()), span);
+        debug_assert_eq!(ty, IrType::ObjectAny);
+        let object = self.emit(InstKind::ObjectNew, IrType::ObjectAny, span);
+        let object_slot = self.spill(object, IrType::ObjectAny, span);
+        for element in &object_literal.elements {
+            match element {
+                ast::ObjectLiteralElement::Spread(spread) => {
+                    let source = self.lower_expr_as(&spread.expr, IrType::ObjectAny);
+                    let destination =
+                        self.emit(InstKind::Load(object_slot), IrType::ObjectAny, spread.span);
                     self.emit_effect(
-                        InstKind::StoreField {
-                            object,
-                            index: index as u32,
-                            value,
+                        InstKind::ObjectMerge {
+                            destination,
+                            source,
                         },
-                        span,
+                        spread.span,
                     );
                 }
-
-                object
+                ast::ObjectLiteralElement::Field(field) => {
+                    let key = match &field.dynamic_key {
+                        Some(expression) => self.lower_expr_as(expression, IrType::String),
+                        None => self.const_string(&field.name.name, field.name.span),
+                    };
+                    let key_slot = self.spill(key, IrType::String, field.span);
+                    let value = self.lower_expr(&field.value);
+                    let value = if self.type_of_operand(value) == IrType::Dynamic {
+                        value
+                    } else {
+                        self.emit(
+                            InstKind::DynamicPack { value },
+                            IrType::Dynamic,
+                            field.value.span(),
+                        )
+                    };
+                    let object =
+                        self.emit(InstKind::Load(object_slot), IrType::ObjectAny, field.span);
+                    let key = self.emit(InstKind::Load(key_slot), IrType::String, field.span);
+                    self.lower_dynamic_object_set(
+                        object,
+                        key,
+                        value,
+                        "cannot change the key set of a sealed object",
+                        field.span,
+                    );
+                }
             }
-            _ => unreachable!("a record literal has a record type"),
         }
+        self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span)
     }
 
     /// The enum and discriminant a call constructs, if it names a variant
@@ -26774,6 +26870,88 @@ impl<'a> FunctionLowering<'a> {
         let target_ty = self.ir_type_from_ref(&expr.target);
         let value = self.lower_expr(&expr.expr);
         let actual_ty = self.type_of_operand(value);
+
+        if actual_ty == IrType::Dynamic
+            && let IrType::Contract(contract) = target_ty
+        {
+            if expr.optional {
+                return self.lower_dynamic_contract_optional_cast(value, contract, span);
+            }
+            return self.lower_dynamic_contract_conversion(value, contract, span);
+        }
+
+        if actual_ty == IrType::Dynamic && target_ty != IrType::Dynamic {
+            let tag = target_ty
+                .dynamic_tag()
+                .expect("sema admits only runtime-tagged Dynamic cast targets");
+            let value_slot = self.spill(value, IrType::Dynamic, span);
+            let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+            let matches = self.emit(
+                InstKind::DynamicIsType { value, tag },
+                IrType::Boolean,
+                span,
+            );
+
+            if expr.optional {
+                let nullable = Nullable::of(target_ty)
+                    .expect("an optional Dynamic cast target has a nullable representation");
+                let result_ty = IrType::Nullable(nullable);
+                let result = self.declare_slot("<optional dynamic cast>", result_ty, span);
+                let fail = self.new_block();
+                let success = self.new_block();
+                let cont = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: matches,
+                    then_block: success,
+                    else_block: fail,
+                });
+
+                self.current = fail;
+                let absent = self.emit(InstKind::NullValue(nullable), result_ty, span);
+                self.emit_effect(InstKind::Store(result, absent), span);
+                self.terminate(Terminator::Jump(cont));
+
+                self.current = success;
+                let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+                let value = self.emit(InstKind::DynamicUnbox { value, tag }, target_ty, span);
+                let wrapped = self.emit(
+                    InstKind::Wrap {
+                        base: nullable,
+                        value,
+                    },
+                    result_ty,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result, wrapped), span);
+                self.terminate(Terminator::Jump(cont));
+
+                self.current = cont;
+                return self.emit(InstKind::Load(result), result_ty, span);
+            }
+
+            let fail = self.new_block();
+            let success = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: matches,
+                then_block: success,
+                else_block: fail,
+            });
+
+            self.current = fail;
+            let native = self
+                .checked
+                .native_exceptions
+                .expect("a checked Dynamic cast registers InvalidCastError");
+            self.throw_native_failure(
+                native.invalid_cast,
+                "dynamic value has a different runtime type",
+                span,
+            );
+
+            self.current = success;
+            let value = self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+            return self.emit(InstKind::DynamicUnbox { value, tag }, target_ty, span);
+        }
 
         if actual_ty == target_ty {
             return value;
@@ -27308,6 +27486,29 @@ impl<'a> FunctionLowering<'a> {
 
         if expr.safe {
             return self.lower_safe_field(expr, span);
+        }
+
+        if self.type_of(&expr.object, expr.object.span()) == IrType::ObjectAny {
+            let object = self.lower_expr(&expr.object);
+            let key = self.const_string(&expr.name.name, expr.name.span);
+            return self.lower_dynamic_object_get(object, key, &expr.name.name, span);
+        }
+
+        if matches!(
+            self.type_of(&expr.object, expr.object.span()),
+            IrType::Contract(_)
+        ) {
+            let object = self.lower_expr(&expr.object);
+            let object = self.emit(InstKind::Retype(object), IrType::ObjectAny, span);
+            let key = self.const_string(&expr.name.name, expr.name.span);
+            let property_ty = self.type_of(&ast::Expr::Field(expr.clone()), span);
+            return self.lower_dynamic_object_get_as(
+                object,
+                key,
+                property_ty,
+                &expr.name.name,
+                span,
+            );
         }
 
         if let Some((view_slot, mut path, object_ty)) = self.borrowed_view_field_path(&expr.object)
@@ -28341,6 +28542,35 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        let object_type = self.checked.expr_types.get(&expr.object.span()).copied();
+        let contract_instance = object_type.and_then(|ty| match ty.base {
+            Base::Contract(id) => Some((id, Vec::new())),
+            Base::ContractInstance(id) => self
+                .checked
+                .contract_instances
+                .get(id as usize)
+                .map(|instance| (instance.contract, instance.args.clone())),
+            _ => None,
+        });
+        if let Some((id, args)) = contract_instance
+            && let Some(property) = self.checked.contracts[id as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == expr.name.name)
+        {
+            let contract = &self.checked.contracts[id as usize];
+            let substitution = contract
+                .type_params
+                .iter()
+                .copied()
+                .zip(args)
+                .collect::<HashMap<_, _>>();
+            return self.ir_type(substitute_specialized_type(
+                self.checked,
+                property.ty,
+                &substitution,
+            ));
+        }
         // `collection.parallel` — see `Self::lower_field`'s own note.
         if self.checked.parallel_adapter_accesses.contains(&expr.span) {
             return self.type_of(&expr.object, expr.object.span());
@@ -29073,6 +29303,143 @@ impl<'a> FunctionLowering<'a> {
         (receiver, index)
     }
 
+    /// Reads an open-object property and turns an absent result into the
+    /// language's catchable MissingPropertyError.
+    fn lower_dynamic_object_get(
+        &mut self,
+        object: Operand,
+        key: Operand,
+        description: &str,
+        span: Span,
+    ) -> Operand {
+        let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+        let found = self.emit(InstKind::ObjectGet { object, key }, nullable_ty, span);
+        let missing = self.emit(InstKind::IsNull(found), IrType::Boolean, span);
+        let found_slot = self.spill(found, nullable_ty, span);
+        let fail = self.new_block();
+        let success = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: missing,
+            then_block: fail,
+            else_block: success,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a direct dynamic read registers MissingPropertyError");
+        self.throw_native_failure(
+            native.missing_property,
+            &format!("missing object property for {description}"),
+            span,
+        );
+
+        self.current = success;
+        let nullable = self.emit(InstKind::Load(found_slot), nullable_ty, span);
+        let value = self.emit(InstKind::Unwrap(nullable), IrType::Dynamic, span);
+        let value_slot = self.spill(value, IrType::Dynamic, span);
+        self.terminate(Terminator::Jump(cont));
+
+        self.current = cont;
+        self.emit(InstKind::Load(value_slot), IrType::Dynamic, span)
+    }
+
+    fn lower_dynamic_object_get_as(
+        &mut self,
+        object: Operand,
+        key: Operand,
+        expected: IrType,
+        description: &str,
+        span: Span,
+    ) -> Operand {
+        let dynamic = self.lower_dynamic_object_get(object, key, description, span);
+        let tag = expected
+            .dynamic_tag()
+            .expect("contract properties have a Dynamic representation");
+        let dynamic_slot = self.spill(dynamic, IrType::Dynamic, span);
+        let dynamic = self.emit(InstKind::Load(dynamic_slot), IrType::Dynamic, span);
+        let matches = self.emit(
+            InstKind::DynamicIsType {
+                value: dynamic,
+                tag,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let success = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: matches,
+            then_block: success,
+            else_block: fail,
+        });
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("contract property reads register ContractViolationError");
+        self.throw_native_failure(
+            native.contract_violation,
+            "contract property value no longer matches its declared type",
+            span,
+        );
+        self.current = success;
+        let dynamic = self.emit(InstKind::Load(dynamic_slot), IrType::Dynamic, span);
+        self.emit(
+            InstKind::DynamicUnbox {
+                value: dynamic,
+                tag,
+            },
+            expected,
+            span,
+        )
+    }
+
+    /// Mutates an open object's property set and converts a sealed-key status
+    /// into a catchable `ContractViolationError`.
+    fn lower_dynamic_object_set(
+        &mut self,
+        object: Operand,
+        key: Operand,
+        value: Operand,
+        message: &str,
+        span: Span,
+    ) {
+        let status = self.emit(
+            InstKind::ObjectSet { object, key, value },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let sealed = self.emit(InstKind::ConstInt(1), IrType::Int(IntWidth::I32), span);
+        let failed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: sealed,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let fail = self.new_block();
+        let cont = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed,
+            then_block: fail,
+            else_block: cont,
+        });
+
+        self.current = fail;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("dynamic object mutation registers ContractViolationError");
+        self.throw_native_failure(native.contract_violation, message, span);
+
+        self.current = cont;
+    }
+
     /// `receiver[index]` read (design D5).
     ///
     /// `receiver` is spilled immediately after it is lowered, before
@@ -29089,6 +29456,14 @@ impl<'a> FunctionLowering<'a> {
 
         if matches!(receiver_ty, IrType::Array(_) | IrType::List(_)) {
             return self.lower_array_list_index_read(receiver_slot, &expr.index, receiver_ty, span);
+        }
+
+        if receiver_ty == IrType::ObjectAny {
+            let key = self.lower_expr_as(&expr.index, IrType::String);
+            let key_slot = self.spill(key, IrType::String, span);
+            let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+            let key = self.emit(InstKind::Load(key_slot), IrType::String, span);
+            return self.lower_dynamic_object_get(receiver, key, "computed key", span);
         }
 
         if let IrType::Value(layout_id) = receiver_ty {
@@ -29995,69 +30370,13 @@ impl<'a> FunctionLowering<'a> {
         }
 
         if let IrType::Value(id) = ty {
-            let has_method = (id as usize) < self.checked.classes.len()
-                && self.checked.classes[id as usize]
-                    .method("to_string")
-                    .is_some();
-            if has_method {
-                let method = self.checked.classes[id as usize]
-                    .method("to_string")
-                    .unwrap();
-                let name = body_symbol(self.checked, method);
-                let virtual_index = method.overridden.then_some(method.index as u32);
-                return match virtual_index {
-                    Some(index) => self.emit(
-                        InstKind::CallVirtual {
-                            object: operand,
-                            index,
-                            args: Vec::new(),
-                        },
-                        IrType::String,
-                        span,
-                    ),
-                    None => self.emit(
-                        InstKind::Call {
-                            callee: name,
-                            args: vec![operand],
-                        },
-                        IrType::String,
-                        span,
-                    ),
-                };
-            }
-
-            // Default rendering for tuples and records that do
-            // not declare their own `to_string`. A `$local$N` suffix —
-            // produced by a class declared inside a block — is cut back to
-            // the surface name (`universal-to-string-and-multiline-strings`).
-            let is_tuple = id >= self.checked.tuple_base;
-            if is_tuple {
-                let tuple_id = id - self.checked.tuple_base;
-                let fields: Vec<(u32, String, zirk_sema::Type)> = self.checked.tuple_types
-                    [tuple_id as usize]
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &ty)| (i as u32, format!("_{i}"), ty))
-                    .collect();
-                return self.lower_default_render_to_string(operand, "(", &fields, true, span);
-            }
-            let class = &self.checked.classes[id as usize];
-            let layout_name = surface_name(&class.name);
-            let fields: Vec<(u32, String, zirk_sema::Type)> = class
-                .fields
+            let fields: Vec<(u32, String, zirk_sema::Type)> = self.checked.tuple_types[id as usize]
+                .elements
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| !(f.is_static || f.name == "outer" && class.enclosing.is_some()))
-                .map(|(i, f)| (i as u32, f.name.clone(), f.ty))
+                .map(|(index, &element)| (index as u32, format!("_{index}"), element))
                 .collect();
-            return self.lower_default_render_to_string(
-                operand,
-                &format!("{layout_name}("),
-                &fields,
-                false,
-                span,
-            );
+            return self.lower_default_render_to_string(operand, "(", &fields, true, span);
         }
 
         if let IrType::Object(id) = ty {
@@ -32751,7 +33070,7 @@ impl<'a> FunctionLowering<'a> {
                 .copied()
                 .map(|ty| self.ir_type(ty))
                 .expect("the checker records every collection literal type"),
-            ast::Expr::Record(record) => self
+            ast::Expr::Object(record) => self
                 .checked
                 .expr_types
                 .get(&record.span)

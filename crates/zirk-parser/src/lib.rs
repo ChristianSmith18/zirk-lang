@@ -67,4 +67,6 @@ pub mod codes {
     /// `select`, `cancellation shield`) — distinct from one not yet
     /// implemented. The diagnostic names the replacement.
     pub const REMOVED_CONSTRUCT: Code = Code::new("E0318");
+    /// A record declaration retained temporarily for migration and fixtures.
+    pub const LEGACY_RECORD: Code = Code::new("E0319");
 }

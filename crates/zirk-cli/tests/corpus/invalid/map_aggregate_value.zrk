@@ -1,5 +1,0 @@
-record Point { x: Int32; }
-
-fn main(): Void {
-    mut points: Map<String, Point> = Map();
-}

@@ -1610,14 +1610,14 @@ mod tests {
 
     #[test]
     fn enum_and_contract_members_keep_their_declared_shapes() {
-        let source = "share enum Outcome { Ok( value : String),Fail }\ninterface Display { show( prefix :String): String; }\n";
+        let source = "share enum Outcome { Ok( value : String),Fail }\ncontract Display { show( prefix :String): String; }\n";
         let formatted = format("members.zrk", source).unwrap();
         assert!(
             formatted.contains("share enum Outcome { Ok(value: String), Fail }"),
             "{formatted}"
         );
         assert!(
-            formatted.contains("interface Display { show(prefix: String): String; }"),
+            formatted.contains("contract Display { show(prefix: String): String; }"),
             "{formatted}"
         );
         assert_eq!(format("members.zrk", &formatted).unwrap(), formatted);

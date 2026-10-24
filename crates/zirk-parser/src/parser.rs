@@ -630,7 +630,16 @@ impl<'a> Parser<'a> {
             }
 
             if self.check_keyword(Keyword::Record) {
-                if let Some(c) = self.parse_class(shared_at.is_some(), ClassKind::Record) {
+                let start = self.peek_span();
+                self.error(
+                    codes::LEGACY_RECORD,
+                    start,
+                    "`record` declarations have been removed in favor of `contract` and reference objects",
+                    "records previously combined named data shape with implicit value-copy semantics",
+                    Some("use `contract` plus an `Object` literal for a structural data shape; use a class, tuple, or enum when its identity or value semantics are intended".into()),
+                );
+                self.eat_keyword(Keyword::Record);
+                if let Some(c) = self.parse_class_body(shared_at.is_some(), ClassKind::Class) {
                     classes.push(c);
                 }
                 continue;
@@ -643,7 +652,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            if self.check_keyword(Keyword::Interface) || self.check_keyword(Keyword::Trait) {
+            if self.check_keyword(Keyword::Contract)
+                || self.check_keyword(Keyword::Interface)
+                || self.check_keyword(Keyword::Trait)
+            {
                 if let Some(c) = self.parse_contract(shared_at.is_some()) {
                     contracts.push(c);
                 }
@@ -664,7 +676,7 @@ impl<'a> Parser<'a> {
             } else {
                 (
                     format!("found {found} at the top level of the file"),
-                    "a file contains `import`, `use`, `enum`, `class`, `interface`, `trait` and `fn` declarations",
+                    "a file contains `import`, `use`, `enum`, `class`, `contract`, `trait` and `fn` declarations",
                 )
             };
             self.error(
@@ -904,19 +916,17 @@ impl<'a> Parser<'a> {
     /// The three kinds of member are told apart by what starts them: the
     /// `construct` keyword, a `fn`, or anything else — which is a field.
     fn parse_class(&mut self, shared: bool, kind: ClassKind) -> Option<ClassDecl> {
-        let start = self.peek_span();
-        let keyword = match kind {
-            // `abstract` is consumed by the caller, ahead of `class` itself.
-            ClassKind::Class | ClassKind::Abstract => Keyword::Class,
-            ClassKind::Record => Keyword::Record,
-        };
-        self.eat_keyword(keyword);
+        self.eat_keyword(Keyword::Class);
+        self.parse_class_body(shared, kind)
+    }
 
-        let context = if kind == ClassKind::Record {
-            "after `record`"
-        } else {
-            "after `class`"
-        };
+    /// Parses a class declaration after its keyword has already been consumed.
+    /// Legacy `record` declarations use this only to recover the rest of the
+    /// source after emitting their migration diagnostic; semantically they are
+    /// never represented as a distinct type kind.
+    fn parse_class_body(&mut self, shared: bool, kind: ClassKind) -> Option<ClassDecl> {
+        let start = self.peek_span();
+        let context = "after `class`";
         let name = self.expect_identifier(context)?;
         let type_params = self.parse_type_params();
 
@@ -996,11 +1006,21 @@ impl<'a> Parser<'a> {
     }
 
     /// `record Name(field: Type, field: Type, ...);`
-    /// `interface Name { ... }` or `trait Name { ... }`
+    /// `contract Name { ... }` or `trait Name { ... }`. The old `interface`
+    /// spelling is parsed only far enough to give a migration diagnostic.
     fn parse_contract(&mut self, shared: bool) -> Option<ContractDecl> {
         let start = self.peek_span();
-        let kind = if self.eat_keyword(Keyword::Interface) {
-            ContractKind::Interface
+        let kind = if self.eat_keyword(Keyword::Contract) {
+            ContractKind::Contract
+        } else if self.eat_keyword(Keyword::Interface) {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`interface` has been replaced by `contract`",
+                "contracts now describe both required properties and operations",
+                Some("replace `interface` with `contract`".into()),
+            );
+            ContractKind::Contract
         } else {
             self.eat_keyword(Keyword::Trait);
             ContractKind::Trait
@@ -1024,11 +1044,52 @@ impl<'a> Parser<'a> {
 
         self.expect(&TokenKind::LBrace, "after the contract name");
 
+        let mut properties = Vec::new();
         let mut methods = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
             let member_start = self.peek_span();
             let visibility = self.parse_visibility();
             let is_static = self.eat_keyword(Keyword::Static);
+
+            // A name followed by `:` is a required property; a name followed
+            // by `(` is an operation. Both use the ordinary field type and
+            // mutability syntax so contracts describe the same shape objects
+            // expose at runtime.
+            let is_property = matches!(
+                self.peek(),
+                TokenKind::Keyword(Keyword::Mut | Keyword::Inmut)
+            ) || (matches!(self.peek(), TokenKind::Identifier(_))
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Colon)
+                ));
+            if is_property {
+                if is_static {
+                    let span = self.peek_span();
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "contract properties are instance properties",
+                        "a property requirement describes each object implementing the contract",
+                        None,
+                    );
+                }
+                if let Some(property) = self.parse_field(visibility, false, member_start) {
+                    if property.default.is_some() {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            property.span,
+                            "a contract property cannot have a default value",
+                            "contracts describe required shape and do not provide storage",
+                            None,
+                        );
+                    }
+                    properties.push(property);
+                } else {
+                    self.synchronize_member();
+                }
+                continue;
+            }
 
             // Contract methods carry no `fn` either. The old form still
             // parses so the diagnostic can name the migration instead of
@@ -1051,7 +1112,10 @@ impl<'a> Parser<'a> {
                     span,
                     format!("a {} declares methods", kind.as_str()),
                     format!("found {found}"),
-                    Some("a contract has no fields: it describes behaviour, not state".into()),
+                    Some(
+                        "write a property as `name: Type` or an operation as `name(...): Type`"
+                            .into(),
+                    ),
                 );
                 self.synchronize_member();
                 continue;
@@ -1077,6 +1141,7 @@ impl<'a> Parser<'a> {
             kind,
             type_params,
             implements,
+            properties,
             methods,
             shared,
             span: start.to(end),
@@ -1134,13 +1199,13 @@ impl<'a> Parser<'a> {
             return None;
         }
 
-        if has_body && kind == ContractKind::Interface {
+        if has_body && kind == ContractKind::Contract {
             let span = self.peek_span();
             self.error(
                 codes::UNEXPECTED_TOKEN,
                 span,
-                "an `interface` method has no body",
-                "an interface declares signatures; a `trait` is the one that may carry implementation",
+                "a `contract` operation has no body",
+                "a contract declares required signatures; a `trait` is the one that may carry reusable implementation",
                 Some("write `trait` instead, or remove the body".into()),
             );
             return None;
@@ -1308,19 +1373,8 @@ impl<'a> Parser<'a> {
         }
 
         // Nested class: `class` (static nested by default), `inner class`,
-        // or `abstract class` when the enclosing class is abstract. A record
-        // cannot nest types.
+        // or `abstract class` when the enclosing class is abstract.
         if self.check_keyword(Keyword::Class) {
-            if enclosing == ClassKind::Record {
-                self.error(
-                    codes::UNEXPECTED_TOKEN,
-                    start,
-                    "a `record` cannot nest classes",
-                    "only a `class` or `abstract class` can contain a nested class",
-                    Some("move it out of the record".into()),
-                );
-                return None;
-            }
             if is_override {
                 self.error(
                     codes::UNEXPECTED_TOKEN,
@@ -1820,7 +1874,7 @@ impl<'a> Parser<'a> {
     }
 
     /// The mandatory return type of a signature with no body to infer from:
-    /// `interface` members, `abstract` methods, `extern` declarations and
+    /// `contract` members, `abstract` methods, `extern` declarations and
     /// `fn dec`.
     fn require_return_type(&mut self, name: &Ident) -> Option<TypeRef> {
         if self.eat(&TokenKind::Colon) {
@@ -3611,7 +3665,7 @@ impl<'a> Parser<'a> {
                             None
                         };
                         let end = binding.as_ref().map(|b| b.span).unwrap_or(name.span);
-                        fields.push(RecordPatternField {
+                        fields.push(ObjectPatternField {
                             name: name.clone(),
                             binding,
                             span: name.span.to(end),
@@ -3626,7 +3680,7 @@ impl<'a> Parser<'a> {
                 }
                 let end = self.peek_span();
                 self.expect(&TokenKind::RBrace, "to close the record pattern");
-                Some(Pattern::Record(RecordPattern {
+                Some(Pattern::Object(ObjectPattern {
                     fields,
                     rest,
                     span: span.to(end),
@@ -3752,16 +3806,9 @@ impl<'a> Parser<'a> {
     /// position is only ever a range bound. The legacy `a..b..step` spelling
     /// still parses, with a migration warning.
     fn parse_range(&mut self) -> Option<Expr> {
-        // A quoted-key object is a JSON document literal. It is represented
-        // as its source text so APIs such as `HTTPResponse.from_json` can take
-        // a readable JSON body without a second layer of string escaping.
-        if self.is_json_document_literal() {
-            return self.parse_json_document_literal(self.peek_span());
-        }
-        // A leading `{` is either a record/object literal (`{ ...src, f: v }`)
-        // or a braced range bound (`{offset}..{limit}`). Record literals are
-        // recognized by `...` or by an identifier immediately followed by `:`
-        // or `,` at the top level.
+        // A leading `{` is either an object literal or a braced range bound.
+        // Object keys can be bare identifiers, quoted strings, or ordinary
+        // interpolated strings.
         if self.is_record_literal() {
             return self.parse_record_literal(self.peek_span());
         }
@@ -3775,60 +3822,6 @@ impl<'a> Parser<'a> {
         Some(start)
     }
 
-    fn is_json_document_literal(&self) -> bool {
-        matches!(self.peek(), TokenKind::LBrace)
-            && matches!(self.peek_at(1), TokenKind::Str(_))
-            && matches!(self.peek_at(2), TokenKind::Colon)
-    }
-
-    /// Captures a JSON object literal as a String containing its exact source
-    /// text. Values are JSON data, not Zirk expressions; use the
-    /// `HTTPJsonSerializable` contract when fields need runtime expressions.
-    fn parse_json_document_literal(&mut self, open: Span) -> Option<Expr> {
-        let start = open.start as usize;
-        let mut depth = 0usize;
-        let mut end = open.end as usize;
-        let mut closed = false;
-        while self.pos < self.tokens.len() {
-            let token = &self.tokens[self.pos];
-            match token.kind {
-                TokenKind::LBrace => depth += 1,
-                TokenKind::RBrace => {
-                    depth -= 1;
-                    end = token.span.end as usize;
-                    self.pos += 1;
-                    if depth == 0 {
-                        closed = true;
-                        break;
-                    }
-                    continue;
-                }
-                _ => {}
-            }
-            end = token.span.end as usize;
-            self.pos += 1;
-        }
-        if !closed {
-            self.error(
-                codes::UNEXPECTED_TOKEN,
-                open,
-                "unterminated JSON object literal",
-                "expected `}` to close the JSON document",
-                None,
-            );
-            return None;
-        }
-        let span = Span {
-            file: open.file,
-            start: open.start,
-            end: end as u32,
-        };
-        Some(Expr::Str(StrLit {
-            value: self.source.text()[start..end].to_owned(),
-            span,
-        }))
-    }
-
     /// Whether the `{` at the cursor starts a record/object literal.
     fn is_record_literal(&self) -> bool {
         if !matches!(self.peek(), TokenKind::LBrace) {
@@ -3838,6 +3831,9 @@ impl<'a> Parser<'a> {
             TokenKind::DotDotDot => true,
             TokenKind::Identifier(_) => {
                 matches!(self.peek_at(2), TokenKind::Colon | TokenKind::Comma)
+            }
+            TokenKind::Str(_) | TokenKind::InterpolatedStr(_) => {
+                matches!(self.peek_at(2), TokenKind::Colon)
             }
             _ => false,
         }
@@ -4051,7 +4047,7 @@ impl<'a> Parser<'a> {
                         Some(expr) => {
                             let span = element_start.to(expr.span());
                             elements
-                                .push(RecordLiteralElement::Spread(SpreadElement { expr, span }));
+                                .push(ObjectLiteralElement::Spread(SpreadElement { expr, span }));
                         }
                         None => {
                             ok = false;
@@ -4059,9 +4055,34 @@ impl<'a> Parser<'a> {
                         }
                     }
                 } else {
-                    let Some(name) = self.expect_identifier("as a record field name") else {
-                        ok = false;
-                        break;
+                    let key_span = self.peek_span();
+                    let (name, dynamic_key) = match self.peek().clone() {
+                        TokenKind::Identifier(name) => {
+                            self.pos += 1;
+                            (Ident::new(name, key_span), None)
+                        }
+                        TokenKind::Str(name) => {
+                            self.pos += 1;
+                            (Ident::new(name, key_span), None)
+                        }
+                        TokenKind::InterpolatedStr(_) => {
+                            let Some(key) = self.parse_primary() else {
+                                ok = false;
+                                break;
+                            };
+                            (Ident::new(String::new(), key_span), Some(key))
+                        }
+                        _ => {
+                            self.error(
+                                codes::UNEXPECTED_TOKEN,
+                                key_span,
+                                "expected an identifier or string object key",
+                                format!("found {}", self.peek().description()),
+                                None,
+                            );
+                            ok = false;
+                            break;
+                        }
                     };
                     let (value, value_span) = if self.eat(&TokenKind::Colon) {
                         let value = match self.parse_expr() {
@@ -4073,14 +4094,25 @@ impl<'a> Parser<'a> {
                         };
                         let span = value.span();
                         (value, span)
-                    } else {
+                    } else if dynamic_key.is_none() {
                         // Shorthand `name` means `name: name`.
                         let value = Expr::Path(name.clone());
                         (value, name.span)
+                    } else {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            name.span,
+                            "an interpolated object key needs a value",
+                            "write `\"{key}\": value`",
+                            None,
+                        );
+                        ok = false;
+                        break;
                     };
-                    let span = name.span.to(value_span);
-                    elements.push(RecordLiteralElement::Field(RecordLiteralField {
+                    let span = key_span.to(value_span);
+                    elements.push(ObjectLiteralElement::Field(ObjectLiteralField {
                         name,
+                        dynamic_key,
                         value,
                         span,
                     }));
@@ -4103,7 +4135,7 @@ impl<'a> Parser<'a> {
         if !self.expect(&TokenKind::RBrace, "to close the record literal") {
             return None;
         }
-        Some(Expr::Record(RecordLiteralExpr {
+        Some(Expr::Object(ObjectLiteralExpr {
             elements,
             span: open.to(end),
         }))

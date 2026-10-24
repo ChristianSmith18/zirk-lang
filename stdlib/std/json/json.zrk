@@ -1,0 +1,38 @@
+package std.json;
+
+// JSON conversion uses the language's ordinary Dynamic, Object, and List
+// values. A missing result means the input contains a cycle or a value that
+// has no JSON representation.
+// Explicit codecs keep type conversion visible and avoid runtime reflection.
+// Implementations validate the JSON shape with Object/contract semantics and
+// construct values through their normal constructors.
+share contract JSONCodec<T> {
+    decode(value: Dynamic): T;
+    encode(value: T): Dynamic;
+}
+
+share class JSON {
+    static parse(document: String): Dynamic throws JsonConversionError {
+        return JSON.parse_dynamic_native(document);
+    }
+
+    static stringify(value: Dynamic): String throws JsonConversionError {
+        return JSON.stringify_dynamic_native(value);
+    }
+
+    static decode<T>(document: String, codec: JSONCodec<T>): T throws JsonConversionError {
+        return codec.decode(JSON.parse(document));
+    }
+
+    static encode<T>(value: T, codec: JSONCodec<T>): String throws JsonConversionError {
+        return JSON.stringify(codec.encode(value));
+    }
+
+    private static parse_dynamic_native(document: String): Dynamic throws JsonConversionError {
+        return document;
+    }
+
+    private static stringify_dynamic_native(value: Dynamic): String throws JsonConversionError {
+        return "";
+    }
+}

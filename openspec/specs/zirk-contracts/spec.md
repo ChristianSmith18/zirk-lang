@@ -1,95 +1,64 @@
 # zirk-contracts Specification
 
 ## Purpose
-Defines interfaces, traits, abstract requirement classes, capability contracts,
-conformance, conflict resolution, and dynamic contract dispatch.
+Defines structural contracts, traits, abstract requirement classes, capability
+contracts, conformance, conflict resolution, and dynamic contract dispatch.
 ## Requirements
-### Requirement: Interface, trait, and abstract requirements
+### Requirement: Contract, trait, and abstract requirements
 
-Interfaces SHALL contain behavior signatures only. Traits SHALL contain behavior requirements and reusable method bodies but no attributes or constructors. Abstract classes SHALL contain nominal attribute and abstract-method requirements but no bodies. All three SHALL be adopted through `implements`; a declaration SHALL satisfy every compatible requirement explicitly.
+Contracts SHALL contain structural property requirements and operation
+signatures without reusable bodies. Traits SHALL contain behavior requirements
+and reusable method bodies but no attributes or constructors. Abstract classes
+SHALL contain nominal attribute and abstract-method requirements but no bodies.
+Classes SHALL be able to implement contracts, traits, and abstract classes; a
+declaration SHALL satisfy every compatible requirement explicitly.
 
 #### Scenario: Trait state rejected
 
 - **WHEN** a trait declares an instance attribute
 - **THEN** compilation fails and recommends a required getter/setter method or abstract-class requirement
 
-### Requirement: Contract composition and conflict resolution
+### Requirement: Contract and trait composition and conflict resolution
 
-Interfaces MAY implement interfaces; traits MAY implement interfaces and traits; abstract classes MAY implement abstract classes and interfaces. Cycles and incompatible same-name signatures SHALL fail. Conflicting trait defaults SHALL require the `#override` marker (since a trait default is an inherited implementation) and MAY select an implementation with `TraitName.super.method()`.
+Contracts MAY extend contracts; traits MAY implement contracts and compose with
+traits; abstract classes MAY implement contracts and extend abstract classes.
+Cycles and incompatible same-name signatures SHALL fail. Conflicting trait
+defaults SHALL require the `#override` marker (since a trait default is an
+inherited implementation) and MAY select an implementation with
+`TraitName.super.method()`.
 
 #### Scenario: Explicit trait selection
 
 - **WHEN** two adopted traits define `print()` and the class overrides it using `JsonPrintable.super.print()` under a `#override` marker
 - **THEN** the selected default is called without declaration-order precedence
 
-#### Scenario: Interface requirement needs no marker
+#### Scenario: Contract requirement needs no marker
 
-- **WHEN** a class implements an `interface` method and writes no `#override`
+- **WHEN** a class implements a contract operation and writes no `#override`
 - **THEN** the implementation is accepted, since no inherited implementation is replaced
 
-### Requirement: Capability derivation model
+### Requirement: Contracts describe structural properties and operations
 
-Classes SHALL NOT gain equality, hashing, or cloning silently: equality on
-classes requires an explicit `_equals` implementation, and cloning requires
-the type to satisfy the `Clone` capability. Records, tuples, and enums have
-structural equality by definition, and `clone` SHALL be available for any
-type whose complete reachable type graph is cloneable — no explicit
-derivation syntax is required; derived cloning SHALL be deep.
+A `contract` SHALL declare required property types and operation signatures.
+Classes and open `Object` values SHALL be eligible to conform by shape. A
+contract-typed view SHALL expose only declared members while preserving the
+identity of its underlying object.
 
-#### Scenario: Uncloneable component
+#### Scenario: Class implementing a contract
 
-- **WHEN** cloning is attempted on a value containing an uncloneable resource
-- **THEN** compilation fails and identifies the component and missing capability
-
-#### Scenario: Record equality is automatic
-
-- **WHEN** two `record` values of the same type are compared with `==`
-- **THEN** structural field equality applies without any declared derivation
-
-### Requirement: Interfaces
-
-An `interface` SHALL declare signatures without implementation, and a class SHALL be able to combine several, per `ZIRK_LANGUAGE_SPEC.md` section 7. A `record` that implements an interface SHALL dispatch correctly through a reference typed by that interface, without exposing observable identity or mutation through that reference.
-
-#### Scenario: Class implementing an interface
-
-- **WHEN** `class User implements Serializable` defines every method of the interface
+- **WHEN** `class User implements Serializable` defines every required property and operation
 - **THEN** the check succeeds
 - **AND** `User` is acceptable wherever `Serializable` is expected
 
-#### Scenario: Unimplemented interface method
+#### Scenario: Unimplemented contract operation
 
-- **WHEN** a class declares that it implements an interface and omits a method
-- **THEN** a diagnostic is emitted naming the missing method and its signature
+- **WHEN** a class declares that it implements a contract and omits a required operation
+- **THEN** a diagnostic is emitted naming the missing operation and its signature
 
-#### Scenario: Record dispatches through an implemented interface
+#### Scenario: Object conforms structurally
 
-- **WHEN** a `record` implements an interface and is held through a variable typed as that interface
-- **THEN** a call through the interface-typed reference dispatches to the record's own method, without granting the value observable identity or mutability through that reference
-
-#### Scenario: Interface with a body
-
-- **WHEN** a method of an `interface` declares a body
-- **THEN** a diagnostic is emitted indicating that reusable implementation belongs in a `trait`
-
-### Requirement: Traits with implementation
-
-A `trait` SHALL be able to include methods with a body, which the class that adopts it receives unless it overrides them.
-
-#### Scenario: Method inherited from the trait
-
-- **WHEN** a class adopts a trait with an implemented method and does not override it
-- **THEN** calling that method on the class executes the trait's body
-
-#### Scenario: The class overrides the trait method
-
-- **WHEN** the class defines its own version
-- **THEN** the class's version is executed
-
-#### Scenario: Two traits provide the same method
-
-- **WHEN** a class adopts two traits that implement a method with the same name and does not override it
-- **THEN** a diagnostic is emitted naming both traits
-- **AND** the help indicates that overriding it in the class resolves the conflict
+- **WHEN** an open object has every property and operation required by a contract
+- **THEN** it is accepted through that contract view without changing object identity
 
 ### Requirement: Operator contracts
 
@@ -144,30 +113,49 @@ A declaration that claims to implement a contract SHALL implement it completely 
 - **WHEN** a class implements two of the three methods of a contract
 - **THEN** a diagnostic is emitted for each missing method
 
-### Requirement: Generic contract conformance
+### Requirement: Contract conformance validates and seals dynamic objects
+The checker SHALL verify statically known conformance at compile time. When the source has only dynamic `Object` type, conformance SHALL validate required properties and operations at runtime and raise a catchable contract violation if any requirement is missing or incompatible. Successful conformance SHALL seal the object's complete existing key set across all aliases. Extra keys SHALL remain stored and sealed; contract-typed access SHALL expose only declared properties and operations. Writes SHALL follow the contract property's mutability and the binding's mutability rules.
 
-A `class` or `record` SHALL be able to declare conformance to a generic
-contract instantiation (`implements Contract<T, ...>`). Signature
-compatibility SHALL be checked against the contract's methods after
-substituting the contract's own type parameters with the arguments written
-in the `implements` clause, and trait default methods SHALL apply under the
-same substitution.
+#### Scenario: Statically known object satisfies a contract
+- **WHEN** an object literal with compatible required members is assigned to a contract type
+- **THEN** conformance is checked at compile time and the object key set becomes sealed
 
-#### Scenario: Signature checked under substitution
+#### Scenario: Dynamic object misses a required property
+- **WHEN** a dynamic `Object` without a required property is assigned to a contract type
+- **THEN** a catchable contract-violation error identifies the missing requirement
 
-- **WHEN** `class Box<T> implements Iterable<T>` declares `iterator(): Iterator<T>`
-- **THEN** the signature is compared against `Iterable`'s `iterator` with the contract parameter replaced by the adopter's `T`
+#### Scenario: Extra property is sealed across aliases
+- **WHEN** an object with `name` and `active` is viewed through a contract requiring only `name`
+- **THEN** `active` remains on the same object, no alias can add or remove keys, and the contract view exposes only `name`
 
-#### Scenario: Missing method under substitution
+### Requirement: Contract operations accept compatible callable properties
+A dynamic object's callable property SHALL satisfy a contract operation when its parameter, result, mutability, safety, and effect requirements are compatible. Calls through the contract view SHALL use the callable value stored on the same object.
 
-- **WHEN** a class declares `implements Comparable<Int32>` without the required method at the substituted signature
-- **THEN** a `MISSING_IMPLEMENTATION` diagnostic is emitted
+#### Scenario: Callable property satisfies an operation
+- **WHEN** an object stores `label` as a compatible callable and is checked against a contract requiring `label(): String`
+- **THEN** conformance succeeds and calling `label()` through the contract view invokes that stored callable
 
-### Requirement: Object spread does not require Iterable
+### Requirement: Contract and trait composition remain distinct
+Contracts MAY extend other contracts, and classes MAY implement multiple contracts and traits. Traits MAY compose with traits and MAY implement contracts. Abstract classes MAY extend abstract classes and implement contracts. Cycles and incompatible same-name signatures SHALL fail. Conflicting trait defaults SHALL require explicit `#override` selection.
 
-Record/object spread and rest SHALL use named-field metadata and SHALL remain valid for records that do not implement `Iterable<T>`. Only collection/call spread requires the iterable contract.
+#### Scenario: Class implements multiple contracts
+- **WHEN** a class implements two contracts and supplies every required member
+- **THEN** both structural conformance checks succeed
 
-#### Scenario: Non-iterable record field spread
-- **WHEN** a record without `Iterable<T>` is used as `{ ...record }`
-- **THEN** named fields are copied successfully according to its record shape
+#### Scenario: Conflicting trait defaults require selection
+- **WHEN** two adopted traits provide the same method and the class does not resolve the conflict
+- **THEN** a diagnostic identifies both trait defaults
 
+### Requirement: Object identity does not imply structural equality
+Dynamic objects SHALL use reference identity. Assignment and contract views SHALL preserve the same object identity; equality SHALL NOT recursively compare object properties unless an explicit equality capability is implemented.
+
+#### Scenario: Two equal-looking objects have distinct identity
+- **WHEN** two separately created objects have the same properties
+- **THEN** structural equality is not inferred and `is` reports distinct identities
+
+### Requirement: Value capabilities remain explicit
+Classes and dynamic objects SHALL NOT gain equality or cloning silently. Equality SHALL require an explicit equality capability or method. Tuples and enums SHALL retain their documented component-wise value semantics; dynamic objects SHALL use identity unless an explicit equality implementation is selected. Deep cloning SHALL be available only when the reachable values satisfy `Clone`.
+
+#### Scenario: Object clone requires cloneable reachable values
+- **WHEN** a dynamic object graph contains a value that does not implement `Clone`
+- **THEN** deep cloning is rejected with a diagnostic naming the unsupported value

@@ -68,12 +68,13 @@ See [String](../02-handbook/03-everyday-types/09-string.md),
 ### User-defined values and references
 
 ```zirk
-record Point { x: Decimal; y: Decimal; }
+contract Point { x: Decimal; y: Decimal; }
+inmut point: Point = { x: 1.0, y: 2.0 };
 class Session { token: String; }
 ```
 
-See [Records](../02-handbook/10-data-types/01-records.md),
-[Class or Record?](../02-handbook/10-data-types/08-class-or-record.md).
+See [Objects and Contracts](../02-handbook/10-data-types/01-records.md),
+[Class, Contract, or Object?](../02-handbook/10-data-types/08-class-or-record.md).
 
 ### Borrowed and unsafe
 
@@ -87,13 +88,13 @@ and [Pointers and Native Slices](../02-handbook/17-memory-and-safety/05-pointers
 
 ## Domain types
 
-User programs add nominal reference `class` types, immutable structural `record`
-values, traditional and algebraic `enum` values, aliases, and unions. These are
+User programs add nominal reference `class` types, open reference `Object` values, traditional and algebraic `enum` values, aliases, and unions. These are
 not compiler primitives, but all belong under the conceptual `Object` root.
 
-Complete reference variables alias when moved. Reads through an attribute,
-index, slice, destructuring, pattern, iterator, argument, return, or closure
-capture are independent projections and require `Clone` when reference-backed.
+`Object` is a managed reference with dynamic string-keyed properties. Aliases
+share identity and mutations; shallow spread creates a new top-level Object
+while preserving nested reference identity. `contract` declarations provide
+structural constraints and seal an Object’s existing keys when applied.
 
 The former `Task<T>` and `TaskSettlement<T>` types were removed. Structured
 concurrency uses `Job<T>`; source-level outcome aggregation remains unavailable.

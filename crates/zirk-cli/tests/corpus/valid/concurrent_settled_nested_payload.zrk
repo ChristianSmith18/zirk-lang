@@ -1,13 +1,14 @@
 import { stdout } from std.io;
 
-record Payload {
+class Payload {
     text: String;
+    construct(text: String) { this.text = text; }
 }
 
 fn main(): Void {
     mut outcomes = Concurrent.of(
-        (): Payload => Payload(text: "nested settled one"),
-        (): Payload => Payload(text: "nested settled two"),
+        (): Payload => Payload("nested settled one"),
+        (): Payload => Payload("nested settled two"),
     ).settled(
 
     );

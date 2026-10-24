@@ -6,7 +6,7 @@
 use zirk_ast::{Expr, Ident, ModuleDecl, Stmt};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
-use zirk_parser::parse;
+use zirk_parser::{codes as parser_codes, parse};
 use zirk_sema::{Base, Type, check, codes};
 
 /// Standard stream calls (`stdout.println`, `stderr.print`, ...) require an
@@ -2025,7 +2025,7 @@ fn invalid_explicit_to_string_with_arguments() {
 #[test]
 fn valid_to_string_through_a_contract_reference() {
     accepted(
-        "interface Printable {  to_string(): String; }
+        "contract Printable {  to_string(): String; }
          class Widget implements Printable { construct() { }  #override to_string(): String { return \"w\"; } }
          fn describe(p: Printable): Void { stdout.println(p); }
          fn main(): Void { mut w = Widget(); describe(w); }",
@@ -2358,7 +2358,7 @@ fn invalid_iterating_a_type_that_does_not_implement_iterable() {
 
 #[test]
 fn invalid_reopening_the_native_iterable_contract() {
-    let output = rejected("interface Iterable {  foo(): Int32; }\nfn main(): Void { }");
+    let output = rejected("contract Iterable {  foo(): Int32; }\nfn main(): Void { }");
     assert!(
         output.contains(codes::DUPLICATE_DECLARATION.as_str()),
         "{output}"
@@ -3261,7 +3261,7 @@ fn valid_a_class_may_extend_one_declared_later() {
 
 // --- Contratos ---------------------------------------------------------------
 
-const CONTRACTS: &str = "interface Describable {
+const CONTRACTS: &str = "contract Describable {
      describe(): String;
 }
 
@@ -3333,7 +3333,7 @@ fn valid_class_own_method_resolves_two_traits_offering_the_same_name() {
 #[test]
 fn invalid_class_missing_what_a_contract_requires() {
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          class Robot implements Describable { construct() { } }
          fn main(): Void { }",
     );
@@ -3347,7 +3347,7 @@ fn invalid_class_missing_what_a_contract_requires() {
 #[test]
 fn invalid_implementation_with_a_different_signature() {
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          class Robot implements Describable {
              construct() { }
               describe(): Int32 { return 1; }
@@ -3361,7 +3361,7 @@ fn invalid_implementation_with_a_different_signature() {
 fn invalid_implementation_that_is_not_public() {
     // A contract declares behaviour anyone may reach.
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          class Robot implements Describable {
              construct() { }
              private  describe(): String { return \"x\"; }
@@ -3387,7 +3387,7 @@ fn invalid_reaching_a_member_the_contract_does_not_declare() {
 #[test]
 fn invalid_constructing_a_contract() {
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          fn main(): Void { mut d = Describable(); }",
     );
     assert!(output.contains(codes::NOT_CALLABLE.as_str()), "{output}");
@@ -3418,7 +3418,7 @@ fn valid_a_subclass_satisfies_what_its_base_satisfies() {
 fn invalid_interface_method_with_a_body() {
     // A trait is the one that may carry implementation.
     let output = rejected(
-        "interface Describable {  describe(): String { return \"x\"; } }\nfn main(): Void { }",
+        "contract Describable {  describe(): String { return \"x\"; } }\nfn main(): Void { }",
     );
     assert!(output.contains("has no body"), "{output}");
 }
@@ -3630,7 +3630,7 @@ fn valid_a_nullable_contract_is_a_type() {
     // It reaches lowering as an ordinary nullable, which is what the uniform
     // representation buys.
     accepted(
-        "interface D {  describe(): String; }
+        "contract D {  describe(): String; }
          class R implements D { construct() { }  describe(): String { return \"r\"; } }
          fn main(): Void { mut d: D? = R(); mut e: D? = null; }",
     );
@@ -3721,7 +3721,7 @@ fn nested_generic_function_signature_accepts_complete_substitution() {
 #[test]
 fn generic_contract_static_requirements_match_static_class_members() {
     accepted(
-        "interface EnvironmentParsable<T> { static parse_environment(text: String): T; }
+        "contract EnvironmentParsable<T> { static parse_environment(text: String): T; }
          class Port implements EnvironmentParsable<Port> {
              static parse_environment(text: String): Port { return Port(); }
          }
@@ -3729,7 +3729,7 @@ fn generic_contract_static_requirements_match_static_class_members() {
     );
 
     let output = rejected(
-        "interface EnvironmentParsable<T> { static parse_environment(text: String): T; }
+        "contract EnvironmentParsable<T> { static parse_environment(text: String): T; }
          class Port implements EnvironmentParsable<Port> {
              parse_environment(text: String): Port { return Port(); }
          }
@@ -3741,7 +3741,7 @@ fn generic_contract_static_requirements_match_static_class_members() {
 #[test]
 fn generic_parameter_calls_static_contract_method_from_its_constraint() {
     accepted(
-        "interface EnvironmentParsable<T> { static parse(text: String): T; }
+        "contract EnvironmentParsable<T> { static parse(text: String): T; }
          class Port implements EnvironmentParsable<Port> {
              static parse(text: String): Port { return Port(); }
          }
@@ -3755,7 +3755,7 @@ fn generic_parameter_calls_static_contract_method_from_its_constraint() {
 #[test]
 fn user_contract_named_environment_parsable_cannot_spoof_builtin_intrinsics() {
     let output = rejected(
-        "interface EnvironmentParsable<T> { static parse(text: String): T; }
+        "contract EnvironmentParsable<T> { static parse(text: String): T; }
          fn parse_value<T from EnvironmentParsable<T>>(text: String): T {
              return T.parse(text);
          }
@@ -3916,7 +3916,7 @@ fn valid_method_call_through_a_type_parameters_contract_constraint() {
     // `value.greet()` resolves through `Greeter`, the one constraint `T`
     // declares — task 7.4 of the generics slice.
     accepted(
-        "interface Greeter {  greet(): String; }
+        "contract Greeter {  greet(): String; }
          fn show<T from Greeter>(value: T): String { return value.greet(); }
          fn main(): Void { }",
     );
@@ -3934,7 +3934,7 @@ fn valid_field_access_through_a_type_parameters_class_constraint() {
 #[test]
 fn invalid_method_the_constraint_does_not_promise() {
     let output = rejected(
-        "interface Greeter {  greet(): String; }
+        "contract Greeter {  greet(): String; }
          fn show<T from Greeter>(value: T): Void { mut r = value.somethingElse(); }
          fn main(): Void { }",
     );
@@ -3985,7 +3985,7 @@ fn invalid_call_infers_conflicting_types_for_the_same_parameter() {
 #[test]
 fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
     let output = rejected(
-        "interface Serializable {  serialize(): String; }
+        "contract Serializable {  serialize(): String; }
          fn store<T from Serializable>(value: T): Void { }
          fn main(): Void { store(5); }",
     );
@@ -3996,11 +3996,54 @@ fn invalid_call_infers_a_type_that_does_not_satisfy_the_constraint() {
 #[test]
 fn valid_call_infers_a_type_that_satisfies_the_constraint() {
     accepted(
-        "interface Serializable {  serialize(): String; }
+        "contract Serializable {  serialize(): String; }
          class Doc implements Serializable { construct() { }  serialize(): String { return \"\"; } }
          fn store<T from Serializable>(value: T): Void { }
          fn main(): Void { store(Doc()); }",
     );
+}
+
+#[test]
+fn valid_contract_property_is_satisfied_by_a_class_field() {
+    accepted(
+        "contract Named { name: String; }
+         class User implements Named { name: String = \"Ada\"; }
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn invalid_contract_property_must_exist_with_compatible_type() {
+    let output = rejected(
+        "contract Named { name: String; }
+         class User implements Named { age: Int32 = 42; }
+         fn main(): Void { }",
+    );
+    assert!(
+        output.contains("does not implement property `name`"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_contract_mutable_property_rejects_an_immutable_field() {
+    let output = rejected(
+        "contract Named { mut name: String; }
+         class User implements Named { inmut name: String = \"Ada\"; }
+         fn main(): Void { }",
+    );
+    assert!(output.contains("not mutable enough"), "{output}");
+}
+
+#[test]
+fn invalid_contract_cannot_inherit_conflicting_property_shapes() {
+    let output = rejected(
+        "contract Named { name: String; }
+         contract Numbered { name: Int32; }
+         contract Both implements Named, Numbered { }
+         fn main(): Void { }",
+    );
+    assert!(output.contains("incompatible property `name`"), "{output}");
 }
 
 #[test]
@@ -4030,7 +4073,7 @@ fn invalid_generic_type_argument_count() {
 #[test]
 fn invalid_generic_type_argument_missing_its_constraint() {
     let output = rejected(
-        "interface Serializable {  serialize(): String; }
+        "contract Serializable {  serialize(): String; }
          class Box<T from Serializable> { value: T; }
          class Holder { value: Box<Int32>; }
          fn main(): Void { }",
@@ -5010,62 +5053,64 @@ fn invalid_enum_mixing_string_and_integer_mappings_has_no_lookup_type() {
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
-// --- Records ------------------------------------------------------------------
+// --- Objects and contracts ----------------------------------------------------
 
 #[test]
-fn valid_record_construction_and_field_access() {
-    // A non-generic record fully lowers now (roadmap task 11.5).
+fn valid_contract_object_assignment_and_field_access() {
     accepted(
-        "record Point { x: Int32; y: Int32; }
-         fn main(): Void { mut p = Point(x: 1, y: 2); stdout.println(p.x); }",
+        "contract Point { x: Int32; y: Int32; }
+         fn main(): Void { mut p: Point = { x: 1, y: 2 }; stdout.println(p.x); }",
     );
 }
 
 #[test]
-fn valid_record_omitted_field_takes_its_type_default() {
+fn valid_class_omitted_field_takes_its_type_default() {
     accepted(
-        "record Settings { count: Int32; flag: Boolean; }
+        "class Settings { count: Int32; flag: Boolean; }
          fn main(): Void { mut s = Settings(); }",
     );
 }
 
 #[test]
-fn invalid_record_field_without_a_default_is_required() {
+fn legacy_record_declaration_reports_migration_error() {
     let output = rejected(
         "class Engine { }
          record Car { engine: Engine; }
          fn main(): Void { mut c = Car(); }",
     );
     assert!(
-        output.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
         "{output}"
     );
 }
 
 #[test]
-fn invalid_record_construction_with_positional_arguments() {
+fn legacy_record_construction_syntax_is_rejected() {
     let output = rejected(
         "record Point { x: Int32; y: Int32; }
          fn main(): Void { mut p = Point(1, 2); }",
     );
     assert!(
-        output.contains(codes::UNKNOWN_ARGUMENT_NAME.as_str()),
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
         "{output}"
     );
 }
 
 #[test]
-fn invalid_record_extends_a_class() {
+fn legacy_record_extends_syntax_is_rejected() {
     let output = rejected(
         "class Base { }
          record Point extends Base { x: Int32; }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
-fn invalid_record_declares_a_custom_construct() {
+fn legacy_record_constructor_syntax_is_rejected() {
     let output = rejected(
         "record Point {
              x: Int32;
@@ -5073,20 +5118,26 @@ fn invalid_record_declares_a_custom_construct() {
          }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
-fn invalid_record_field_explicitly_marked_mut() {
+fn legacy_record_mutable_field_syntax_is_rejected() {
     let output = rejected(
         "record Point { mut x: Int32; }
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
-fn invalid_mutating_a_record_field_from_a_method() {
+fn legacy_record_method_syntax_is_rejected() {
     let output = rejected(
         "record Point {
              x: Int32;
@@ -5095,42 +5146,35 @@ fn invalid_mutating_a_record_field_from_a_method() {
          fn main(): Void { }",
     );
     assert!(
-        output.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
         "{output}"
     );
 }
 
 #[test]
-fn valid_record_equality_is_derived_without_a_reserved_method() {
-    // `fase-3-structural-equality`: `==` on a record fully compiles now —
-    // not only free of `TYPE_MISMATCH` (already true before this change),
-    // but of `NOT_LOWERED` too, since `zirk-ir` now lowers it to a
-    // field-by-field comparison instead of gating it.
+fn valid_object_identity_is_not_structural_equality() {
     accepted(
-        "record Point { x: Int32; y: Int32; }
-         fn main(): Void { mut a = Point(x: 1, y: 2); mut b = Point(x: 1, y: 2); stdout.println(a == b); }",
+        "fn main(): Void { mut a: Object = { x: 1 }; mut alias: Object = a; mut b: Object = { x: 1 }; stdout.println(a is alias); stdout.println(a is b); }",
     );
 }
 
 #[test]
-fn valid_record_equality_inline_basic() {
+fn valid_class_reference_equality_uses_identity() {
     accepted(
-        "record Money { amount: Int32; currency: String; }
-         fn main(): Void { mut a = Money(amount: 1, currency: \"USD\"); mut b = Money(amount: 1, currency: \"USD\"); stdout.println(a == b); }",
+        "class Money { amount: Int32; currency: String; construct(amount: Int32, currency: String) { this.amount = amount; this.currency = currency; } }
+         fn main(): Void { mut a = Money(1, \"USD\"); mut alias = a; mut b = Money(1, \"USD\"); stdout.println(a is alias); stdout.println(a is b); }",
     );
 }
 
 #[test]
-fn valid_record_equality_over_a_nested_record_field() {
-    // Design D1: a nested `record` field recurses the same
-    // way its own top-level `==` would.
+fn valid_nested_objects_keep_reference_identity() {
     accepted(
-        "record Point { x: Int32; y: Int32; }
-         record Line { start: Point; end: Point; }
+        "class Point { x: Int32; construct(x: Int32) { this.x = x; } }
+         class Line { start: Point; construct(start: Point) { this.start = start; } }
          fn main(): Void {
-             mut a = Line(start: Point(x: 0, y: 0), end: Point(x: 1, y: 1));
-             mut b = Line(start: Point(x: 0, y: 0), end: Point(x: 1, y: 1));
-             stdout.println(a == b);
+             mut point = Point(1);
+             mut line = Line(point);
+             stdout.println(line.start is point);
          }",
     );
 }
@@ -5146,11 +5190,11 @@ fn valid_record_equality_over_a_class_field_with_its_own_equals() {
              construct(value: Int32) { this.value = value; }
               _equals(other: Id): Boolean { return this.value == other.value; }
          }
-         record Tagged { id: Id; }
+         class Tagged { id: Id; construct(id: Id) { this.id = id; } }
          fn main(): Void {
-             mut a = Tagged(id: Id(1));
-             mut b = Tagged(id: Id(1));
-             stdout.println(a == b);
+             mut a = Tagged(Id(1));
+             mut b = Tagged(Id(1));
+             stdout.println(a.id == b.id);
          }",
     );
 }
@@ -5162,76 +5206,73 @@ fn valid_record_equality_over_a_class_field_without_equals_uses_identity() {
     // the way a bare top-level `class == class` with no `_equals` would.
     accepted(
         "class Box { value: Int32; construct(value: Int32) { this.value = value; } }
-         record Tagged { box: Box; }
+         class Tagged { box: Box; construct(box: Box) { this.box = box; } }
          fn main(): Void {
              mut b = Box(1);
-             mut a = Tagged(box: b);
-             mut c = Tagged(box: b);
-             stdout.println(a == c);
+             mut a = Tagged(b);
+             mut c = Tagged(b);
+             stdout.println(a.box is c.box);
          }",
     );
 }
 
 #[test]
-fn invalid_record_equality_over_an_unsupported_field_type_is_not_lowered() {
-    // Design D3: a residual unsupported field type (here, `T?`) keeps the
-    // existing checked-but-not-compilable diagnostic, scoped to just that
-    // field rather than the whole comparison unconditionally.
+fn legacy_record_equality_syntax_is_rejected() {
     let output = rejected(
         "record Box { value: Int32?; }
          fn main(): Void { mut a = Box(value: 1); mut b = Box(value: 1); stdout.println(a == b); }",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
-fn invalid_identity_comparison_on_a_record() {
+fn legacy_record_identity_syntax_is_rejected() {
     let output = rejected(
         "record Point { x: Int32; }
          fn main(): Void { mut a = Point(x: 1); mut b = Point(x: 1); stdout.println(a is b); }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains("no identity"), "{output}");
-}
-
-#[test]
-fn invalid_generic_record_is_not_lowered_yet() {
-    // A non-generic record fully lowers (task 11.5); combining
-    // that with per-instantiation specialization (11.1) is out of scope.
-    let output = rejected("record Box<T> { value: T; }\nfn main(): Void { }");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
-}
-
-#[test]
-fn valid_record_method_called_directly() {
-    // A record's own method dispatches statically (design.md's open
-    // question on virtual methods) — nothing gates a plain call the way
-    // implementing a contract does below.
-    accepted(
-        "record Point {
-             x: Int32;
-              double(): Int32 { return this.x * 2; }
-         }
-         fn main(): Void { mut p = Point(x: 3); stdout.println(p.double()); }",
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
     );
 }
 
 #[test]
-fn valid_record_implements_a_contract_and_dispatches_through_it() {
-    // `fase-3-value-type-contract-dispatch` (design D1): a record
-    // implementing a contract is assignable to it, and a call through the
-    // contract-typed reference type-checks like any other contract call —
-    // conformance was already checked the same way it is for a class; what
-    // this change adds is that the reference itself now compiles too.
+fn legacy_generic_record_declaration_reports_migration_error() {
+    let output = rejected("record Box<T> { value: T; }\nfn main(): Void { }");
+    assert!(
+        output.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn valid_class_method_called_directly() {
     accepted(
-        "interface Describable {  describe(): String; }
-         record Point implements Describable {
+        "class Point {
              x: Int32;
+             construct(x: Int32) { this.x = x; }
+              double(): Int32 { return this.x * 2; }
+         }
+         fn main(): Void { mut p = Point(3); stdout.println(p.double()); }",
+    );
+}
+
+#[test]
+fn valid_class_implements_a_contract_and_dispatches_through_it() {
+    accepted(
+        "contract Describable {  describe(): String; }
+         class Point implements Describable {
+             x: Int32;
+             construct(x: Int32) { this.x = x; }
               describe(): String { return \"point\"; }
          }
          fn announce(d: Describable): String { return d.describe(); }
          fn main(): Void {
-             mut p = Point(x: 3);
+             mut p = Point(3);
              mut d: Describable = p;
              stdout.println(d.describe());
              stdout.println(announce(p));
@@ -5244,7 +5285,7 @@ fn invalid_record_missing_what_a_contract_requires() {
     // A record's conformance is checked exactly the way a class's is
     // (unaffected by this change): a missing method is still caught.
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          record Point implements Describable { x: Int32; }
          fn main(): Void { }",
     );
@@ -5263,7 +5304,7 @@ fn invalid_mutating_a_field_through_a_boxed_record_s_contract_type() {
     // to even name, whether the concrete adopter behind it is a class or a
     // boxed value.
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          record Point implements Describable {
              x: Int32;
               describe(): String { return \"point\"; }
@@ -5283,7 +5324,7 @@ fn invalid_record_not_implementing_the_named_interface() {
     // same way a class would be — this change only makes the *adopted*
     // case compile, not any and every record.
     let output = rejected(
-        "interface Describable {  describe(): String; }
+        "contract Describable {  describe(): String; }
          record Point { x: Int32; }
          fn announce(d: Describable): String { return d.describe(); }
          fn main(): Void { mut p = Point(x: 3); stdout.println(announce(p)); }",
@@ -5292,8 +5333,10 @@ fn invalid_record_not_implementing_the_named_interface() {
 }
 
 #[test]
-fn valid_record_construction() {
-    accepted("record UserId { value: Int32; }\nfn main(): Void { mut u = UserId(value: 5); }");
+fn valid_object_contract_construction() {
+    accepted(
+        "contract UserId { value: Int32; }\nfn main(): Void { mut u: UserId = { value: 5 }; }",
+    );
 }
 
 #[test]
@@ -5652,7 +5695,7 @@ fn valid_cast_between_a_class_and_its_base() {
 #[test]
 fn valid_cast_between_a_class_and_a_contract() {
     let output = rejected(
-        "interface Shape {  area(): Int32; }
+        "contract Shape {  area(): Int32; }
          class Circle implements Shape { construct() { }  area(): Int32 { return 1; } }
          fn main(): Void { mut c = Circle(); mut s = c as Shape; mut back = <Circle>s; }",
     );
@@ -5707,7 +5750,7 @@ fn valid_cast_from_a_type_parameter_to_its_own_constraint() {
     // `T from Serializable` may always be widened to `Serializable`: that is
     // exactly what the constraint promises, not a leap of faith.
     let output = rejected(
-        "interface Serializable {  serialize(): String; }
+        "contract Serializable {  serialize(): String; }
          fn show<T from Serializable>(x: T): Void { mut y = x as Serializable; }
          fn main(): Void { }",
     );
@@ -5717,7 +5760,7 @@ fn valid_cast_from_a_type_parameter_to_its_own_constraint() {
 #[test]
 fn invalid_cast_from_a_type_parameter_to_an_unrelated_type() {
     let output = rejected(
-        "interface Serializable {  serialize(): String; }
+        "contract Serializable {  serialize(): String; }
          fn show<T from Serializable>(x: T): Void { mut y = x as String; }
          fn main(): Void { }",
     );
@@ -6218,7 +6261,7 @@ fn valid_class_implements_an_abstract_class_and_an_interface() {
     // must not collide on index assignment.
     accepted(&format!(
         "{SHAPE}
-         interface Describable {{
+         contract Describable {{
               describe(): String;
          }}
          class Circle implements Shape, Describable {{
@@ -6953,9 +6996,9 @@ fn invalid_pointer_escapes_via_closure_capture() {
 #[test]
 fn valid_pointer_from_record_field() {
     accepted(
-        "record Point { x: Int32; y: Int32; }
+        "class Point { x: Int32; y: Int32; construct(x: Int32, y: Int32) { this.x = x; this.y = y; } }
          fn main(): Void {
-             mut p: Point = Point(x: 1, y: 2);
+             mut p: Point = Point(1, 2);
              unsafe {
                  mut q: Pointer<Int32> = Pointer.from(p.x);
              }
@@ -6966,9 +7009,9 @@ fn valid_pointer_from_record_field() {
 #[test]
 fn valid_pointer_from_user_record_field() {
     accepted(
-        "record UserId { value: Int32; }
+        "class UserId { value: Int32; construct(value: Int32) { this.value = value; } }
          fn main(): Void {
-             mut u: UserId = UserId(value: 5);
+             mut u: UserId = UserId(5);
              unsafe {
                  mut p: Pointer<Int32> = Pointer.from(u.value);
              }
@@ -6979,10 +7022,10 @@ fn valid_pointer_from_user_record_field() {
 #[test]
 fn valid_pointer_from_nested_record_field() {
     accepted(
-        "record Inner { a: Int32; }
-         record Outer { inner: Inner; }
+        "class Inner { a: Int32; construct(a: Int32) { this.a = a; } }
+         class Outer { inner: Inner; construct(inner: Inner) { this.inner = inner; } }
          fn main(): Void {
-             mut o: Outer = Outer(inner: Inner(a: 1));
+             mut o: Outer = Outer(Inner(1));
              unsafe {
                  mut p: Pointer<Int32> = Pointer.from(o.inner.a);
              }
@@ -7033,19 +7076,6 @@ fn valid_weak_upgrade_and_is_alive() {
 #[test]
 fn invalid_weak_of_a_scalar_referent() {
     let output = rejected("fn f(w: Weak<Int32>): Void { }\nfn main(): Void { }");
-    assert!(
-        output.contains(codes::WEAK_DISALLOWED_REFERENT.as_str()),
-        "{output}"
-    );
-}
-
-#[test]
-fn invalid_weak_of_a_record_referent() {
-    let output = rejected(
-        "record Point { x: Int32; y: Int32; }
-         fn f(w: Weak<Point>): Void { }
-         fn main(): Void { }",
-    );
     assert!(
         output.contains(codes::WEAK_DISALLOWED_REFERENT.as_str()),
         "{output}"
@@ -7196,7 +7226,7 @@ fn valid_manual_clone_implementation_is_dispatched_as_an_ordinary_method() {
     // `Self::check_method_call_on`'s own gate never reaches
     // `check_derived_clone_call` once the class declares the method itself.
     accepted(
-        "interface Greeter {  greet(): String; }
+        "contract Greeter {  greet(): String; }
          class Loud implements Greeter { construct() { }  greet(): String { return \"hi\"; } }
          class Holder { mut g: Greeter; construct(g: Greeter) { this.g = g; }  clone(): Holder { return this; } }
          fn main(): Void {
@@ -7452,9 +7482,8 @@ fn valid_collection_word_layouts_cover_scalars_and_managed_handles() {
 fn valid_map_set_aggregate_descriptors_remain_semantically_admissible() {
     accepted(
         "enum Direction { North }\n\
-         record Point { x: Int32; }\n\
          fn main(): Void {\n\
-             mut records: List<Point> = List();\n\
+             mut objects: List<Object> = List();\n\
              mut nullable: List<String?> = List();\n\
              mut tuples: List<Tuple<Int32, String>> = List();\n\
              mut closures: List<Fn(Int32) => Int32> = List();\
@@ -7519,17 +7548,7 @@ fn invalid_map_values_fail_early_when_the_word_abi_cannot_round_trip_them() {
 }
 
 #[test]
-fn invalid_map_values_reject_inline_records_and_payload_enums() {
-    let output = rejected(
-        "record Point { x: Int32; }\n\
-         enum Outcome { Success(value: String), Failure }\n\
-         fn main(): Void {\n\
-             mut points: Map<String, Point> = Map();\n\
-         }",
-    );
-    assert!(output.contains("Map<..., Point>"), "{output}");
-    assert!(output.contains("one-word value representation"), "{output}");
-
+fn invalid_map_values_reject_payload_enums() {
     let output = rejected(
         "enum Outcome { Success(value: String), Failure }\n\
          fn main(): Void {\n\
@@ -8075,10 +8094,10 @@ fn valid_spread_and_rest_operators_type_check() {
 #[test]
 fn valid_record_spread_and_rest_type_check() {
     accepted(
-        "record UserProfile { id: Int32; name: String; active: Boolean; }\n\
+        "\n\
          fn main(): Void {\n\
-             mut profile: UserProfile = UserProfile(id: 7, name: \"Ada\", active: true);\n\
-             mut renamed: UserProfile = { ...profile, name: \"Grace\" };\n\
+             mut profile: Object = { id: 7, name: \"Ada\", active: true };\n\
+             mut renamed: Object = { ...profile, name: \"Grace\" };\n\
              mut { id, ...details } = profile;\n\
              mut { id: profile_id, name: profile_name, ...flags } = profile;\n\
          }",
@@ -8384,7 +8403,7 @@ fn ownership_derivation_denies_resources_without_compiler_audited_transfer_marke
 #[test]
 fn ownership_derivation_fails_closed_for_unsupported_native_and_open_contract_shapes() {
     let checked = ownership_program(
-        "interface Open { read(): Int32; }
+        "contract Open { read(): Int32; }
          class HoldsOpen { inmut value: Open; construct(value: Open) { this.value = value; } }
          fn main(): Void { }",
     );
@@ -8549,17 +8568,17 @@ fn promoted_field_write_outside_its_constructor_is_a_warning() {
 }
 
 #[test]
-fn promoted_variadic_and_record_constructor_parameters_are_rejected() {
+fn promoted_variadic_constructor_parameters_are_rejected() {
     let variadic =
         rejected("class C { construct(public ...items: List<Int32>) { } } fn main(): Void { }");
     assert!(
         variadic.contains(codes::PROMOTED_VARIADIC.as_str()),
         "{variadic}"
     );
-    let record = rejected("record C { construct(public item: Int32) { } } fn main(): Void { }");
+    let legacy = rejected("record C { construct(public item: Int32) { } fn main(): Void { }");
     assert!(
-        record.contains(codes::PROMOTION_OUTSIDE_CLASS_CONSTRUCT.as_str()),
-        "{record}"
+        legacy.contains(parser_codes::LEGACY_RECORD.as_str()),
+        "{legacy}"
     );
 }
 
@@ -8815,4 +8834,74 @@ fn service_context_is_bound_to_callback_parameter_and_cannot_escape() {
             "{body}: {output}"
         );
     }
+}
+
+#[test]
+fn open_object_literal_infers_object_and_checks_interpolated_keys() {
+    accepted(
+        "fn build(dynamic_key: String): Void { mut data = { status: \"ok\", \"{dynamic_key}\": true }; } fn main(): Void { }",
+    );
+}
+
+#[test]
+fn object_view_preserves_class_widening_and_dynamic_member_reads() {
+    accepted(
+        "class Box { } fn widen(value: Box): Object { return value; } fn read(value: Object): Dynamic { return value.status; } fn read_computed(value: Object): Dynamic { return value[\"status\"]; } fn narrow(value: Object): Box? { return value as? Box; } fn narrow_dynamic(value: Object): String? { return value.status as? String; } fn require_dynamic(value: Object): String { return value.status as String; } fn main(): Void { }",
+    );
+}
+
+#[test]
+fn open_object_property_mutation_respects_reference_mutability() {
+    accepted(
+        "fn main(): Void { inmut value = { status: \"initial\" }; value.status = \"ready\"; value[\"count\"] = 2; }",
+    );
+    let output = rejected(
+        "fn main(): Void { inmut::strict value = { status: \"initial\" }; value.status = \"ready\"; }",
+    );
+    assert!(
+        output.contains(codes::STRICT_ALIAS_VIOLATION.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn object_literals_check_known_contract_properties_statically() {
+    accepted(
+        "contract Named { name: String; } fn main(): Void { inmut value: Named = { name: \"Ada\" }; }",
+    );
+
+    let missing = rejected(
+        "contract Named { name: String; } fn main(): Void { inmut value: Named = { age: 37 }; }",
+    );
+    assert!(
+        missing.contains("missing contract property `name`"),
+        "{missing}"
+    );
+
+    let wrong_type = rejected(
+        "contract Named { name: String; } fn main(): Void { inmut value: Named = { name: 37 }; }",
+    );
+    assert!(
+        wrong_type.contains(codes::TYPE_MISMATCH.as_str()),
+        "{wrong_type}"
+    );
+}
+
+#[test]
+fn object_literal_callable_properties_satisfy_contract_operations() {
+    accepted(
+        "contract Runnable { run(): Int32; }
+         fn run_once(): Int32 { return 1; }
+         fn main(): Void { inmut runner: Runnable = { run: run_once }; }",
+    );
+
+    let mismatch = rejected(
+        "contract Runnable { run(value: Int32): Int32; }
+         fn run_without_arguments(): Int32 { return 1; }
+         fn main(): Void { inmut runner: Runnable = { run: run_without_arguments }; }",
+    );
+    assert!(
+        mismatch.contains("operation `run`") || mismatch.contains("contract"),
+        "{mismatch}"
+    );
 }

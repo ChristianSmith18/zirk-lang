@@ -68,11 +68,11 @@ directamente omite el contexto de permisos del proyecto.
 | [`09-clases-y-objetos.zrk`](09-clases-y-objetos.zrk) | Constructores, campos, visibilidad, métodos e identidad de objetos. |
 | [`10-enums-algebraicos.zrk`](10-enums-algebraicos.zrk) | Casos con y sin payload, patrones exhaustivos y destructuración. |
 | [`11-tuplas.zrk`](11-tuplas.zrk) | Valores producto heterogéneos y acceso/destructuración. |
-| [`12-genericos-y-contratos.zrk`](12-genericos-y-contratos.zrk) | Interfaces genéricas, implementaciones, despacho y protocolos de iteración. |
+| [`12-genericos-y-contratos.zrk`](12-genericos-y-contratos.zrk) | Contratos genéricos, implementaciones, despacho y protocolos de iteración. |
 | [`13-resultados.zrk`](13-resultados.zrk) | Result<T,E>, construcción, consumo y match exhaustivo. |
 | [`14-excepciones.zrk`](14-excepciones.zrk) | throws, throw, try/catch/finally y jerarquía Throwable. |
 | [`15-recursos.zrk`](15-recursos.zrk) | Resource<E> y match with con cierre automático en las salidas. |
-| [`16-clonado-profundo.zrk`](16-clonado-profundo.zrk) | clone de records y objetos administrados con preservación de valores. |
+| [`16-clonado-profundo.zrk`](16-clonado-profundo.zrk) | Objetos dinámicos, copia superficial y referencia de identidad. |
 | [`17-punteros-unsafe.zrk`](17-punteros-unsafe.zrk) | Acceso explícito a Pointer dentro de un bloque unsafe. |
 | [`18-regex.zrk`](18-regex.zrk) | Literales de expresiones regulares, búsqueda, grupos y reemplazo. |
 | [`19-tiempo-civil.zrk`](19-tiempo-civil.zrk) | Date, Time, DateTime y validación de componentes temporales. |

@@ -1,0 +1,11 @@
+import { stdout } from std.io;
+
+class Box { }
+
+fn main(): Void {
+    mut box = Box();
+    inmut open: Object = box;
+    open.name = "Zirk";
+    inmut name: String = open.name as String;
+    stdout.println(name);
+}

@@ -1,8 +1,11 @@
 import { stdout } from std.io;
 
-record Point { inmut::strict x: Int32; }
+class Point {
+    inmut x: Int32;
+    construct(x: Int32) { this.x = x; }
+}
 
 fn main(): Void {
-    mut p: Point = Point(x: 5);
+    mut p: Point = Point(5);
     stdout.println(p.x.to_string());
 }

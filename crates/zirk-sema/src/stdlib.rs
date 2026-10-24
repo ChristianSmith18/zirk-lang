@@ -60,6 +60,14 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
             package: "std.http",
             module: "http",
         }),
+        "std.json" => Some(StandardModule {
+            package: "std.json",
+            module: "json",
+        }),
+        "std.json::json" => Some(StandardModule {
+            package: "std.json",
+            module: "json",
+        }),
         "std.net" => Some(StandardModule {
             package: "std.net",
             module: "net",
@@ -401,6 +409,15 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
         "websocket_close_native" => Some("std.http.websocket.close"),
         "websocket_close_with_native" => Some("std.http.websocket.close_with"),
         "decode_text_native" => Some("std.http.response_text"),
+        _ => None,
+    }
+}
+
+/// Compiler-owned JSON conversion leaves, bindable only from `std.json`.
+pub fn compiler_binding_for_json_member(name: &str) -> Option<&'static str> {
+    match name {
+        "stringify_dynamic_native" => Some("std.json.stringify_dynamic"),
+        "parse_dynamic_native" => Some("std.json.parse_dynamic"),
         _ => None,
     }
 }

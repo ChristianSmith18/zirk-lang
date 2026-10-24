@@ -14,8 +14,8 @@ fn each_and_each_settled_keep_nested_payloads_alive_across_real_gc() {
         dir.join("main.zrk"),
         r#"import { stdout } from std.io;
 
-record Leaf { text: String; }
-record Payload { leaf: Leaf; }
+class Leaf { text: String; construct(text: String) { this.text = text; } }
+class Payload { leaf: Leaf; construct(leaf: Leaf) { this.leaf = leaf; } }
 
 class Churn {
     value: Int32;

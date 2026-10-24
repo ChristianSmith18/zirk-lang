@@ -20,7 +20,7 @@ match point {
 ```
 
 An algebraic enum is not destructured directly. Its payload is selected and
-extracted only inside `match`; a nested record or tuple pattern may then inspect
+extracted only inside `match`; a nested object or tuple pattern may then inspect
 that payload.
 
 Attribute names and types are checked. Bindings remain local and may be renamed

@@ -91,38 +91,31 @@ fn show_rest_destructuring(): Void {
     // Expected remaining contents: [20, 30, 40]
 }
 
-record UserProfile {
-    id: Int32;
-    name: String;
-    active: Boolean;
-}
-
 fn show_object_spread_and_rest(): Void {
-    inmut profile: UserProfile = UserProfile(
+    inmut profile: Object = {
         id: 7,
         name: "Ada",
         active: true,
-    );
+    };
 
-    // Object/record spread copies named fields and explicit fields override
-    // earlier values. The expected record type supplies the object shape.
-    inmut renamed: UserProfile = { ... profile, name: "Grace" };
-    stdout.println(renamed.id);
-    stdout.println(renamed.name);
-    stdout.println(renamed.active);
+    // Object spread copies named fields and explicit fields override earlier values.
+    inmut renamed: Object = { ... profile, name: "Grace" };
+    stdout.println(renamed.id as Int32);
+    stdout.println(renamed.name as String);
+    stdout.println(renamed.active as Boolean);
     // Expected: 7, then "Grace", then true
 
     // Object rest binds selected fields and collects the remaining fields.
     inmut { id, ... details } = profile;
-    stdout.println(id);
-    stdout.println(details.name);
-    stdout.println(details.active);
+    stdout.println(id as Int32);
+    stdout.println(details.name as String);
+    stdout.println(details.active as Boolean);
     // Expected: 7, then "Ada", then true
 
     inmut { id: profile_id, name: profile_name, ... flags } = profile;
-    stdout.println(profile_id);
-    stdout.println(profile_name);
-    stdout.println(flags.active);
+    stdout.println(profile_id as Int32);
+    stdout.println(profile_name as String);
+    stdout.println(flags.active as Boolean);
     // Expected: 7, then "Ada", then true
 }
 

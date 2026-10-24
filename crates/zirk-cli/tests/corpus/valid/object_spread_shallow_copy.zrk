@@ -1,0 +1,14 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut child: Object = { value: 1 };
+    inmut p: Object = { x: 1, y: 2, name: "hi", child: child };
+    inmut q: Object = { ...p };
+    stdout.println(p.x as Int32);
+    stdout.println(q.x as Int32);
+    stdout.println(q.name as String);
+    stdout.println(p is q);
+    inmut original_child: Object = p.child as Object;
+    inmut copied_child: Object = q.child as Object;
+    stdout.println(original_child is copied_child);
+}

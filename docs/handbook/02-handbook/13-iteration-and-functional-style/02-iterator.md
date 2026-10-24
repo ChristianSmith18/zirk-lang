@@ -9,7 +9,7 @@ Completion is explicit and cannot be confused with a nullable item:
 ```zirk
 enum Iteration<T> { Item(T), Done }
 
-interface Iterator<out T> {
+contract Iterator<out T> {
     next(): Iteration<T>;
 }
 ```

@@ -270,6 +270,64 @@ fn emit_inner<'ctx>(
                 fields.push(const_field_offset(context, struct_type, path).into());
             }
 
+            // Name every declared instance field in the class descriptor so
+            // the open `Object` view can use the same dynamic property API
+            // for class fields and sidecar properties. Each field record is:
+            // key pointer, key byte length, byte offset, byte size, Dynamic
+            // tag, reference-offset count, then offsets relative to the
+            // field payload. The collector still uses the compact aggregate
+            // reference list above; these per-field paths let a dynamically
+            // read field preserve its references when boxed as `Dynamic`.
+            fields.push(word.const_int(layout.fields.len() as u64, false).into());
+            for (field_index, field) in layout.fields.iter().enumerate() {
+                let key_bytes = context.const_string(field.name.as_bytes(), false);
+                let key_global = llvm.add_global(
+                    key_bytes.get_type(),
+                    None,
+                    &format!("zk.field.{}.{}", layout.name, field_index),
+                );
+                key_global.set_initializer(&key_bytes);
+                key_global.set_constant(true);
+                key_global.set_linkage(Linkage::Private);
+
+                let field_type = llvm_type_in(
+                    context,
+                    field.ty,
+                    &module.closures,
+                    &module.values,
+                    &module.enums,
+                )
+                .expect("class instance fields have sized LLVM types");
+                let field_path = vec![field_index as u32 + OBJECT_HEADER_FIELDS];
+                let field_offset = const_field_offset(context, struct_type, &field_path);
+                let mut reference_paths = Vec::new();
+                gc_reference_paths(
+                    module,
+                    field.ty,
+                    &mut field_path.clone(),
+                    &mut reference_paths,
+                );
+
+                fields.push(key_global.as_pointer_value().into());
+                fields.push(word.const_int(field.name.len() as u64, false).into());
+                fields.push(field_offset.into());
+                fields.push(
+                    field_type
+                        .size_of()
+                        .expect("class instance fields are sized")
+                        .into(),
+                );
+                fields.push(
+                    word.const_int(u64::from(field.ty.dynamic_tag().unwrap_or(0)), false)
+                        .into(),
+                );
+                fields.push(word.const_int(reference_paths.len() as u64, false).into());
+                for path in &reference_paths {
+                    let reference_offset = const_field_offset(context, struct_type, path);
+                    fields.push(reference_offset.const_sub(field_offset).into());
+                }
+            }
+
             let descriptor = context.const_struct(&fields, false);
             let global = llvm.add_global(
                 descriptor.get_type(),
@@ -600,6 +658,9 @@ fn llvm_type_in<'ctx>(
         // so the value carried around is a pointer. The struct behind it is
         // only needed where a field is addressed.
         ir::IrType::Object(_) => context.ptr_type(AddressSpace::default()).into(),
+        ir::IrType::ObjectAny | ir::IrType::Dynamic => {
+            context.ptr_type(AddressSpace::default()).into()
+        }
         // Reached through the contract, but still just the object's address:
         // the descriptor it already carries answers which body to run.
         ir::IrType::Contract(_) => context.ptr_type(AddressSpace::default()).into(),
@@ -864,6 +925,8 @@ fn gc_reference_paths(
         // with no `parallel` involved).
         ir::IrType::Object(_)
         | ir::IrType::Contract(_)
+        | ir::IrType::ObjectAny
+        | ir::IrType::Dynamic
         | ir::IrType::Weak(_)
         | ir::IrType::Dependent(_)
         | ir::IrType::Pin(_)
@@ -1579,8 +1642,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             self.emit_terminator(terminator);
         }
 
-        if let Some(next_instruction) = last_parameter_store
-            .and_then(|store| store.get_next_instruction())
+        if let Some(next_instruction) =
+            last_parameter_store.and_then(|store| store.get_next_instruction())
         {
             for slot in parameter_debug_declarations {
                 let span = function.slots[slot.0 as usize].span;
@@ -1667,6 +1730,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 | ir::IrType::Regex
                 | ir::IrType::Object(_)
                 | ir::IrType::Contract(_)
+                | ir::IrType::ObjectAny
+                | ir::IrType::Dynamic
                 | ir::IrType::Weak(_)
                 | ir::IrType::Dependent(_)
                 | ir::IrType::Pin(_)
@@ -3265,12 +3330,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 self.module.pointer_types[pointer_id as usize],
                 index,
                 "field_ptr",
+                true,
             ),
             ir::IrType::Pin(pin_id) => self.field_pointer_of_type(
                 ptr,
                 self.module.pin_types[pin_id as usize],
                 index,
                 "field_ptr",
+                false,
             ),
             other => unreachable!(
                 "field_pointer called on {}, not an object or pointer",
@@ -3288,6 +3355,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         referent: ir::IrType,
         index: u32,
         name: &str,
+        load_object_reference: bool,
     ) -> PointerValue<'ctx> {
         match referent {
             ir::IrType::Object(id) => {
@@ -3299,8 +3367,27 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     &self.module.values,
                     &self.module.enums,
                 );
+                // `Pointer.from(object.field)` starts with the address of
+                // the local slot containing the managed object reference.
+                // A Pin already carries the pinned object address directly.
+                let object_value = if load_object_reference {
+                    let object_pointer_type = self
+                        .llvm_type(referent)
+                        .expect("managed object references have a pointer LLVM type");
+                    self.builder
+                        .build_load(object_pointer_type, ptr, "pointer_object")
+                        .expect("load the managed object reference")
+                        .into_pointer_value()
+                } else {
+                    ptr
+                };
                 self.builder
-                    .build_struct_gep(struct_type, ptr, index + OBJECT_HEADER_FIELDS, name)
+                    .build_struct_gep(
+                        struct_type,
+                        object_value,
+                        index + OBJECT_HEADER_FIELDS,
+                        name,
+                    )
                     .expect("a verified module addresses a field the layout has")
             }
             ir::IrType::Value(id) => {
@@ -4111,20 +4198,54 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             } => {
                 let receiver = self.operand(*object).into_pointer_value();
                 let ptr = self.context.ptr_type(AddressSpace::default());
-
-                let descriptor = self
-                    .builder
-                    .build_load(ptr, receiver, "descriptor")
-                    .expect("load the descriptor")
-                    .into_pointer_value();
-
-                // Which table answers for this contract is not statically
-                // known — that is what a contract is for — so the runtime
-                // finds it in the descriptor.
                 let id = self
                     .context
                     .i64_type()
                     .const_int(u64::from(*contract), false);
+                let open = self
+                    .builder
+                    .build_call(
+                        self.runtime.is_open_object,
+                        &[receiver.into()],
+                        "is_open_object",
+                    )
+                    .expect("check whether the receiver is an open object")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("open-object check returns a status")
+                    .into_int_value();
+                let is_open = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        open,
+                        self.context.i32_type().const_zero(),
+                        "dynamic_contract_receiver",
+                    )
+                    .expect("compare open-object status");
+                let parent = self.builder.get_insert_block().expect("call block");
+                let function = parent.get_parent().expect("call function");
+                let dynamic_block = self
+                    .context
+                    .append_basic_block(function, "contract.dynamic");
+                let class_block = self.context.append_basic_block(function, "contract.class");
+                let merge_block = self.context.append_basic_block(function, "contract.merge");
+                self.builder
+                    .build_conditional_branch(is_open, dynamic_block, class_block)
+                    .expect("branch on receiver representation");
+
+                let result_ty = instruction.ty;
+                let arg_tys: Vec<ir::IrType> =
+                    args.iter().map(|a| self.value_types[&a.0]).collect();
+                let call_signature =
+                    self.contract_signature(*contract, *index, result_ty, &arg_tys);
+
+                self.builder.position_at_end(class_block);
+                let descriptor = self
+                    .builder
+                    .build_load(ptr, receiver, "descriptor")
+                    .expect("load class descriptor")
+                    .into_pointer_value();
                 let table = self
                     .builder
                     .build_call(
@@ -4132,39 +4253,243 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         &[descriptor.into(), id.into()],
                         "itable",
                     )
-                    .expect("find the contract table")
+                    .expect("find class contract table")
                     .try_as_basic_value()
                     .basic()
-                    .expect("the lookup returns a pointer")
+                    .expect("contract table lookup returns a pointer")
                     .into_pointer_value();
-
                 let offset = self.context.i32_type().const_int(u64::from(*index), false);
                 let slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(ptr, table, &[offset], "method_slot")
-                        .expect("a verified module calls a method the table has")
+                        .expect("verified contract method slot")
                 };
                 let target = self
                     .builder
                     .build_load(ptr, slot, "method")
-                    .expect("load the method")
+                    .expect("load contract method")
                     .into_pointer_value();
-
-                let result_ty = instruction.ty;
-                let arg_tys: Vec<ir::IrType> =
-                    args.iter().map(|a| self.value_types[&a.0]).collect();
-                let signature = self.contract_signature(*contract, *index, result_ty, &arg_tys);
-                let mut arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
-                arguments.extend(
+                let mut class_arguments: Vec<BasicMetadataValueEnum> = vec![receiver.into()];
+                class_arguments.extend(
                     args.iter()
                         .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
                 );
-
-                let call = self
+                let class_call = self
                     .builder
-                    .build_indirect_call(signature, target, &arguments, "call")
-                    .expect("call through the contract table");
-                call.try_as_basic_value().basic()
+                    .build_indirect_call(
+                        call_signature,
+                        target,
+                        &class_arguments,
+                        "class_contract_call",
+                    )
+                    .expect("call through class contract table");
+                let class_value = class_call.try_as_basic_value().basic();
+                let class_end = self.builder.get_insert_block().expect("class call block");
+                self.builder
+                    .build_unconditional_branch(merge_block)
+                    .expect("join contract dispatch");
+
+                self.builder.position_at_end(dynamic_block);
+                let method_name = self
+                    .module
+                    .contracts
+                    .get(*contract as usize)
+                    .and_then(|layout| layout.methods.get(*index as usize))
+                    .expect("verified contract method has a runtime name");
+                let key_bytes = self.context.const_string(method_name.as_bytes(), false);
+                let key_global = self.llvm.add_global(
+                    key_bytes.get_type(),
+                    None,
+                    &format!(
+                        "zk.contract.{}.{}.dynamic-key",
+                        instruction.result.map_or(0, |v| v.0),
+                        index
+                    ),
+                );
+                key_global.set_initializer(&key_bytes);
+                key_global.set_constant(true);
+                key_global.set_linkage(Linkage::Private);
+                let property_out = self
+                    .builder
+                    .build_alloca(ptr, "contract_callable_box_out")
+                    .expect("callable property output slot");
+                self.builder
+                    .build_store(property_out, ptr.const_null())
+                    .expect("initialize callable output");
+                self.builder
+                    .build_call(
+                        self.runtime.object_get_bytes,
+                        &[
+                            receiver.into(),
+                            key_global.as_pointer_value().into(),
+                            self.context
+                                .i64_type()
+                                .const_int(method_name.len() as u64, false)
+                                .into(),
+                            property_out.into(),
+                        ],
+                        "contract_callable_property_status",
+                    )
+                    .expect("read callable contract property");
+                let box_ptr = self
+                    .builder
+                    .build_load(ptr, property_out, "contract_callable_box")
+                    .expect("load callable property box")
+                    .into_pointer_value();
+                let callable_id = self
+                    .module
+                    .closures
+                    .iter()
+                    .position(|layout| layout.params == arg_tys && layout.returns == result_ty);
+                let dynamic_value = if let Some(callable_id) = callable_id {
+                    let callable_id = callable_id as u32;
+                    let callable_layout = &self.module.closures[callable_id as usize];
+                    let callable_ty = callable_struct(self.context);
+                    let callable_out = self
+                        .builder
+                        .build_alloca(callable_ty, "contract_callable_out")
+                        .expect("allocate callable payload");
+                    let unpack_status = self
+                        .builder
+                        .build_call(
+                            self.runtime.dynamic_value_copy_to,
+                            &[
+                                box_ptr.into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(
+                                        u64::from(
+                                            ir::IrType::Callable(callable_id)
+                                                .dynamic_tag()
+                                                .unwrap(),
+                                        ),
+                                        false,
+                                    )
+                                    .into(),
+                                callable_out.into(),
+                                callable_ty.size_of().expect("callable payload size").into(),
+                            ],
+                            "unpack_contract_callable",
+                        )
+                        .expect("unpack tagged callable property")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("callable unpack returns status")
+                        .into_int_value();
+                    let unpacked = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            unpack_status,
+                            self.context.i32_type().const_zero(),
+                            "contract_callable_layout_matches",
+                        )
+                        .expect("compare callable layout validation");
+                    let callable_ready = self
+                        .context
+                        .append_basic_block(function, "contract.callable.ready");
+                    let callable_invalid = self
+                        .context
+                        .append_basic_block(function, "contract.callable.invalid");
+                    self.builder
+                        .build_conditional_branch(unpacked, callable_ready, callable_invalid)
+                        .expect("reject a callable whose signature changed after conformance");
+                    self.builder.position_at_end(callable_invalid);
+                    self.builder
+                        .build_call(
+                            self.runtime.missing_contract,
+                            &[],
+                            "invalid_contract_callable",
+                        )
+                        .expect("invalid callable contract failure helper");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid callable dispatch is unreachable");
+                    self.builder.position_at_end(callable_ready);
+                    let callable = self
+                        .builder
+                        .build_load(callable_ty, callable_out, "contract_callable")
+                        .expect("load callable payload")
+                        .into_struct_value();
+                    let dispatch = self
+                        .builder
+                        .build_extract_value(callable, CALLABLE_DISPATCH_FIELD, "contract_dispatch")
+                        .expect("callable dispatch entry")
+                        .into_pointer_value();
+                    let captures = self
+                        .builder
+                        .build_extract_value(callable, CALLABLE_CAPTURE_FIELD, "contract_captures")
+                        .expect("callable captures")
+                        .into_pointer_value();
+                    let mut dynamic_arguments: Vec<BasicMetadataValueEnum> = vec![captures.into()];
+                    dynamic_arguments.extend(
+                        args.iter()
+                            .map(|a| BasicMetadataValueEnum::from(self.operand(*a))),
+                    );
+                    let dispatch_sig = callable_dispatch_signature(
+                        self.context,
+                        callable_layout,
+                        &self.module.closures,
+                        &self.module.values,
+                        &self.module.enums,
+                    );
+                    let dynamic_call = self
+                        .builder
+                        .build_indirect_call(
+                            dispatch_sig,
+                            dispatch,
+                            &dynamic_arguments,
+                            "dynamic_contract_call",
+                        )
+                        .expect("invoke callable property");
+                    let dynamic_value = dynamic_call.try_as_basic_value().basic();
+                    let dynamic_end = self.builder.get_insert_block().expect("dynamic call block");
+                    self.builder
+                        .build_unconditional_branch(merge_block)
+                        .expect("join contract dispatch");
+                    dynamic_value.map(|value| (value, dynamic_end))
+                } else {
+                    // A contract method need not be representable as a
+                    // first-class callable in this module. Such a module can
+                    // still dispatch class implementors; an open object that
+                    // reaches this branch is a failed runtime conformance.
+                    self.builder
+                        .build_call(
+                            self.runtime.missing_contract,
+                            &[],
+                            "missing_dynamic_contract_callable",
+                        )
+                        .expect("missing-contract failure helper");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid dynamic contract dispatch is unreachable");
+                    None
+                };
+
+                self.builder.position_at_end(merge_block);
+                match (class_value, dynamic_value) {
+                    (Some(class_value), Some((dynamic_value, dynamic_end))) => {
+                        let phi = self
+                            .builder
+                            .build_phi(class_value.get_type(), "contract_result")
+                            .expect("merge dynamic and class contract results");
+                        phi.add_incoming(&[
+                            (&class_value, class_end),
+                            (&dynamic_value, dynamic_end),
+                        ]);
+                        Some(phi.as_basic_value())
+                    }
+                    (Some(class_value), None) => {
+                        let phi = self
+                            .builder
+                            .build_phi(class_value.get_type(), "contract_result")
+                            .expect("merge class contract result with unreachable dynamic path");
+                        phi.add_incoming(&[(&class_value, class_end)]);
+                        Some(phi.as_basic_value())
+                    }
+                    (None, None) => None,
+                    _ => panic!("class and dynamic contract calls disagree on return type"),
+                }
             }
 
             // `throw`'s own early-return placeholder (roadmap Phase 4b) —
@@ -4753,6 +5078,526 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("store the descriptor");
 
                 Some(object.into())
+            }
+
+            ir::InstKind::ObjectNew => Some(
+                self.builder
+                    .build_call(self.runtime.object_new, &[], "dynamic_object")
+                    .expect("the dynamic-object allocator returns a pointer")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the dynamic-object allocator returns a pointer"),
+            ),
+
+            ir::InstKind::ObjectSeal { object } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.object_seal,
+                        &[self.operand(*object).into()],
+                        "object_seal_status",
+                    )
+                    .expect("the object key-set sealer is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the object key-set sealer returns a status"),
+            ),
+
+            ir::InstKind::DynamicObjectUnbox { value } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self
+                    .builder
+                    .build_alloca(pointer, "dynamic_object_out")
+                    .expect("a dynamic object unbox gets an output slot");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("an absent dynamic object starts as null");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.dynamic_object_unbox,
+                        &[self.operand(*value).into(), output.into()],
+                        "dynamic_object_status",
+                    )
+                    .expect("the Dynamic object unbox helper is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the Dynamic object unbox helper returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "dynamic_object_present",
+                    )
+                    .expect("the Dynamic object status is compared with success");
+                let object = self
+                    .builder
+                    .build_load(pointer, output, "dynamic_object")
+                    .expect("the Dynamic object pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("DynamicObjectUnbox has a nullable Object representation")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "dynamic_present")
+                    .expect("the nullable Dynamic object stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, object, 1, "dynamic_unboxed_object")
+                        .expect("the nullable Dynamic object stores its pointer")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::ObjectConform {
+                object,
+                contract,
+                requirements,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let usize_type = self.context.i64_type();
+                let requirement_type = self.context.struct_type(
+                    &[
+                        pointer.into(),
+                        usize_type.into(),
+                        self.context.i32_type().into(),
+                    ],
+                    false,
+                );
+                let requirement_pointer = if requirements.is_empty() {
+                    pointer.const_null()
+                } else {
+                    let mut entries = Vec::with_capacity(requirements.len());
+                    for (index, requirement) in requirements.iter().enumerate() {
+                        let bytes = self.context.const_string(requirement.key.as_bytes(), false);
+                        let key_global = self.llvm.add_global(
+                            bytes.get_type(),
+                            None,
+                            &format!(
+                                "zk.contract.{}.{}.key.{index}",
+                                instruction
+                                    .result
+                                    .expect("ObjectConform returns a status")
+                                    .0,
+                                contract
+                            ),
+                        );
+                        key_global.set_initializer(&bytes);
+                        key_global.set_constant(true);
+                        key_global.set_linkage(Linkage::Private);
+                        entries.push(
+                            self.context.const_struct(
+                                &[
+                                    key_global.as_pointer_value().into(),
+                                    usize_type
+                                        .const_int(requirement.key.len() as u64, false)
+                                        .into(),
+                                    self.context
+                                        .i32_type()
+                                        .const_int(u64::from(requirement.tag), false)
+                                        .into(),
+                                ],
+                                false,
+                            ),
+                        );
+                    }
+                    let array = requirement_type.const_array(&entries);
+                    let global = self.llvm.add_global(
+                        array.get_type(),
+                        None,
+                        &format!(
+                            "zk.contract.{}.{}.requirements",
+                            instruction
+                                .result
+                                .expect("ObjectConform returns a status")
+                                .0,
+                            contract
+                        ),
+                    );
+                    global.set_initializer(&array);
+                    global.set_constant(true);
+                    global.set_linkage(Linkage::Private);
+                    global.as_pointer_value()
+                };
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.object_conform,
+                        &[
+                            self.operand(*object).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*contract), false)
+                                .into(),
+                            requirement_pointer.into(),
+                            usize_type
+                                .const_int(requirements.len() as u64, false)
+                                .into(),
+                            pointer.const_null().into(),
+                        ],
+                        "object_conformance_status",
+                    )
+                    .expect("the runtime contract validator is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the runtime contract validator returns a status");
+                Some(status)
+            }
+
+            ir::InstKind::DynamicPack { value } => {
+                let source_ty = self.value_types[&value.0];
+                if source_ty == ir::IrType::Dynamic {
+                    Some(self.operand(*value))
+                } else {
+                    let tag = source_ty
+                        .dynamic_tag()
+                        .expect("the verifier rejects non-boxable DynamicPack types");
+                    let source_type = self
+                        .llvm_type(source_ty)
+                        .expect("a DynamicPack source has an LLVM layout");
+                    let source_slot = self
+                        .builder
+                        .build_alloca(source_type, "dynamic_payload")
+                        .expect("a Dynamic payload gets a stack slot");
+                    self.builder
+                        .build_store(source_slot, self.operand(*value))
+                        .expect("the Dynamic payload is stored before copying");
+                    let (offsets, count) = self.gc_offsets_for(
+                        source_ty,
+                        &format!(
+                            "zk.dynamic.offsets.{}",
+                            instruction.result.expect("DynamicPack produces a value").0
+                        ),
+                    );
+                    let bytes = self.byte_size_of(source_ty);
+                    Some(
+                        self.builder
+                            .build_call(
+                                self.runtime.dynamic_value_new,
+                                &[
+                                    self.context
+                                        .i32_type()
+                                        .const_int(u64::from(tag), false)
+                                        .into(),
+                                    source_slot.into(),
+                                    bytes.into(),
+                                    offsets.into(),
+                                    count.into(),
+                                ],
+                                "dynamic_value",
+                            )
+                            .expect("the Dynamic boxing helper is declared")
+                            .try_as_basic_value()
+                            .basic()
+                            .expect("Dynamic boxing returns a pointer"),
+                    )
+                }
+            }
+
+            ir::InstKind::JsonStringifyDynamic { value } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_stringify_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON stringify output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stringify_dynamic,
+                        &[self.operand(*value).into(), output.into()],
+                        "json_stringify_status",
+                    )
+                    .expect("the dynamic JSON stringifier is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON stringifier returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_stringify_present",
+                    )
+                    .expect("JSON stringify status is compared with success");
+                let string = self
+                    .builder
+                    .build_load(pointer, output, "json_stringify_value")
+                    .expect("the JSON output pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON stringify returns a nullable String")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_present")
+                    .expect("the JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, string, 1, "json_string")
+                        .expect("the JSON result stores its text")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonParseDynamic {
+                document,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_parse_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON parse output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_parse_dynamic,
+                        &[
+                            self.operand(*document).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            output.into(),
+                        ],
+                        "json_parse_status",
+                    )
+                    .expect("the dynamic JSON parser is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON parser returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_parse_present",
+                    )
+                    .expect("JSON parse status is compared with success");
+                let value = self
+                    .builder
+                    .build_load(pointer, output, "json_parse_value")
+                    .expect("the parsed Dynamic pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON parse returns a nullable Dynamic")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_present")
+                    .expect("the JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, value, 1, "json_dynamic")
+                        .expect("the JSON result stores its Dynamic tree")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::DynamicIsType { value, tag } => {
+                let actual = self
+                    .builder
+                    .build_call(
+                        self.runtime.dynamic_value_tag,
+                        &[self.operand(*value).into()],
+                        "dynamic_tag",
+                    )
+                    .expect("the Dynamic tag reader is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the Dynamic tag reader returns a tag")
+                    .into_int_value();
+                Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            actual,
+                            self.context.i32_type().const_int(u64::from(*tag), false),
+                            "dynamic_type_matches",
+                        )
+                        .expect("the Dynamic type tag is compared")
+                        .into(),
+                )
+            }
+
+            ir::InstKind::DynamicUnbox { value, tag } => {
+                let result_type = self
+                    .llvm_type(instruction.ty)
+                    .expect("a checked Dynamic target has an LLVM layout");
+                let output = self
+                    .builder
+                    .build_alloca(result_type, "dynamic_unbox_out")
+                    .expect("a Dynamic payload gets a typed output slot");
+                let size = self.byte_size_of(instruction.ty);
+                self.builder
+                    .build_call(
+                        self.runtime.dynamic_value_copy_to,
+                        &[
+                            self.operand(*value).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*tag), false)
+                                .into(),
+                            output.into(),
+                            size.into(),
+                        ],
+                        "dynamic_unbox_status",
+                    )
+                    .expect("the checked Dynamic payload copier is declared");
+                Some(
+                    self.builder
+                        .build_load(result_type, output, "dynamic_unboxed")
+                        .expect("the checked Dynamic payload is loaded"),
+                )
+            }
+
+            ir::InstKind::ObjectSet { object, key, value } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.object_set,
+                        &[
+                            self.operand(*object).into(),
+                            self.operand(*key).into(),
+                            self.operand(*value).into(),
+                        ],
+                        "object_set_status",
+                    )
+                    .expect("the dynamic-object property setter is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the dynamic property setter returns a status"),
+            ),
+
+            ir::InstKind::ObjectGet { object, key } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self
+                    .builder
+                    .build_alloca(pointer, "dynamic_property_out")
+                    .expect("a dynamic property result gets an output slot");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("a missing dynamic property starts as null");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.object_get,
+                        &[
+                            self.operand(*object).into(),
+                            self.operand(*key).into(),
+                            output.into(),
+                        ],
+                        "dynamic_property_status",
+                    )
+                    .expect("the dynamic-object property getter is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the dynamic property getter returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_int(1, false),
+                        "dynamic_property_present",
+                    )
+                    .expect("the property status is compared with present");
+                let value = self
+                    .builder
+                    .build_load(pointer, output, "dynamic_property")
+                    .expect("the dynamic property result is loaded");
+                let ty = self
+                    .llvm_type(instruction.ty)
+                    .expect("ObjectGet has its nullable Dynamic representation")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(ty.get_undef(), present, 0, "dynamic_present")
+                    .expect("the nullable presence flag is inserted");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, value, 1, "dynamic_wrapped")
+                        .expect("the nullable dynamic payload is inserted")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::ObjectMerge {
+                destination,
+                source,
+            } => {
+                self.builder
+                    .build_call(
+                        self.runtime.object_merge,
+                        &[
+                            self.operand(*destination).into(),
+                            self.operand(*source).into(),
+                        ],
+                        "object_merge_status",
+                    )
+                    .expect("the dynamic-object merge helper is declared");
+                None
+            }
+
+            ir::InstKind::ObjectRest {
+                object,
+                excluded_keys,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let count = excluded_keys.len();
+                let excluded_pointer = if count == 0 {
+                    pointer.const_null()
+                } else {
+                    let array_type = pointer.array_type(count as u32);
+                    let array = self
+                        .builder
+                        .build_alloca(array_type, "object_rest_exclusions")
+                        .expect("object-rest exclusion array allocation");
+                    for (index, key) in excluded_keys.iter().enumerate() {
+                        let entry = unsafe {
+                            self.builder.build_gep(
+                                array_type,
+                                array,
+                                &[
+                                    self.context.i32_type().const_zero(),
+                                    self.context.i32_type().const_int(index as u64, false),
+                                ],
+                                "object_rest_exclusion",
+                            )
+                        }
+                        .expect("object-rest exclusion array index");
+                        self.builder
+                            .build_store(entry, self.operand(*key))
+                            .expect("store object-rest exclusion key");
+                    }
+                    array
+                };
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.object_rest,
+                            &[
+                                self.operand(*object).into(),
+                                excluded_pointer.into(),
+                                self.context
+                                    .i64_type()
+                                    .const_int(count as u64, false)
+                                    .into(),
+                            ],
+                            "object_rest",
+                        )
+                        .expect("the object-rest helper is declared")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("object rest returns a managed object pointer"),
+                )
             }
 
             // A `Void` field (roadmap Phase 4c, `Result<Void,E>`) has no

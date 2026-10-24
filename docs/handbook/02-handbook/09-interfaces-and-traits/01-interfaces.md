@@ -1,17 +1,26 @@
-# Interfaces
+# Contracts
 
-An interface names a behavior contract independent of one implementation class.
+A `contract` describes the properties and operations a value must provide.
+It defines no storage and no reusable method bodies.
 
 ```zirk
-interface Serializable {
+contract Serializable {
     serialize(): String;
+}
+
+contract Named {
+    name: String;
 }
 ```
 
-Generic constraints and public APIs can depend on the interface instead of a concrete type. An implementation must provide compatible visibility, parameter, result, effect, and error behavior.
+A contract can combine properties and operations. Classes and ordinary objects
+may satisfy it structurally. Property types, mutability, operation parameters,
+results, and effects must be compatible. Generic constraints can name contracts
+so an API depends on the capability it needs rather than on one concrete class.
 
-Interfaces should remain cohesive; unrelated methods force implementers to claim capabilities they do not possess.
+Use a `trait` when several types should share reusable method bodies. Traits do
+not declare data properties; `contract` owns the structural shape requirement.
 
 ---
 
-**Previous:** [← Interfaces and Traits](README.md) · **Next:** [ Implementing Contracts](02-implementing-contracts.md)
+**Previous:** [← Contracts and Traits](README.md) · **Next:** [Implementing Contracts](02-implementing-contracts.md)

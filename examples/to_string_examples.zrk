@@ -14,12 +14,13 @@ enum Shape {
     Rectangle(width: Float64, height: Float64)
 }
 
-record Point {
+class Point {
     x: Int32;
     y: Int32;
+    construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
 }
 
-interface Printable {
+contract Printable {
     to_string(): String;
 }
 
@@ -125,8 +126,8 @@ fn show_collections(): Void {
 fn show_structured(): Void {
     stdout.println("== structured ==");
 
-    // Record default rendering: Name(field: value, …) recursively.
-    inmut p = Point(x: 1, y: 2);
+    // Class default rendering: Name(field: value, …) recursively.
+    inmut p = Point(1, 2);
     stdout.println(p.to_string()); // Expected: Point(x: 1, y: 2)
 
     // Class without to_string gets the same structural default.

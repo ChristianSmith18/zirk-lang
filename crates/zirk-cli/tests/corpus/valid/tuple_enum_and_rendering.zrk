@@ -1,7 +1,7 @@
 import { stdout } from std.io;
 
 // Tuple length/to_string, enum case members and default rendering for
-// records, classes, algebraic enums and callable values.
+// classes, algebraic enums and callable values.
 fn double(x: Int32): Int32 { return x * 2; }
 
 enum Color { Red, Green, Blue }
@@ -16,11 +16,17 @@ class Tag {
     construct(label: String) { this.label = label; }
 }
 
-record Point {
+class Point {
     x: Int32;
     y: Int32;
     name: String;
     tag: Tag;
+    construct(x: Int32, y: Int32, name: String, tag: Tag) {
+        this.x = x;
+        this.y = y;
+        this.name = name;
+        this.tag = tag;
+    }
 }
 
 class Person {

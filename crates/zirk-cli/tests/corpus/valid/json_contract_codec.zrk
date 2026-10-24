@@ -1,0 +1,30 @@
+import { JSON, JSONCodec } from std.json;
+import { stdout } from std.io;
+
+class Person {
+    name: String;
+    construct(name: String) { this.name = name; }
+}
+
+class PersonCodec implements JSONCodec<Person> {
+    decode(value: Dynamic): Person {
+        inmut object: Object = value as Object;
+        return Person(object.name as String);
+    }
+
+    encode(value: Person): Dynamic {
+        inmut object: Object = { name: value.name };
+        return object;
+    }
+}
+
+fn main(): Void {
+    inmut codec: PersonCodec = PersonCodec();
+    try {
+        inmut person: Person = JSON.decode<Person>("\{\"name\":\"Ada\"\}", codec);
+        stdout.println(person.name);
+        stdout.println(JSON.encode(person, codec));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+}

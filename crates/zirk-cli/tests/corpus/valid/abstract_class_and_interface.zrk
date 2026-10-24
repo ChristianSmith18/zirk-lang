@@ -8,7 +8,7 @@ abstract class Shape {
     abstract area(): Int32;
 }
 
-interface Describable {
+contract Describable {
     describe(): String;
 }
 

@@ -1,8 +1,13 @@
 # ADR-013 — Shape of dispatch
 
-- **Status:** accepted
+- **Status:** superseded in part by [ADR-027](./ADR-027-contract-object-model.md)
 - **Date:** August 19, 2026
 - **Phase:** 3
+
+> Historical dispatch decision. Its interface naming and record restrictions
+> are superseded by ADR-027. Direct and virtual class dispatch, plus trait
+> default resolution, remain in force where compatible with contract views
+> and callable dynamic properties.
 
 ## Context
 

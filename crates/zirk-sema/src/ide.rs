@@ -31,7 +31,6 @@ pub enum SemanticSymbolKind {
     Field,
     Type,
     Class,
-    Record,
     Contract,
     Enum,
     EnumVariant,

@@ -1,5 +1,5 @@
 // El default de un parámetro de tipo debe satisfacer sus constraints.
-interface Movable {
+contract Movable {
     move(): Void;
 }
 

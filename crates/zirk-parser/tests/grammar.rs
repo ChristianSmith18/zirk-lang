@@ -198,15 +198,20 @@ fn shape(e: &Expr) -> String {
                 .collect();
             format!("[{}]", parts.join(", "))
         }
-        Expr::Record(r) => {
+        Expr::Object(r) => {
             let parts: Vec<_> = r
                 .elements
                 .iter()
                 .map(|e| match e {
-                    RecordLiteralElement::Field(f) => {
-                        format!("{}: {}", f.name.name, shape(&f.value))
-                    }
-                    RecordLiteralElement::Spread(s) => format!("...{}", shape(&s.expr)),
+                    ObjectLiteralElement::Field(f) => format!(
+                        "{}: {}",
+                        f.dynamic_key
+                            .as_ref()
+                            .map(|key| format!("\"{{{}}}\"", shape(key)))
+                            .unwrap_or_else(|| f.name.name.clone()),
+                        shape(&f.value)
+                    ),
+                    ObjectLiteralElement::Spread(s) => format!("...{}", shape(&s.expr)),
                 })
                 .collect();
             format!("{{{}}}", parts.join(", "))
@@ -272,7 +277,7 @@ fn valid_function_without_return_type() {
 
 #[test]
 fn invalid_signature_without_return_type() {
-    let output = errors("interface Runner { run(); }\nfn main(): Void { }");
+    let output = errors("contract Runner { run(); }\nfn main(): Void { }");
     assert!(output.contains(codes::MISSING_RETURN_TYPE.as_str()));
     assert!(output.contains("= help:"));
 }
@@ -624,6 +629,16 @@ fn valid_index_expression_parses() {
     let e = expression("view[0]");
     assert!(matches!(e, Expr::Index(_)));
     assert_eq!(shape(&e), "view[0]");
+}
+
+#[test]
+fn computed_string_property_access_uses_index_expression_syntax() {
+    let expr = expression("object[key]");
+    let Expr::Index(index) = expr else {
+        panic!("computed object access must use the normal index expression");
+    };
+    assert!(matches!(*index.receiver, Expr::Path(_)));
+    assert!(matches!(*index.index, Expr::Path(_)));
 }
 
 #[test]
@@ -1130,12 +1145,63 @@ fn valid_record_literal_forms() {
 }
 
 #[test]
-fn valid_quoted_key_object_is_a_json_document_string() {
+fn valid_quoted_key_object_is_an_object_expression() {
     let source = "{\n    \"status\": \"ok\",\n    \"nested\": { \"count\": 3 }\n}";
-    let Expr::Str(json) = expression(source) else {
-        panic!("a quoted-key object literal must produce JSON text");
+    let Expr::Object(object) = expression(source) else {
+        panic!("quoted keys must be parsed as ordinary object properties");
     };
-    assert_eq!(json.value, source);
+    assert_eq!(object.elements.len(), 2);
+    let ObjectLiteralElement::Field(status) = &object.elements[0] else {
+        panic!("expected a status property");
+    };
+    assert_eq!(status.name.name, "status");
+    assert!(status.dynamic_key.is_none());
+    let ObjectLiteralElement::Field(nested) = &object.elements[1] else {
+        panic!("expected a nested property");
+    };
+    assert_eq!(nested.name.name, "nested");
+    assert!(matches!(nested.value, Expr::Object(_)));
+}
+
+#[test]
+fn valid_interpolated_object_key_is_kept_as_a_runtime_expression() {
+    let expr = expression("{ \"{name}\": null }");
+    let Expr::Object(object) = expr else {
+        panic!("interpolated keys must be parsed as object expressions");
+    };
+    let ObjectLiteralElement::Field(field) = &object.elements[0] else {
+        panic!("expected a dynamic property");
+    };
+    assert!(matches!(field.dynamic_key, Some(Expr::Interpolated(_))));
+    assert!(matches!(field.value, Expr::Null(_)));
+}
+
+#[test]
+fn interpolated_object_key_requires_a_value() {
+    let output = errors("fn main(): Void { mut value = { \"{key}\": }; }");
+    assert!(
+        !output.is_empty(),
+        "missing interpolated-key value was accepted"
+    );
+}
+
+#[test]
+fn object_pattern_with_rest_is_partial_and_parses_named_bindings() {
+    let expr = expression(
+        "match value { { name, active: enabled, ...remaining } => enabled, _ => false }",
+    );
+    let Expr::Match(matched) = expr else {
+        panic!("expected a match expression");
+    };
+    let Pattern::Object(pattern) = &matched.arms[0].pattern else {
+        panic!("expected an object-property pattern");
+    };
+    assert_eq!(pattern.fields.len(), 2);
+    assert_eq!(pattern.fields[0].name.name, "name");
+    assert!(pattern.fields[0].binding.is_none());
+    assert_eq!(pattern.fields[1].name.name, "active");
+    assert_eq!(pattern.fields[1].binding.as_ref().unwrap().name, "enabled");
+    assert_eq!(pattern.rest.as_ref().unwrap().name, "remaining");
 }
 
 #[test]
@@ -1546,23 +1612,20 @@ fn invalid_abstract_method_with_a_body() {
     );
 }
 
-// --- Records -----------------------------------------------------------------
+// --- Contracts and class value-bearing declarations -------------------------
 
 #[test]
-fn valid_record_declaration() {
-    let p = program("record Point { x: Float64; y: Float64; }\nfn main(): Void { }");
-    let r = &p.classes[0];
+fn valid_contract_declaration() {
+    let p = program("contract Point { x: Float64; y: Float64; }\nfn main(): Void { }");
 
-    assert_eq!(r.kind, ClassKind::Record);
-    assert_eq!(r.name.name, "Point");
-    assert_eq!(r.fields.len(), 2);
-    assert!(r.constructors.is_empty());
+    assert_eq!(p.contracts[0].name.name, "Point");
+    assert_eq!(p.contracts[0].properties.len(), 2);
 }
 
 #[test]
-fn valid_record_with_a_method() {
+fn valid_class_with_a_method() {
     let p = program(
-        "record Point { x: Float64; y: Float64;  length(): Float64 { return this.x; } }
+        "class Point { x: Float64; y: Float64;  length(): Float64 { return this.x; } }
          fn main(): Void { }",
     );
     assert_eq!(p.classes[0].methods.len(), 1);
@@ -2113,7 +2176,7 @@ fn valid_class_type_parameter() {
 
 #[test]
 fn valid_contract_type_parameter() {
-    let p = program("interface Box<out T> {  value(): T; }\nfn main(): Void { }");
+    let p = program("contract Box<out T> {  value(): T; }\nfn main(): Void { }");
     let contract = &p.contracts[0];
 
     assert_eq!(contract.type_params.len(), 1);
@@ -2141,6 +2204,51 @@ fn valid_implements_with_type_arguments() {
     assert_eq!(implements[0].name, "Iterable");
     assert_eq!(implements[0].arguments.len(), 1);
     assert_eq!(implements[0].arguments[0].name, "Int32");
+}
+
+#[test]
+fn valid_contract_keyword_creates_contract_declaration() {
+    let parsed = program("contract Named { label(): String; }\nfn main(): Void { }");
+    assert_eq!(parsed.contracts.len(), 1);
+    assert_eq!(parsed.contracts[0].name.name, "Named");
+    assert_eq!(parsed.contracts[0].kind, ContractKind::Contract);
+}
+
+#[test]
+fn interface_keyword_reports_the_contract_migration() {
+    let output = errors("interface Named { label(): String; }\nfn main(): Void { }");
+    assert!(
+        output.contains("`interface` has been replaced by `contract`"),
+        "{output}"
+    );
+    assert!(
+        output.contains("replace `interface` with `contract`"),
+        "{output}"
+    );
+}
+
+#[test]
+fn record_declaration_explains_available_migration_paths() {
+    let output = errors("record Point { x: Int32; y: Int32; }\nfn main(): Void { }");
+    assert!(
+        output.contains("`record` declarations have been removed"),
+        "{output}"
+    );
+    assert!(
+        output.contains("contract` plus an `Object` literal"),
+        "{output}"
+    );
+    assert!(output.contains("class, tuple, or enum"), "{output}");
+}
+
+#[test]
+fn contract_parses_required_properties_and_operations() {
+    let parsed = program(
+        "contract Named { name: String; mut age: Int32; label(): String; }\nfn main(): Void { }",
+    );
+    assert_eq!(parsed.contracts[0].properties.len(), 2);
+    assert_eq!(parsed.contracts[0].properties[0].name.name, "name");
+    assert_eq!(parsed.contracts[0].methods[0].name.name, "label");
 }
 
 #[test]

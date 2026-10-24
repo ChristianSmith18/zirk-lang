@@ -25,21 +25,6 @@ grapheme-based.
 - **THEN** it returns `Result.Error(RegexError)` rather than throwing or
   compiling an unsafe backtracking program
 
-### Requirement: JSON values and typed codecs are explicit
-
-The standard library SHALL name every JSON public type with the uppercase
-`JSON` acronym and SHALL provide an exact-number `JSONValue` tree plus
-`JSON.parse`, `JSON.stringify`, `JSON.decode<T>`, `JSON.to_value`, and
-`JSON.from_value<T>` without a redundant `JSON.encode`. Typed conversion SHALL
-use compile-generated or explicitly implemented ordinary `JSONCodec<T>` values
-and SHALL NOT require retained decorator metadata or runtime field scanning.
-
-#### Scenario: Typed value is stringified
-
-- **WHEN** an eligible `User` value is passed to `JSON.stringify`
-- **THEN** the compiler resolves or synthesizes its typed codec and the runtime
-  emits valid JSON without reflective field discovery
-
 ### Requirement: JSON processing is strict and bounded
 
 JSON parsing SHALL require valid UTF-8 standard JSON, reject duplicate keys,
@@ -118,15 +103,6 @@ Tuple types SHALL use `Tuple(T...)`, values SHALL use `(v...)`, and heterogeneou
 - **WHEN** `(200, "OK")[1]` is checked
 - **THEN** the result type is String and the extracted String is independent
 
-### Requirement: Record value semantics
-
-Records SHALL be nominal immutable values with named-only construction, omitted type defaults, methods without mutation, no custom constructor/inheritance, structural field equality, and explicit component-wise derivation.
-
-#### Scenario: Omitted record fields
-
-- **WHEN** `Settings()` omits Int32, Boolean, and String attributes
-- **THEN** they contain `0`, `false`, and `""` respectively
-
 ### Requirement: Closed data-only enums
 
 Traditional and algebraic enums SHALL be closed data declarations and SHALL NOT contain user-defined methods. Traditional cases SHALL expose native `.name`, `.value`, and `to_string()` behavior without implicit mapping conversion or declaration order; the enum type itself SHALL expose the built-in static members `count`, `keys()`, `values()`, `from_name()`, and `from_value()` (see `enum-static-members`). Algebraic payloads SHALL be extracted only through exhaustive match.
@@ -185,36 +161,6 @@ A pattern SHALL be able to extract the associated values of a variant, binding t
 - **WHEN** a `match` over an algebraic enum omits a variant and has no `_`
 - **THEN** the exhaustiveness diagnostic is emitted naming the missing variant
 
-### Requirement: Records
-
-A `record` SHALL be immutable and have structural semantics, per `ZIRK_LANGUAGE_SPEC.md` section 7.
-
-#### Scenario: Structural equality
-
-- **WHEN** two records with the same values in their fields are compared
-- **THEN** `==` produces `true` even though they are distinct instances
-
-#### Scenario: Immutability
-
-- **WHEN** a record's field is assigned to
-- **THEN** a diagnostic is emitted indicating that a record cannot be modified
-
-### Requirement: Record spread and rest
-
-A record expression of the form `{ ...source, field: value }` SHALL be accepted
-when an expected record type is known, SHALL copy every field from `source`, and
-SHALL override a copied field with an explicit field of the same name. Record
-destructuring patterns MAY contain one final `...name` binding that collects
-every remaining field into a new record value.
-
-#### Scenario: Record spread with override
-- **WHEN** `{ ...profile, name: "Grace" }` is evaluated as a `UserProfile`
-- **THEN** the result has the same `id` and `active` as `profile` but `name` is `"Grace"`
-
-#### Scenario: Record rest destructuring
-- **WHEN** `{ id, ...details }` destructures a `UserProfile`
-- **THEN** `id` receives the selected field and `details` contains every remaining field
-
 ### Requirement: Unions and aliases
 
 `A | B` SHALL declare a union, and `type` SHALL declare an alias.
@@ -235,33 +181,14 @@ every remaining field into a new record value.
 - **WHEN** `type Id = Int32;` is declared
 - **THEN** `Id` and `Int32` are interchangeable
 
-### Requirement: Pointer.from accepts record lvalues
-
-`Pointer.from(place)` SHALL accept a `place` that is an lvalue of a `record` slot or field, provided the final pointee type is FFI-safe.
-
-#### Scenario: Pointer.from(record field)
-
-- **WHEN** the program contains `Pointer.from(record_instance.x)` inside `unsafe`
-- **THEN** the compiler lowers it to a chain of pointer-to-field operations ending at `Pointer<T>`
-
-#### Scenario: Pointer.from rejects temporary value
-
-- **WHEN** the program contains `Pointer.from(Foo().x)` or `Pointer.from(makePoint().y)`
-- **THEN** the compiler reports an error because the root is not an lvalue
-
-#### Scenario: Pointer.from on nested record field
-
-- **WHEN** the program contains `Pointer.from(point.inner.x)` where `inner` is a `record` field
-- **THEN** the compiler builds a `Pointer<Value>` to `inner` and then `PointerFromField` to `x`
-
 ### Requirement: Example-driven documentation without semantic change
 
-The `zirk-data-types` specification examples in the handbook SHALL illustrate the value/reference/unsafe spectrum for tuples, records, enums, unions, aliases, and built-in types, but SHALL NOT introduce new language semantics, new keywords, or unapproved type syntax.
+The `zirk-data-types` specification examples in the handbook SHALL illustrate the value/reference/unsafe spectrum for tuples, dynamic objects, classes, contracts, enums, unions, aliases, and built-in types, but SHALL NOT introduce new language semantics, new keywords, or unapproved type syntax.
 
-#### Scenario: A record example shows value semantics
+#### Scenario: An object example shows reference semantics
 
-- **WHEN** the `record` chapter is expanded
-- **THEN** it includes a code example that demonstrates independent copies after assignment and explains why `is` is invalid for records
+- **WHEN** the dynamic object chapter is expanded
+- **THEN** it includes a code example that demonstrates shared identity after assignment and explains how `is` compares object references
 
 #### Scenario: A tuple example shows compile-time index
 
@@ -309,29 +236,6 @@ A traditional-enum case SHALL expose `name` (declared case name,
 - **WHEN** `Color.Red.value` is read on a `String`-mapped enum
 - **THEN** the result is the mapped value
 
-### Requirement: Universal rendering on structured values
-
-`record`, algebraic-enum, `class`, `Weak<T>`, and callable values SHALL answer `to_string()` with a readable default rendering when no method is declared. It SHALL use the surface type name (strip `$local$N`, keep `Outer.Inner`), include enum payloads as `Variant(field: v, …)`, and omit compiler-synthesized fields such as an inner class `outer` capture.
-
-#### Scenario: Record default rendering
-
-- **WHEN** `Point(x: 1, y: 2).to_string()` runs on a record without a
-  declared `to_string`
-- **THEN** the result is `Point(x: 1, y: 2)`
-
-#### Scenario: Local class surface name
-- **WHEN** a local class is rendered
-- **THEN** its output never exposes `$local$` mangling
-
-### Requirement: Type categories updated
-
-The user-defined type categories SHALL be `class` (reference with identity), `record` (nominal immutable value), `enum` (closed nominal set), `union`, and `alias`. Documentation and diagnostics SHALL no longer mention `value class`.
-
-#### Scenario: Type category documentation
-
-- **WHEN** a developer consults the handbook for user-defined types
-- **THEN** `value class` is absent and `record` is the recommended value type
-
 ### Requirement: User-defined type categories include the renamed scalar families
 
 The user-defined type categories documentation and diagnostics SHALL refer to `Decimal` as the exact base-ten scalar, `Dec` as its abbreviation, and `FloatN` as the IEEE 754 binary family. `Float` SHALL be an alias for `Float64`. The documentation SHALL recommend `Decimal` as the default fractional type and `FloatN` for performance-sensitive or hardware-integrated binary floating-point.
@@ -360,51 +264,6 @@ A `type` alias declared at module scope SHALL resolve to its underlying type thr
 - **WHEN** `type IntList = List<Int32>;` and `mut l: IntList = List<Int32>();` are written
 - **THEN** the alias resolves to `List<Int32>` and `l` behaves as a `List<Int32>`
 
-### Requirement: Clone derivation for record and enum
-
-A `record` or `enum` SHALL automatically implement `Clone` when every field/associated value implements `Clone`. A record or enum containing a non-`Clone` field SHALL be rejected with the same diagnostic used for `class`.
-
-#### Scenario: Record clone
-
-- **WHEN** `record Point { x: Int32; y: Int32; }` is declared and `p2 = p1.clone()` is called
-- **THEN** `p2` is an independent copy of `p1`
-
-#### Scenario: Enum clone
-
-- **WHEN** `enum Color { Red, Green, Blue }` is declared and `c2 = c1.clone()` is called
-- **THEN** `c2` is an independent copy of `c1`
-
-#### Scenario: Non-Clone field rejected
-
-- **WHEN** a `record` contains a `class` field that does not implement `Clone`
-- **THEN** deriving `Clone` for the record is rejected
-
-### Requirement: Generic contract satisfaction
-
-A user-defined generic `class` or `record` that `implements` a generic contract (e.g., `Iterable<T>`) SHALL have its contract methods lowered with the type parameters substituted at each call site.
-
-#### Scenario: Generic iterable class
-
-- **WHEN** `class Box<T> implements Iterable<T>` declares `iterator(): Iterator<T>`
-- **THEN** `for x in Box<Int32>()` compiles and yields `Int32` values
-
-#### Scenario: Generic iterable record
-
-- **WHEN** `record Pair<T, U> implements Iterable<T>` declares a custom iterator
-- **THEN** `for x in Pair<Int32, String>()` compiles and yields the first `Int32` element
-
-### Requirement: Compound values preserve managed-reference paths
-
-The representation of tuples, records, enums, closures, and nullable values SHALL expose every initialized managed-reference path to root enumeration and heap tracing. Inactive enum payloads SHALL never be interpreted as live references.
-
-#### Scenario: Enum variant contains managed references
-- **WHEN** a live enum selects one variant and another variant has reference-typed fields
-- **THEN** collection preserves the selected variant's references and ignores inactive storage safely
-
-#### Scenario: Inline value contains nested references
-- **WHEN** a tuple or record containing a managed reference is copied into a supported collection element
-- **THEN** the nested reference remains live while the collection element remains reachable
-
 ### Requirement: Numeric conversions have defined boundary outcomes
 
 Conversions between binary floating values, exact-decimal values, integers, and durations SHALL either produce a representable result under the language's specified rounding rule or a controlled language failure. Native and interpreted execution SHALL agree on the value or failure category.
@@ -416,3 +275,54 @@ Conversions between binary floating values, exact-decimal values, integers, and 
 #### Scenario: Conversion is representable
 - **WHEN** a finite floating value lies within the destination range
 - **THEN** native and interpreted execution apply the same documented rounding rule
+
+### Requirement: Object is the open dynamic object value
+`Object` SHALL represent the common reference-object view for dynamic object literals and class instances. Its string-keyed dynamic properties SHALL preserve their Zirk runtime types. It SHALL NOT be the universal root type of scalars, enums, tuples, or other values. A dynamic property read whose type cannot be proven statically SHALL produce a tagged `Dynamic` value that requires safe narrowing before typed use.
+
+#### Scenario: Object accepts a class reference but not a scalar
+- **WHEN** a class instance and an `Int32` are each assigned to `Object`
+- **THEN** the class instance preserves its identity through the object view and the scalar assignment is rejected
+
+#### Scenario: Dynamic read is safely narrowed
+- **WHEN** a property is read from an `Object` without a statically known property type
+- **THEN** the result preserves its runtime tag and cannot be used as a concrete type until a checked narrowing succeeds
+
+### Requirement: Object literals support static and dynamic string keys
+An object literal SHALL accept identifier-shaped keys without quotes, quoted string keys, and interpolated string keys. An interpolated key SHALL be evaluated as a string using Zirk's ordinary interpolation conversion. Computed property access SHALL accept a string key. Literal property values SHALL preserve their own inferred or expected types.
+
+#### Scenario: Identifier key creates a string property
+- **WHEN** `{ name: "Ada" }` is evaluated
+- **THEN** it creates an `Object` with the string key `name` and a `String` value
+
+#### Scenario: Interpolated key is evaluated
+- **WHEN** `key` contains `custom_status` and `{ "{key}": null }` is evaluated
+- **THEN** the object contains the key `custom_status` with a `Null` value
+
+### Requirement: User-defined types use contracts for structural shape
+The user-defined type model SHALL include classes with reference identity, contracts with structural property and operation requirements, enums with closed variants, unions, aliases, and open dynamic `Object` values. Scalars SHALL retain their own types and SHALL NOT be widened to `Object`.
+
+#### Scenario: Structural declarations use contract
+- **WHEN** a developer defines a named shape for an object
+- **THEN** the declaration is a `contract`, not a record or interface
+
+### Requirement: Enums retain component-wise cloning
+An enum SHALL implement `Clone` when all associated values implement `Clone`. A dynamic `Object` SHALL NOT receive implicit value-copy semantics from this rule.
+
+#### Scenario: Clone an enum with cloneable payloads
+- **WHEN** every associated type of an enum implements `Clone` and an enum value is cloned
+- **THEN** the clone contains independently cloned payload values
+
+### Requirement: JSON materializes ordinary Zirk values
+The JSON API SHALL parse JSON objects into ordinary `Object` values, arrays into ordinary Zirk collections of dynamic values, and JSON scalars into their corresponding Zirk scalar or `Null` values. The public parse result SHALL be `Dynamic`, not a second public object/tree model. Stringification SHALL serialize those values back to JSON, preserve exact JSON number behavior, and raise a catchable error for cycles or values that JSON cannot represent. Typed JSON codecs SHALL use contracts for structural object validation and SHALL NOT require retained decorators or runtime field scanning.
+
+#### Scenario: Parsed JSON object is a dynamic object
+- **WHEN** JSON containing `{"status":"ok"}` is parsed
+- **THEN** the result is an `Object` whose `status` property can be read and narrowed to `String`
+
+#### Scenario: Interpolated object key serializes
+- **WHEN** an object literal uses an interpolated key and is passed to JSON stringification
+- **THEN** the resulting JSON contains the evaluated string key
+
+#### Scenario: Non-JSON runtime value is rejected
+- **WHEN** stringification encounters a callable, resource, or cyclic object graph that JSON cannot represent
+- **THEN** it raises a catchable JSON conversion error without returning partial JSON

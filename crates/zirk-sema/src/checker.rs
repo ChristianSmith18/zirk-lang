@@ -13,10 +13,10 @@ use crate::ide::{
 };
 use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
-    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
-    FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
-    describe, is_ffi_safe, pending_type,
+    AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractProperty, ContractType, EnumType,
+    EnumVariantInfo, FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance,
+    GenericInstance, IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo,
+    VariantMapping, describe, is_ffi_safe, pending_type,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -139,6 +139,8 @@ pub struct CheckedProgram {
     pub standard_network_calls: HashMap<Span, String>,
     /// Compiler-owned `std.http` calls resolved from bundled declarations.
     pub standard_http_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.json` conversions resolved from bundled declarations.
+    pub standard_json_calls: HashMap<Span, String>,
     /// Concrete type-parameter substitutions inferred for direct generic
     /// calls, keyed by call span. IR specialization consumes this metadata so
     /// generic dispatch stays compile-time and never needs runtime reflection.
@@ -240,9 +242,6 @@ pub struct CheckedProgram {
     /// Interned `Set<T>` element types, indexed by the id their
     /// [`Base::Set`] carries.
     pub set_types: Vec<Type>,
-    /// `module.values` records class layouts before tuple layouts; this is
-    /// the index where the first tuple's `ValueLayout` lives.
-    pub tuple_base: u32,
     /// Declared `extern "C" fn` signatures, keyed by name (roadmap Phase 4e,
     /// `ADR-015`).
     pub externs: HashMap<String, ExternSignature>,
@@ -697,10 +696,7 @@ impl<'a> OwnershipDeriver<'a> {
                 share: false,
             };
         }
-        if !matches!(
-            class.kind,
-            zirk_ast::ClassKind::Class | zirk_ast::ClassKind::Record
-        ) {
+        if !matches!(class.kind, zirk_ast::ClassKind::Class) {
             return OwnershipProperties {
                 transfer: false,
                 share: false,
@@ -742,6 +738,8 @@ impl<'a> OwnershipDeriver<'a> {
                 .is_some_and(|class| class.kind == zirk_ast::ClassKind::Class),
             Base::Contract(_)
             | Base::ContractInstance(_)
+            | Base::Object
+            | Base::Dynamic
             | Base::ServiceCapacityError
             | Base::ServiceLifecycleError
             | Base::Array(_)
@@ -871,6 +869,12 @@ pub struct NativeExceptions {
     pub float_nan: u32,
     pub arithmetic_overflow: u32,
     pub invalid_cast: u32,
+    /// Missing open-object property, raised by direct dynamic reads.
+    pub missing_property: u32,
+    /// A sealed object rejected an insertion or removal of a property.
+    pub contract_violation: u32,
+    /// JSON stringify/parse rejected a value or document.
+    pub json_conversion: u32,
     /// `IndexOutOfBoundsError` (roadmap Phase 4e, `fase-4e-native-slice`,
     /// design D3): thrown when a `NativeSlice<T>`/`NativeSliceMut<T>` index
     /// is out of range — the "controlled bounds error" the spec's own "View
@@ -1274,6 +1278,7 @@ struct Checker<'a> {
     standard_environment_calls: HashMap<Span, String>,
     standard_network_calls: HashMap<Span, String>,
     standard_http_calls: HashMap<Span, String>,
+    standard_json_calls: HashMap<Span, String>,
     /// See [`CheckedProgram::generic_call_substitutions`].
     generic_call_substitutions: HashMap<Span, GenericCallInfo>,
     /// Bare names opened by more than one imported module. They deliberately
@@ -1427,7 +1432,7 @@ struct Checker<'a> {
     native_atomic_order: Option<u32>,
     /// See [`CheckedProgram::native_exceptions`].
     native_exceptions: Option<NativeExceptions>,
-    /// Ids of the language's own `Resource<E>` interface and its `E`
+    /// Ids of the language's own `Resource<E>` contract and its `E`
     /// parameter, minted by [`Self::register_native_resource_contract`]
     /// (roadmap Phase 4c) — only consulted while checking `implements
     /// Resource<...>` and a `match ... with` binding; `zirk-ir/lower.rs`
@@ -1752,6 +1757,7 @@ impl<'a> Checker<'a> {
             standard_environment_calls: HashMap::new(),
             standard_network_calls: HashMap::new(),
             standard_http_calls: HashMap::new(),
+            standard_json_calls: HashMap::new(),
             generic_call_substitutions: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
@@ -2407,7 +2413,6 @@ impl<'a> Checker<'a> {
         self.validate_thread_run_effects(&suspend_summaries);
         self.validate_mutex_callback_effects(&suspend_summaries);
 
-        let tuple_base = self.classes.len() as u32;
         let type_map = self.build_type_map(program);
         let semantic_index = self.build_semantic_index(program, &type_map);
         CheckedProgram {
@@ -2447,6 +2452,7 @@ impl<'a> Checker<'a> {
             standard_environment_calls: self.standard_environment_calls,
             standard_network_calls: self.standard_network_calls,
             standard_http_calls: self.standard_http_calls,
+            standard_json_calls: self.standard_json_calls,
             generic_call_substitutions: self.generic_call_substitutions,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -2474,7 +2480,6 @@ impl<'a> Checker<'a> {
             list_types: self.list_types,
             map_types: self.map_types,
             set_types: self.set_types,
-            tuple_base,
             externs: self.externs,
             expr_types: self.expr_types,
             result_projections: self.result_projections,
@@ -2697,10 +2702,7 @@ impl<'a> Checker<'a> {
             sources: &SourceMap,
             class: &ClassDecl,
         ) {
-            let kind = match class.kind {
-                ClassKind::Record => SemanticSymbolKind::Record,
-                _ => SemanticSymbolKind::Class,
-            };
+            let kind = SemanticSymbolKind::Class;
             push_symbol(
                 declarations,
                 sources,
@@ -3556,7 +3558,10 @@ impl<'a> Checker<'a> {
         // impossible import path back into that entry file (required by
         // compiler-provided `std.net` resources).
         if (matches!(what, "class" | "abstract class")
-            && matches!(used.name.as_str(), "Error" | "Throwable" | "RuntimeError"))
+            && matches!(
+                used.name.as_str(),
+                "Error" | "Throwable" | "RuntimeError" | "JsonConversionError"
+            ))
             || (what == "contract" && used.name == "Resource")
         {
             return;
@@ -3650,7 +3655,8 @@ impl<'a> Checker<'a> {
         let iterable = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: "Iterable".into(),
-            kind: ContractKind::Interface,
+            kind: ContractKind::Contract,
+            properties: Vec::new(),
             methods: Vec::new(),
             implements: Vec::new(),
             type_params: vec![iterable_t],
@@ -3668,7 +3674,8 @@ impl<'a> Checker<'a> {
         let iterator = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: "Iterator".into(),
-            kind: ContractKind::Interface,
+            kind: ContractKind::Contract,
+            properties: Vec::new(),
             methods: Vec::new(),
             implements: Vec::new(),
             type_params: vec![iterator_t],
@@ -3774,7 +3781,8 @@ impl<'a> Checker<'a> {
         let clone = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: "Clone".into(),
-            kind: ContractKind::Interface,
+            kind: ContractKind::Contract,
+            properties: Vec::new(),
             methods: Vec::new(),
             implements: Vec::new(),
             type_params: Vec::new(),
@@ -4339,6 +4347,10 @@ impl<'a> Checker<'a> {
         let arithmetic_overflow =
             register_native_failure(&mut self.classes, "ArithmeticOverflowError");
         let invalid_cast = register_native_failure(&mut self.classes, "InvalidCastError");
+        let missing_property = register_native_failure(&mut self.classes, "MissingPropertyError");
+        let contract_violation =
+            register_native_failure(&mut self.classes, "ContractViolationError");
+        let json_conversion = register_native_failure(&mut self.classes, "JsonConversionError");
         // Roadmap Phase 4e, `fase-4e-native-slice`: `IndexOutOfBoundsError`
         // (thrown by a bounds-checked `view[i]`, design D3) and
         // `NativeError` (returned in `Result<..., NativeError>` by
@@ -4397,6 +4409,9 @@ impl<'a> Checker<'a> {
             float_nan,
             arithmetic_overflow,
             invalid_cast,
+            missing_property,
+            contract_violation,
+            json_conversion,
             index_out_of_bounds,
             native_error,
             invalid_step,
@@ -4418,7 +4433,7 @@ impl<'a> Checker<'a> {
         });
     }
 
-    /// Registers `interface Resource<E from Error> { fn close(): Result<Void,E>;
+    /// Registers `contract Resource<E from Error> { fn close(): Result<Void,E>;
     /// fn is_closed(): Boolean; }` (roadmap Phase 4c,
     /// `docs/ERROR_RESOURCE_PERMISSION_SEMANTICS.md` section 4), the same
     /// "inject the tables directly" mechanism
@@ -4426,7 +4441,7 @@ impl<'a> Checker<'a> {
     ///
     /// Unlike `Iterable<T>`/`Iterator<T>`, `E`'s own `from Error` constraint
     /// is expressed directly with [`TypeParamInfo::constraints`] — the same
-    /// field a user-declared interface's own `from` clause resolves into
+    /// field a user-declared contract's own `from` clause resolves into
     /// (`Self::resolve_class_type_param_constraints`) — since `Error` (and
     /// therefore a real constraint to check against) already exists once
     /// [`Self::register_native_exception_hierarchy`] has run, unlike when
@@ -4455,7 +4470,8 @@ impl<'a> Checker<'a> {
         let resource = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: "Resource".into(),
-            kind: ContractKind::Interface,
+            kind: ContractKind::Contract,
+            properties: Vec::new(),
             methods: Vec::new(),
             implements: Vec::new(),
             type_params: vec![e],
@@ -4513,7 +4529,8 @@ impl<'a> Checker<'a> {
         let transferable = self.contracts.len() as u32;
         self.contracts.push(ContractType {
             name: "TransferableResource".into(),
-            kind: ContractKind::Interface,
+            kind: ContractKind::Contract,
+            properties: Vec::new(),
             methods: Vec::new(),
             implements: Vec::new(),
             type_params: Vec::new(),
@@ -4636,6 +4653,46 @@ impl<'a> Checker<'a> {
                 .map(|p| (p.name.name.clone(), self.type_param_ids[&p.span]))
                 .collect(),
         );
+        let properties: Vec<ContractProperty> = decl
+            .properties
+            .iter()
+            .map(|property| ContractProperty {
+                name: property.name.name.clone(),
+                ty: self.resolve_type(&property.ty),
+                mutability: property.mutability,
+                span: property.span,
+            })
+            .collect();
+        for (index, property) in properties.clone().iter().enumerate() {
+            if let Some(previous) = properties[..index]
+                .iter()
+                .find(|previous| previous.name == property.name)
+            {
+                let where_ = self.declared_at(previous.span, property.span);
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    property.span,
+                    format!("property `{}` is already defined", property.name),
+                    format!("a previous definition exists {where_}"),
+                    Some("keep one property declaration".into()),
+                );
+            }
+            if let Some(method) = decl.methods.iter().find(|m| m.name.name == property.name) {
+                self.error(
+                    codes::DUPLICATE_DECLARATION,
+                    property.span,
+                    format!(
+                        "`{}` cannot be both a property and an operation",
+                        property.name
+                    ),
+                    format!(
+                        "the operation is declared at {}",
+                        self.sources.location(method.name.span).line
+                    ),
+                    None,
+                );
+            }
+        }
         let mut methods: Vec<ContractMethod> = Vec::new();
         let mut instance_method_index = 0usize;
         for method in &decl.methods {
@@ -4703,6 +4760,7 @@ impl<'a> Checker<'a> {
         self.contracts.push(ContractType {
             name: decl.name.name.clone(),
             kind: decl.kind,
+            properties,
             methods,
             implements: Vec::new(),
             type_params,
@@ -4716,7 +4774,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolves `interface/trait X implements Y` after every contract name
+    /// Resolves `contract/trait X implements Y` after every contract name
     /// is known, then checks for cycles and incompatible inherited signatures.
     fn resolve_contract_implements(&mut self, program: &Program) {
         for decl in &program.contracts {
@@ -4746,7 +4804,7 @@ impl<'a> Checker<'a> {
                             codes::UNKNOWN_TYPE,
                             named.span,
                             format!("`{}` is not a declared contract", named.name),
-                            "`implements` on a contract names another interface or trait",
+                            "`implements` on a contract names another contract or trait",
                             None,
                         );
                         continue;
@@ -4822,16 +4880,64 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// Reports when two contracts in the same `implements` chain require the
-    /// same method name with a different concrete signature.
+    /// Reports incompatible members required by contracts in one inheritance
+    /// chain, including property/method name collisions.
     fn check_contract_incompatibilities(&mut self) {
         for i in 0..self.contracts.len() {
             let mut seen: std::collections::HashMap<String, (u32, ContractMethod)> =
                 std::collections::HashMap::new();
+            let mut seen_properties: std::collections::HashMap<String, (u32, ContractProperty)> =
+                std::collections::HashMap::new();
             let closure = self.transitive_contracts(i as u32);
             for contract in &closure {
-                let methods = self.contracts[*contract as usize].methods.clone();
+                let (methods, properties) = {
+                    let source = &self.contracts[*contract as usize];
+                    (source.methods.clone(), source.properties.clone())
+                };
+                for property in properties {
+                    if seen.contains_key(&property.name) {
+                        let owner = seen[&property.name].0;
+                        let first = self.contracts[owner as usize].name.clone();
+                        let second = self.contracts[*contract as usize].name.clone();
+                        self.error(
+                            codes::DUPLICATE_DECLARATION,
+                            self.contracts[i as usize].span,
+                            format!("contracts `{first}` and `{second}` use `{}` as both an operation and a property", property.name),
+                            "a member name has one shape in a contract hierarchy",
+                            None,
+                        );
+                    }
+                    if let Some((owner, previous)) = seen_properties.get(&property.name) {
+                        if property.ty != previous.ty || property.mutability != previous.mutability
+                        {
+                            let first = self.contracts[*owner as usize].name.clone();
+                            let second = self.contracts[*contract as usize].name.clone();
+                            self.error(
+                                codes::DUPLICATE_DECLARATION,
+                                self.contracts[i as usize].span,
+                                format!("contracts `{first}` and `{second}` have incompatible property `{}`", property.name),
+                                "a contract implementing both must expose one compatible property shape",
+                                None,
+                            );
+                        }
+                    } else {
+                        seen_properties
+                            .insert(property.name.clone(), (*contract, property.clone()));
+                    }
+                }
                 for method in &methods {
+                    if seen_properties.contains_key(&method.name) {
+                        let owner = seen_properties[&method.name].0;
+                        let first = self.contracts[owner as usize].name.clone();
+                        let second = self.contracts[*contract as usize].name.clone();
+                        self.error(
+                            codes::DUPLICATE_DECLARATION,
+                            self.contracts[i as usize].span,
+                            format!("contracts `{first}` and `{second}` use `{}` as both a property and an operation", method.name),
+                            "a member name has one shape in a contract hierarchy",
+                            None,
+                        );
+                    }
                     if let Some((owner, previous)) = seen.get(&method.name) {
                         let same_params = method.params.len() == previous.params.len()
                             && method
@@ -5068,7 +5174,7 @@ impl<'a> Checker<'a> {
                         "`{}` is not a declared contract or abstract class",
                         named.name
                     ),
-                    "`implements` names an interface, a trait or an abstract class",
+                    "`implements` names a contract, a trait or an abstract class",
                     None,
                 );
             }
@@ -5332,7 +5438,7 @@ impl<'a> Checker<'a> {
         for (class, name, span) in pending {
             let mut claimed = self.native_stringifiable.is_some() && name == "to_string";
             // A trait default has a body, so replacing it is a genuine
-            // override; an interface requirement or a bodyless trait method
+            // override; a contract requirement or a bodyless trait method
             // is signature-only, and the marker is unnecessary there.
             for &contract in &self.classes[class as usize].contracts.clone() {
                 let required = self.contracts[contract as usize]
@@ -5420,9 +5526,81 @@ impl<'a> Checker<'a> {
         at: Span,
         subst: &[(u32, Type)],
     ) {
+        let properties = self.contracts[contract as usize].properties.clone();
         let required = self.contracts[contract as usize].methods.clone();
         let contract_name = self.contracts[contract as usize].name.clone();
         let class_name = self.classes[class as usize].name.clone();
+
+        for property in properties {
+            let required_type = self.substitute_type(property.ty, subst);
+            let Some(supplied) = self.classes[class as usize].field(&property.name).cloned() else {
+                self.error(
+                    codes::MISSING_IMPLEMENTATION,
+                    at,
+                    format!(
+                        "`{class_name}` does not implement property `{}`",
+                        property.name
+                    ),
+                    format!(
+                        "`{contract_name}` requires a public property of type `{}`",
+                        self.name(required_type)
+                    ),
+                    Some(format!(
+                        "add `{}: {}` to `{class_name}`",
+                        property.name,
+                        self.name(required_type)
+                    )),
+                );
+                continue;
+            };
+            if supplied.is_static || supplied.visibility != Visibility::Public {
+                self.error(
+                    codes::INACCESSIBLE_MEMBER,
+                    supplied.span,
+                    format!("property `{}` must be public and non-static to implement `{contract_name}`", property.name),
+                    "contract properties describe instance shape available through the contract",
+                    None,
+                );
+            }
+            if supplied.ty != required_type {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    supplied.span,
+                    format!("property `{}` has an incompatible type", property.name),
+                    format!(
+                        "`{contract_name}` requires `{}`, but `{class_name}` provides `{}`",
+                        self.name(required_type),
+                        self.name(supplied.ty)
+                    ),
+                    None,
+                );
+            }
+            if property.mutability == Mutability::Mutable
+                && supplied.mutability != Mutability::Mutable
+            {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    supplied.span,
+                    format!(
+                        "property `{}` is not mutable enough for `{contract_name}`",
+                        property.name
+                    ),
+                    "a mutable contract property requires a mutable class property",
+                    None,
+                );
+            }
+            if property.mutability == Mutability::Strict
+                && supplied.mutability != Mutability::Strict
+            {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    supplied.span,
+                    format!("property `{}` is not strict enough for `{contract_name}`", property.name),
+                    "an `inmut::strict` contract property requires an `inmut::strict` class property",
+                    None,
+                );
+            }
+        }
 
         // A generic contract's own `<T>` is substituted before anything below
         // compares against it, so `Iterable<Int32>` is checked against
@@ -6315,19 +6493,6 @@ impl<'a> Checker<'a> {
                 // class's (below too), so `CallVirtual` has a shared index to
                 // read regardless of which concrete adopter is behind it.
             }
-            // A generic record with no contract still cannot lower: its
-            // inline value representation needs per-instantiation
-            // specialization. Once it implements a generic contract we need
-            // it to be monomorphized like a generic class so the boxed
-            // contract table can be built (fase-3-dispatch-generico).
-            ClassKind::Record if !decl.type_params.is_empty() && decl.implements.is_empty() => {
-                self.not_lowered(
-                    decl.name.span,
-                    &format!("a generic {}", decl.kind.as_str()),
-                    "model it as an ordinary `class` for now, or implement a generic contract",
-                );
-            }
-            ClassKind::Record => {}
         }
 
         // Inherited members come first, which is what makes a subclass's
@@ -6711,7 +6876,7 @@ impl<'a> Checker<'a> {
                     // `#override` is required only when an inherited
                     // *implementation* is replaced: a concrete base method
                     // or a trait default. A signature-only requirement —
-                    // an `abstract class` member or an interface method —
+                    // an `abstract class` member or a contract method —
                     // has nothing to replace, so the marker is unnecessary
                     // there (a warning, not an error).
                     let owner_is_abstract =
@@ -8110,6 +8275,8 @@ impl<'a> Checker<'a> {
                 Base::ServiceContext => (35, 0),
                 Base::ServiceCapacityError => (36, 0),
                 Base::ServiceLifecycleError => (37, 0),
+                Base::Object => (39, 0),
+                Base::Dynamic => (40, 0),
             }
         }
         bases.sort_by_key(key);
@@ -8862,7 +9029,7 @@ impl<'a> Checker<'a> {
             Base::Class(id) => self
                 .classes
                 .get(id as usize)
-                .is_some_and(|class| class.kind != ClassKind::Record),
+                .is_some_and(|class| class.kind == ClassKind::Class),
             Base::Contract(_) => true,
             _ => false,
         }
@@ -9037,6 +9204,7 @@ impl<'a> Checker<'a> {
             let id = match reference.name.as_str() {
                 "ServiceCapacityError" => Some(native.service_capacity_error),
                 "ServiceLifecycleError" => Some(native.service_lifecycle_error),
+                "JsonConversionError" => Some(native.json_conversion),
                 _ => None,
             };
             if let Some(id) = id {
@@ -11194,11 +11362,14 @@ impl<'a> Checker<'a> {
                 CollectionElement::Scalar(expr) => self.expr_mutates_receiver(ctx, expr, aliases),
                 CollectionElement::Spread(s) => self.expr_mutates_receiver(ctx, &s.expr, aliases),
             }),
-            Expr::Record(r) => r.elements.iter().any(|e| match e {
-                RecordLiteralElement::Field(f) => {
-                    self.expr_mutates_receiver(ctx, &f.value, aliases)
+            Expr::Object(r) => r.elements.iter().any(|e| match e {
+                ObjectLiteralElement::Field(f) => {
+                    f.dynamic_key
+                        .as_ref()
+                        .is_some_and(|key| self.expr_mutates_receiver(ctx, key, aliases))
+                        || self.expr_mutates_receiver(ctx, &f.value, aliases)
                 }
-                RecordLiteralElement::Spread(s) => {
+                ObjectLiteralElement::Spread(s) => {
                     self.expr_mutates_receiver(ctx, &s.expr, aliases)
                 }
             }),
@@ -11859,6 +12030,8 @@ impl<'a> Checker<'a> {
             }
             Base::Contract(_)
             | Base::ContractInstance(_)
+            | Base::Object
+            | Base::Dynamic
             | Base::Atomic(_)
             | Base::Mutex(_)
             | Base::ServiceCapacityError
@@ -12003,10 +12176,7 @@ impl<'a> Checker<'a> {
         // need the `IrType::Value` runtime entry point the earlier design
         // deferred. An `abstract class` declares no layout of its own, so
         // there is nothing to derive on it.
-        if !matches!(
-            self.classes[id as usize].kind,
-            ClassKind::Class | ClassKind::Record
-        ) {
+        if !matches!(self.classes[id as usize].kind, ClassKind::Class) {
             self.clone_cache.insert(id, false);
             return false;
         }
@@ -12324,6 +12494,21 @@ impl<'a> Checker<'a> {
                         );
                         return;
                     }
+                    if receiver_ty.base == Base::Object
+                        && let Some((root_name, Mutability::Strict)) =
+                            self.root_binding_mutability(&index.receiver)
+                    {
+                        self.error(
+                            codes::STRICT_ALIAS_VIOLATION,
+                            index.span,
+                            format!("cannot write through `{root_name}`"),
+                            format!(
+                                "`{root_name}` is `inmut::strict`; writing an object property mutates the referent it protects"
+                            ),
+                            Some(format!("declare `{root_name}` with `mut` if its properties must change")),
+                        );
+                        return;
+                    }
                     element
                 }
                 AssignTarget::Name(_) => unreachable!("handled by the outer let-else"),
@@ -12460,6 +12645,45 @@ impl<'a> Checker<'a> {
     fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
         let object = self.check_expr(&field.object);
         let ty = self.member_type(object, &field.name, field.object.span(), false);
+        let contract_property = match object.base {
+            Base::Contract(id) => self.contracts[id as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == field.name.name)
+                .map(|property| (property.mutability, property.span)),
+            Base::ContractInstance(id) => {
+                let contract = self.contract_instances[id as usize].contract;
+                self.contracts[contract as usize]
+                    .properties
+                    .iter()
+                    .find(|property| property.name == field.name.name)
+                    .map(|property| (property.mutability, property.span))
+            }
+            _ => None,
+        };
+        if let Some((mutability, declaration)) = contract_property {
+            if mutability == Mutability::Immutable {
+                let line = self.sources.location(declaration).line;
+                self.error(
+                    codes::ASSIGN_TO_IMMUTABLE,
+                    field.name.span,
+                    format!("cannot assign to `{}`", field.name.name),
+                    format!("the contract property is `inmut` on line {line}"),
+                    Some("declare the contract property `mut` if views may update it".into()),
+                );
+            } else if mutability == Mutability::Strict {
+                let line = self.sources.location(declaration).line;
+                self.error(
+                    codes::STRICT_FIELD_WRITE,
+                    field.name.span,
+                    format!("cannot assign to `{}`", field.name.name),
+                    format!("the contract property is `inmut::strict` on line {line}"),
+                    Some(
+                        "a strict contract property is never writable through a projection".into(),
+                    ),
+                );
+            }
+        }
         if let Base::Class(id) = object.base
             && let Some(info) = self.classes[id as usize].field(&field.name.name).cloned()
         {
@@ -13162,7 +13386,7 @@ impl<'a> Checker<'a> {
             Expr::Range(e) => self.check_range(e, expected),
             Expr::Collection(e) => self.check_collection_literal(e, expected),
             Expr::Tuple(tuple) => self.check_tuple_literal(tuple, expected),
-            Expr::Record(e) => self.check_record_literal(e, expected),
+            Expr::Object(e) => self.check_object_literal(e, expected),
             Expr::If(e) => self.check_if_expr(e, expected),
             Expr::This(e) => match self.this_type {
                 Some(ty) => {
@@ -13525,6 +13749,26 @@ impl<'a> Checker<'a> {
     /// out too — the check would also have to decide what a null value
     /// means for it, which is a second question this does not answer yet.
     fn cast_is_directly_lowerable(&self, actual: Type, target: Type) -> bool {
+        if actual.base == Base::Dynamic && !actual.nullable && !target.nullable {
+            return matches!(
+                target.base,
+                Base::Int(_)
+                    | Base::Float(_)
+                    | Base::Decimal
+                    | Base::Boolean
+                    | Base::String
+                    | Base::Char
+                    | Base::Regex
+                    | Base::Object
+                    | Base::Class(_)
+                    | Base::Contract(_)
+                    | Base::Enum(_)
+                    | Base::Array(_)
+                    | Base::List(_)
+                    | Base::Map(_)
+                    | Base::Set(_)
+            );
+        }
         if actual.nullable || target.nullable {
             return false;
         }
@@ -13575,8 +13819,10 @@ impl<'a> Checker<'a> {
         ) {
             return true;
         }
-        matches!(actual.base, Base::Class(_) | Base::Contract(_))
-            && matches!(target.base, Base::Class(_))
+        matches!(
+            actual.base,
+            Base::Class(_) | Base::Contract(_) | Base::Object
+        ) && matches!(target.base, Base::Class(_))
     }
 
     /// Whether a cast between two types could ever succeed at runtime.
@@ -13585,6 +13831,14 @@ impl<'a> Checker<'a> {
         let target_bare = target.without_null();
 
         if actual_bare.base == target_bare.base {
+            return true;
+        }
+        if actual_bare.base == Base::Dynamic {
+            return !matches!(target_bare.base, Base::Void);
+        }
+        if actual_bare.base == Base::Object
+            && matches!(target_bare.base, Base::Class(_) | Base::Instance(_))
+        {
             return true;
         }
         // Any integer width may be cast to any other: narrowing and
@@ -14383,7 +14637,7 @@ impl<'a> Checker<'a> {
             Is => {
                 self.expect_same(left, right, expr);
                 let has_identity = match left.base {
-                    Base::Class(id) => self.classes[id as usize].kind == ClassKind::Class,
+                    Base::Class(_) => true,
                     // A closure's identity is its whole value — function
                     // pointer plus captures (design D15) —
                     // `CORE_LANGUAGE_SEMANTICS.md`'s "callable identity uses
@@ -14391,7 +14645,7 @@ impl<'a> Checker<'a> {
                     // sides to share one exact `Base::Function` id, so this
                     // is comparing two values of the *same* callable shape,
                     // not deciding cross-shape compatibility.
-                    Base::Contract(_) | Base::String | Base::Function(_) => true,
+                    Base::Contract(_) | Base::Object | Base::String | Base::Function(_) => true,
                     _ => false,
                 };
                 if !has_identity && !left.is_unknown() {
@@ -14552,32 +14806,6 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        // A record always has one: equality is derived from
-        // every field, per `ZIRK_LANGUAGE_SPEC.md` section 7, not opted into
-        // with a reserved method the way a plain class's is (`fase-3-
-        // structural-equality`, design D1/D2). `zirk-ir`'s
-        // `FunctionLowering::lower_structural_equality` lowers it to a
-        // conjunction of per-field comparisons — but only for a field type
-        // that comparison chain knows how to compare (a scalar/`String`/
-        // `Char`, a nested `record` recursively, or a
-        // `class` reference via its own `_equals`-or-identity rule, D2).
-        // A residual unsupported field type (`T?`, a closure, a contract,
-        // an algebraic enum with payload, …) keeps the same
-        // checked-but-not-compilable diagnostic this whole comparison used
-        // to get unconditionally, but now scoped to just that field (D3).
-        if let Base::Class(id) = left.base
-            && matches!(self.classes[id as usize].kind, ClassKind::Record)
-        {
-            if let Some(unsupported) = self.structural_equality_unsupported_field(left) {
-                let name = self.name(unsupported);
-                self.not_lowered(
-                    expr.span,
-                    &format!("structural equality on a record with a field of type `{name}`"),
-                    "compare its fields individually for now",
-                );
-            }
-            return;
-        }
         if let Base::Class(id) = left.base
             && self.classes[id as usize].kind != ClassKind::Class
         {
@@ -14598,54 +14826,6 @@ impl<'a> Checker<'a> {
             "`==` compares content, and this type has not said what its content comparison is",
             Some(help),
         );
-    }
-
-    /// Whether `ty` is a field type derived structural equality's own
-    /// lowering (`zirk-ir`'s `lower_structural_equality`) knows how to
-    /// compare, checked recursively for a nested `record`
-    /// field — returns the first unsupported type found, if any.
-    ///
-    /// A scalar (`Int*`/`Float*`/`Boolean`/`Char`), `String`, and a
-    /// payload-less (traditional) enum compare directly; a `record`/`value
-    /// class` field recurses into its own fields the same way; a `class`
-    /// reference is always fine, whatever its own equality resolves to
-    /// (D2 — its own `_equals` if declared, `is` identity otherwise, never
-    /// an error at this recursive position). Everything else — `T?`, a
-    /// closure, a contract, an algebraic enum carrying a payload, a
-    /// generic parameter — has no comparison this lowering builds yet.
-    fn structural_equality_unsupported_field(&self, ty: Type) -> Option<Type> {
-        // `T?` (`Type::nullable`, not a `Base` variant of its own) has no
-        // comparison this lowering builds yet: `IrType::Nullable` is a
-        // `{present, payload}` struct, not one of the shapes
-        // `lower_field_equality`'s fallback `Binary { op: Eq }` arm
-        // actually codegens (a scalar/`String`/`Char`) or its two other
-        // arms specifically handle (`Value`/`Object`).
-        if ty.nullable {
-            return Some(ty);
-        }
-        match ty.base {
-            Base::Int(_) | Base::Float(_) | Base::Boolean | Base::Char | Base::String => None,
-            Base::Enum(id) => {
-                let all_bare = self.enums[id as usize]
-                    .variants
-                    .iter()
-                    .all(|v| v.associated.is_empty());
-                if all_bare { None } else { Some(ty) }
-            }
-            Base::Class(id) => match self.classes[id as usize].kind {
-                ClassKind::Record => self.classes[id as usize]
-                    .fields
-                    .iter()
-                    .find_map(|f| self.structural_equality_unsupported_field(f.ty)),
-                // A plain `class` field always resolves (D2): its own
-                // `_equals` if it declares one, identity otherwise — never
-                // the "does not define equality" error that only applies
-                // to a bare top-level `==` between two of them.
-                ClassKind::Class => None,
-                ClassKind::Abstract => Some(ty),
-            },
-            _ => Some(ty),
-        }
     }
 
     /// An arithmetic operator, resolved by what its operands support.
@@ -14997,178 +15177,261 @@ impl<'a> Checker<'a> {
         Type::of(Base::Tuple(id))
     }
 
-    /// `{ ...source, field: value, ... }` — a record/object literal.
-    fn check_record_literal(
+    /// Checks an open object literal or its statically visible contract shape.
+    fn check_object_literal(
         &mut self,
-        literal: &RecordLiteralExpr,
+        literal: &ObjectLiteralExpr,
         expected: Option<Type>,
     ) -> Type {
-        let Some(expected) = expected else {
-            self.error(
-                codes::TYPE_MISMATCH,
-                literal.span,
-                "a record/object literal needs a record-typed context",
-                "write an explicit type annotation, or use this value where a record type is expected",
-                None,
-            );
-            return Type::UNKNOWN;
-        };
-
-        let (class_id, result_ty) = match expected.without_null().base {
-            Base::Class(id) => (id, expected.without_null()),
-            Base::Instance(inst_id) => {
-                let inst = self.generic_instances[inst_id as usize].clone();
-                (
-                    inst.class,
-                    Type {
-                        base: Base::Instance(inst_id),
-                        nullable: false,
-                        borrowed_scope: None,
-                    },
-                )
-            }
-            _ => {
-                self.error(
-                    codes::TYPE_MISMATCH,
-                    literal.span,
-                    "a record/object literal is only valid where a record type is expected",
-                    format!("expected {}", self.name(expected)),
-                    None,
-                );
-                return Type::UNKNOWN;
-            }
-        };
-
-        let class = self.classes[class_id as usize].clone();
-        if class.kind != ClassKind::Record {
-            self.error(
-                codes::TYPE_MISMATCH,
-                literal.span,
-                "object literal syntax is only valid for record value types",
-                format!("`{}` is a {}", class.name, class.kind.as_str()),
-                None,
-            );
-            return Type::UNKNOWN;
+        if let Some(expected_contract) = expected.map(Type::without_null)
+            && matches!(
+                expected_contract.base,
+                Base::Contract(_) | Base::ContractInstance(_)
+            )
+        {
+            self.check_object_literal_contract(literal, expected_contract);
+            return Type::OBJECT;
         }
 
-        // Build a substitution map for generic record field types.
-        let substitution: HashMap<u32, Type> =
-            if let Base::Instance(inst_id) = expected.without_null().base {
-                let inst = &self.generic_instances[inst_id as usize];
-                class
+        if expected.is_none_or(|ty| ty.without_null().base == Base::Object) {
+            for element in &literal.elements {
+                match element {
+                    ObjectLiteralElement::Spread(spread) => {
+                        let source = self.check_expr(&spread.expr);
+                        if !matches!(
+                            source.without_null().base,
+                            Base::Object
+                                | Base::Class(_)
+                                | Base::Instance(_)
+                                | Base::Contract(_)
+                                | Base::ContractInstance(_)
+                        ) {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                spread.span,
+                                "object spread requires an object value",
+                                format!("found `{}`", self.name(source)),
+                                None,
+                            );
+                        }
+                    }
+                    ObjectLiteralElement::Field(field) => {
+                        if let Some(key) = &field.dynamic_key {
+                            let key_ty = self.check_expr(key);
+                            if !Type::STRING.accepts(key_ty) {
+                                self.error(
+                                    codes::TYPE_MISMATCH,
+                                    key.span(),
+                                    "an interpolated object key must produce a String",
+                                    format!("found `{}`", self.name(key_ty)),
+                                    None,
+                                );
+                            }
+                        }
+                        self.check_expr(&field.value);
+                    }
+                }
+            }
+            return expected.map(Type::without_null).unwrap_or(Type::OBJECT);
+        }
+
+        let expected = expected.unwrap_or(Type::UNKNOWN);
+        self.error(
+            codes::TYPE_MISMATCH,
+            literal.span,
+            "an object literal must be assigned to `Object` or a structural `contract`",
+            format!("found context `{}`", self.name(expected)),
+            Some("use a class constructor when nominal class identity is required".into()),
+        );
+        Type::UNKNOWN
+    }
+
+    /// Check the statically visible portion of an object literal against a
+    /// contract. A literal containing spread or interpolated keys can have
+    /// additional members whose names are only known at runtime; those are
+    /// checked by the ordinary Object-to-contract conversion after lowering.
+    fn check_object_literal_contract(&mut self, literal: &ObjectLiteralExpr, expected: Type) {
+        let (contract_id, substitution): (u32, Vec<(u32, Type)>) = match expected.base {
+            Base::Contract(id) => (id, Vec::new()),
+            Base::ContractInstance(instance_id) => {
+                let instance = self.contract_instances[instance_id as usize].clone();
+                let params = self.contracts[instance.contract as usize]
                     .type_params
-                    .iter()
-                    .copied()
-                    .zip(inst.args.iter().copied())
-                    .collect()
-            } else {
-                HashMap::new()
-            };
-
-        let field_types: HashMap<String, Type> = class
-            .fields
-            .iter()
-            .map(|f| (f.name.clone(), self.substitute(f.ty, &substitution)))
-            .collect();
-
+                    .clone();
+                (
+                    instance.contract,
+                    params.into_iter().zip(instance.args).collect(),
+                )
+            }
+            _ => unreachable!("caller filters contract types"),
+        };
+        let contract = self.contracts[contract_id as usize].clone();
         let mut provided: HashMap<String, Span> = HashMap::new();
-        let mut explicit: HashSet<String> = HashSet::new();
+        let mut has_unknown_keys = false;
 
         for element in &literal.elements {
             match element {
-                RecordLiteralElement::Spread(s) => {
-                    let source_ty = self.check_expr(&s.expr);
-                    if !result_ty.accepts(source_ty) {
-                        let found = self.name(source_ty);
-                        let wanted = self.name(result_ty);
+                ObjectLiteralElement::Spread(spread) => {
+                    let source = self.check_expr(&spread.expr);
+                    if !matches!(
+                        source.without_null().base,
+                        Base::Object
+                            | Base::Class(_)
+                            | Base::Instance(_)
+                            | Base::Contract(_)
+                            | Base::ContractInstance(_)
+                    ) {
                         self.error(
                             codes::TYPE_MISMATCH,
-                            s.span,
-                            format!("cannot spread `{found}` into a `{wanted}` literal"),
-                            "the spread source must have the same record type",
+                            spread.span,
+                            "object spread requires an object value",
+                            format!("found `{}`", self.name(source)),
                             None,
                         );
-                    } else {
-                        for field in &class.fields {
-                            provided.entry(field.name.clone()).or_insert(s.span);
-                            explicit.remove(&field.name);
-                        }
                     }
+                    has_unknown_keys = true;
                 }
-                RecordLiteralElement::Field(f) => {
-                    let field_name = f.name.name.clone();
-                    let Some(&field_ty) = field_types.get(&field_name) else {
-                        self.error(
-                            codes::UNKNOWN_MEMBER,
-                            f.name.span,
-                            format!("record `{}` has no field `{}`", class.name, field_name),
-                            format!(
-                                "fields are: {}",
-                                class
-                                    .fields
-                                    .iter()
-                                    .map(|fld| &fld.name[..])
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                            None,
-                        );
-                        continue;
+                ObjectLiteralElement::Field(field) => {
+                    let key = if let Some(dynamic_key) = &field.dynamic_key {
+                        let key_ty = self.check_expr(dynamic_key);
+                        if !Type::STRING.accepts(key_ty) {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                dynamic_key.span(),
+                                "an interpolated object key must produce a String",
+                                format!("found `{}`", self.name(key_ty)),
+                                None,
+                            );
+                        }
+                        has_unknown_keys = true;
+                        None
+                    } else {
+                        Some(field.name.name.clone())
                     };
-                    if explicit.contains(&field_name) {
-                        let &prev = provided
-                            .get(&field_name)
-                            .expect("explicit field is tracked");
-                        self.error(
-                            codes::DUPLICATE_DECLARATION,
-                            f.name.span,
-                            format!("field `{}` is set more than once", field_name),
-                            "remove the duplicate assignment",
-                            Some(format!("also set at {:?}", prev)),
+
+                    let required_type = key.as_deref().and_then(|key| {
+                        contract
+                            .properties
+                            .iter()
+                            .find(|property| property.name == key)
+                            .map(|property| property.ty)
+                    });
+                    let required_method =
+                        key.as_deref().and_then(|key| contract.method(key).cloned());
+                    let expected_callable = required_method.as_ref().map(|method| {
+                        let params = method
+                            .params
+                            .iter()
+                            .map(|param| {
+                                if substitution.is_empty() {
+                                    param.ty
+                                } else {
+                                    self.substitute_type(param.ty, &substitution)
+                                }
+                            })
+                            .collect();
+                        let returns = if substitution.is_empty() {
+                            method.returns
+                        } else {
+                            self.substitute_type(method.returns, &substitution)
+                        };
+                        Type::of(Base::Function(
+                            self.intern_fn_type(FnType { params, returns }),
+                        ))
+                    });
+                    let previous_expected = self.expected_type;
+                    self.expected_type = required_type
+                        .map(|ty| {
+                            if substitution.is_empty() {
+                                ty
+                            } else {
+                                self.substitute_type(ty, &substitution)
+                            }
+                        })
+                        .or(expected_callable);
+                    let actual = self.check_expr(&field.value);
+                    self.expected_type = previous_expected;
+                    if let (Some(key), Some(required)) = (key.clone(), required_type) {
+                        let required = if substitution.is_empty() {
+                            required
+                        } else {
+                            self.substitute_type(required, &substitution)
+                        };
+                        provided.insert(key, field.name.span);
+                        self.expect_assignable(
+                            required,
+                            actual,
+                            field.value.span(),
+                            "the contract property value",
                         );
-                        continue;
                     }
-                    self.expected_type = Some(field_ty);
-                    let value_ty = self.check_expr(&f.value);
-                    if !field_ty.accepts(value_ty) {
-                        let found = self.name(value_ty);
-                        let wanted = self.name(field_ty);
+                    if let (Some(key), Some(required), Some(actual_id)) = (
+                        key.clone(),
+                        expected_callable,
+                        match actual.base {
+                            Base::Function(id) => Some(id),
+                            _ => None,
+                        },
+                    ) {
+                        let Base::Function(required_id) = required.base else {
+                            unreachable!("a contract operation has a callable requirement")
+                        };
+                        if !actual.is_unknown()
+                            && !self.fn_shapes_compatible(required_id, actual_id)
+                        {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                field.value.span(),
+                                format!("object property `{key}` does not match the contract operation signature"),
+                                format!("contract `{}` requires a callable compatible with `{}`", contract.name, self.name(required)),
+                                None,
+                            );
+                        }
+                        provided.insert(key, field.name.span);
+                    } else if let (Some(key), Some(_)) = (key.clone(), required_method) {
                         self.error(
                             codes::TYPE_MISMATCH,
-                            f.value.span(),
-                            format!("field `{field_name}` has type `{found}`, expected `{wanted}`"),
-                            "the explicit value does not match the record field type",
+                            field.value.span(),
+                            format!("object property `{key}` must be callable to satisfy the contract operation"),
+                            format!("contract `{}` declares `{key}` as an operation", contract.name),
                             None,
                         );
+                        provided.insert(key, field.name.span);
                     }
-                    provided.insert(field_name.clone(), f.name.span);
-                    explicit.insert(field_name);
                 }
             }
         }
 
-        for field in &class.fields {
-            if !provided.contains_key(&field.name) {
-                let field_ty = field_types
-                    .get(&field.name)
-                    .copied()
-                    .unwrap_or(Type::UNKNOWN);
-                if !field_ty.has_default() {
+        if !has_unknown_keys {
+            for property in &contract.properties {
+                if !provided.contains_key(&property.name) {
                     self.error(
-                        codes::UNINITIALIZED_FIELD,
+                        codes::TYPE_MISMATCH,
+                        literal.span,
+                        format!("object literal is missing contract property `{}`", property.name),
+                        format!("contract `{}` requires this property", contract.name),
+                        Some("add the required property or use an object whose shape is checked at runtime".into()),
+                    );
+                }
+            }
+            for method in &contract.methods {
+                if !provided.contains_key(&method.name) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
                         literal.span,
                         format!(
-                            "field `{}` of record `{}` is not initialized",
-                            field.name, class.name
+                            "object literal is missing contract operation `{}`",
+                            method.name
                         ),
-                        "provide an explicit value or a spread that includes it",
-                        None,
+                        format!(
+                            "contract `{}` requires a compatible callable property",
+                            contract.name
+                        ),
+                        Some(format!("add a callable property named `{}`", method.name)),
                     );
                 }
             }
         }
-
-        result_ty
     }
 
     /// `if` used where a value is expected. Decision D7.
@@ -15921,10 +16184,10 @@ impl<'a> Checker<'a> {
                     });
                 }
             }
-            Pattern::Record(r) => {
+            Pattern::Object(r) => {
                 let inner = scrutinee.without_null();
                 match inner.base {
-                    Base::Class(_) | Base::Instance(_) => {}
+                    Base::Class(_) | Base::Instance(_) | Base::Object => {}
                     _ => {
                         let name = self.name(scrutinee);
                         self.error(
@@ -15937,11 +16200,16 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 };
-                if pattern.is_irrefutable() {
+                let dynamic_object = inner.base == Base::Object;
+                if pattern.is_irrefutable() && !dynamic_object {
                     *has_wildcard = true;
                 }
                 for field in &r.fields {
-                    let field_ty = self.member_type(inner, &field.name, r.span, false);
+                    let field_ty = if dynamic_object {
+                        Type::DYNAMIC
+                    } else {
+                        self.member_type(inner, &field.name, r.span, false)
+                    };
                     let binding_name = field
                         .binding
                         .as_ref()
@@ -16306,6 +16574,19 @@ impl<'a> Checker<'a> {
         if receiver.nullable {
             self.reject_absent_receiver(receiver, expr.receiver.span());
             return (receiver, Type::UNKNOWN, false);
+        }
+
+        if receiver.base == Base::Object {
+            if !index.is_unknown() && index.base != Base::String || index.nullable {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.index.span(),
+                    "an object key must be a String",
+                    format!("found `{}`", self.name(index)),
+                    None,
+                );
+            }
+            return (receiver, Type::DYNAMIC, true);
         }
 
         if !index.is_unknown() && !matches!(index.base, Base::Int(_)) || index.nullable {
@@ -16696,6 +16977,60 @@ impl<'a> Checker<'a> {
 
         if safe {
             self.reject_redundant_safe(object, object_span);
+        }
+
+        // Open objects have no statically closed member table. A named read
+        // is therefore a tagged Dynamic value and must be narrowed before a
+        // concrete operation can use it.
+        if object.base == Base::Object {
+            return Type::DYNAMIC;
+        }
+
+        if let Base::Contract(id) = object.base {
+            if let Some(property) = self.contracts[id as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == member.name)
+            {
+                return property.ty;
+            }
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!(
+                    "contract `{}` has no property `{}`",
+                    self.contracts[id as usize].name, member.name
+                ),
+                "the member is not declared by the contract",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        if let Base::ContractInstance(id) = object.base {
+            let instance = self.contract_instances[id as usize].clone();
+            if let Some(property) = self.contracts[instance.contract as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == member.name)
+            {
+                let params = self.contracts[instance.contract as usize]
+                    .type_params
+                    .clone();
+                let substitution: Vec<_> = params.into_iter().zip(instance.args).collect();
+                return self.substitute_type(property.ty, &substitution);
+            }
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!(
+                    "contract `{}` has no property `{}`",
+                    self.contracts[instance.contract as usize].name, member.name
+                ),
+                "the member is not declared by the contract",
+                None,
+            );
+            return Type::UNKNOWN;
         }
 
         if let Base::Param(id) = object.base {
@@ -17860,13 +18195,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Record(e) => {
+            Expr::Object(e) => {
                 for element in &e.elements {
                     match element {
-                        RecordLiteralElement::Field(f) => {
+                        ObjectLiteralElement::Field(f) => {
+                            if let Some(key) = &f.dynamic_key {
+                                self.check_recursive_reference(key, name, nested);
+                            }
                             self.check_recursive_reference(&f.value, name, nested);
                         }
-                        RecordLiteralElement::Spread(s) => {
+                        ObjectLiteralElement::Spread(s) => {
                             self.check_recursive_reference(&s.expr, name, nested);
                         }
                     }
@@ -18988,8 +19326,18 @@ impl<'a> Checker<'a> {
 
         self.require_visible(span, shared, callee, kind.as_str());
 
-        if kind != ClassKind::Class {
-            return self.check_record_construction(expr, id);
+        if kind == ClassKind::Abstract {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("abstract class `{class_name}` cannot be instantiated"),
+                "abstract classes provide requirements for concrete classes",
+                Some("instantiate a concrete class that implements this abstract class".into()),
+            );
+            for argument in &expr.args {
+                self.check_expr(&argument.value);
+            }
+            return Type::UNKNOWN;
         }
 
         if constructors.is_empty() {
@@ -19640,67 +19988,6 @@ impl<'a> Checker<'a> {
         }
         let id = self.intern_set_type(element);
         Type::of(Base::Set(id))
-    }
-
-    /// `Point(x: 1, y: 2)`: the implicit constructor of a record or value
-    /// class, over every field, named-only, an omitted field taking its
-    /// type's default (`ZIRK_LANGUAGE_SPEC.md` section 7).
-    ///
-    /// Dispatched from [`Self::check_construction`] instead of matching
-    /// arity against `class.constructors`: a record never has
-    /// one, its whole field list is the signature.
-    fn check_record_construction(&mut self, expr: &CallExpr, id: u32) -> Type {
-        let class = self.classes[id as usize].clone();
-        let class_name = class.name.clone();
-        let kind = class.kind;
-
-        for arg in &expr.args {
-            if arg.name.is_none() {
-                self.error(
-                    codes::UNKNOWN_ARGUMENT_NAME,
-                    arg.span,
-                    format!("`{class_name}` takes only named arguments"),
-                    format!("a {} is constructed by naming its fields", kind.as_str()),
-                    Some(format!("write `{class_name}(field: value, ...)`")),
-                );
-            }
-        }
-
-        let params: Vec<ParamInfo> = class
-            .fields
-            .iter()
-            .map(|f| ParamInfo {
-                name: f.name.clone(),
-                ty: f.ty,
-                optional: f.ty.has_default(),
-                has_default: false,
-                default: None,
-                variadic: false,
-            })
-            .collect();
-        let type_params = class.type_params.clone();
-        let signature = Signature {
-            name: class_name,
-            params,
-            returns: Type::of(Base::Class(id)),
-            shared: class.shared,
-            span: class.span,
-            type_params: type_params.clone(),
-            throws: Vec::new(),
-        };
-        let (_, substitution) = self.check_direct_call_with_subst(expr, &signature);
-
-        if type_params.is_empty() {
-            return Type::of(Base::Class(id));
-        }
-
-        let args: Vec<Type> = type_params
-            .iter()
-            .map(|pid| substitution.get(pid).copied().unwrap_or(Type::UNKNOWN))
-            .collect();
-        let instance = self.intern_instance(GenericInstance { class: id, args });
-        self.generic_constructions.insert(expr.span, instance);
-        Type::of(Base::Instance(instance))
     }
 
     /// Gives removed Result extraction helpers a targeted migration
@@ -23066,6 +23353,17 @@ impl<'a> Checker<'a> {
                         self.mark_standard_library_binding_effect(binding);
                         self.standard_http_calls.insert(expr.span, binding.into());
                     }
+                    let is_bundled_json = self
+                        .sources
+                        .file(class.span.file)
+                        .identity()
+                        .is_some_and(|identity| identity.package == "std.json");
+                    if is_bundled_json
+                        && let Some(binding) =
+                            crate::stdlib::compiler_binding_for_json_member(&method.name)
+                    {
+                        self.standard_json_calls.insert(expr.span, binding.into());
+                    }
                     let from_inside = self.this_type == Some(Type::of(Base::Class(class_id)))
                         || self.current_class_body == Some(class_id);
                     if method.visibility != Visibility::Public && !from_inside {
@@ -25448,6 +25746,9 @@ impl<'a> Checker<'a> {
     /// Checks that a value may be stored where a type is expected.
     fn expect_assignable(&mut self, expected: Type, actual: Type, span: Span, context: &str) {
         if expected.accepts(actual)
+            || (actual.base == Base::Object
+                && matches!(expected.base, Base::Contract(_) | Base::ContractInstance(_))
+                && (!actual.nullable || expected.nullable))
             || self.is_subclass_of(actual, expected)
             || self.accepts_into_union(expected, actual)
             || self.bare_enum_matches_instance(actual, expected)
@@ -25934,11 +26235,16 @@ fn collect_service_callback_references(program: &Program) -> HashSet<String> {
                     }
                 }
             }
-            Expr::Record(e) => {
+            Expr::Object(e) => {
                 for x in &e.elements {
                     match x {
-                        RecordLiteralElement::Field(f) => expression(&f.value, out),
-                        RecordLiteralElement::Spread(s) => expression(&s.expr, out),
+                        ObjectLiteralElement::Field(f) => {
+                            if let Some(key) = &f.dynamic_key {
+                                expression(key, out);
+                            }
+                            expression(&f.value, out);
+                        }
+                        ObjectLiteralElement::Spread(s) => expression(&s.expr, out),
                     }
                 }
             }
@@ -26056,11 +26362,16 @@ fn collect_path_names(expr: &Expr, out: &mut Vec<(String, Span)>) {
                 }
             }
         }
-        Expr::Record(e) => {
+        Expr::Object(e) => {
             for element in &e.elements {
                 match element {
-                    RecordLiteralElement::Field(field) => collect_path_names(&field.value, out),
-                    RecordLiteralElement::Spread(spread) => collect_path_names(&spread.expr, out),
+                    ObjectLiteralElement::Field(field) => {
+                        if let Some(key) = &field.dynamic_key {
+                            collect_path_names(key, out);
+                        }
+                        collect_path_names(&field.value, out);
+                    }
+                    ObjectLiteralElement::Spread(spread) => collect_path_names(&spread.expr, out),
                 }
             }
         }

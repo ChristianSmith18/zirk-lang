@@ -6,4 +6,4 @@ The trade-off is IR-version compatibility and a larger trusted compiler surface,
 
 ---
 
-**Previous:** [← Why Permissions?](10-why-permissions.md) · **Next:** [ Class or Record?](12-class-or-record.md)
+**Previous:** [← Why Permissions?](10-why-permissions.md) · **Next:** [ Class, Contract, or Object?](12-class-or-record.md)

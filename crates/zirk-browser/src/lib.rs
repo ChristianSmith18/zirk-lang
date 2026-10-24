@@ -279,7 +279,7 @@ fn bundled_standard_sources(
             && let Some(package) = path.strip_prefix("std.")
         {
             let package = package.split("::").next().unwrap_or(package);
-            if matches!(package, "environment" | "http" | "net") {
+            if matches!(package, "environment" | "http" | "json" | "net") {
                 required_packages.insert(package.to_string());
             }
         }
@@ -289,6 +289,7 @@ fn bundled_standard_sources(
     if required_packages.contains("http") {
         required_packages.insert("environment".into());
         required_packages.insert("net".into());
+        required_packages.insert("json".into());
     }
     let packages = [
         (
@@ -312,6 +313,11 @@ fn bundled_standard_sources(
             "http",
             include_str!("../../../stdlib/std/http/package.zrk"),
             vec![("http", include_str!("../../../stdlib/std/http/http.zrk"))],
+        ),
+        (
+            "json",
+            include_str!("../../../stdlib/std/json/package.zrk"),
+            vec![("json", include_str!("../../../stdlib/std/json/json.zrk"))],
         ),
         (
             "net",
@@ -2133,10 +2139,10 @@ fn main(): Void {
         include_str!("../fixtures/oop-generics-two-params.json"),
         include_str!("../fixtures/oop-identity-aliasing.json"),
         include_str!("../fixtures/oop-inheritance-chain.json"),
-        include_str!("../fixtures/oop-interface-trait-default.json"),
+        include_str!("../fixtures/oop-contract-trait-default.json"),
         include_str!("../fixtures/oop-nested-inner-local.json"),
         include_str!("../fixtures/oop-polymorphic-collection.json"),
-        include_str!("../fixtures/oop-records-enums-in-classes.json"),
+        include_str!("../fixtures/oop-objects-enums-in-classes.json"),
         include_str!("../fixtures/oop-static-mutable.json"),
         include_str!("../fixtures/oop-subclass-adds-method.json"),
         include_str!("../fixtures/oop-visibility-inheritance.json"),

@@ -91,22 +91,12 @@ fn show_rest_destructuring(): Void {
     // Expected remaining contents: [20, 30, 40]
 }
 
-record UserProfile {
-    id: Int32;
-    name: String;
-    active: Boolean;
-}
-
 fn show_object_spread_and_rest(): Void {
-    inmut profile: UserProfile = UserProfile(
-        id: 7,
-        name: "Ada",
-        active: true,
-    );
+    inmut profile: Object = { id: 7, name: "Ada", active: true };
 
-    // Object/record spread copies named fields and explicit fields override
-    // earlier values. The expected record type supplies the object shape.
-    inmut renamed: UserProfile = { ... profile, name: "Grace" };
+    // Object spread copies properties and explicit fields override earlier
+    // values. The result remains an ordinary open Object.
+    inmut renamed: Object = { ... profile, name: "Grace" };
     stdout.println(renamed.id);
     stdout.println(renamed.name);
     stdout.println(renamed.active);

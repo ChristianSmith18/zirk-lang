@@ -5,8 +5,9 @@ has a precedence table, stable diagnostic-code policy, and normative detail for
 ranges, slicing, traditional `for`, patterns, generators, and callable types.
 Tuples, `Duration` literals, `Regex` literals with `matches`/`find`/`replace`,
 the `String` mutation/search surface, `Char` classification/normalization, and
-`type` alias lowering are now delivered; `value class` was removed (use
-`record`). Their existence in documentation does not imply every pipeline
+`type` alias lowering are now delivered; `value class`, `record`, and `interface` declarations were removed; use
+`Object` for open data, `contract` for structural requirements, and `class` for
+nominal reference types. Their existence in documentation does not imply every pipeline
 stage implements them.
 
 The delivered `Map`/`Set` runtime remains intentionally narrower than the
@@ -194,14 +195,14 @@ Current high-impact delivery limits include:
   (resizable) are native collector-tracked reference collections with
   bounds-checked indexing, `length`/`is_empty`, and `for ... in`
   iteration; their delivery is completing in parallel within the same
-  change. `value class` is removed — `record` covers its semantics.
+  change. `value class` and record value semantics are removed; use Object, class, tuple, or enum according to identity and shape.
   Also delivered inside the change: `Regex.split` and
   `Regex.find_all(text): List<Regex.Match>` for match iteration
   (`matches(text)` keeps its `Boolean` meaning), `re'...'` patterns in
   `match` arms, `Range<T>` (`start`, `end`, `step`, colon steps, inferred
   direction, slicing, expansion, and `Iterable<T>` for integer `T` and
   `Duration`), derived `Clone` for
-  `record`/`enum`, `String` writes `s[i] = c` and slicing
+  enum, `String` writes `s[i] = c` and slicing
   `s[start:end:step]`, and lowering of user-defined generic `implements
   Contract<T>` satisfaction (contract members that name the contract's own
   `T` were since covered by the Phase 3 OOP closing slice described above).

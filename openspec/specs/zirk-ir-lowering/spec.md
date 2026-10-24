@@ -87,26 +87,6 @@ IR generation SHALL start from the already-resolved and verified tree, not from 
 - **THEN** the input has resolved names and verified types
 - **AND** lowering does NOT re-check types
 
-### Requirement: Lowering of spread and rest operators
-
-Lowering SHALL evaluate each spread source once, expand it in order, and produce
-checked-capacity array allocation or list appends. It SHALL lower rest
-destructuring into projections that copy the remaining elements or fields without
-mutating the source, and object/record spread into field-by-field copies with
-explicit-field overrides.
-
-#### Scenario: Spread into a variadic call
-- **WHEN** `sum(...values)` is lowered
-- **THEN** the call receives a single `List<Int32>` built by appending each spread element
-
-#### Scenario: Spread in an array literal
-- **WHEN** `[0, ...values, 4]` is lowered
-- **THEN** the array is allocated with the exact combined length and each element is written in order
-
-#### Scenario: Record spread with override
-- **WHEN** `{ ...profile, name: "Grace" }` is lowered
-- **THEN** source fields are copied first and the explicit `name` field overwrites the previous value
-
 ### Requirement: Lowering of loops and of `break`/`continue`
 
 Lowering SHALL translate `for`, `for ... in`, `while`, and `loop` into basic blocks with the condition evaluated in its own block, and SHALL translate `break`/`continue` into a direct jump to the continuation block or to the condition block of the loop that contains them.
@@ -201,8 +181,8 @@ Most calls fall into the first case, and paying for an indirection on all of the
 - **THEN** an indirect call through the type's table is emitted
 
 #### Scenario: Call through a contract
-- **WHEN** the receiver has the type of an interface
-- **THEN** dispatch happens through that interface's table
+- **WHEN** the receiver has a contract type
+- **THEN** dispatch happens through that contract's table
 
 ### Requirement: Lowering of safe access
 
@@ -475,14 +455,6 @@ representation without boxing.
 - **WHEN** `channel.try_receive()` is lowered
 - **THEN** the IR contains a plain runtime call whose result is a typed outcome and no suspend instruction
 
-### Requirement: Deterministic object spread lowering
-
-IR lowering SHALL evaluate object spread sources and explicit fields left to right, copy fields according to nominal layout metadata, apply later explicit overrides, and construct the destination without mutating any source object.
-
-#### Scenario: Object override order
-- **WHEN** `{ ...base, name: replacement }` is lowered
-- **THEN** `base` is evaluated first and `replacement` becomes the final `name` field
-
 ### Requirement: Lowering of concurrent scopes
 
 The lowering SHALL surround a `concurrent { }` block with a `ScopeEnter`
@@ -600,3 +572,25 @@ pending-cancellation check on every exit edge.
 #### Scenario: protect brackets the shield depth
 - **WHEN** `Concurrent.protect(fn)` is lowered
 - **THEN** the IR increments shield depth before `fn` and decrements it with a cancellation check on every exit edge
+
+### Requirement: Lowering dynamic object operations
+The typed IR SHALL represent dynamic object creation, tagged property reads and writes, key removal, safe lookup, spread, rest, and contract conformance as explicit operations. Runtime checks SHALL preserve source locations and produce catchable errors. Contract views SHALL retain the underlying object reference rather than copy the object. Existing call and collection spread SHALL continue to lower as iterable expansion.
+
+#### Scenario: Lower interpolated object key
+- **WHEN** an object literal contains an interpolated key expression
+- **THEN** lowering evaluates the key once and stores its resulting string with the tagged value
+
+#### Scenario: Lower runtime contract check
+- **WHEN** a value with only dynamic `Object` type is assigned to a contract
+- **THEN** the IR validates required properties and operations before exposing the contract view
+
+#### Scenario: Lower safe property lookup
+- **WHEN** a program performs explicit presence-safe lookup
+- **THEN** the IR returns an absent result for a missing key without emitting a throwing access
+
+### Requirement: Dynamic object spread creates a shallow copy
+Lowered object spread SHALL create a distinct object identity, copy property values in insertion order, and then apply explicit overrides. Nested managed references SHALL preserve their identities. Rest lowering SHALL copy all keys not selected by the pattern.
+
+#### Scenario: Spread source and result have separate identities
+- **WHEN** a dynamic object is spread into a new object
+- **THEN** the result has a new identity and copied nested references remain shared

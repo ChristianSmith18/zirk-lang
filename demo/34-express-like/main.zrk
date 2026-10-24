@@ -9,9 +9,12 @@ fn home(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
 
 fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
     inmut name = "custom_status";
-    return HTTPResponse.from_json(200, {
-        "{name}": null
-    });
+    inmut body = { "{name}": "ok" };
+    try {
+        return HTTPResponse.from_json(200, body);
+    } catch JsonConversionError(error) {
+        return HTTPResponse.from_text(500, error.message());
+    }
 }
 
 fn user_by_id(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {

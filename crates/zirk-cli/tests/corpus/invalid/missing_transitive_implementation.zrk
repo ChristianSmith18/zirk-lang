@@ -1,9 +1,9 @@
 // Una clase que adopta B, y B implementa A, también debe implementar a().
-interface A {
+contract A {
     a(): Int32;
 }
 
-interface B implements A {
+contract B implements A {
     b(): Int32;
 }
 

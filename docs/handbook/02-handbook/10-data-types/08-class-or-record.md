@@ -1,38 +1,42 @@
-# Class or Record?
+# Class, Contract, or Object?
 
-Choose based on semantics:
+Choose the concept that matches the semantics:
 
-- A **class** models identity, encapsulated state, lifecycle, inheritance, or polymorphic behavior.
-- A **record** models a product of named fields with structural value behavior.
-
-For example, a mutable session with lifecycle is a class; an immutable address payload is a record.
-
-Representation cost is secondary. The compiler may optimize both, but callers depend on equality, identity, mutation, construction, and compatibility contracts.
+- A **class** models identity, encapsulated state, lifecycle, inheritance, or
+  polymorphic behavior.
+- A **contract** names required properties and operations for values that may
+  have different concrete types.
+- An **Object** holds open, dynamically extensible data, including parsed JSON.
+- A **tuple** models a small positional value group.
+- An **enum** models a closed set of alternatives.
 
 ```zirk
+contract AddressLike {
+    street: String;
+    city: String;
+}
+
+mut address: Object = { street: "Main", city: "Santiago" };
+inmut view: AddressLike = address;
+
 class Session {
     token: String;
     active: Boolean;
 }
-
-record Address {
-    street: String;
-    city: String;
-}
 ```
 
-| Question | Class | Record |
-| --- | --- | --- |
-| Observable identity with `is`? | Yes | No |
-| Mutable state? | Yes, by field contract | No |
-| Equality | Usually field/contract-defined | Structural by fields |
-| Assignment | Shares the class reference | Copies value semantics |
-| Primary use | Stateful entity or service | Immutable data product |
-| Inheritance | One class plus contracts | No class identity hierarchy |
+| Question | Class | Contract | Object |
+| --- | --- | --- | --- |
+| Defines nominal identity? | Yes | No | Yes |
+| Defines required members? | Concrete members | Yes | No |
+| Allows open dynamic keys? | Through its object view | No | Yes |
+| Assignment aliases identity? | Yes | Same underlying value | Yes |
+| Main use | Stateful entity or service | Shared structural API | JSON and flexible data |
 
-Use `Session` when two otherwise equal sessions may still be different live
-objects. Use `Address` when only the field values matter.
+A contract does not create an immutable projection or copy. Successful
+conformance validates the shape and seals the object's existing key set across
+aliases. Extra keys remain stored but are hidden from the contract-typed view.
 
 ---
 
-**Previous:** [← Union Types](07-union-types.md) · **Next:** [ Collections](../12-collections/README.md)
+**Previous:** [← Union Types](07-union-types.md) · **Next:** [Collections](../12-collections/README.md)

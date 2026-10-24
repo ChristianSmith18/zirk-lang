@@ -34,68 +34,6 @@ Classes SHALL expose attributes and ordinary methods, SHALL NOT expose a propert
 - **WHEN** a field initializer references `this`
 - **THEN** a diagnostic is emitted
 
-### Requirement: Static members
-
-A class MAY declare `static` methods and `static` fields. Static members SHALL be accessed as `ClassName.member`, SHALL NOT dispatch virtually, SHALL NOT appear in vtables or contract tables, and `this` SHALL be an error inside a static body. The usual visibility rules (`public`, `private`, `protected`) and mutability rules (`mut`/`inmut`) apply unchanged. Static members SHALL be allowed on classes; whether `record` or `enum` may declare them is left to a later decision.
-
-#### Scenario: Static method call
-
-- **WHEN** `class Counter { static make(): Counter { ... } }` is declared and `Counter.make()` is written
-- **THEN** the call resolves statically to `Counter`'s method, with no receiver instance required
-
-#### Scenario: Static field access
-
-- **WHEN** `class Limits { static inmut max: Int32 = 100; }` is declared and `Limits.max` is read
-- **THEN** the read resolves to the class-level field
-
-#### Scenario: No receiver in static context
-
-- **WHEN** a `static` method body references `this`
-- **THEN** a diagnostic is emitted
-
-#### Scenario: Static members are not virtual
-
-- **WHEN** a subclass redeclares a `static` method of its base
-- **THEN** no override relationship is created and calls resolve by the static type name used
-
-### Requirement: Concrete inheritance and abstract implementation
-
-A concrete class MAY extend at most one concrete class. An `abstract class` SHALL be a nominal set of required attributes and method signatures with no constructor, body, state allocation, or layout contribution, and concrete classes SHALL adopt it through `implements`. Interfaces and traits SHALL also use `implements`. A value statically typed as an `abstract class`, holding a concrete adopter instance, SHALL dispatch every call to the adopter's own implementation.
-
-#### Scenario: Abstract class contract
-
-- **WHEN** `class Circle implements Shape` supplies every attribute and method required by abstract class `Shape`
-- **THEN** Circle is accepted where Shape is required without inheriting Shape storage
-
-#### Scenario: Dynamic dispatch through an abstract-class-typed value
-
-- **WHEN** a variable statically typed as abstract class `Shape` holds a `Circle` instance and a caller invokes a `Shape`-declared method on it
-- **THEN** the call dispatches to `Circle`'s own implementation, the same way dispatch through a concrete base class already works
-
-### Requirement: Explicit overriding and super dispatch
-
-Only a method marked `#override` SHALL replace an inherited implementation: a concrete base-class method or a trait default. `#override` SHALL be written on its own member-marker line before the method and SHALL apply only to instance methods. Implementing a signature-only requirement (`abstract class` or `interface`) SHALL NOT use `#override`; writing it there SHALL produce a warning that the marker is unnecessary. Writing `#override` when no inherited implementation is replaced SHALL be an error. Public/protected instance methods SHALL dispatch virtually by default; private/static methods SHALL not. `super(...)` and `super.method()` SHALL address the concrete base, and `TraitName.super.method()` SHALL resolve a trait conflict.
-
-#### Scenario: Missing override marker
-
-- **WHEN** a subclass redeclares a compatible base method implementation without `#override`
-- **THEN** compilation fails with both declarations identified
-
-#### Scenario: Marker on a signature-only requirement
-
-- **WHEN** a class implementing an `interface` writes `#override` above the implementing method
-- **THEN** a warning is emitted indicating the marker is unnecessary and should be removed
-
-#### Scenario: Marker that overrides nothing
-
-- **WHEN** `#override` precedes a method that replaces no inherited implementation
-- **THEN** compilation fails indicating nothing is overridden
-
-#### Scenario: Marker on a non-method member
-
-- **WHEN** `#override` precedes a field, constructor, nested class, or `static` member
-- **THEN** a diagnostic is emitted indicating `#override` applies only to instance methods
-
 ### Requirement: Object casts and identity
 
 `is` SHALL compare reference identity, `==` SHALL require equality capability, `as` SHALL perform a checked related-type cast with controlled failure, and `as?` SHALL return nullable absence on failure. Unrelated casts SHALL fail at compile time.
@@ -385,3 +323,58 @@ fields declared at their parameter position.
 - **WHEN** `zirk format` processes `construct(public name: String)` or
   `class Foo {}`
 - **THEN** the output keeps the sugared form without synthesized members
+
+### Requirement: Classes implement structural contracts
+Classes SHALL be able to implement multiple contracts by providing compatible required properties and operations. Contract implementation SHALL not alter class inheritance, abstract-class conformance, or trait default conflict rules. Implementing a contract operation SHALL NOT require `#override` unless it also replaces an inherited implementation.
+
+#### Scenario: Class implements a contract
+- **WHEN** a class implements a contract and declares every required member
+- **THEN** the class is accepted through that contract type
+
+#### Scenario: Contract implementation does not require override marker
+- **WHEN** a class supplies a contract operation without replacing an inherited implementation
+- **THEN** the implementation is accepted without `#override`
+
+### Requirement: Static members remain class-only
+Classes MAY declare static methods and fields. Static members SHALL be accessed through the class name, SHALL NOT dispatch virtually or appear in instance contract tables, and SHALL NOT use `this`. Visibility and mutability rules SHALL apply as for other class members.
+
+#### Scenario: Static method resolves on the class
+- **WHEN** `Counter.make()` calls a declared static method
+- **THEN** dispatch is static and requires no instance
+
+#### Scenario: Static body rejects this
+- **WHEN** a static method references `this`
+- **THEN** the checker emits a diagnostic
+
+### Requirement: Abstract classes remain nominal requirements
+An abstract class SHALL define nominal required attributes and abstract method signatures without constructor, method body, state allocation, or layout contribution. A concrete subclass SHALL implement those requirements and SHALL dispatch calls through an abstract-class view to its concrete implementation. Classes MAY extend one concrete class.
+
+#### Scenario: Concrete subclass satisfies abstract requirements
+- **WHEN** a subclass implements every abstract method and required attribute
+- **THEN** it can be used through the abstract-class type
+
+### Requirement: Override markers select inherited implementations
+`#override` SHALL be required only when replacing an inherited class implementation or trait default. Implementing a contract signature without replacing inherited behavior SHALL NOT require the marker. Inherited calls through `super` and explicit trait-default selection SHALL retain their existing behavior.
+
+#### Scenario: Contract method needs no override marker
+- **WHEN** a class supplies a contract operation that has no inherited implementation
+- **THEN** it compiles without `#override`
+
+### Requirement: Class instances support dynamic properties
+Class instances SHALL support dynamic properties in addition to declared class fields. Unknown named access SHALL resolve to a dynamic property, and computed string access SHALL read or write dynamic properties. Dynamic property addition, replacement, and removal SHALL follow the instance reference's mutability and SHALL be disallowed after contract conformance seals the instance's key set. Declared class fields SHALL retain their declared types and visibility rules.
+
+#### Scenario: Mutable class instance adds a dynamic property
+- **WHEN** a mutable class instance receives a key not declared as a class field
+- **THEN** that key is stored as a dynamic property without changing the class's declared layout or members
+
+#### Scenario: Declared field keeps its declared type
+- **WHEN** a dynamic property and a declared class field share the same spelling
+- **THEN** declared-member resolution takes precedence and enforces the class field type
+
+#### Scenario: Unknown member reads a dynamic property
+- **WHEN** a class instance has a dynamic property not declared in its class
+- **THEN** unknown-member access reads that property as `Dynamic` rather than producing a compile-time member-not-found error
+
+#### Scenario: Contract seals class instance keys
+- **WHEN** a class instance is successfully checked against a contract
+- **THEN** its existing dynamic key set cannot be changed through any alias

@@ -57,6 +57,7 @@ pub enum Keyword {
     Do,
     /// `yield` inside a `fn gen`.
     Yield,
+    Contract,
     Interface,
     Trait,
     With,
@@ -148,6 +149,7 @@ impl Keyword {
             "match" => Match,
             "do" => Do,
             "yield" => Yield,
+            "contract" => Contract,
             "interface" => Interface,
             "trait" => Trait,
             "with" => With,
@@ -221,6 +223,7 @@ impl Keyword {
             Match => "match",
             Do => "do",
             Yield => "yield",
+            Contract => "contract",
             Interface => "interface",
             Trait => "trait",
             With => "with",

@@ -1,4 +1,4 @@
-interface ExternalValue {
+contract ExternalValue {
     value(): Int32;
 }
 

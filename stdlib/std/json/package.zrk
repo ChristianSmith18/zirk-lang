@@ -1,0 +1,3 @@
+package std.json;
+
+share mod json from "./json";

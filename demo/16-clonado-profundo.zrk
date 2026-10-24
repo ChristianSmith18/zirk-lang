@@ -1,26 +1,12 @@
-// DEMO 16 — clone de records y objetos administrados con preservación de valores.
+// DEMO 16 — copia superficial de objetos y preservación de identidad anidada.
 
 import { stdout } from std.io;
 
-class Tag {
-    label: String;
-    construct(label: String) { this.label = label; }
-}
-
-record Point {
-    x: Int32;
-    y: Int32;
-    name: String;
-    tag: Tag;
-}
-
 fn main(): Void {
-    inmut p = Point(x: 1, y: 2, name: "hi", tag: Tag("t"));
-    inmut q = p.clone();
-    stdout.println(p.x);
-    stdout.println(q.x);
-    stdout.println(q.name);
-    stdout.println(p.tag.label);
-    stdout.println(q.tag.label);
-    stdout.println(q.tag is p.tag);
+    inmut p: Object = { x: 1, y: 2, name: "hi" };
+    inmut q: Object = { ...p };
+    stdout.println(p.x as Int32);
+    stdout.println(q.x as Int32);
+    stdout.println(q.name as String);
+    stdout.println(p is q);
 }

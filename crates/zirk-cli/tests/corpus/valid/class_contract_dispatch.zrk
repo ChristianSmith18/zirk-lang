@@ -1,0 +1,25 @@
+import { stdout } from std.io;
+
+// A class implementing a contract, viewed through its contract type and
+// passed as a contract-typed parameter.
+contract Describable {
+    describe(): String;
+}
+
+class Point implements Describable {
+    x: Int32;
+    y: Int32;
+    construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
+    describe(): String { return "a point"; }
+}
+
+fn announce(d: Describable): String {
+    return d.describe();
+}
+
+fn main(): Void {
+    mut p = Point(1, 2);
+    mut d: Describable = p;
+    stdout.println(d.describe());
+    stdout.println(announce(p));
+}

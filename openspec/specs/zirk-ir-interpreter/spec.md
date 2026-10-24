@@ -42,28 +42,6 @@ The interpreter SHALL execute IR instructions in basic-block order, apply `Jump`
 - **WHEN** execution reaches `Unreachable`
 - **THEN** the interpreter returns a structured internal failure with the originating source span
 
-### Requirement: Typed runtime values preserve Zirk semantics
-
-The interpreter SHALL represent each supported IR scalar, nullable, callable, closure, object, contract, record, enum, string, regex, range, and collection value without coercing it to JavaScript semantics. Width, signedness, exact-decimal behavior, Unicode grapheme behavior, nullability, identity, and structural equality SHALL match the native implementation for browser-compatible programs.
-
-#### Scenario: Detect narrow integer overflow
-- **WHEN** an interpreted integer operation exceeds its declared signed or unsigned width
-- **THEN** execution produces the same controlled runtime failure category as native execution
-- **AND** the value does not silently wrap
-
-#### Scenario: Preserve exact decimal arithmetic
-- **WHEN** interpreted `Float` arithmetic evaluates `0.1 + 0.2`
-- **THEN** the result uses the exact-decimal representation and equals `0.3`
-
-#### Scenario: Compare identity-bearing values
-- **WHEN** `is` compares two references to the same interpreter heap identity
-- **THEN** the result is true
-- **AND** equivalent content stored under distinct identities does not make `is` true
-
-#### Scenario: Compare canonically equivalent strings
-- **WHEN** interpreted string equality compares canonically equivalent Unicode content
-- **THEN** it returns the same result as the native runtime
-
 ### Requirement: Calls, closures, and dispatch use explicit frames
 
 The interpreter SHALL execute direct calls, indirect callable calls, captured closure environments, object virtual dispatch, and contract dispatch using module metadata and explicit Zirk frames. It SHALL enforce a configurable call-depth limit independently of the host stack. A call whose callee returns `Void` SHALL NOT require a return value when the callee frame completes, regardless of whether the call instruction declared a result value.
@@ -119,7 +97,7 @@ The interpreter SHALL preserve typed throws, exact rethrows, suppressed failures
 - **THEN** the bound value has the narrowed type and the handler body executes normally
 
 #### Scenario: Pass a subtype to a supertype parameter
-- **WHEN** a subclass value is passed where a supertype or interface is expected
+- **WHEN** a subclass value is passed where a supertype or contract is expected
 - **THEN** the call executes with the coerced value and dispatches as native dispatch does
 
 #### Scenario: Return an uncaught runtime failure
@@ -293,40 +271,6 @@ Deep clone SHALL be charged against the configured instruction budget and heap l
 - **WHEN** the work to clone a graph would exceed the remaining instruction budget
 - **THEN** execution ends with a `limit-exceeded` result naming `instructions`
 
-### Requirement: Object-oriented programs execute with native-equivalent behavior
-
-The interpreter SHALL execute the delivered object-oriented surface — classes with constructors, fields, `this`, visibility, single inheritance with `super` and `#override`, abstract classes, interfaces, traits with default implementations, static members, static nested, `inner` and local classes, generic classes and methods, and objects held in collections — with the same normalized output, completion category and runtime failure category as the native pipeline. A construct SHALL be documented as browser-supported only when a shared conformance fixture exercises it in both engines.
-
-#### Scenario: Override selected by runtime type
-- **WHEN** an interpreted program calls an overridden method through a variable declared with the superclass type
-- **THEN** the override of the runtime class executes
-- **AND** the output matches native execution
-
-#### Scenario: Interface and trait dispatch
-- **WHEN** an interpreted program calls an interface method and a trait default method on instances of different classes
-- **THEN** each call executes the implementation selected by the class's contract table
-- **AND** a default implementation runs only for classes that do not override it
-
-#### Scenario: Abstract class instantiated through a subclass
-- **WHEN** an interpreted program constructs a concrete subclass of an abstract class and calls an abstract method through the abstract type
-- **THEN** the subclass implementation executes and the output matches native execution
-
-#### Scenario: Polymorphic collection
-- **WHEN** an interpreted program stores instances of several subclasses in a `List<Supertype>` and calls the same method on each element
-- **THEN** each element dispatches to its own implementation in iteration order
-
-#### Scenario: Identity versus structural equality
-- **WHEN** an interpreted program compares two distinct class instances with equal field values using `is` and `==`
-- **THEN** `is` is false and the equality result matches native execution
-
-#### Scenario: Static and nested classes
-- **WHEN** an interpreted program reads and writes a static member and instantiates a static nested class, an `inner` class that captures its enclosing instance, and a local class
-- **THEN** each observes the same state and produces the same output as native execution
-
-#### Scenario: Exception thrown from a method
-- **WHEN** a method of an interpreted object throws a typed exception that a caller catches by supertype
-- **THEN** the handler runs with the original exception identity and the output matches native execution
-
 ### Requirement: Unsupported object-model constructs fail as capability diagnostics
 
 When a verified module uses an object-model construct that the browser interpreter does not execute, preflight SHALL report a structured capability diagnostic that names the construct, and the entrypoint SHALL NOT execute. The interpreter SHALL NOT surface such a case as an internal failure.
@@ -348,3 +292,25 @@ The repository SHALL keep a checked-in catalog that lists each documented object
 #### Scenario: Catalog drift
 - **WHEN** a fixture named by the catalog is removed or fails in either engine
 - **THEN** repository verification fails and names the construct and fixture
+
+### Requirement: Interpreter values preserve dynamic object semantics
+The interpreter SHALL represent every supported scalar, nullable, callable, closure, dynamic object, contract view, enum, string, regex, range, and collection value without coercing it to host JavaScript semantics. Dynamic `Object` values SHALL have stable identity and tagged string-keyed properties. Property reads, writes, safe lookups, key sealing, contract checks, spread, and rest SHALL match the native implementation. `Dynamic` values SHALL preserve their runtime tags and require the same checked narrowing as native execution.
+
+#### Scenario: Dynamic object mutation matches native execution
+- **WHEN** an interpreted program adds a property and reads it back
+- **THEN** its value and identity behavior match native execution
+
+#### Scenario: Runtime contract mismatch is catchable
+- **WHEN** an interpreted dynamic object fails a contract check inside `try`
+- **THEN** the same typed contract error is caught as in native execution
+
+### Requirement: Contract and object programs execute with native-equivalent behavior
+The interpreter SHALL execute the supported object-oriented surface, including classes, constructors, fields, inheritance, overrides, abstract classes, contracts, traits, static and nested classes, generic class methods, callable object properties, open dynamic objects, class instances with dynamic properties, and alias-visible key sealing with the same output, completion, and failure category as the native pipeline. Browser-support claims SHALL continue to require shared conformance fixtures.
+
+#### Scenario: Contract dispatch uses the underlying value
+- **WHEN** an interpreted class or object is called through a compatible contract view
+- **THEN** dispatch invokes the compatible class method or stored callable property
+
+#### Scenario: Sealed object remains sealed through aliases
+- **WHEN** a dynamic object is assigned to a contract view and later accessed through another alias
+- **THEN** no alias can add or remove keys

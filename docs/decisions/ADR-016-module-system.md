@@ -12,7 +12,7 @@ The language already has `share`, `import` and `use` in the grammar, and `ZIRK_L
 
 ## Decision
 
-Every `.zrk` file is a **module** — a unit of compilation. Modules declare `class`, `record`, `enum`, `interface`, `trait`, `type` aliases and `fn`. Only symbols marked `share` are visible to importers. Imports are direct, non-transitive, and idempotent: a module loaded by several others is loaded exactly once.
+Every `.zrk` file is a **module** — a unit of compilation. Modules declare `class`, `contract`, `enum`, `trait`, `type` aliases and `fn`. Only symbols marked `share` are visible to importers. Imports are direct, non-transitive, and idempotent: a module loaded by several others is loaded exactly once. ADR-027 removes `record` and `interface` declarations.
 
 Execution is split into two modes:
 
@@ -81,7 +81,7 @@ import utils from "./utils";
 import { User, Role -> DomainRole } from "./domain/user";
 ```
 
-- `share` behaves like JavaScript `export` and can prefix `class`, `record`, `enum`, `fn`, `type`, `interface` and `trait`.
+- `share` behaves like JavaScript `export` and can prefix `class`, `contract`, `enum`, `fn`, `type` and `trait`.
 - Un-imported symbols are private to the file.
 - Open imports that cause name collisions are compile-time errors.
 - Importing a file that exports nothing emits a warning.

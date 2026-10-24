@@ -279,7 +279,7 @@ pub enum Base {
     Atomic(u32),
     /// `Mutex<T>`, interned by its protected payload type.
     Mutex(u32),
-    /// A declared interface or trait, identified by its index in the checker's
+    /// A declared contract or trait, identified by its index in the checker's
     /// table.
     ///
     /// A value of this type is reached through the contract rather than
@@ -292,6 +292,12 @@ pub enum Base {
     /// is what `ZIRK_LANGUAGE_SPEC.md` section 7 means by a class having
     /// identity. Structural equality is what records are for.
     Class(u32),
+    /// The common reference-object view. It accepts class references and
+    /// dynamic object allocations, but not scalar, tuple, or enum values.
+    Object,
+    /// A managed, runtime-tagged value whose concrete Zirk type is not known
+    /// statically. It must be narrowed before use as a concrete type.
+    Dynamic,
     /// A generic type parameter in scope where it is declared, identified by
     /// its index in the checker's table.
     ///
@@ -314,7 +320,7 @@ pub enum Base {
     /// constraints (roadmap task 7.3). Reading a member through one is not
     /// implemented.
     Instance(u32),
-    /// A declared interface or trait instantiated with concrete type
+    /// A declared contract or trait instantiated with concrete type
     /// arguments, such as `Iterable<Int32>`, identified by its index in the
     /// checker's table. See [`Base::Instance`], its class equivalent.
     ContractInstance(u32),
@@ -428,6 +434,8 @@ impl Type {
     pub const FLOAT: Type = Type::of(Base::Decimal);
     pub const BOOLEAN: Type = Type::of(Base::Boolean);
     pub const STRING: Type = Type::of(Base::String);
+    pub const OBJECT: Type = Type::of(Base::Object);
+    pub const DYNAMIC: Type = Type::of(Base::Dynamic);
     pub const DURATION: Type = Type::of(Base::Duration);
     /// A calendar date — a day count since 1970-01-01.
     pub const DATE: Type = Type::of(Base::Date);
@@ -493,7 +501,7 @@ impl Type {
 
     /// Whether a value of this type may be absent.
     pub const fn admits_null(self) -> bool {
-        self.nullable || matches!(self.base, Base::Null | Base::Unknown)
+        self.nullable || matches!(self.base, Base::Null | Base::Unknown | Base::Dynamic)
     }
 
     /// Whether two types are compatible for assignment.
@@ -536,6 +544,18 @@ impl Type {
             // requires for an implicit conversion, so neither goes through
             // here; both need `as` instead.
             return match (self.base, other.base) {
+                (
+                    Base::Object,
+                    Base::Class(_)
+                    | Base::Instance(_)
+                    | Base::Contract(_)
+                    | Base::ContractInstance(_),
+                ) => self.nullable || !other.nullable,
+                (Base::Dynamic, Base::Void) => false,
+                // Dynamic boxes absence as a runtime value, so it accepts
+                // nullable sources even when the Dynamic binding itself is
+                // not written with `?`.
+                (Base::Dynamic, _) => true,
                 // Integer widening, including unsigned-to-signed when the
                 // signed target has enough magnitude bits.
                 (Base::Int(dst), Base::Int(src)) => {
@@ -640,6 +660,35 @@ impl Type {
             return Some(self.as_nullable());
         }
 
+        if self.base == Base::Dynamic || other.base == Base::Dynamic {
+            return Some(Type {
+                base: Base::Dynamic,
+                nullable: self.nullable || other.nullable,
+                borrowed_scope: self.borrowed_scope,
+            });
+        }
+
+        if (self.base == Base::Object
+            && matches!(
+                other.base,
+                Base::Class(_) | Base::Instance(_) | Base::Contract(_) | Base::ContractInstance(_)
+            ))
+            || (other.base == Base::Object
+                && matches!(
+                    self.base,
+                    Base::Class(_)
+                        | Base::Instance(_)
+                        | Base::Contract(_)
+                        | Base::ContractInstance(_)
+                ))
+        {
+            return Some(Type {
+                base: Base::Object,
+                nullable: self.nullable || other.nullable,
+                borrowed_scope: self.borrowed_scope,
+            });
+        }
+
         if self.base != other.base {
             return None;
         }
@@ -725,6 +774,8 @@ impl Type {
             "Char" => Type::of(Base::Char),
             "Boolean" => Type::BOOLEAN,
             "String" => Type::STRING,
+            "Object" => Type::OBJECT,
+            "Dynamic" => Type::DYNAMIC,
             "Duration" => Type::DURATION,
             "Date" => Type::DATE,
             "Time" => Type::TIME,
@@ -773,6 +824,8 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Char => "Char".to_string(),
         Base::Boolean => "Boolean".to_string(),
         Base::String => "String".to_string(),
+        Base::Object => "Object".to_string(),
+        Base::Dynamic => "Dynamic".to_string(),
         Base::Duration => "Duration".to_string(),
         Base::Date => "Date".to_string(),
         Base::Time => "Time".to_string(),
@@ -1068,25 +1121,32 @@ pub struct MethodInfo {
     pub is_static: bool,
 }
 
-/// A declared interface or trait.
-///
-/// One type for both: `ZIRK_LANGUAGE_SPEC.md` section 7 separates them by a
-/// single thing — a trait may supply bodies. Everything else is identical, and
-/// two types would duplicate every rule to say the same.
+/// A declared contract or trait. Both expose the same property and operation
+/// shape; a trait may additionally provide operation bodies.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractType {
     pub name: String,
     pub kind: zirk_ast::ContractKind,
+    pub properties: Vec<ContractProperty>,
     pub methods: Vec<ContractMethod>,
     /// Its own `<T>`, empty when the contract is not generic. Each id indexes
     /// the checker's type-parameter table, the same as
     /// [`ClassType::type_params`].
     pub type_params: Vec<u32>,
-    /// Other contracts this interface or trait `implements`, with the type
+    /// Other contracts this contract or trait `implements`, with the type
     /// arguments used for each link. A non-generic `implements A` is stored
     /// as `A` with empty arguments.
     pub implements: Vec<crate::GenericContractInstance>,
     pub shared: bool,
+    pub span: zirk_diagnostics::Span,
+}
+
+/// A required property in a contract shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractProperty {
+    pub name: String,
+    pub ty: Type,
+    pub mutability: zirk_ast::Mutability,
     pub span: zirk_diagnostics::Span,
 }
 
@@ -1252,6 +1312,8 @@ mod tests {
         assert_eq!(Type::from_name("Void"), Some(Type::VOID));
         assert_eq!(Type::from_name("Boolean"), Some(Type::BOOLEAN));
         assert_eq!(Type::from_name("String"), Some(Type::STRING));
+        assert_eq!(Type::from_name("Object"), Some(Type::OBJECT));
+        assert_eq!(Type::from_name("Dynamic"), Some(Type::DYNAMIC));
     }
 
     #[test]
@@ -1449,6 +1511,15 @@ mod tests {
                 .as_nullable()
                 .accepts(Type::INT32.as_nullable())
         );
+    }
+
+    #[test]
+    fn dynamic_accepts_nullable_values_and_object_accepts_only_references() {
+        assert!(Type::DYNAMIC.accepts(Type::STRING.as_nullable()));
+        assert!(Type::DYNAMIC.accepts(Type::NULL));
+        assert!(!Type::DYNAMIC.accepts(Type::VOID));
+        assert!(Type::OBJECT.accepts(Type::of(Base::Class(0))));
+        assert!(!Type::OBJECT.accepts(Type::INT32));
     }
 
     #[test]

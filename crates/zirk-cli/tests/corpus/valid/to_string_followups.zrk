@@ -6,7 +6,7 @@ import { stdout } from std.io;
 // `to_string()` dispatched through a contract reference rather than a
 // concrete class, and `Float16` printing (fixed by widening to `Float32`
 // first, always exact).
-interface Printable {
+contract Printable {
     to_string(): String;
 }
 

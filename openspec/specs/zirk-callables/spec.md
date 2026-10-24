@@ -70,17 +70,6 @@ The language SHALL allow the same `Fn(P...) => R` binding to hold differently-ca
 - **WHEN** a captured closure is stored in a parameter, field, or local and later called
 - **THEN** the call uses the stored closure's capture block
 
-### Requirement: Escaping captured closures are boxed
-The language SHALL lower captured closures that escape or are stored to a two-word `{function pointer, capture-block pointer}` representation, where the capture block is heap-allocated and GC-tracked.
-
-#### Scenario: Returned closure keeps environment
-- **WHEN** a function returns `Fn() => Int32` that captures a mutable counter
-- **THEN** the returned callable owns a boxed capture block and repeated calls share the same counter
-
-#### Scenario: Closure stored in a field
-- **WHEN** a captured closure is stored in a `class` or `record` field
-- **THEN** the capture block is heap-allocated and the field holds the two-word representation
-
 ### Requirement: Cloned callables produce independent environments
 The language SHALL support `.clone()` on a callable when all captures are `Clone`, producing an independent deep copy of the capture block.
 
@@ -92,14 +81,17 @@ The language SHALL support `.clone()` on a callable when all captures are `Clone
 - **WHEN** a callable captures a non-`Clone` resource and `.clone()` is called
 - **THEN** compilation fails
 
-### Requirement: Callable captures remain visible to managed-memory tracing
+### Requirement: Callable values may be stored in dynamic object properties
+An `Object` SHALL store callable values as tagged property values. Escaping closures SHALL use a managed capture environment and remain invocable after their creation frame exits. Captured references SHALL remain visible to managed-memory tracing when a closure is stored in an object or supported aggregate. The callable SHALL satisfy a contract operation when its signature and effects are compatible.
 
-Every managed reference captured by a closure SHALL remain represented in its environment descriptor, including when a closure is nested inside a supported tuple, record, enum payload, or collection element. Copies and clones SHALL preserve the correct capture edges.
+#### Scenario: Escaping closure is stored in an object
+- **WHEN** an object stores a closure returned from another function and the closure captures a managed value
+- **THEN** the closure remains callable and the captured value remains reachable
 
-#### Scenario: Closure is stored in a supported aggregate
-- **WHEN** a reachable aggregate contains a closure as its only path to a captured object and collection runs
-- **THEN** the captured object remains valid while the aggregate and closure remain reachable
+#### Scenario: Stored callable satisfies a contract operation
+- **WHEN** a dynamic object stores a callable whose signature matches a contract operation
+- **THEN** runtime conformance succeeds and the operation dispatches to the stored callable
 
-#### Scenario: Closure clone is collected during construction
-- **WHEN** collection runs while a closure clone is being constructed
-- **THEN** partially built capture environments remain reachable until cloning completes or fails
+#### Scenario: Stored closure remains rooted in a collection
+- **WHEN** a collection contains an object whose only path to a captured object is a callable property
+- **THEN** the captured object remains reachable during collection

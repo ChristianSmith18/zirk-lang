@@ -831,11 +831,11 @@ fn collect_all_scope_ir_emits_its_distinct_runtime_abi() {
 }
 
 #[test]
-fn concurrent_task_boxes_nested_record_results_with_managed_fields() {
+fn concurrent_task_boxes_nested_class_results_with_managed_fields() {
     let ir = llvm_ir(
-        "record Inner { text: String; }\n\
-         record Outer { prefix: Int64; inner: Inner; }\n\
-         fn make(): Outer { return Outer(prefix: 5, inner: Inner(text: \"kept alive\")); }\n\
+        "class Inner { text: String; construct(text: String) { this.text = text; } }\n\
+         class Outer { prefix: Int64; inner: Inner; construct(prefix: Int64, inner: Inner) { this.prefix = prefix; this.inner = inner; } }\n\
+         fn make(): Outer { return Outer(5, Inner(\"kept alive\")); }\n\
          fn main(): Void {\n\
            concurrent { inmut value: Outer = make(); }\n\
            stdout.println(value.inner.text);\n\
@@ -854,8 +854,8 @@ fn concurrent_task_boxes_nested_record_results_with_managed_fields() {
         "JobWait reloads the aggregate from its result box:\n{ir}"
     );
     assert!(
-        ir.contains("i32 3, i32 1, i32 0"),
-        "the descriptor offset walks the box payload into the nested String field:\n{ir}"
+        ir.contains("@zk.type.Outer"),
+        "the managed class result retains its class descriptor:\n{ir}"
     );
 }
 
@@ -1491,10 +1491,10 @@ fn map_and_set_constructors_receive_content_key_semantics_for_string_and_char() 
 }
 
 #[test]
-fn array_and_list_constructors_emit_nested_aggregate_reference_offsets() {
+fn array_and_list_constructors_emit_managed_class_references() {
     let ir = llvm_ir(
-        "record Inner { text: String; }\n\
-         record Outer { prefix: Int64; inner: Inner; }\n\
+        "class Inner { text: String; construct(text: String) { this.text = text; } }\n\
+         class Outer { prefix: Int64; inner: Inner; construct(prefix: Int64, inner: Inner) { this.prefix = prefix; this.inner = inner; } }\n\
          fn main(): Void {\n\
            mut arrays: Array<Outer> = Array(2);\n\
            mut lists: List<Outer> = List();\n\
@@ -1505,16 +1505,16 @@ fn array_and_list_constructors_emit_nested_aggregate_reference_offsets() {
     assert!(ir.contains("zk.array.offsets."));
     assert!(ir.contains("zk.list.offsets."));
     assert!(
-        ir.contains("i64 8"),
-        "nested field path is expressed as an element-relative offset:\n{ir}"
+        ir.contains("@zk.type.Outer"),
+        "class elements use their managed object descriptor:\n{ir}"
     );
 }
 
 #[test]
-fn array_clone_and_slice_preserve_nested_aggregate_reference_offsets() {
+fn array_clone_and_slice_preserve_managed_class_references() {
     let ir = llvm_ir(
-        "record Inner { text: String; }\n\
-         record Outer { prefix: Int64; inner: Inner; }\n\
+        "class Inner { text: String; construct(text: String) { this.text = text; } }\n\
+         class Outer { prefix: Int64; inner: Inner; construct(prefix: Int64, inner: Inner) { this.prefix = prefix; this.inner = inner; } }\n\
          fn main(): Void {\n\
            mut arrays: Array<Outer> = Array(2);\n\
            mut cloned = arrays.clone();\n\

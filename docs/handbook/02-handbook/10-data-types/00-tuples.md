@@ -40,8 +40,8 @@ semantics; it does not acquire identity because one component is
 reference-backed.
 
 Use a tuple for a small positional product with no domain identity. Use a
-record when names matter, an algebraic enum when alternatives matter, and a
-class when shared identity and mutation matter.
+contract plus `Object` when named, open properties matter, an algebraic enum
+when alternatives matter, and a class when shared identity and behavior matter.
 
 ## API
 
@@ -82,4 +82,4 @@ match result {
 
 ---
 
-**Previous:** [← Data Types](README.md) · **Next:** [Records →](01-records.md)
+**Previous:** [← Data Types](README.md) · **Next:** [Objects and Contracts →](01-records.md)

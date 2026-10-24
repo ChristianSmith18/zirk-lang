@@ -25,6 +25,7 @@ pub mod http_router;
 pub mod http_sse;
 pub mod http_values;
 pub mod http_websocket;
+pub mod json;
 pub mod network_policy;
 pub mod permission_grant;
 pub mod range;

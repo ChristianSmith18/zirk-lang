@@ -15,7 +15,7 @@ comparison operators as contracts, generic contract dispatch for classes
 and records, and positional variance verification. Still assigned to later
 changes: trait defaults under generic substitution, nested contract
 arguments (`Container<Box<T>>`), type-parameter defaults and bodies for
-user-defined generic functions, and `static` on `record`/`enum`.
+user-defined generic functions, and `static` on `enum`.
 
 Phase 5 scoped delivery is complete: alongside the structured executor,
 `parallel`, and typed channels, the compiler supports bounded completion and

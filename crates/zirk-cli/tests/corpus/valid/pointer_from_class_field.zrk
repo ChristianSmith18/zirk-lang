@@ -1,0 +1,15 @@
+import { stdout } from std.io;
+
+class Point {
+    x: Int32;
+    y: Int32;
+    construct(x: Int32, y: Int32) { this.x = x; this.y = y; }
+}
+
+fn main(): Void {
+    mut p: Point = Point(1, 2);
+    unsafe {
+        mut q: Pointer<Int32> = Pointer.from (p.x);
+        stdout.println(q.read());
+    }
+}

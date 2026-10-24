@@ -38,7 +38,7 @@ Replacing an inherited concrete implementation requires the `#override` member
 marker, written on its own line above the method; the method must preserve
 parameter types exactly and may narrow its result covariantly. `#override`
 applies only when an inherited implementation is actually replaced: satisfying
-an `abstract class` or `interface` requirement takes no marker (writing one is
+an `abstract class` or `contract` requirement takes no marker (writing one is
 a warning), and a `#override` that overrides nothing is an error. The marker
 never applies to fields, constructors, nested classes, or `static` members. Use
 `super(...)` for base construction and `super.method()` for inherited behavior.

@@ -2,11 +2,11 @@ import { stdout } from std.io;
 
 // Conformidad transitiva: una clase que adopta B, y B implementa A,
 // debe satisfacer los métodos de A.
-interface A {
+contract A {
     a(): Int32;
 }
 
-interface B implements A {
+contract B implements A {
     b(): Int32;
 }
 

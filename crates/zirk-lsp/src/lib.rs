@@ -286,7 +286,6 @@ fn lsp_symbol_kind(kind: SemanticSymbolKind) -> SymbolKind {
         SemanticSymbolKind::Field => SymbolKind::FIELD,
         SemanticSymbolKind::Type | SemanticSymbolKind::TypeAlias => SymbolKind::TYPE_PARAMETER,
         SemanticSymbolKind::Class => SymbolKind::CLASS,
-        SemanticSymbolKind::Record => SymbolKind::STRUCT,
         SemanticSymbolKind::Contract => SymbolKind::INTERFACE,
         SemanticSymbolKind::Enum => SymbolKind::ENUM,
         SemanticSymbolKind::EnumVariant => SymbolKind::ENUM_MEMBER,
@@ -307,7 +306,6 @@ fn lsp_completion_kind(kind: SemanticSymbolKind) -> CompletionItemKind {
             CompletionItemKind::TYPE_PARAMETER
         }
         SemanticSymbolKind::Class => CompletionItemKind::CLASS,
-        SemanticSymbolKind::Record => CompletionItemKind::STRUCT,
         SemanticSymbolKind::Contract => CompletionItemKind::INTERFACE,
         SemanticSymbolKind::Enum => CompletionItemKind::ENUM,
         SemanticSymbolKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
@@ -636,8 +634,7 @@ fn import_hover_content(
             Kind::Field => typed_name("field"),
             Kind::Type => format!("type {}", symbol.name),
             Kind::Class => format!("class {}", symbol.name),
-            Kind::Record => format!("record {}", symbol.name),
-            Kind::Contract => format!("interface {}", symbol.name),
+            Kind::Contract => format!("contract {}", symbol.name),
             Kind::Enum => format!("enum {}", symbol.name),
             Kind::EnumVariant => format!("variant {}", symbol.name),
             Kind::TypeAlias => match symbol.type_text.as_deref() {
@@ -881,15 +878,11 @@ pub fn document_symbols_in_file(
         for nested in &class.nested {
             children.push(class_symbols(sources, nested));
         }
-        let kind = match class.kind {
-            zirk_ast::ClassKind::Record => SymbolKind::STRUCT,
-            _ => SymbolKind::CLASS,
-        };
         symbol(
             sources,
             &class.name.name,
             Some(class.kind.as_str().to_string()),
-            kind,
+            SymbolKind::CLASS,
             class.span,
             class.name.span,
             children,
@@ -1057,7 +1050,6 @@ fn semantic_token_types(
         Kind::Class => &["class", "type"],
         Kind::Enum => &["enum", "type"],
         Kind::Contract => &["interface", "type"],
-        Kind::Record => &["struct", "type"],
         Kind::TypeParameter => &["typeParameter", "type"],
         Kind::Parameter => &["parameter", "variable"],
         Kind::Variable if visibility == zirk_sema::SemanticVisibility::Local => {
@@ -3241,7 +3233,6 @@ mod tests {
             (Kind::Type, "type"),
             (Kind::TypeAlias, "type"),
             (Kind::Class, "class"),
-            (Kind::Record, "struct"),
             (Kind::Contract, "interface"),
             (Kind::Enum, "enum"),
             (Kind::EnumVariant, "enumMember"),
@@ -3351,11 +3342,11 @@ mod tests {
 
         let contract_hover = hover_at("Named -> NamedValue", 1);
         assert!(
-            contract_hover.contains("interface Named"),
+            contract_hover.contains("contract Named"),
             "{contract_hover}"
         );
-        let record_hover = hover_at("User, Named", 1);
-        assert!(record_hover.contains("record User"), "{record_hover}");
+        let class_hover = hover_at("User, Named", 1);
+        assert!(class_hover.contains("class User"), "{class_hover}");
 
         let standard_module_hover = hover_at("std.io", 2);
         assert!(standard_module_hover.contains("module std.io"));
@@ -5047,18 +5038,18 @@ mod tests {
                 "identity -> ".len() + 1,
                 "Imported as `keep`",
             ),
-            ("Named -> NamedValue", 1, "interface Named"),
+            ("Named -> NamedValue", 1, "contract Named"),
             (
                 "Named -> NamedValue",
                 "Named -> ".len() + 1,
-                "interface Named",
+                "contract Named",
             ),
             (
                 "Named -> NamedValue",
                 "Named -> ".len() + 1,
                 "Imported as `NamedValue`",
             ),
-            ("User, Named", 1, "record User"),
+            ("User, Named", 1, "class User"),
             ("std.io", 2, "module std.io"),
             ("./domain/geometry", 3, "module \"./domain/geometry\""),
         ]

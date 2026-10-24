@@ -8,39 +8,6 @@ annotation remains mandatory because there is no body to infer from.
 
 ## Requirements
 
-### Requirement: Optional return type annotation
-
-A `fn` declaration or a method of a `class`, `record`, or `trait` that has a
-body MAY omit the `: ReturnType` annotation. When omitted, the checker SHALL
-infer the return type from the body instead of emitting the missing-return-type
-diagnostic.
-
-An explicit annotation, when present, SHALL remain the contract: the body must
-satisfy it exactly as before, and inference SHALL NOT widen, narrow, or
-otherwise alter it.
-
-#### Scenario: Omitted annotation infers `Void`
-
-- **WHEN** `fn main() { }` is checked
-- **THEN** the function's return type resolves to `Void`
-- **AND** no missing-return-type diagnostic is emitted
-
-#### Scenario: Omitted annotation infers a value type
-
-- **WHEN** `fn double(n: Int32) { return n * 2; }` is checked
-- **THEN** the function's return type resolves to `Int32`
-
-#### Scenario: Explicit annotation still enforced
-
-- **WHEN** `fn f(): Int32 { return "x"; }` is checked
-- **THEN** a return-type-mismatch diagnostic is emitted against the returned
-  expression, as if inference did not exist
-
-#### Scenario: Omitted annotation on a method
-
-- **WHEN** a `class` method with a body omits its return type
-- **THEN** its return type is inferred under the same rules as a `fn`
-
 ### Requirement: Inference from `return` expressions
 
 The inferred return type SHALL be the unification of the types of every
@@ -113,28 +80,6 @@ member.
   checked
 - **THEN** no inference diagnostic is emitted
 
-### Requirement: Mandatory annotation where no body exists
-
-Signatures without a body SHALL keep the return type annotation mandatory:
-`interface` members, `abstract` methods, `extern "C" fn` declarations, and
-`fn dec` decorator signatures. Omitting it there SHALL produce the
-missing-return-type diagnostic.
-
-#### Scenario: Interface member without return type
-
-- **WHEN** an `interface` method omits its return type
-- **THEN** the missing-return-type diagnostic is emitted
-
-#### Scenario: Extern declaration without return type
-
-- **WHEN** `extern "C" fn puts(s: Pointer<UInt8>)` omits its return type
-- **THEN** the missing-return-type diagnostic is emitted
-
-#### Scenario: Trait method with body infers
-
-- **WHEN** a `trait` method with a default body omits its return type
-- **THEN** its return type is inferred like any method with a body
-
 ### Requirement: Interaction with overrides and contracts
 
 A method that overrides an inherited implementation or satisfies a contract
@@ -148,3 +93,22 @@ be.
   differs from the inherited signature's return type
 - **THEN** the same signature-mismatch diagnostic as with a declared type is
   emitted
+
+### Requirement: Return inference applies to executable object methods
+Functions, class methods, and trait methods with bodies MAY omit return annotations under the existing inference rules. The checker SHALL unify every returned expression using existing branch-join rules, infer `Void` when a body completes without a value return, and infer `Never` when every path diverges. Explicit annotations SHALL remain binding. Contract operations and abstract or external signatures without bodies SHALL require an explicit return type. Object literals SHALL infer the dynamic `Object` type unless a contract or other expected type supplies a more specific structural view.
+
+#### Scenario: Object literal has no expected contract type
+- **WHEN** an object literal is returned without a declared result type or contract context
+- **THEN** its inferred type is `Object`
+
+#### Scenario: Contract operation requires a return type
+- **WHEN** a contract operation omits its return type
+- **THEN** the checker emits the missing-return-type diagnostic
+
+#### Scenario: Incompatible return expressions
+- **WHEN** one return path produces `Int32` and another produces `String`
+- **THEN** a diagnostic identifies incompatible inferred return types
+
+#### Scenario: Recursive inference requires an annotation
+- **WHEN** mutually recursive functions have no return annotation and no non-recursive return evidence
+- **THEN** inference reports the cycle and requires an explicit annotation on at least one function

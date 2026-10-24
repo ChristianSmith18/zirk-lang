@@ -1,6 +1,6 @@
 // A signature without a body has nothing to infer from: the annotation
 // stays mandatory on interfaces, abstract methods and externs.
-interface Runner {
+contract Runner {
     run();
 }
 

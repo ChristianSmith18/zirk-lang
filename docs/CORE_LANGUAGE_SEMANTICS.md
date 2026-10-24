@@ -26,8 +26,9 @@ discards either outcome.
 
 ## 1. Values, references, places, and projections
 
-- Scalars, tuples, records, enums, ranges, and declared value types copy as
-  independent values. `Float` is an exact base-ten decimal scalar (the default
+- Scalars, tuples, enums, ranges, and declared value types copy as independent
+  values. `Object` and class instances are reference objects; `Dynamic` is a
+  tagged value, not a universal type root. `Float` is an exact base-ten decimal scalar (the default
   fractional type, no `NaN`, no infinity); the IEEE 754 binary family is
   `Float16`…`Float128` (`Float` = `Float64`), written
   with an `f` literal suffix. The two never combine implicitly.
@@ -39,10 +40,13 @@ discards either outcome.
   its referent.
 - A place such as `users[0].name` on the left of `=` mutates original storage
   when permissions allow.
-- Reading an attribute, index, slice, destructured component, pattern binding,
-  returned projection, argument projection, or captured projection creates an
-  independent value. A reference-backed result is deeply cloned and therefore
-  requires `Clone`.
+- Reading a statically typed projection, slice, destructured component,
+  pattern binding, returned projection, argument projection, or captured
+  projection creates an independent value. A reference-backed result is deeply
+  cloned and therefore requires `Clone`. A dynamic property read through
+  `Object` preserves its stored runtime tag and reference identity; scalar
+  values copy, while nested objects remain aliases, matching the open-object
+  model.
 
 ```zirk
 mut users = [User(name: "Ada")]
@@ -52,10 +56,11 @@ users[0].name = "Grace"        // place write changes users and alias
 stdout.println(first.name)     // Ada
 ```
 
-This is transitive: no nested mutable alias may leak through a projection. A
-non-`Clone` reference projection is a compile-time error. Only an explicit
-documented view can share a subregion. `inmut` prevents rebinding but can allow
-referent mutation; `inmut::strict` freezes the complete reachable graph and
+The projection-copy rule is transitive for statically typed projections.
+Dynamic `Object` members are the explicit open-object exception and retain
+nested reference identity. A non-`Clone` reference projection is a compile-time
+error unless it is a dynamic `Object` member. `inmut` prevents rebinding but
+can allow referent mutation; `inmut::strict` freezes the complete reachable graph and
 forbids a weaker alias. `clone()` makes a deep independent copy.
 
 Comma-grouped declarations apply one explicit type and permission to every
@@ -115,7 +120,7 @@ protected instance methods are virtual by default; private and static methods
 are not. Replacing an inherited concrete implementation — a base-class method
 or a trait default — requires the `#override` member marker, exact compatible
 parameters, and may return a covariant result. Satisfying an `abstract class`
-or `interface` requirement takes no marker. `final` seals a class against
+or `contract` requirement takes no marker. `final` seals a class against
 `extends` or a method against override, and class bodies may declare static
 nested classes, instance-capturing `inner` classes, and (inside bodies) local
 classes. Methods are written without `fn` and without `mut`; receiver mutation
@@ -123,12 +128,25 @@ is inferred for the `inmut::strict` check.
 
 An `abstract class` is a nominal requirement set: required attributes and
 abstract functions, but no body, constructor, state, or layout. It is adopted
-with `implements`, never `extends`. Interfaces contain behavior signatures.
-Traits contain requirements and reusable bodies but no attributes,
-constructors, or state. All three compose through `implements`. Trait conflicts
-require an explicit `#override` and may select `TraitName.super.method()`. Derivation is
-explicit and static contract requirements are deferred. `as` is a strict
+with `implements`, never `extends`. A `contract` declares structural property
+and operation requirements; it has no storage or default values. Traits contain
+operation requirements and reusable bodies but no properties, constructors, or
+state. Classes and dynamic objects can satisfy several contracts. Assigning an
+open `Object` to a contract validates its required shape and seals its existing
+key set for every alias; extra keys remain present. Contract views expose only
+declared members. Trait conflicts require an explicit `#override` and may
+select `TraitName.super.method()`. Derivation is explicit. `as` is a strict
 checked cast; `as?` returns a nullable cast result.
+
+`Object` is an open, identity-bearing object with string-keyed dynamic
+properties. Dynamic property values preserve their Zirk runtime types. Class
+instances share the object view and may also expose class-declared fields and
+methods. An unknown property read produces `Dynamic`, which must be narrowed
+with a checked cast, type test, or `match` before concrete use. Object literals
+use `{ name: value }`; quoted keys allow arbitrary strings, and interpolation
+inside a quoted key uses ordinary string interpolation. Computed access uses
+`object[key]`. Adding, replacing, or removing dynamic properties follows the
+reference's mutability; a successful contract check prevents key-set changes.
 
 ## 4. Generics
 
@@ -137,7 +155,7 @@ fn max<T from Comparable<T> & Clone>(left: T, right: T): T
 class Cache<K from Hashable & Equatable, out V> { ... }
 ```
 
-Constraints may name interfaces, traits, abstract requirement classes,
+Constraints may name contracts, traits, abstract requirement classes,
 concrete bases, or native contracts. Inference uses arguments, receiver,
 expected result, callable context, and constraints, but never guesses between
 ambiguous solutions. Explicit arguments resolve ambiguity. Defaults are
@@ -158,9 +176,9 @@ independent reference-backed result.
 `Tuple(A, B)` is the type of `(a, b)`. Access is `result.n`, where `n` is a
 compile-time integer literal. Tuples do not slice. Contracts derive component-wise.
 
-Records are nominal immutable values with named construction and type defaults
-for omitted members. They may have non-mutating methods, but no custom
-constructor, inheritance, or mutation. Equality and hashing are structural.
+Dynamic objects are reference values and use identity; contracts declare their
+structural views. Tuples and enums remain the value aggregates. There is no
+record declaration category.
 
 Traditional enums are data-only and expose `.name`, `.value`, `to_string()`,
 `from_name()`, and `from_value()`. Mappings are unique; no implicit index,
@@ -170,10 +188,12 @@ which are extracted only inside `match`, never by direct destructuring.
 Unions normalize order, duplicates, subsumed members, and `Never`; only common
 compatible capabilities are accessible before narrowing. Every statement and
 expression `match` over a closed domain is exhaustive. Patterns support values,
-types, enum variants, unions, regex, alternatives, and nesting. Guards are not
+types, enum variants, unions, regex, alternatives, partial object properties,
+and nesting. Guards are not
 part of Zirk. Proven unreachable patterns are errors. Bindings are projected
-copies. Direct destructuring supports records, tuples, ordered collections with
-a rest binding (`[first, ...rest]`), and record rest patterns (`{ field, ...rest }`);
+copies. Direct destructuring supports tuples, partial object properties with an
+object rest binding (`{ field, ...rest }`), and ordered collections with a rest
+binding (`[first, ...rest]`);
 enum destructuring remains invalid. `Never` unifies with every branch result type.
 
 ## 6. Collections and iteration
@@ -204,8 +224,8 @@ an operation exists.
 
 ```zirk
 enum Iteration<T> { Item(T), Done }
-interface Iterable<out T> { iterator(): Iterator<T> }
-interface Iterator<out T> { next(): Iteration<T> }
+contract Iterable<out T> { iterator(): Iterator<T> }
+contract Iterator<out T> { next(): Iteration<T> }
 ```
 
 Ordinary loops yield independent projected values. Structural mutation

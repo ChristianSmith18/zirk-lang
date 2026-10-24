@@ -136,7 +136,6 @@
         "clone-callable"
       ],
       "corpus": [
-        "clone_record",
         "callable_clone"
       ]
     },
@@ -150,11 +149,11 @@
       "corpus": []
     },
     {
-      "id": "interfaces",
+      "id": "contracts",
       "handbook": "09-interfaces-and-traits/01-interfaces",
       "verdict": "supported",
       "fixtures": [
-        "oop-interface-trait-default"
+        "oop-contract-trait-default"
       ],
       "corpus": [
         "contracts",
@@ -176,7 +175,7 @@
       "handbook": "09-interfaces-and-traits/03-traits",
       "verdict": "supported",
       "fixtures": [
-        "oop-interface-trait-default"
+        "oop-contract-trait-default"
       ],
       "corpus": [
         "inferred_trait_default",
@@ -197,15 +196,15 @@
       ]
     },
     {
-      "id": "records-and-enums-with-classes",
+      "id": "objects-and-enums-with-classes",
       "handbook": "10-data-types/01-records",
       "verdict": "supported",
       "fixtures": [
-        "oop-records-enums-in-classes"
+        "oop-objects-enums-in-classes"
       ],
       "corpus": [
         "enum_class_payload",
-        "record_contract_dispatch"
+        "class_contract_dispatch"
       ]
     },
     {

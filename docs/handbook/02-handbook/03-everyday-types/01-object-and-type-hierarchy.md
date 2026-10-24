@@ -1,59 +1,51 @@
-# Object and the Type Tree
+# Object and Zirk's Type Families
 
-Every Zirk value has a static type and belongs conceptually beneath `Object`.
-That common root lets generic APIs ask for universal operations such as
-`type` and `to_string()` without claiming that every value is a heap object.
+`Object` is not a universal root type. It is the common reference-object view
+for dynamic objects and class instances. Scalars, tuples, enums, and functions
+do not widen to `Object`; use a generic type parameter when an API should
+preserve any input type, or `Dynamic` when it should hold differently typed
+values for checked runtime use.
 
 ```text
-Object
-├── Value
-│   ├── Numeric
-│   │   ├── Integer: Int8 … Int128, UInt8 … UInt128
-│   │   ├── Decimal (exact base-ten decimal)
-│   │   └── Float: Float16 … Float128
-│   ├── Boolean
-│   ├── Char
-│   ├── Temporal
-│   ├── Record
-│   └── Enum
-├── Reference
-│   ├── String
-│   ├── Array, List, Map, Set
-│   └── Class
-└── Special
-    ├── Null
-    ├── Void
-    └── Never
+Zirk values
+├── Scalars and temporal values
+├── Tuples and enums
+├── Reference objects
+│   ├── Object (open dynamic properties)
+│   └── Class instances (declared fields + Object view)
+├── Collections and callables
+└── Special: Dynamic, Null, Void, Never, pointers, views, tasks
 ```
 
-The tree is a learning model, not automatic subtype permission. `Int32` and
-`Decimal` share numeric capabilities, but a function accepting `Int32` does not
-accept every numeric value. `Date` and `Duration` are both temporal, but only
-the combinations defined by their contracts compile.
+This is a learning map, not a subtype graph. Numeric capabilities do not make
+`Int32` interchangeable with `Decimal`; date and duration operations remain
+limited to the combinations their types define.
+
+## Object values
+
+An `Object` stores string-keyed dynamic properties. Its identity is stable, and
+its properties may be added, updated, read, or removed subject to Zirk's
+mutability rules. Unknown reads produce `Dynamic`; narrow the value before using
+it as a concrete type. Class instances share this `Object` view while retaining
+their declared class fields and methods.
+
+A `contract` names required properties and operations. A successful check of a
+dynamic object against a contract validates its shape and seals the object's
+existing key set across aliases. `Dynamic` remains a tagged value, not a parent
+class for every runtime type.
 
 ## Semantics are not layout
 
-An `Int32`, record, or temporal value may be stored inline. A
-`String`, collection, or class instance has reference semantics. The compiler
-may still specialize, move, box, cache, or allocate values when observable
-behavior remains unchanged. Only an ABI document can make physical layout part
-of a public contract.
+A scalar, tuple, enum, or temporal value may be stored inline. A `String`,
+collection, class instance, and dynamic `Object` have reference semantics. The
+compiler may specialize, box, cache, or allocate values when observable
+behavior remains unchanged. Only an ABI document makes physical layout part of
+a public contract.
 
-## Static type controls available operations
-
-```zirk
-inmut count: Int32 = 3;
-inmut broad: Object = count;
-```
-
-`count` supports integer arithmetic. `broad` exposes only operations guaranteed
-by `Object` until a safe check narrows it. Zirk never searches for an operation
-dynamically merely because the runtime value happens to support it.
-
-Continue with [How Values Live and Share](./00-how-values-live-and-share.md) for
-the memory-behavior spectrum, then [Type Categories](./01a-type-categories.md)
+Continue with [How Values Live and Share](./00-how-values-live-and-share.md)
+for assignment and mutation behavior, then [Type Categories](./01a-type-categories.md)
 before choosing an individual built-in type.
 
 ---
 
-**Previous:** [← How Values Live and Share](00-how-values-live-and-share.md) · **Next:** [ Type Categories](01a-type-categories.md)
+**Previous:** [← How Values Live and Share](00-how-values-live-and-share.md) · **Next:** [Type Categories](01a-type-categories.md)

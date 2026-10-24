@@ -28,7 +28,7 @@ The parser SHALL recognize function declarations with the form from `ZIRK_LANGUA
 
 #### Scenario: Missing return type
 
-- **WHEN** a signature without a body omits the return type, as in an `interface` member, an `abstract` method, or an `extern "C" fn`
+- **WHEN** a signature without a body omits the return type, as in a `contract` operation, an `abstract` method, or an `extern "C" fn`
 - **THEN** a diagnostic pointing to where the type was expected is emitted
 - **AND** the help indicates that a signature without a body must declare its return type
 
@@ -412,47 +412,6 @@ expansion.
 - **WHEN** source contains `values[::-1]`
 - **THEN** it represents a slice with omitted bounds and negative step
 
-### Requirement: Spread and rest operator syntax
-
-The parser SHALL accept `...expr` as a positional call argument and as an
-element of a collection literal or `Array(...)`/`List(...)` constructor list. It
-SHALL accept one `...name` rest binding at the end of a collection pattern and a
-record pattern, and object/record expressions of the form `{ ...source, field: value }`.
-
-#### Scenario: Spread in a call
-
-- **WHEN** source contains `sum(...values)`
-- **THEN** it produces a call whose argument is marked as spread
-
-#### Scenario: Spread in a collection literal
-
-- **WHEN** source contains `[0, ...values, 4]`
-- **THEN** it produces a collection literal with a spread element between two scalars
-
-#### Scenario: Collection rest pattern
-
-- **WHEN** source contains `[first, ...rest]`
-- **THEN** it produces a collection pattern with one rest binding at the end
-
-#### Scenario: Object/record spread expression
-
-- **WHEN** source contains `{ ...profile, name: "Grace" }`
-- **THEN** it produces a record literal expression with one spread element and one explicit field
-
-### Requirement: Match alternatives, regex, and nested destructuring
-
-The parser SHALL group alternative patterns with commas followed by one `=>` body, SHALL accept regex literals as patterns, and SHALL compose enum payload and record destructuring as `UserCreated({ id, name })`.
-
-#### Scenario: Multiline alternatives
-
-- **WHEN** `200`, `201`, and `204` appear on separate lines before one `=>` body
-- **THEN** all three patterns select that body
-
-#### Scenario: Nested enum payload pattern
-
-- **WHEN** source contains `UserCreated({ id, name }) => handle(id, name)`
-- **THEN** the enum payload is destructured and both names bind in the branch
-
 ### Requirement: Function and constructor surface
 
 The parser SHALL accept lambdas with or without leading `fn`, SHALL require a type on every optional parameter, SHALL accept multiple `construct` declarations, SHALL accept reordered named construction arguments, and SHALL parse `fn gen` with `yield`.
@@ -775,20 +734,6 @@ The parser SHALL recognize `class`, its fields and methods, `construct`, `this`,
 - **WHEN** `fn f(): Void { class Local { } }` is parsed
 - **THEN** a class declaration statement inside the body is produced
 
-### Requirement: Contract syntax
-
-The parser SHALL recognize `interface` and `trait` with their methods — written without `fn` — and allow a body only in those of a `trait`.
-
-#### Scenario: Interface
-
-- **WHEN** `interface Serializable { serialize(): String; }` is parsed
-- **THEN** a declaration with a signature without a body is produced
-
-#### Scenario: Trait with implementation
-
-- **WHEN** `trait Greet { hello(): String { return "hello"; } }` is parsed
-- **THEN** a declaration whose method has a body is produced
-
 ### Requirement: Generics syntax
 
 The parser SHALL recognize type parameters `<T>` in declarations, type arguments at use sites, and constraints with `from`.
@@ -812,35 +757,6 @@ The parser SHALL recognize type parameters `<T>` in declarations, type arguments
 
 - **WHEN** `a < b` is parsed
 - **THEN** a comparison, not a type argument, is produced
-
-### Requirement: Data type syntax
-
-The parser SHALL recognize `record`, enum variants with associated data, unions `A | B`, and aliases with `type`.
-
-#### Scenario: Enum with associated data
-
-- **WHEN** `enum Shape { Circle(Int32), Rect(Int32, Int32) }` is parsed
-- **THEN** two variants with one and two associated types are produced
-
-#### Scenario: Traditional enum mapping
-
-- **WHEN** `enum Direction { North -> "N", South }` is parsed
-- **THEN** `North` retains its explicit mapping and `South` remains without an explicit mapping
-
-#### Scenario: Pattern with destructuring
-
-- **WHEN** `match s { Shape.Circle(r) => r, _ => 0 }` is parsed
-- **THEN** the pattern binds a name to the associated value
-
-#### Scenario: Union
-
-- **WHEN** `mut x: Int32 | String;` is parsed
-- **THEN** a type with two members is produced
-
-#### Scenario: Alias
-
-- **WHEN** `type Id = Int32;` is parsed
-- **THEN** an alias declaration is produced
 
 ### Requirement: Type names are valid identifiers
 
@@ -1014,7 +930,7 @@ The parser SHALL recognize `#name` member markers on their own prefix position b
 
 ### Requirement: `final` modifier positions
 
-The parser SHALL accept `final` before `class` and in the member-modifier sequence before a method. `final` in any other position (fields, constructors, `interface`, `trait`, `record`, parameters, variables, and any expression position) SHALL produce a targeted diagnostic.
+The parser SHALL accept `final` before `class` and in the member-modifier sequence before a method. `final` in any other position (fields, constructors, `trait`, parameters, variables, and any expression position) SHALL produce a targeted diagnostic. Removed `record` and `interface` declarations SHALL produce their migration diagnostic.
 
 #### Scenario: Final class and method
 
@@ -1025,18 +941,6 @@ The parser SHALL accept `final` before `class` and in the member-modifier sequen
 
 - **WHEN** a class body contains `final x: Int32;`
 - **THEN** a diagnostic is emitted indicating attributes use `inmut`, not `final`
-
-### Requirement: Object spread and rest grammar
-
-The parser SHALL accept field-based object/record spread in a record-typed expression context (`{ ...source, field: value }`) and a final object rest binding in record destructuring (`{ field, ...rest }`). It SHALL distinguish these forms from statement blocks and reject more than one rest binding or any field after the rest binding.
-
-#### Scenario: Object spread expression
-- **WHEN** `{ ...profile, active: false }` appears where a `UserProfile` is expected
-- **THEN** the parser produces an object-spread expression with one override field
-
-#### Scenario: Object rest pattern
-- **WHEN** `{ id, ...details }` appears in a destructuring declaration
-- **THEN** the parser produces a record pattern with a final rest binding
 
 ### Requirement: The concurrent block
 
@@ -1105,16 +1009,15 @@ reject a promoted variadic parameter.
 ### Requirement: Promotion is restricted to class constructors
 
 Promoted parameters SHALL be accepted only on `construct` members of a
-`class` declaration. Writing a promoted parameter on a `record`, `enum`,
-`interface`, `trait`, or `abstract class` member — or on any other
-declaration — SHALL produce a targeted diagnostic naming where promotion
-is allowed.
+`class` declaration. Writing a promoted parameter on an `enum`, `trait`, or
+`abstract class` member — or on any other declaration — SHALL produce a
+targeted diagnostic naming where promotion is allowed. Removed `record` and
+`interface` declarations SHALL produce their migration diagnostic.
 
-#### Scenario: Promotion on a record member
+#### Scenario: Removed record declaration is rejected
 
-- **WHEN** source attempts promotion inside a `record` declaration
-- **THEN** a diagnostic indicates promotion applies only to `class`
-  constructors
+- **WHEN** source attempts to declare a record with a promoted member
+- **THEN** the removed-declaration diagnostic explains the migration to a `contract`, `Object`, `class`, tuple, or enum
 
 ### Requirement: Package and module declarations have explicit grammar
 
@@ -1158,3 +1061,73 @@ use `module.member`.
 #### Scenario: Qualified import
 - **WHEN** source contains `import { println } from std.io::stdout;`
 - **THEN** the parser records the package path `std.io` and module segment `stdout`
+
+### Requirement: Contract declaration syntax
+The parser SHALL recognize `contract` declarations containing required properties and operation signatures. Contract operations SHALL omit `fn` consistently with existing type-body method syntax. Contract members SHALL NOT contain implementation bodies; trait methods may contain bodies.
+
+#### Scenario: Contract with a property and operation
+- **WHEN** `contract Named { name: String; label(): String; }` is parsed
+- **THEN** a contract declaration contains one property requirement and one operation signature
+
+#### Scenario: Contract body is rejected
+- **WHEN** a contract operation includes a method body
+- **THEN** a diagnostic directs reusable implementation to a trait or class
+
+### Requirement: Dynamic object literal keys and access
+The parser SHALL accept identifier keys, quoted string keys, and quoted keys containing ordinary string interpolation in object literals. It SHALL parse `object[key]` as computed object-property access when the receiver is `Object`, while preserving collection and string indexing rules for other receiver types.
+
+#### Scenario: Interpolated key
+- **WHEN** `{ "{name}": value }` is parsed
+- **THEN** the key is represented as a runtime string expression
+
+#### Scenario: Computed property access
+- **WHEN** `object[key]` is parsed with an `Object` receiver and a string key
+- **THEN** it is represented as dynamic property access rather than a numeric collection index
+
+### Requirement: Dynamic object spread and pattern syntax
+The parser SHALL accept object spread and object rest syntax over dynamic objects. It SHALL accept object property patterns as partial tests and SHALL NOT treat them as closed-shape tests. Existing collection spread and rest grammar SHALL retain its separate iterable meaning.
+
+#### Scenario: Object spread expression
+- **WHEN** `{ ...source, name: "Ada" }` is parsed in expression position
+- **THEN** it produces an object expression with a spread source and explicit override
+
+#### Scenario: Object rest pattern
+- **WHEN** `{ name, ...remaining }` is parsed as a pattern
+- **THEN** it produces an object property pattern with one final rest binding
+
+### Requirement: Remaining data type declarations parse
+The parser SHALL continue to recognize enum variants with associated data, unions `A | B`, and aliases with `type`. It SHALL NOT recognize `record` or `interface` declarations as active language syntax.
+
+#### Scenario: Enum with associated data
+- **WHEN** `enum Shape { Circle(Int32), Rect(Int32, Int32) }` is parsed
+- **THEN** the variants retain their declared payload types
+
+#### Scenario: Union type
+- **WHEN** `mut value: Int32 | String;` is parsed
+- **THEN** the declaration contains a two-member union type
+
+#### Scenario: Legacy record declaration is rejected
+- **WHEN** source declares `record Point { x: Int32; }`
+- **THEN** a targeted migration diagnostic recommends `contract` and `Object`
+
+### Requirement: Match syntax supports partial object patterns
+The parser SHALL retain compatible-value, type, enum, union, regex, wildcard, and comma-grouped patterns while accepting nested object property patterns. Object patterns SHALL remain partial patterns and SHALL NOT imply a closed object shape.
+
+#### Scenario: Nested enum payload and object pattern
+- **WHEN** an enum payload pattern contains `{ id, name }`
+- **THEN** the parser produces an object property pattern nested within the enum pattern
+
+#### Scenario: Regex pattern remains supported
+- **WHEN** a regex literal appears in a match pattern
+- **THEN** it is parsed as a full-match regex pattern
+
+### Requirement: Spread and rest syntax remains distinct by domain
+The parser SHALL distinguish positional call and collection spread based on `Iterable<T>` from named object spread and rest. Object spread and rest SHALL accept open objects; collection rest remains an ordered suffix binding.
+
+#### Scenario: Collection spread remains iterable syntax
+- **WHEN** `[0, ...values]` or `sum(...values)` is parsed
+- **THEN** the spread operand is represented as an iterable expansion
+
+#### Scenario: Dynamic object spread parses
+- **WHEN** `{ ...source, field: value }` is parsed in expression position
+- **THEN** it produces a dynamic object spread expression

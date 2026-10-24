@@ -1,10 +1,10 @@
 import { stdout } from std.io;
 
-interface Named<T> {
+contract Named<T> {
     name(): String;
 }
 
-record Tag implements Named<Int32> {
+class Tag implements Named<Int32> {
     name(): String { return "tag"; }
 }
 

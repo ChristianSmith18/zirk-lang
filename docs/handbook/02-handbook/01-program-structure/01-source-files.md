@@ -14,7 +14,7 @@ Declarations belong to their file unless published with `share`. Consumers impor
 
 ```zirk
 // product.zrk
-share record Product {
+share contract Product {
     id: UInt64;
     name: String;
 }

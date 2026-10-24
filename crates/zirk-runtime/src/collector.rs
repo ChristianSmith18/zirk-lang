@@ -1375,10 +1375,22 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
                 unsafe { crate::map::mark_entries(object, allocations, &mut enqueue) };
                 continue;
             }
+            if std::ptr::eq(descriptor, crate::object::object_descriptor()) {
+                unsafe { crate::object::mark_properties(object, allocations, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(descriptor, crate::object::dynamic_value_descriptor()) {
+                unsafe { crate::object::mark_dynamic_value(object, allocations, &mut enqueue) };
+                continue;
+            }
             if std::ptr::eq(descriptor, crate::set::set_descriptor()) {
                 unsafe { crate::set::mark_entries(object, allocations, &mut enqueue) };
                 continue;
             }
+            // Class instances use their fixed generated layout for declared
+            // fields and an object sidecar for properties added through an
+            // `Object` view. Trace that sidecar alongside the class fields.
+            unsafe { crate::object::mark_properties(object, allocations, &mut enqueue) };
             let offsets = unsafe { gc_field_offsets(descriptor as *const c_void) };
             for &offset in offsets {
                 let field_addr = (object as usize + offset) as *mut *mut c_void;
@@ -1488,6 +1500,7 @@ fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_voi
             let descriptor = unsafe { object_descriptor(current) };
             unsafe { release_dynamic_descriptor(descriptor) };
             crate::exceptions::owner_swept(current);
+            crate::object::owner_swept(current);
             // A channel owns Rust collections after its three-word GC header.
             // Run their destructor before freeing the raw collector block.
             if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
@@ -1498,6 +1511,10 @@ fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_voi
                 unsafe { crate::list::drop_body(current) };
             } else if std::ptr::eq(descriptor, crate::map::map_descriptor()) {
                 unsafe { crate::map::drop_body(current) };
+            } else if std::ptr::eq(descriptor, crate::object::object_descriptor()) {
+                unsafe { crate::object::drop_object_body(current) };
+            } else if std::ptr::eq(descriptor, crate::object::dynamic_value_descriptor()) {
+                unsafe { crate::object::drop_dynamic_value_body(current) };
             } else if std::ptr::eq(descriptor, crate::set::set_descriptor()) {
                 unsafe { crate::set::drop_body(current) };
             }
@@ -1560,6 +1577,10 @@ pub(crate) mod test_support {
     pub(crate) fn descriptor_with_fields_for_tests(field_offsets: &[usize]) -> Vec<usize> {
         let mut words = vec![0usize, 0, 0, field_offsets.len()];
         words.extend_from_slice(field_offsets);
+        // Runtime object descriptors now append declared-field metadata
+        // after the collector reference paths. These synthetic descriptors
+        // have no language fields, so terminate them with a zero field count.
+        words.push(0);
         words
     }
 
@@ -1591,6 +1612,7 @@ pub(crate) mod test_support {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        crate::object::reset_class_properties_for_tests();
         heap_hard_reset();
         set_threshold_bytes(default_threshold());
     }

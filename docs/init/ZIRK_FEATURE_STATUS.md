@@ -19,15 +19,15 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `zirk-ide-semantic-intelligence`, **2026-10-23**.
+Last reviewed for `unify-objects-and-contracts`, **2026-10-23**.
 
 ## Browser-hosted interpreter tooling
 
 `add-browser-ir-interpreter` adds an optional, versioned WASM tooling package,
 not a Zirk target. It executes verified IR for scalar and text values, exact
 Decimal through `zirk-runtime-core`, closures, collections, regex, temporal
-values, the object model (classes, inheritance, abstract classes, interfaces,
-traits, static and nested classes, generic classes, records, enums, typed
+values, the object model (classes, inheritance, abstract classes, contracts,
+traits, static and nested classes, generic classes, dynamic objects, enums, typed
 exceptions) and bounded output. The package contract has deterministic compiler,
 capability, runtime, and resource-limit responses.
 
@@ -110,14 +110,14 @@ native backend is delivered.
 | Promoted constructor parameters and implicit constructors | yes | yes | yes | yes | yes | yes | `add-class-construction-sugar`: member-modified class constructor parameters become fields; constructor-less classes accept zero arguments; an implicit subclass constructor delegates to an accessible zero-argument base constructor. |
 | Visibility (`public`/`private`/`protected`) | yes | yes | yes | yes | yes | yes | — |
 | Inheritance (`extends`) | yes | yes | yes | yes | yes | yes | Single inheritance; `super`/`#override`; `final` seals classes and methods. |
-| `interface`/`trait` | yes | yes | yes | yes | yes | yes | `Keyword::Interface`/`Trait` in subset. |
+| `contract`/`trait` | yes | yes | yes | yes | yes | yes | `contract` unifies structural property and operation requirements; traits retain reusable default behavior. Legacy `interface` and `record` declarations receive migration diagnostics. |
 | `implements` | yes | yes | yes | yes | yes | yes | — |
 | Generics with `from` constraints | yes | yes | yes | yes | partial | partial | `fase-3-verificacion-constraints`; `from` verified at use and in the body, declared variance verified positionally; generic contract/enum dispatch still pending. |
-| Records | yes | yes | yes | yes | yes | yes | — |
+| `Object` / `Dynamic` open objects | yes | yes | yes | yes | yes | yes | Dynamic string-keyed objects, tagged property values, computed access, checked narrowing, and class sidecars; contract checks seal key sets across aliases. |
 | Tuples (literals, `.N` indexing, `match` destructuring) | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`. |
 | Algebraic enums with data | yes | yes | yes | yes | yes | yes | Includes recursive/mutual declaration order. |
 | Enum static members (`E.count`, `E.keys()`, `E.values()`, `E.from_name()`, `E.from_value()`, `E.to_string`, `Enums.*`) | yes | yes | yes | yes | yes | yes | `enum-static-members`; `count`/`keys`/`values`/`to_string` lower to constants, the lookups expand to a comparison chain returning `Result<E, LookupError>`. `values()`/`from_*` apply to traditional enums only. |
-| `static` class members (`static` methods, `static` fields, `ClassName.member`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; statics excluded from vtables, contract tables, record equality, and clone graphs. |
+| `static` class members (`static` methods, `static` fields, `ClassName.member`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; statics excluded from vtables, contract tables, Object equality, and clone graphs. |
 | Field default initializers (`field: T = expr;`) | yes | yes | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; evaluated in declaration order before the constructor body, unless the constructor assigns the field. |
 | `as` casts | yes | yes | yes | yes | yes | yes | — |
 | `as?` nullable casts | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; returns `T?` with `null` on mismatch. |
@@ -126,12 +126,12 @@ native backend is delivered.
 | Contract `implements` clauses | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; parsed, DAG checked, transitive conformance enforced. |
 | Comparison operator contracts (`<`, `<=`, `>`, `>=`) | yes | yes | yes | yes | yes | yes | `fase-3-cierre-contratos`; `_less`/`_less_equal`/`_greater`/`_greater_equal` reserved methods. |
 | `abstract class` dynamic dispatch | yes | yes | yes | yes | yes | yes | `fase-3-abstract-dispatch`. |
-| Structural equality on records | yes | yes | yes | yes | yes | yes | `fase-3-structural-equality`. |
-| `record` contract dispatch | yes | yes | yes | yes | yes | yes | `fase-3-value-type-contract-dispatch`. |
+| Record structural equality | n/a | n/a | n/a | n/a | n/a | n/a | Removed with record declarations; `Object` and classes use reference identity unless equality is explicit. |
+| Structural `contract` conformance | yes | yes | yes | yes | yes | yes | Object literals, dynamic objects, and classes satisfy required properties and operations; runtime checks are catchable. |
 | `type` alias lowering | yes | yes | yes | yes | yes | yes | `array-list-tuple-duration-regex`; an alias resolves to its underlying type through the whole pipeline and is usable in executable programs. |
-| `value class` | n/a | n/a | n/a | n/a | n/a | n/a | **Removed** by `array-list-tuple-duration-regex`; migrate to `record` (or `class` when identity/mutability is wanted). |
-| Derived `Clone` for `record`/`enum` | n/a | n/a | yes | yes | yes | yes | `fase-3-miembros-y-defaults`; automatic deep clone when the reachable type graph is cloneable; no `derive` keyword. |
-| Generic contract lowering (`class`/`record` implements `Contract<T>`) | yes | yes | partial | partial | partial | partial | `fase-3-dispatch-generico` + `fase-3-cierre-contratos`: user-defined `class`/`record` generic `implements Contract<T>` lowers and dispatches; generic contract composition (`interface B<T> implements A<T>`) substitutes transitively; trait default bodies under substitution and user-defined generic function bodies remain pending. |
+| `value class` | n/a | n/a | n/a | n/a | n/a | n/a | **Removed** by `array-list-tuple-duration-regex`; migrate to `contract` for a structural constraint and `Object` for open data (or `class` for nominal behavior). |
+| Derived `Clone` for enums | n/a | n/a | yes | yes | yes | yes | Component-wise clone remains for enums; dynamic objects require explicit clone behavior. |
+| Generic contract conformance (`class` implements `Contract<T>`) | yes | yes | yes | yes | yes | yes | Generic classes implement and dispatch through substituted contracts; contract composition is transitive. User-defined generic function body support remains separately scoped. |
 
 ## Phase 3b — Scalars and text
 
@@ -203,7 +203,7 @@ native backend is delivered.
 | `extern "C" fn` | yes | yes | yes | yes | yes | yes | `ADR-015`; `Keyword::Extern` in subset. |
 | `commit {}` | yes | yes | yes | yes | yes | yes | `Keyword::Commit` in subset. |
 | Transactional unsafe journal/rollback | yes | yes | yes | yes | yes | yes | `fase-4e-unsafe-journal`; `phase-4e-pending-closeout` closed `return`/`break`/`continue` early-exit rollback. |
-| `Pointer.from` on `record` fields | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout`. |
+| `Pointer.from` on dynamic object fields | n/a | n/a | n/a | n/a | n/a | n/a | Dynamic object properties have managed reference storage, not inline addressable fields. Class field pointer rules remain separately supported. |
 | `String[index]` grapheme access | yes | yes | yes | yes | yes | yes | `phase-4e-pending-closeout` delivered read access; `array-list-tuple-duration-regex` adds `s[i] = c` write. |
 | Dependent references | yes | yes | yes | yes | yes | yes | `Dependent<T>` lifetime and escape analysis rejects returns, field stores, captures, and non-dependent parameter passing; valid local use runs end-to-end. |
 | Automatic bounded native pinning | yes | yes | yes | yes | yes | yes | `Pin(c)` constructs a `Pin<T>`, automatic unpin provides field/method access, and reassignment of the pinned variable is rejected. |
@@ -245,6 +245,7 @@ native backend is delivered.
 | `std.testing` package and `zirk test` runner | no | no | no | no | no | no | The handbook defines a target contract only; no bundled `std.testing` package or test reporter exists, and the CLI returns `NOT_IMPLEMENTED` for `zirk test`. Secret redaction in test reports is not implemented or verified. |
 | `std.environment` | partial | partial | partial | partial | partial | partial | The scoped `deliver-std-http-and-environment` feature is complete: bundled `Env`/`Environment` provide exact-grant reads and queries, lexicographically ordered names, compile-time `EnvironmentParsable<T>` parsing, and redacted `SecretString`. Approved reads fail closed on stale grants. GitHub Actions run 39359107965 passes the full native workspace matrix on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; each target passes 155/155 CLI E2Es. Secret values have explicit HTTPS-header and authenticated-proxy sinks; debugger views, snapshots, test reports, and other future reveal sinks remain outside this delivery. The overall standard library is still partial. See [the environment handbook](../handbook/04-standard-library/18-std-environment.md) and archived `deliver-std-http-and-environment` evidence. |
 | `std.net` | partial | partial | partial | partial | partial | partial | The baseline feature delivers bundled IP/address values, bounded DNS, TCP streams/listeners, and authenticated TLS client/server APIs with exact grants, peer identity validation, cancellation, and owner-task cleanup. The `complete-stdlib-networking-and-http` change adds bounded UDP, local IPC, interface snapshots, configurable TLS, and controlled shutdown. Focused native conformance passes on all targets in run 39739088146; full per-target suite evidence passes across runs 39739088146 and 39702042337, with the changed Windows regression test also passing in 39748669844. Browser socket APIs remain excluded and the overall standard library is still partial. See [the network handbook](../handbook/04-standard-library/11-std-net.md). |
+| `std.json` | yes | yes | yes | yes | yes | yes | `JSON.parse`/`JSON.stringify` use ordinary `Dynamic`, `Object`, lists, scalars, exact parsed number tokens, strict duplicate-key checks, 16 MiB/depth-128 limits, and catchable conversion errors. `JSONCodec<T>` is an explicit structural contract with manual implementations; generated codecs and configurable/streaming APIs are not delivered. |
 | `std.http` | partial | partial | partial | partial | partial | partial | The baseline includes HTTP/1.1 and TLS HTTP/2 clients/servers, QUERY (RFC 10008), bounded bodies and streaming, redirects, cookies, caching, retries, proxies, routing/middleware, SSE, and HTTP/1.1 plus HTTP/2 WebSocket paths. The `complete-stdlib-networking-and-http` change adds optional native HTTP/3/QUIC client and server paths, RFC 9220 WebSocket, validated server options, and shareable controlled shutdown across TCP/TLS/HTTP/3. Full workspace and independent-peer interoperability evidence covers macOS ARM64 and both Linux targets in run 39739088146 and Windows x86_64 in run 39702042337; the current Windows regression-test change passes focused run 39748669844. Browser Fetch passes; browser listeners and sockets are excluded. The overall standard library is still partial. See [the HTTP handbook](../handbook/04-standard-library/12-std-http.md). |
 
 ### Result and nullable standard-library outcome consistency (working tree, 2026-10-22)

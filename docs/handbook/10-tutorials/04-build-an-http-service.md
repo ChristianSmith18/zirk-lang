@@ -17,7 +17,7 @@ import { HTTPError, HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouteParameters, 
 import { stderr, stdout } from std.io;
 
 fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
-    return HTTPResponse.from_json(200, "42");
+    return HTTPResponse.from_json(200, { value: 42 });
 }
 
 fn main(): Void {

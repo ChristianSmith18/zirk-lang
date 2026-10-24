@@ -1,8 +1,13 @@
 # ADR-012 — Object layout
 
-- **Status:** accepted
+- **Status:** superseded in part by [ADR-027](./ADR-027-contract-object-model.md)
 - **Date:** August 19, 2026
 - **Phase:** 3
+
+> Historical layout decision. Its inline-record and record-dispatch rules no
+> longer describe the language. ADR-027 replaces those assumptions; retain the
+> remaining fixed class-layout and descriptor details only where compatible
+> with dynamic properties and tagged values.
 
 ## Context
 
