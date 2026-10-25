@@ -37,4 +37,7 @@ exceptions = [
     { allow = ["Unicode-3.0"], name = "zerotrie", version = "=0.2.5" },
     { allow = ["Unicode-3.0"], name = "zerovec", version = "=0.11.8" },
     { allow = ["Unicode-3.0"], name = "zerovec-derive", version = "=0.11.6" },
+    # `winx` is used by cap-primitives for Windows filesystem handles. Keep its
+    # LLVM exception scoped to the exact transitive version in the lockfile.
+    { allow = ["Apache-2.0 WITH LLVM-exception"], name = "winx", version = "=0.36.4" },
 ]

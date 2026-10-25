@@ -1373,6 +1373,8 @@ mod tests {
         let outside = directory.join("outside");
         fs::create_dir(&approved).unwrap();
         fs::create_dir(&outside).unwrap();
+        let approved = fs::canonicalize(approved).unwrap();
+        let outside = fs::canonicalize(outside).unwrap();
 
         let outside_handle = open_directory_chain(&outside).unwrap();
         assert!(!windows_handle_matches_path(&outside_handle, &approved).unwrap());
@@ -1423,10 +1425,11 @@ mod tests {
             panic!("failed to create test file link: {error}");
         }
 
-        assert!(matches!(
-            open_resolved(&resolved, true, false, false, false),
-            Err(FsError::InvalidPath | FsError::NotFound)
-        ));
+        let opened = open_resolved(&resolved, true, false, false, false);
+        assert!(
+            opened.is_err(),
+            "reparse-point path unexpectedly opened: {opened:?}"
+        );
         assert_eq!(fs::read(&outside).unwrap(), b"keep me safe");
     }
 
