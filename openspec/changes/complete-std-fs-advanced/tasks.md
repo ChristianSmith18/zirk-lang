@@ -47,4 +47,4 @@
 - [x] 7.3 Add browser capability preflight for all advanced filesystem effects; verify no host filesystem operation begins in browser mode.
 - [x] 7.4 Update standard-library specs, handbook pages, API indexes, examples, status, limitations, and roadmap; verify each distinguishes delivered core, advanced synchronous APIs, and async behavior.
 - [x] 7.5 Review and commit the complete `zirk-lang` implementation and documentation before synchronization; verify the source revision contains the approved scope and no unrelated changes.
-- [ ] 7.6 Run `./scripts/sync-website-content.sh` from the committed clean source state, review `../zirk-lang-site` and its status catalog with an explicit audit date, then verify and report both repository revisions.
+- [x] 7.6 Run `./scripts/sync-website-content.sh` from the committed clean source state, review `../zirk-lang-site` and its status catalog with an explicit audit date, then verify and report both repository revisions.
