@@ -171,21 +171,22 @@ The implementation support matrix is:
 | Temporary files and directories | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
 | Synchronous advisory file locks | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
 | No-replace directory move | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
-| Directory watchers | Implemented; create/close E2E passed | Implemented; native backend registration checked in emulated x86_64 container | Implemented; native backend registration checked in ARM64 container | `FileError.Unsupported` | Unsupported |
-| Async file and directory iteration | Implemented; E2E covers sibling progress, typed errors, open/read/write/append | Runtime filesystem suite passed in emulated x86_64 container; async CLI E2E not run | Runtime filesystem suite and 20 filesystem CLI E2E tests passed in ARM64 container | GNU cross-check and MSVC target/test compilation passed; native Windows execution unverified | Unsupported |
-| Async advisory-lock and watcher waits | Implemented; contention and watcher E2E passed | Runtime filesystem suite passed in emulated x86_64 container; async wait E2E not run | Runtime filesystem suite and async lock/watcher E2E tests passed in ARM64 container | `FileError.Unsupported`; MSVC target/test compilation passed | Unsupported |
+| Directory watchers | Implemented; create/close E2E passed | Runtime and watcher E2E passed in emulated x86_64 container | Runtime and watcher E2E passed in ARM64 container | `FileError.Unsupported` | Unsupported |
+| Async file and directory iteration | Implemented; E2E covers sibling progress, typed errors, open/read/write/append | Runtime suite and 20 filesystem CLI E2E tests passed serially in emulated x86_64 container | Runtime suite and 20 filesystem CLI E2E tests passed in ARM64 container | GNU cross-check and MSVC target/test compilation passed; native Windows execution unverified | Unsupported |
+| Async advisory-lock and watcher waits | Implemented; contention and watcher E2E passed | Runtime suite and async lock/watcher E2E tests passed serially in emulated x86_64 container | Runtime suite and async lock/watcher E2E tests passed in ARM64 container | `FileError.Unsupported`; MSVC target/test compilation passed | Unsupported |
 
 Watcher creation, recursive-symlink containment, denied consent, bounded
 overflow, and close have focused macOS ARM64 tests. Linux ARM64 and emulated
 Linux x86_64 runtime filesystem tests check backend registration and invariants;
-they do not establish native Linux-hardware execution or watcher event delivery.
-Async CLI E2E coverage runs on macOS ARM64 and Linux ARM64. The Linux x86_64
-container passed runtime filesystem tests, but its CLI E2E build did not
-resolve the pinned LLVM toolchain. Windows
+the container results do not establish native Linux-hardware execution.
+Filesystem CLI E2E coverage passed on macOS ARM64, Linux ARM64, and in the
+emulated Linux x86_64 container (serialized to stay within its thread limit).
+Windows
 x86_64 `zirk-runtime` cross-compiles for the GNU and MSVC targets, including
 test-target compilation and typed unsupported lock and watcher paths; native
-Windows runtime execution remains unverified. Browser preflight rejects reachable filesystem effects
-before execution and is covered by focused browser tests.
+Windows runtime execution remains unverified. Browser preflight rejects
+reachable filesystem effects before execution and is covered by focused
+browser tests.
 
 ---
 

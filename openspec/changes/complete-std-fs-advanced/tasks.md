@@ -43,7 +43,7 @@
 ## 7. Validate, document, and synchronize
 
 - [x] 7.1 Add adversarial coverage for directory escape, link replacement, traversal cycles, temporary substitution, lock cleanup, watcher overflow, cancellation, and concurrent races; verify each invariant on native runtime tests.
-- [ ] 7.2 Run conformance on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify each target meets published behavior or returns its documented typed unsupported/degraded outcome. macOS ARM64 and Linux ARM64 container runs pass; Linux x86_64 runtime tests pass but CLI E2E toolchain detection remains unresolved; Windows x86_64 compiles for GNU and MSVC, but native execution is unavailable on this host.
+- [ ] 7.2 Run conformance on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify each target meets published behavior or returns its documented typed unsupported/degraded outcome. macOS ARM64 and Linux ARM64 container runs pass; Linux x86_64 runtime tests and 20 serialized CLI E2Es pass in an emulated container; Windows x86_64 compiles for GNU and MSVC, but native execution is unavailable on this host.
 - [x] 7.3 Add browser capability preflight for all advanced filesystem effects; verify no host filesystem operation begins in browser mode.
 - [x] 7.4 Update standard-library specs, handbook pages, API indexes, examples, status, limitations, and roadmap; verify each distinguishes delivered core, advanced synchronous APIs, and async behavior.
 - [x] 7.5 Review and commit the complete `zirk-lang` implementation and documentation before synchronization; verify the source revision contains the approved scope and no unrelated changes.
