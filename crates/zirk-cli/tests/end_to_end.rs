@@ -180,6 +180,12 @@ fn approval_security_directory(home: &Path) -> PathBuf {
     root.join("security")
 }
 
+fn configure_test_home(command: &mut Command, home: &Path) {
+    command.env("HOME", home);
+    #[cfg(windows)]
+    command.env("LOCALAPPDATA", home.join("AppData/Local"));
+}
+
 /// Restores only operating-system and native-linker variables after a test
 /// deliberately clears the environment. On Windows, `clang` needs these to
 /// locate the MSVC linker/SDK and to start child tools; the test still supplies
@@ -12370,12 +12376,10 @@ fn main(): Void {
         },
     );
 
-    let run = TestCommand::new(compiler())
-        .args(["run", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .output()
-        .expect("run filesystem roundtrip");
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run filesystem roundtrip");
     assert!(
         run.status.success(),
         "stdout: {}\nstderr: {}",
@@ -12452,10 +12456,10 @@ fn main(): Void {
         },
     );
 
-    let run = TestCommand::new(compiler())
-        .args(["run", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command
         .output()
         .expect("run filesystem calls without consent");
     assert!(
@@ -12548,10 +12552,10 @@ fn main(): Void {
         },
     );
 
-    let run = TestCommand::new(compiler())
-        .args(["run", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command
         .output()
         .expect("run filesystem calls with metadata-only consent");
     assert!(
