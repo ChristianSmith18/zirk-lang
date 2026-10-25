@@ -12359,7 +12359,11 @@ fn main(): Void {
     )
     .unwrap();
 
-    let absolute_input_scope = input.to_string_lossy().into_owned();
+    let absolute_input_scope = project
+        .join("src")
+        .join("input.txt")
+        .to_string_lossy()
+        .into_owned();
     let input_scope = input.canonicalize().unwrap().to_string_lossy().into_owned();
     let output_scope = project
         .canonicalize()
