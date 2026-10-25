@@ -41,4 +41,4 @@
 - [x] 6.1 Update `docs/ZIRK_STDLIB_SPEC.md`, `std.fs`/`std.path` handbook pages, API indexes, examples, and error/permission/resource links; verify documented signatures and examples match the sources and specs.
 - [x] 6.2 Update `docs/init/ZIRK_FEATURE_STATUS.md`, limitations, and roadmap only after target and security conformance; verify delivered, next-stage, and deferred APIs are clearly separated and target gaps remain explicit.
 - [x] 6.3 Review and commit the complete `zirk-lang` change before website synchronization; verify the commit contains implementation, tests, specs, and documentation evidence.
-- [ ] 6.4 Run `./scripts/sync-website-content.sh` from the clean committed source state, review the generated `../zirk-lang-site` diff and status catalog with an explicit audit date, then verify both repositories and report their separate revisions.
+- [x] 6.4 Run `./scripts/sync-website-content.sh` from the clean committed source state, review the generated `../zirk-lang-site` diff and status catalog with an explicit audit date, then verify both repositories and report their separate revisions.
