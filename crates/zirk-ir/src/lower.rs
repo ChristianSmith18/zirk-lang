@@ -17,13 +17,15 @@ use zirk_diagnostics::Span;
 use zirk_sema::{
     AssociatedFieldInfo, Base, Capture, CheckedProgram, ClassType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth as SemaFloatWidth, FnType, IntWidth as SemaIntWidth, MethodInfo,
-    ParamInfo, Signature, TupleType, Type, TypeNames, VariantMapping, describe,
+    ParamInfo, ProjectGlobalOperation, Signature, TupleType, Type, TypeNames, VariantMapping,
+    describe,
 };
 
 /// The symbol every `abstract class`'s own method-table slot names (roadmap
 /// Phase 4b) — see `lower`'s own doc comment on the dummy function it
 /// points to.
 const UNREACHABLE_ABSTRACT_METHOD: &str = "zk.unreachable_abstract_method";
+const PROJECT_GLOBAL_WATCH_CAPACITY: i128 = 64;
 
 #[derive(Clone, Copy)]
 struct FirstFailureSlots {
@@ -348,6 +350,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
 
     let mut module = Module {
         objects,
+        capability_requesters: checked.protected_api_requesters.clone(),
         contracts: checked
             .contracts
             .iter()
@@ -365,6 +368,26 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+    module.project_globals = checked
+        .project_globals
+        .iter()
+        .map(|(name, global)| ProjectGlobalLayout {
+            name: name.clone(),
+            payload: ir_type(global.ty, instance_base, enum_instance_base, checked),
+            readonly: global.readonly,
+            snapshot_cloneable: global.snapshot_cloneable,
+            default_function: global.default_function.clone(),
+            watch_change: checked
+                .project_global_calls
+                .values()
+                .find(|call| call.name == *name && call.operation == ProjectGlobalOperation::Watch)
+                .and_then(|call| call.change_type)
+                .map(|ty| ir_type(ty, instance_base, enum_instance_base, checked)),
+        })
+        .collect();
+    module
+        .project_globals
+        .sort_by(|left, right| left.name.cmp(&right.name));
     if let Some(id) = stringifiable_box {
         module.functions.push(build_stringifiable_box_to_string(id));
     }
@@ -4029,6 +4052,10 @@ struct FunctionLowering<'a> {
     /// Name to slot, per nesting level, to resolve shadowing exactly as the
     /// checker did.
     scopes: Vec<HashMap<String, SlotId>>,
+    /// Subscription handles grouped by the lexical block that owns them.
+    watch_scopes: Vec<Vec<GlobalWatchHandle>>,
+    /// Known local subscription bindings and the block that owns each one.
+    watch_bindings: HashMap<SlotId, GlobalWatchHandle>,
     return_type: IrType,
     /// Where `break` and `continue` jump, innermost loop last.
     loops: Vec<LoopTargets>,
@@ -4105,6 +4132,8 @@ enum BranchBody<'b> {
 struct TryFrame {
     catches: Vec<CatchFrame>,
     finally: Option<ast::Block>,
+    /// Active lexical watch scopes at the start of the try body.
+    watch_scope_depth: usize,
     /// Push order relative to `unsafe_stack` frames (`FunctionLowering::next_scope_seq`,
     /// `fase-4e-unsafe-journal` design D2) — see
     /// `FunctionLowering::lower_pending_exception_dispatch`.
@@ -4151,6 +4180,7 @@ struct CatchFrame {
 }
 
 /// The two blocks a loop exposes to the jumps inside it.
+#[derive(Clone, Copy)]
 struct LoopTargets {
     break_to: BlockId,
     continue_to: BlockId,
@@ -4164,6 +4194,16 @@ struct LoopTargets {
     /// are leaving, the same way exceptions already do
     /// (`Self::lower_pending_exception_dispatch`).
     unsafe_depth: usize,
+    /// Subscriptions created inside the loop body are closed on break or
+    /// continue.
+    watch_scope_depth: usize,
+}
+
+#[derive(Clone, Copy)]
+struct GlobalWatchHandle {
+    token_slot: SlotId,
+    object_slot: SlotId,
+    object_type: IrType,
 }
 
 /// Resolver for [`zirk_sema::describe`] used to materialise the `value.type`
@@ -4418,6 +4458,8 @@ impl<'a> FunctionLowering<'a> {
             current: BlockId(0),
             next_value: 0,
             scopes: Vec::new(),
+            watch_scopes: Vec::new(),
+            watch_bindings: HashMap::new(),
             return_type: IrType::Void,
             loops: Vec::new(),
             lifted: Vec::new(),
@@ -5656,17 +5698,18 @@ impl<'a> FunctionLowering<'a> {
         // (`concurrent-blocks-and-timers`, design D5) — opened only when the
         // body directly starts a branch (`spawn`, `Timer.after` / `every`)
         // outside any `concurrent { }` block of its own.
-        let root_scope_slot =
-            (function.name.name == "main" && body_opens_root_scope(&function.body)).then(|| {
-                let id = self.emit(
-                    InstKind::ScopeEnter,
-                    IrType::Int(IntWidth::I64),
-                    function.span,
-                );
-                let slot = self.declare_slot("<scope>", IrType::Int(IntWidth::I64), function.span);
-                self.emit_effect(InstKind::Store(slot, id), function.span);
-                slot
-            });
+        let root_scope_slot = (function.name.name == ast::GENERATED_ENTRYPOINT
+            && body_opens_root_scope(&function.body))
+        .then(|| {
+            let id = self.emit(
+                InstKind::ScopeEnter,
+                IrType::Int(IntWidth::I64),
+                function.span,
+            );
+            let slot = self.declare_slot("<scope>", IrType::Int(IntWidth::I64), function.span);
+            self.emit_effect(InstKind::Store(slot, id), function.span);
+            slot
+        });
         if let Some(slot) = root_scope_slot {
             self.scope_stack.push(slot);
         }
@@ -5699,7 +5742,11 @@ impl<'a> FunctionLowering<'a> {
         let lifted = std::mem::take(&mut self.lifted);
         let gc_roots = gc_roots_of(self.module, &self.slots);
         let lowered = Function {
-            name: self.standard_stream_function_symbol(function),
+            name: if function.name.name == ast::GENERATED_ENTRYPOINT {
+                function.name.name.clone()
+            } else {
+                self.standard_stream_function_symbol(function)
+            },
             params,
             return_type: self.return_type,
             slots: self.slots,
@@ -6276,10 +6323,172 @@ impl<'a> FunctionLowering<'a> {
 
     fn lower_block(&mut self, block: &ast::Block) {
         self.scopes.push(HashMap::new());
+        self.watch_scopes.push(Vec::new());
         for stmt in &block.statements {
             self.lower_stmt(stmt);
         }
+        if !self.is_terminated(self.current) {
+            let depth = self.watch_scopes.len().saturating_sub(1);
+            self.close_watch_scopes_from(depth, block.span);
+        }
+        self.watch_scopes.pop();
         self.scopes.pop();
+    }
+
+    /// Closes subscriptions from the selected lexical scope on this control
+    /// flow edge without changing the stack used by other edges.
+    fn close_watch_scopes_from(&mut self, depth: usize, span: Span) {
+        self.close_watch_scopes_from_except(depth, None, span);
+    }
+
+    fn close_watch_scopes_from_except(
+        &mut self,
+        depth: usize,
+        except: Option<(SlotId, IrType)>,
+        span: Span,
+    ) {
+        let mut handles: Vec<GlobalWatchHandle> = self
+            .watch_scopes
+            .iter()
+            .skip(depth)
+            .rev()
+            .flat_map(|scope| scope.iter().rev().copied())
+            .collect();
+        let mut seen = HashSet::new();
+        handles.retain(|handle| seen.insert(handle.token_slot));
+        for handle in handles {
+            if let Some((return_slot, return_type)) = except
+                && return_type == handle.object_type
+            {
+                let object =
+                    self.emit(InstKind::Load(handle.object_slot), handle.object_type, span);
+                let returned = self.emit(InstKind::Load(return_slot), return_type, span);
+                let same_handle = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Identical,
+                        left: object,
+                        right: returned,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let skip_close = self.new_block();
+                let close = self.new_block();
+                let join = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: same_handle,
+                    then_block: skip_close,
+                    else_block: close,
+                });
+                self.current = close;
+                self.emit_watch_close(handle, span);
+                self.terminate(Terminator::Jump(join));
+                self.current = skip_close;
+                self.terminate(Terminator::Jump(join));
+                self.current = join;
+            } else {
+                self.emit_watch_close(handle, span);
+            }
+        }
+    }
+
+    fn emit_watch_close(&mut self, handle: GlobalWatchHandle, span: Span) {
+        let token = self.emit(
+            InstKind::Load(handle.token_slot),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::ProjectGlobalWatchClose { token }, span);
+    }
+
+    fn global_subscription_object_id(&self, ty: IrType) -> Option<u32> {
+        let IrType::Object(id) = ty else {
+            return None;
+        };
+        let name = &self.module.objects.get(id as usize)?.name;
+        (name == "GlobalSubscription" || name.starts_with("GlobalSubscription$")).then_some(id)
+    }
+
+    fn register_watch_binding(
+        &mut self,
+        binding_slot: SlotId,
+        object_type: IrType,
+        scope_depth: usize,
+        span: Span,
+    ) -> Option<GlobalWatchHandle> {
+        let object_id = self.global_subscription_object_id(object_type)?;
+        let token_field = self.module.objects[object_id as usize].field_index("token")? as u32;
+        let object = self.emit(InstKind::Load(binding_slot), object_type, span);
+        let token = self.emit(
+            InstKind::LoadField {
+                object,
+                index: token_field,
+            },
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let token_slot = self.declare_slot(
+            "<project_global_watch_owned_token>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(InstKind::Store(token_slot, token), span);
+        let handle = GlobalWatchHandle {
+            token_slot,
+            object_slot: binding_slot,
+            object_type,
+        };
+        if let Some(scope) = self.watch_scopes.get_mut(scope_depth) {
+            scope.push(handle);
+        }
+        self.watch_bindings.insert(binding_slot, handle);
+        Some(handle)
+    }
+
+    fn track_watch_let_binding(
+        &mut self,
+        binding_slot: SlotId,
+        object_type: IrType,
+        source_slot: Option<SlotId>,
+        initializer_is_path: bool,
+        span: Span,
+    ) {
+        if self.global_subscription_object_id(object_type).is_none() {
+            return;
+        }
+        let scope_depth = self.watch_scopes.len().saturating_sub(1);
+        if initializer_is_path {
+            if let Some(source_slot) = source_slot
+                && let Some(handle) = self.watch_bindings.get(&source_slot).copied()
+            {
+                self.watch_bindings.insert(binding_slot, handle);
+            }
+            return;
+        }
+        let _ = self.register_watch_binding(binding_slot, object_type, scope_depth, span);
+    }
+
+    fn track_watch_assignment(
+        &mut self,
+        binding_slot: SlotId,
+        object_type: IrType,
+        source_slot: Option<SlotId>,
+        value_is_path: bool,
+        span: Span,
+    ) {
+        if self.global_subscription_object_id(object_type).is_none() {
+            return;
+        }
+        let scope_depth = self.watch_scopes.len().saturating_sub(1);
+        if value_is_path {
+            if let Some(source_slot) = source_slot
+                && let Some(handle) = self.watch_bindings.get(&source_slot).copied()
+            {
+                self.watch_bindings.insert(binding_slot, handle);
+            }
+            return;
+        }
+        let _ = self.register_watch_binding(binding_slot, object_type, scope_depth, span);
     }
 
     // --- Statements -------------------------------------------------------
@@ -6324,6 +6533,11 @@ impl<'a> FunctionLowering<'a> {
         // `mut x = x` — with an outer `x` — reads the outer one, as the checker
         // resolved it.
         let annotated = stmt.ty.as_ref().map(|a| self.ir_type_from_ref(a));
+        let initializer_is_path = matches!(stmt.init.as_ref(), Some(ast::Expr::Path(_)));
+        let initializer_source_slot = stmt.init.as_ref().and_then(|expr| match expr {
+            ast::Expr::Path(path) => self.try_lookup_slot(&path.name),
+            _ => None,
+        });
 
         // D14: a capturing closure literal written directly as this
         // initializer adopts its own id as the local's type
@@ -6397,6 +6611,13 @@ impl<'a> FunctionLowering<'a> {
                 let slot = self.declare_slot(&ident.name, ty, ident.span);
                 if let Some((operand, _)) = value {
                     self.emit_effect(InstKind::Store(slot, operand), stmt.span);
+                    self.track_watch_let_binding(
+                        slot,
+                        ty,
+                        initializer_source_slot,
+                        initializer_is_path,
+                        stmt.span,
+                    );
                 }
             }
             ast::Pattern::Wildcard(_) => {
@@ -6433,6 +6654,19 @@ impl<'a> FunctionLowering<'a> {
     fn lower_multi_let(&mut self, stmt: &ast::MultiLetStmt) {
         let mut shared_ty = stmt.ty.as_ref().map(|a| self.ir_type_from_ref(a));
         let arity_matches = !stmt.inits.is_empty() && stmt.inits.len() == stmt.names.len();
+        let initializer_paths = stmt
+            .inits
+            .iter()
+            .map(|init| matches!(init, ast::Expr::Path(_)))
+            .collect::<Vec<_>>();
+        let initializer_sources = stmt
+            .inits
+            .iter()
+            .map(|init| match init {
+                ast::Expr::Path(path) => self.try_lookup_slot(&path.name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
 
         let mut inits: Vec<Operand> = Vec::with_capacity(stmt.inits.len());
         if arity_matches {
@@ -6463,6 +6697,15 @@ impl<'a> FunctionLowering<'a> {
             };
             if let Some(value) = value {
                 self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                if arity_matches {
+                    self.track_watch_let_binding(
+                        slot,
+                        ty,
+                        initializer_sources.get(i).copied().flatten(),
+                        initializer_paths.get(i).copied().unwrap_or(false),
+                        stmt.span,
+                    );
+                }
             }
         }
     }
@@ -6498,12 +6741,21 @@ impl<'a> FunctionLowering<'a> {
     /// time this runs (loaded back from a temporary slot), so — unlike
     /// `Self::lower_assign`'s own `Field` case — lowering it can never open a
     /// block partway through the object/value pair, and no spill is needed.
-    fn store_assign_target(&mut self, target: &ast::AssignTarget, value: Operand, span: Span) {
+    fn store_assign_target(
+        &mut self,
+        target: &ast::AssignTarget,
+        value: Operand,
+        source_slot: Option<SlotId>,
+        value_is_path: bool,
+        span: Span,
+    ) {
         match target {
             ast::AssignTarget::Name(name) => {
                 let slot = self.lookup_slot(&name.name);
+                let ty = self.slot_type(slot);
                 self.journal_writes_to_slot(slot, span);
                 self.emit_effect(InstKind::Store(slot, value), span);
+                self.track_watch_assignment(slot, ty, source_slot, value_is_path, span);
             }
             ast::AssignTarget::Field(field) => {
                 let object = self.lower_expr(&field.object);
@@ -6574,6 +6826,19 @@ impl<'a> FunctionLowering<'a> {
     /// correctly instead of the second read observing the first write.
     fn lower_multi_assign(&mut self, stmt: &ast::MultiAssignStmt) {
         let n = stmt.targets.len().min(stmt.values.len());
+        let source_slots = stmt
+            .values
+            .iter()
+            .map(|value| match value {
+                ast::Expr::Path(path) => self.try_lookup_slot(&path.name),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let value_paths = stmt
+            .values
+            .iter()
+            .map(|value| matches!(value, ast::Expr::Path(_)))
+            .collect::<Vec<_>>();
 
         let mut temps: Vec<Option<(SlotId, IrType)>> = Vec::with_capacity(n);
         for i in 0..n {
@@ -6603,11 +6868,22 @@ impl<'a> FunctionLowering<'a> {
         for (i, temp) in temps.iter().enumerate().take(n) {
             let Some((slot, ty)) = *temp else { continue };
             let value = self.emit(InstKind::Load(slot), ty, stmt.values[i].span());
-            self.store_assign_target(&stmt.targets[i], value, stmt.span);
+            self.store_assign_target(
+                &stmt.targets[i],
+                value,
+                source_slots.get(i).copied().flatten(),
+                value_paths.get(i).copied().unwrap_or(false),
+                stmt.span,
+            );
         }
     }
 
     fn lower_assign(&mut self, stmt: &ast::AssignStmt) {
+        let value_is_path = matches!(&stmt.value, ast::Expr::Path(_));
+        let value_source_slot = match &stmt.value {
+            ast::Expr::Path(path) => self.try_lookup_slot(&path.name),
+            _ => None,
+        };
         if let ast::AssignTarget::Field(field) = &stmt.target
             && field.name.name == "on_background_error"
             && matches!(&*field.object, ast::Expr::Path(base) if base.name == "App")
@@ -6645,6 +6921,13 @@ impl<'a> FunctionLowering<'a> {
                     let value = self.lower_expr_as(&stmt.value, slot_ty);
                     self.journal_writes_to_slot(slot, stmt.span);
                     self.emit_effect(InstKind::Store(slot, value), stmt.span);
+                    self.track_watch_assignment(
+                        slot,
+                        slot_ty,
+                        value_source_slot,
+                        value_is_path,
+                        stmt.span,
+                    );
                 }
             }
             ast::AssignTarget::Field(field) => {
@@ -7056,6 +7339,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: step_block,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -7492,6 +7776,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: step_block,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -7752,6 +8037,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: step_block,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -7853,6 +8139,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: step_block,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -7977,6 +8264,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: step_block,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -8125,6 +8413,7 @@ impl<'a> FunctionLowering<'a> {
             continue_to: header,
             try_depth: self.try_stack.len(),
             unsafe_depth: self.unsafe_stack.len(),
+            watch_scope_depth: self.watch_scopes.len(),
         });
 
         self.current = body_block;
@@ -8161,11 +8450,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_break(&mut self, _stmt: &ast::JumpStmt) {
-        let loop_target = self
+        let loop_target = *self
             .loops
             .last()
             .expect("a verified program only breaks inside a loop");
         let target = loop_target.break_to;
+        self.close_watch_scopes_from(loop_target.watch_scope_depth, _stmt.span);
         self.run_exit_cleanup(loop_target.try_depth, loop_target.unsafe_depth, _stmt.span);
         self.terminate(Terminator::Jump(target));
 
@@ -8176,11 +8466,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn lower_continue(&mut self, _stmt: &ast::JumpStmt) {
-        let loop_target = self
+        let loop_target = *self
             .loops
             .last()
             .expect("a verified program only continues inside a loop");
         let target = loop_target.continue_to;
+        self.close_watch_scopes_from(loop_target.watch_scope_depth, _stmt.span);
         self.run_exit_cleanup(loop_target.try_depth, loop_target.unsafe_depth, _stmt.span);
         self.terminate(Terminator::Jump(target));
 
@@ -8212,6 +8503,9 @@ impl<'a> FunctionLowering<'a> {
         // just the innermost one (roadmap Phase 4b/4e, design D2/D3) —
         // unlike `break`/`continue`, which only exit the ones nested *inside*
         // the loop they target.
+        let returning_watch =
+            holder.filter(|(_, ty)| self.global_subscription_object_id(*ty).is_some());
+        self.close_watch_scopes_from_except(0, returning_watch, stmt.span);
         self.run_exit_cleanup(0, 0, stmt.span);
         let value = holder.map(|(slot, ty)| self.emit(InstKind::Load(slot), ty, stmt.span));
         self.terminate(Terminator::Return(value));
@@ -8828,6 +9122,136 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Call(e) => {
+                if let Some(global_call) = self.checked.project_global_calls.get(&e.span).cloned() {
+                    let global = self
+                        .module
+                        .project_globals
+                        .iter()
+                        .position(|global| global.name == global_call.name)
+                        .expect("sema globals are carried into the IR module")
+                        as u32;
+                    let payload = self.module.project_globals[global as usize].payload;
+                    return match global_call.operation {
+                        ProjectGlobalOperation::Get => {
+                            let out = self.declare_slot("<project_global_snapshot>", payload, span);
+                            let status = self.emit(
+                                InstKind::ProjectGlobalGet { global, out },
+                                IrType::Int(IntWidth::I32),
+                                span,
+                            );
+                            self.lower_project_global_status(status, span, "global read failed");
+                            let value = self.emit(InstKind::Load(out), payload, span);
+                            self.lower_clone_value(value, payload, span)
+                        }
+                        ProjectGlobalOperation::Set => {
+                            let source = self.lower_expr_as(&e.args[1].value, payload);
+                            let source = self.spill(source, payload, e.args[1].span);
+                            let value = self.emit(InstKind::Load(source), payload, e.args[1].span);
+                            let value = self.lower_clone_value(value, payload, e.args[1].span);
+                            let event = self.module.project_globals[global as usize]
+                                .watch_change
+                                .map(|change_type| {
+                                    let IrType::Object(change_id) = change_type else {
+                                        unreachable!("GlobalChange<T> is a class")
+                                    };
+                                    let layout = &self.module.objects[change_id as usize];
+                                    let previous_field = layout
+                                        .field_index("previous")
+                                        .expect("GlobalChange<T> has previous")
+                                        as u32;
+                                    let current_field = layout
+                                        .field_index("current")
+                                        .expect("GlobalChange<T> has current")
+                                        as u32;
+                                    let revision_field = layout
+                                        .field_index("revision")
+                                        .expect("GlobalChange<T> has revision")
+                                        as u32;
+                                    let event = self.emit(
+                                        InstKind::Alloc(change_id),
+                                        IrType::Object(change_id),
+                                        span,
+                                    );
+                                    let event_slot =
+                                        self.spill(event, IrType::Object(change_id), span);
+                                    let source_value =
+                                        self.emit(InstKind::Load(source), payload, span);
+                                    let current =
+                                        self.lower_clone_value(source_value, payload, span);
+                                    let event = self.emit(
+                                        InstKind::Load(event_slot),
+                                        IrType::Object(change_id),
+                                        span,
+                                    );
+                                    self.emit_effect(
+                                        InstKind::StoreField {
+                                            object: event,
+                                            index: current_field,
+                                            value: current,
+                                        },
+                                        span,
+                                    );
+                                    ProjectGlobalWatchEvent {
+                                        object_slot: event_slot,
+                                        previous_field,
+                                        current_field,
+                                        revision_field,
+                                    }
+                                });
+                            let status = self.emit(
+                                InstKind::ProjectGlobalSet {
+                                    global,
+                                    value,
+                                    event,
+                                },
+                                IrType::Int(IntWidth::I32),
+                                span,
+                            );
+                            self.lower_project_global_status(
+                                status,
+                                span,
+                                "global replacement failed",
+                            );
+                            self.emit(InstKind::Undefined, IrType::Void, span)
+                        }
+                        ProjectGlobalOperation::Watch => {
+                            return self.lower_project_global_watch(global_call, span);
+                        }
+                    };
+                }
+
+                if let ast::Expr::Path(callee) = &*e.callee
+                    && let Some(global) =
+                        self.module.project_globals.iter().position(|global| {
+                            global.default_function.as_deref() == Some(&callee.name)
+                        })
+                {
+                    let global = global as u32;
+                    let payload = self.module.project_globals[global as usize].payload;
+                    let args = self.lower_args(e);
+                    let value = self.emit(
+                        InstKind::Call {
+                            callee: callee.name.clone(),
+                            args,
+                        },
+                        payload,
+                        span,
+                    );
+                    let value = if self.module.project_globals[global as usize].snapshot_cloneable {
+                        self.lower_clone_value(value, payload, span)
+                    } else {
+                        value
+                    };
+                    let value_slot = self.spill(value, payload, span);
+                    let status = self.emit(
+                        InstKind::ProjectGlobalInit { global, value_slot },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    );
+                    self.lower_project_global_status(status, span, "global initialization failed");
+                    return self.emit(InstKind::Undefined, IrType::Void, span);
+                }
+
                 if self.is_mutex_constructor_call(e) {
                     return self.lower_mutex_construction(e, span);
                 }
@@ -11259,6 +11683,13 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_channel_method_call(e, span) {
                     return operand;
                 }
+                if self
+                    .checked
+                    .project_global_subscription_calls
+                    .contains_key(&e.span)
+                {
+                    return self.lower_project_global_subscription_call(e, span);
+                }
                 if let Some(operand) = self.lower_array_list_construction(e, span) {
                     return operand;
                 }
@@ -12350,6 +12781,562 @@ impl<'a> FunctionLowering<'a> {
         self.throw_native_failure(native.invalid_argument, "mutex allocation failed", span);
         self.current = success;
         self.emit(InstKind::Load(object_slot), IrType::Mutex(mutex_type), span)
+    }
+
+    fn lower_project_global_status(&mut self, status: Operand, span: Span, context: &str) {
+        let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+        let cancelled_status = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+        let status_value = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let cancelled = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status_value,
+                right: cancelled_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let cancelled_block = self.new_block();
+        let check_panic_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: cancelled,
+            then_block: cancelled_block,
+            else_block: check_panic_block,
+        });
+
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("project-global runtime errors are registered");
+        self.current = cancelled_block;
+        self.throw_native_failure(native.cancelled_error, context, span);
+
+        self.current = check_panic_block;
+        let status_value = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let panic_status = self.const_int_at(4, IrType::Int(IntWidth::I32), span);
+        let panicked = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status_value,
+                right: panic_status,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let panic_block = self.new_block();
+        let check_success_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: panicked,
+            then_block: panic_block,
+            else_block: check_success_block,
+        });
+        self.current = panic_block;
+        self.emit_first_fatal(context, span);
+
+        self.current = check_success_block;
+        let status_value = self.emit(
+            InstKind::Load(status_slot),
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+        let okay = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status_value,
+                right: zero,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let success_block = self.new_block();
+        let failure_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: okay,
+            then_block: success_block,
+            else_block: failure_block,
+        });
+        self.current = failure_block;
+        self.throw_native_failure(native.invalid_argument, context, span);
+        self.current = success_block;
+    }
+
+    fn lower_project_global_watch(
+        &mut self,
+        global_call: zirk_sema::ProjectGlobalCallInfo,
+        span: Span,
+    ) -> Operand {
+        let payload = self.ir_type(global_call.ty);
+        let subscription_type = global_call
+            .subscription_type
+            .expect("sema resolves GlobalSubscription<T>");
+        let IrType::Object(subscription_id) = self.ir_type(subscription_type) else {
+            unreachable!("GlobalSubscription<T> lowers to an object")
+        };
+        let change_channel_type = global_call
+            .change_channel_type
+            .expect("sema resolves the typed GlobalChange<T> channel");
+        let IrType::Channel(channel_id) = self.ir_type(change_channel_type) else {
+            unreachable!("GlobalChange<T> watch channel lowers to Channel<T>")
+        };
+        let element = self.module.channel_types[channel_id as usize];
+        let capacity = self.emit(
+            InstKind::ConstInt(PROJECT_GLOBAL_WATCH_CAPACITY),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let limit = self.emit(
+            InstKind::ConstInt(PROJECT_GLOBAL_WATCH_CAPACITY),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let channel = self.emit(
+            InstKind::ChannelNew {
+                capacity,
+                limit,
+                element,
+            },
+            IrType::Channel(channel_id),
+            span,
+        );
+        let channel_slot = self.spill(channel, IrType::Channel(channel_id), span);
+        let snapshot_out = self.declare_slot("<project_global_watch_snapshot>", payload, span);
+        let token_out = self.declare_slot(
+            "<project_global_watch_token>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let revision_out = self.declare_slot(
+            "<project_global_watch_revision>",
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        let global = self
+            .module
+            .project_globals
+            .iter()
+            .position(|global| global.name == global_call.name)
+            .expect("sema globals are carried into the IR module") as u32;
+        let channel = self.emit(
+            InstKind::Load(channel_slot),
+            IrType::Channel(channel_id),
+            span,
+        );
+        let status = self.emit(
+            InstKind::ProjectGlobalWatchSubscribe {
+                global,
+                channel,
+                snapshot_out,
+                token_out,
+                revision_out,
+            },
+            IrType::Int(IntWidth::I32),
+            span,
+        );
+        self.lower_project_global_status(status, span, "global watch registration failed");
+
+        let snapshot = self.emit(InstKind::Load(snapshot_out), payload, span);
+        let snapshot = self.lower_clone_value(snapshot, payload, span);
+        let object = self.emit(
+            InstKind::Alloc(subscription_id),
+            IrType::Object(subscription_id),
+            span,
+        );
+        let object_slot = self.spill(object, IrType::Object(subscription_id), span);
+        let token_field = self.module.objects[subscription_id as usize]
+            .field_index("token")
+            .expect("GlobalSubscription<T> has a token field") as u32;
+        let snapshot_field = self.module.objects[subscription_id as usize]
+            .field_index("snapshot_value")
+            .expect("GlobalSubscription<T> has a snapshot value field")
+            as u32;
+        let revision_field = self.module.objects[subscription_id as usize]
+            .field_index("snapshot_revision")
+            .expect("GlobalSubscription<T> has a snapshot revision field")
+            as u32;
+        let object = self.emit(
+            InstKind::Load(object_slot),
+            IrType::Object(subscription_id),
+            span,
+        );
+        let token = self.emit(InstKind::Load(token_out), IrType::Int(IntWidth::U64), span);
+        self.emit_effect(
+            InstKind::StoreField {
+                object,
+                index: token_field,
+                value: token,
+            },
+            span,
+        );
+        let object = self.emit(
+            InstKind::Load(object_slot),
+            IrType::Object(subscription_id),
+            span,
+        );
+        self.emit_effect(
+            InstKind::StoreField {
+                object,
+                index: snapshot_field,
+                value: snapshot,
+            },
+            span,
+        );
+        let object = self.emit(
+            InstKind::Load(object_slot),
+            IrType::Object(subscription_id),
+            span,
+        );
+        let revision = self.emit(
+            InstKind::Load(revision_out),
+            IrType::Int(IntWidth::U64),
+            span,
+        );
+        self.emit_effect(
+            InstKind::StoreField {
+                object,
+                index: revision_field,
+                value: revision,
+            },
+            span,
+        );
+        self.emit(
+            InstKind::Load(object_slot),
+            IrType::Object(subscription_id),
+            span,
+        )
+    }
+
+    fn lower_project_global_subscription_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Operand {
+        let info = self.checked.project_global_subscription_calls[&call.span];
+        let ast::Expr::Field(field) = &*call.callee else {
+            unreachable!("sema marks only subscription method calls")
+        };
+        let receiver_type = self.type_of(&field.object, field.object.span());
+        let IrType::Object(subscription_id) = receiver_type else {
+            unreachable!("GlobalSubscription<T> receiver is an object")
+        };
+        let receiver = self.lower_expr(&field.object);
+        let receiver_slot = self.spill(receiver, receiver_type, field.object.span());
+        let token_field = self.module.objects[subscription_id as usize]
+            .field_index("token")
+            .expect("GlobalSubscription<T> has a token field") as u32;
+        let snapshot_value_field = self.module.objects[subscription_id as usize]
+            .field_index("snapshot_value")
+            .expect("GlobalSubscription<T> has a snapshot value field")
+            as u32;
+        let snapshot_revision_field = self.module.objects[subscription_id as usize]
+            .field_index("snapshot_revision")
+            .expect("GlobalSubscription<T> has a snapshot revision field")
+            as u32;
+        let token = {
+            let receiver = self.emit(InstKind::Load(receiver_slot), receiver_type, span);
+            self.emit(
+                InstKind::LoadField {
+                    object: receiver,
+                    index: token_field,
+                },
+                IrType::Int(IntWidth::U64),
+                span,
+            )
+        };
+
+        match info.operation {
+            zirk_sema::ProjectGlobalSubscriptionOperation::Snapshot => {
+                let snapshot_type = self.ir_type(info.result_type);
+                let IrType::Object(snapshot_id) = snapshot_type else {
+                    unreachable!("GlobalSnapshot<T> lowers to an object")
+                };
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_type, span);
+                let value = self.emit(
+                    InstKind::LoadField {
+                        object: receiver,
+                        index: snapshot_value_field,
+                    },
+                    self.ir_type(info.ty),
+                    span,
+                );
+                let value = self.lower_clone_value(value, self.ir_type(info.ty), span);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_type, span);
+                let revision = self.emit(
+                    InstKind::LoadField {
+                        object: receiver,
+                        index: snapshot_revision_field,
+                    },
+                    IrType::Int(IntWidth::U64),
+                    span,
+                );
+                let snapshot = self.emit(InstKind::Alloc(snapshot_id), snapshot_type, span);
+                let snapshot_slot = self.spill(snapshot, snapshot_type, span);
+                let value_index = self.module.objects[snapshot_id as usize]
+                    .field_index("value")
+                    .expect("GlobalSnapshot<T> has a value field")
+                    as u32;
+                let revision_index = self.module.objects[snapshot_id as usize]
+                    .field_index("revision")
+                    .expect("GlobalSnapshot<T> has a revision field")
+                    as u32;
+                let snapshot = self.emit(InstKind::Load(snapshot_slot), snapshot_type, span);
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object: snapshot,
+                        index: value_index,
+                        value,
+                    },
+                    span,
+                );
+                let snapshot = self.emit(InstKind::Load(snapshot_slot), snapshot_type, span);
+                self.emit_effect(
+                    InstKind::StoreField {
+                        object: snapshot,
+                        index: revision_index,
+                        value: revision,
+                    },
+                    span,
+                );
+                self.emit(InstKind::Load(snapshot_slot), snapshot_type, span)
+            }
+            zirk_sema::ProjectGlobalSubscriptionOperation::Close => {
+                self.emit_effect(InstKind::ProjectGlobalWatchClose { token }, span);
+                self.emit(InstKind::Undefined, IrType::Void, span)
+            }
+            zirk_sema::ProjectGlobalSubscriptionOperation::Next => {
+                let result_type = self.ir_type(info.result_type);
+                let IrType::Enum(result_enum) = result_type else {
+                    unreachable!("GlobalSubscription.next returns Result<T, E>")
+                };
+                let result = self.declare_slot("<project_global_watch_result>", result_type, span);
+                let enum_instance = self.checked.enum_instances
+                    [(result_enum - self.enum_instance_base) as usize]
+                    .clone();
+                let nullable_change = self.ir_type(enum_instance.args[0]);
+                let IrType::Nullable(Nullable::Object(change_id)) = nullable_change else {
+                    unreachable!("GlobalSubscription.next payload is GlobalChange<T>?")
+                };
+                let error_enum = self
+                    .checked
+                    .enums
+                    .iter()
+                    .position(|item| item.name == "GlobalWatchError")
+                    .expect("sema registered GlobalWatchError");
+                let change_out = self.declare_slot(
+                    "<project_global_watch_change>",
+                    IrType::Object(change_id),
+                    span,
+                );
+                let status = self.emit(
+                    InstKind::ProjectGlobalWatchNext {
+                        token,
+                        out: change_out,
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+                let received = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                let status_value = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let is_received = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status_value,
+                        right: received,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let received_block = self.new_block();
+                let check_empty = self.new_block();
+                let done = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_received,
+                    then_block: received_block,
+                    else_block: check_empty,
+                });
+
+                self.current = received_block;
+                let change = self.emit(InstKind::Load(change_out), IrType::Object(change_id), span);
+                let change = self.emit(
+                    InstKind::Wrap {
+                        base: Nullable::Object(change_id),
+                        value: change,
+                    },
+                    nullable_change,
+                    span,
+                );
+                let ok = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id: result_enum,
+                        variant: 0,
+                        fields: vec![change],
+                    },
+                    result_type,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result, ok), span);
+                self.terminate(Terminator::Jump(done));
+
+                self.current = check_empty;
+                let empty = self.const_int_at(1, IrType::Int(IntWidth::I32), span);
+                let status_value = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let is_empty = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status_value,
+                        right: empty,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let empty_block = self.new_block();
+                let check_lagged = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_empty,
+                    then_block: empty_block,
+                    else_block: check_lagged,
+                });
+                self.current = empty_block;
+                let null = self.emit(
+                    InstKind::NullValue(Nullable::Object(change_id)),
+                    nullable_change,
+                    span,
+                );
+                let ok_empty = self.emit(
+                    InstKind::BuildEnum {
+                        enum_id: result_enum,
+                        variant: 0,
+                        fields: vec![null],
+                    },
+                    result_type,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result, ok_empty), span);
+                self.terminate(Terminator::Jump(done));
+
+                let build_error = |this: &mut Self,
+                                   variant_name: &str,
+                                   span: Span,
+                                   result: SlotId,
+                                   result_enum: u32,
+                                   result_type: IrType,
+                                   error_enum: usize| {
+                    let discriminant = this.checked.enums[error_enum]
+                        .discriminant(variant_name)
+                        .expect("GlobalWatchError variant exists");
+                    let error =
+                        this.const_int_at(discriminant as i128, IrType::Int(IntWidth::I32), span);
+                    let value = this.emit(
+                        InstKind::BuildEnum {
+                            enum_id: result_enum,
+                            variant: 1,
+                            fields: vec![error],
+                        },
+                        result_type,
+                        span,
+                    );
+                    this.emit_effect(InstKind::Store(result, value), span);
+                    this.terminate(Terminator::Jump(done));
+                };
+                self.current = check_lagged;
+                let lagged_status = self.const_int_at(2, IrType::Int(IntWidth::I32), span);
+                let status_value = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let is_lagged = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status_value,
+                        right: lagged_status,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let lagged_block = self.new_block();
+                let check_closed = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_lagged,
+                    then_block: lagged_block,
+                    else_block: check_closed,
+                });
+                self.current = lagged_block;
+                build_error(
+                    self,
+                    "Lagged",
+                    span,
+                    result,
+                    result_enum,
+                    result_type,
+                    error_enum,
+                );
+
+                self.current = check_closed;
+                let closed_status = self.const_int_at(3, IrType::Int(IntWidth::I32), span);
+                let status_value = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let is_closed = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status_value,
+                        right: closed_status,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let closed_block = self.new_block();
+                let runtime_error_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: is_closed,
+                    then_block: closed_block,
+                    else_block: runtime_error_block,
+                });
+                self.current = closed_block;
+                build_error(
+                    self,
+                    "Closed",
+                    span,
+                    result,
+                    result_enum,
+                    result_type,
+                    error_enum,
+                );
+                self.current = runtime_error_block;
+                build_error(
+                    self,
+                    "RuntimeFailure",
+                    span,
+                    result,
+                    result_enum,
+                    result_type,
+                    error_enum,
+                );
+
+                self.current = done;
+                self.emit(InstKind::Load(result), result_type, span)
+            }
+        }
     }
 
     fn lower_mutex_with_call(&mut self, call: &ast::CallExpr, span: Span) -> Operand {
@@ -13874,6 +14861,7 @@ impl<'a> FunctionLowering<'a> {
                 3 => {
                     self.lower_concurrent_each_cancel_scope(scope_slot, span);
                     self.cancellation_cleanup_depth += 1;
+                    self.close_watch_scopes_from(0, span);
                     self.run_exit_cleanup(0, 0, span);
                     self.cancellation_cleanup_depth -= 1;
                     self.terminate(Terminator::Cancel);
@@ -14532,6 +15520,7 @@ impl<'a> FunctionLowering<'a> {
                 );
             }
             self.cancellation_cleanup_depth += 1;
+            self.close_watch_scopes_from(0, span);
             self.run_exit_cleanup(0, 0, span);
             self.cancellation_cleanup_depth -= 1;
             self.emit_effect(InstKind::CancelShieldExit, span);
@@ -15643,6 +16632,7 @@ impl<'a> FunctionLowering<'a> {
 
     fn finish_first_cancellation(&mut self, span: Span) {
         self.cancellation_cleanup_depth += 1;
+        self.close_watch_scopes_from(0, span);
         self.run_exit_cleanup(0, 0, span);
         self.cancellation_cleanup_depth -= 1;
         self.emit_effect(InstKind::CancelShieldExit, span);
@@ -16322,6 +17312,7 @@ impl<'a> FunctionLowering<'a> {
                 self.try_stack.push(TryFrame {
                     catches: Vec::new(),
                     finally: Some(finally.clone()),
+                    watch_scope_depth: self.watch_scopes.len(),
                     pushed_at,
                 });
             }
@@ -16621,6 +17612,7 @@ impl<'a> FunctionLowering<'a> {
         self.try_stack.push(TryFrame {
             catches: Vec::new(),
             finally: finally.clone(),
+            watch_scope_depth: self.watch_scopes.len(),
             pushed_at,
         });
 
@@ -18127,6 +19119,7 @@ impl<'a> FunctionLowering<'a> {
         self.current = cleanup_block;
         self.emit_effect(InstKind::CancelShieldEnter, span);
         self.cancellation_cleanup_depth += 1;
+        self.close_watch_scopes_from(0, span);
         self.run_exit_cleanup(0, 0, span);
         self.cancellation_cleanup_depth -= 1;
         self.emit_effect(InstKind::CancelShieldExit, span);
@@ -18262,6 +19255,7 @@ impl<'a> FunctionLowering<'a> {
                             span,
                         );
                         self.emit_effect(InstKind::Store(catch.slot, narrowed), span);
+                        self.close_watch_scopes_from(frame.watch_scope_depth, span);
                         self.terminate(Terminator::Jump(catch.handler));
 
                         self.current = next_test_block;
@@ -18270,6 +19264,7 @@ impl<'a> FunctionLowering<'a> {
                     // `finally` still runs before the search continues
                     // further out, exactly as it would on any other exit
                     // from this `try`.
+                    self.close_watch_scopes_from(frame.watch_scope_depth, span);
                     self.lower_finally_block(&frame.finally);
                 }
                 Scope::Unsafe(frame) => {
@@ -18293,6 +19288,7 @@ impl<'a> FunctionLowering<'a> {
         // Escaped every active `try`: put the exception back as pending and
         // re-propagate from the current function, the same early-return an
         // uncaught `throw` itself takes.
+        self.close_watch_scopes_from(0, span);
         let exception = self.emit(InstKind::Load(holder), throwable_ty, span);
         self.emit_effect(InstKind::Throw(exception), span);
         let placeholder = self
@@ -19353,6 +20349,7 @@ impl<'a> FunctionLowering<'a> {
         self.try_stack.push(TryFrame {
             catches: catches.clone(),
             finally: stmt.finally.clone(),
+            watch_scope_depth: self.watch_scopes.len(),
             pushed_at,
         });
         self.lower_block(&stmt.body);
@@ -29854,16 +30851,41 @@ impl<'a> FunctionLowering<'a> {
     fn lower_clone_value(&mut self, value: Operand, ty: IrType, span: Span) -> Operand {
         match ty {
             IrType::Nullable(inner) => {
-                let inner_op = self.emit(InstKind::Unwrap(value), inner.inner(), span);
-                let cloned = self.lower_clone_value(inner_op, inner.inner(), span);
-                self.emit(
+                let source = self.spill(value, ty, span);
+                let result = self.declare_slot("<clone_nullable>", ty, span);
+                let source_value = self.emit(InstKind::Load(source), ty, span);
+                let absent = self.emit(InstKind::IsNull(source_value), IrType::Boolean, span);
+                let absent_block = self.new_block();
+                let present_block = self.new_block();
+                let join_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: absent,
+                    then_block: absent_block,
+                    else_block: present_block,
+                });
+
+                self.current = absent_block;
+                let null = self.emit(InstKind::NullValue(inner), ty, span);
+                self.emit_effect(InstKind::Store(result, null), span);
+                self.terminate(Terminator::Jump(join_block));
+
+                self.current = present_block;
+                let source_value = self.emit(InstKind::Load(source), ty, span);
+                let inner_value = self.emit(InstKind::Unwrap(source_value), inner.inner(), span);
+                let cloned = self.lower_clone_value(inner_value, inner.inner(), span);
+                let wrapped = self.emit(
                     InstKind::Wrap {
                         base: inner,
                         value: cloned,
                     },
                     ty,
                     span,
-                )
+                );
+                self.emit_effect(InstKind::Store(result, wrapped), span);
+                self.terminate(Terminator::Jump(join_block));
+
+                self.current = join_block;
+                self.emit(InstKind::Load(result), ty, span)
             }
             IrType::Object(_) | IrType::Callable(_) => self.emit(InstKind::Clone(value), ty, span),
             IrType::Value(id) => {
@@ -30010,8 +31032,12 @@ impl<'a> FunctionLowering<'a> {
         }
 
         let ty = self.type_of(object, object.span()).unwrapped();
-        let (fields, index) = layout_of(self.module, ty, name)
-            .expect("a verified field access reads an object, a value, or a Pin<T> of one");
+        let (fields, index) = layout_of(self.module, ty, name).unwrap_or_else(|| {
+            panic!(
+                "verified field `{name}` receiver lowered as `{}` from {object:?}",
+                ty.as_str()
+            )
+        });
         (index as u32, fields[index].ty)
     }
 
@@ -30188,6 +31214,17 @@ impl<'a> FunctionLowering<'a> {
     /// them would leave a value nobody reads.
     fn lower_expr_for_effect(&mut self, expr: &ast::Expr) {
         match expr {
+            ast::Expr::Call(e) if self.checked.project_global_calls.contains_key(&e.span) => {
+                let _ = self.lower_expr(expr);
+            }
+            ast::Expr::Call(e)
+                if self
+                    .checked
+                    .project_global_subscription_calls
+                    .contains_key(&e.span) =>
+            {
+                self.lower_project_global_subscription_call(e, expr.span());
+            }
             ast::Expr::Call(e) if self.is_mutex_constructor_call(e) => {
                 let _ = self.lower_mutex_construction(e, expr.span());
             }
@@ -32384,7 +33421,12 @@ impl<'a> FunctionLowering<'a> {
     }
 
     fn is_callable_call(&self, call: &ast::CallExpr) -> bool {
-        if self.checked.mutex_with_calls.contains_key(&call.span)
+        if self.checked.project_global_calls.contains_key(&call.span)
+            || self
+                .checked
+                .project_global_subscription_calls
+                .contains_key(&call.span)
+            || self.checked.mutex_with_calls.contains_key(&call.span)
             || self.is_mutex_constructor_call(call)
         {
             return false;

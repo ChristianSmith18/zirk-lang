@@ -14,14 +14,14 @@ Zirk treats those contracts as one language-and-toolchain design. The goal is no
 
 ## Readable defaults, explicit boundaries
 
-Most code should not need to mention allocation strategies, system threads, ABI layouts, or compile-time filesystem access. Zirk therefore starts with automatic memory management, inferred local types, safe references, standard resource contracts, and a high-level standard library.
+Most code should not need to mention allocation strategies, system threads, ABI layouts, or low-level filesystem mechanics. Zirk therefore starts with automatic memory management, inferred local types, safe references, standard resource contracts, and a high-level standard library.
 
 But some operations change the risk profile of a program. Zirk makes those operations explicit:
 
 - raw pointers and unsafe casts require `unsafe {}`;
 - optional values use `T?` rather than allowing universal `null`;
 - expected failures use `Result<T, E>` rather than being hidden in ordinary return values;
-- libraries declare required capabilities and applications grant final permissions;
+- applications and packages declare capability requirements, while users approve exact resources at protected operation boundaries;
 - structured scopes, CPU parallelism, and typed channels have distinct constructs; managed OS threads are not currently exposed;
 - cross-target builds name their target and reject incompatible native dependencies early.
 
@@ -58,7 +58,7 @@ Zirk's safety model therefore spans several dimensions:
 - **Memory safety:** safe code excludes use-after-free and undefined behavior.
 - **Concurrency safety:** unsafe shared mutable access must be rejected or synchronized.
 - **Resource safety:** `Resource<E>` and `match with` give cleanup observable language semantics.
-- **Capability safety:** packages declare filesystem, network, process, environment, and compile-time access.
+- **Capability safety:** applications and packages declare one finite `requires` list; users approve an exact resource when a protected operation is attempted. Filesystem and process APIs remain unavailable today.
 - **Build safety:** locked dependencies, hashes, targets, and reproducible inputs are part of the project model.
 
 These guarantees interact. For example, a file operation is not only an I/O call: it may require a declared permission, may block or support cancellation, returns a typed failure, and produces a resource whose lifetime must be closed on every exit path.

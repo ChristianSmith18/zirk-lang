@@ -23,6 +23,8 @@
 > **Checkpoint de revisión autoral del handbook — 15 de agosto de 2026.** Las 37 acotaciones del autor corrigen respuestas anteriores de esta plantilla. Quedan confirmados `**`/`**=`, ranges descendentes y con `step`, bounds interpolados, `if` de una sola sentencia, `do ... while`, regex `re'...'`, alternativas de `match` separadas por coma, parámetros opcionales siempre tipados, variadics iterables, `fn` opcional en lambdas, capturas desambiguadas con `this`, campos `public mut` por defecto, múltiples `construct` por firma, enums tradicionales con valor string nominal o mapping explícito, arrays siempre fijos, slicing `[inicio:fin:salto]`, strings iterables, generators, pipelines de funciones puras, miembros convenientes de la stdlib y cloning de callables ligados. Este checkpoint prevalece sobre respuestas incompatibles más abajo.
 >
 
+> **Vigencia del sistema de proyectos — 25 de octubre de 2026.** Los capítulos históricos de esta plantilla que describen `fn main` como entrada, `use` para globals, `permissions`, `compile_permissions` o `during` quedaron supersedidos. La norma actual está en `ZIRK_LANGUAGE_SPEC.md`, `ZIRK_RUNTIME_SPEC.md`, `ERROR_RESOURCE_PERMISSION_SEMANTICS.md` y `openspec/changes/complete-zkinit-project-runtime/`. `.zkinit` usa un `project` tipado, `entry`/`root`, `globals`, dependencias y un único `requires`; la entrada ejecuta sentencias de archivo y el consentimiento ocurre por recurso en runtime.
+
 > **Checkpoint semántico del núcleo — 16 de agosto de 2026.** La fuente
 > normativa consolidada es `docs/CORE_LANGUAGE_SEMANTICS.md`. Se aceptan
 > `Function(P...) => R` y el alias preferido `Fn(P...) => R`, closures

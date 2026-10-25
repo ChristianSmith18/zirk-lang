@@ -215,9 +215,13 @@ impl EffectiveNetworkGrant {
         let listen_addresses = listen_addresses
             .into_iter()
             .map(|address| {
-                address
+                let parsed: SocketAddr = address
                     .parse()
-                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)
+                    .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
+                if address != parsed.to_string() {
+                    return Err(NetworkPolicyError::AddressNotAllowed);
+                }
+                Ok(parsed)
             })
             .collect::<Result<_, _>>()?;
         let udp_destinations = udp_destinations
@@ -241,7 +245,9 @@ impl EffectiveNetworkGrant {
                 let parsed: SocketAddr = address
                     .parse()
                     .map_err(|_| NetworkPolicyError::AddressNotAllowed)?;
-                if parsed.port() == 0 || address != parsed.to_string() {
+                // Port zero is an exact request for an OS-assigned ephemeral
+                // bind. It does not grant any explicitly selected port.
+                if address != parsed.to_string() {
                     return Err(NetworkPolicyError::AddressNotAllowed);
                 }
                 Ok(parsed)
@@ -801,6 +807,25 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_listener_authority_matches_only_the_requested_address_and_port_zero() {
+        let grant =
+            EffectiveNetworkGrant::from_verified_scopes(std::iter::empty(), ["127.0.0.1:0".into()])
+                .unwrap();
+        assert_eq!(
+            grant.authorize_listen("127.0.0.1:0".parse().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            grant.authorize_listen("127.0.0.1:8080".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+        assert_eq!(
+            grant.authorize_listen("0.0.0.0:0".parse().unwrap()),
+            Err(NetworkPolicyError::PermissionDenied)
+        );
+    }
+
+    #[test]
     fn datagram_local_and_interface_authority_are_independent() {
         let grant = EffectiveNetworkGrant::from_verified_network_scopes(
             std::iter::empty(),
@@ -941,5 +966,21 @@ mod tests {
             ),
             Err(NetworkPolicyError::InvalidOrigin)
         );
+    }
+
+    #[test]
+    fn listener_scopes_require_a_canonical_address_and_port() {
+        assert_eq!(
+            EffectiveNetworkGrant::from_verified_scopes(
+                std::iter::empty(),
+                ["127.0.0.1:080".into()],
+            ),
+            Err(NetworkPolicyError::AddressNotAllowed)
+        );
+        assert!(EffectiveNetworkGrant::from_verified_scopes(
+            std::iter::empty(),
+            ["127.0.0.1:0".into()],
+        )
+        .is_ok());
     }
 }

@@ -172,8 +172,12 @@ fn main(): Void {
     // Opaque handles render their type name.
     inmut ch: Channel<Int32> = Channel(1);
     stdout.println(ch);
-    inmut j = spawn work();
-    stdout.println(j);
+    concurrent {
+        inmut j = spawn work();
+        inmut job_text: String = j.to_string();
+        _ = j;
+    }
+    stdout.println(job_text);
     mut marker: Marker = Marker(1);
     mut w: Weak<Marker> = Weak.from (marker);
     stdout.println(w);

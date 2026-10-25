@@ -64,6 +64,16 @@ Compilation begins at an entry source or the entry declared by `.zkinit`. The
 loader follows imports rather than compiling every `.zrk` in a directory. An
 unreachable file is not part of the program.
 
+For a project run, the CLI validates `.zkinit`, resolves the application
+`entry` (or the explicitly supplied source path), checks the dependency and
+global type graph, and then executes the selected file's top-level statements.
+Packages provide an importable `root`; it is not an application entry. There is
+no required source `fn main`: a function with that name is ordinary code and
+runs only if the program calls it. Imported modules initialize once in
+depth-first source import order before their importer, after the complete graph
+has passed static checks. See [Project Entry](../03-projects/05-entry-point.md)
+for path selection and initialization details.
+
 Each file receives a stable identity in the compilation source map. The loader
 preserves both its user-facing written path and canonical module identity,
 deduplicates aliases/symlinks, prevents project-root escape, and permits access

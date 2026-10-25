@@ -13,6 +13,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+type TestCommand = Command;
+
 /// Path to the `zirk` executable produced by the workspace.
 fn compiler() -> PathBuf {
     // The test binary lives in `<target>/<profile>/deps/`; the CLI is one level
@@ -46,6 +48,112 @@ fn workspace(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("working directory");
     dir
+}
+
+/// Makes the legacy test fixtures that use a function named `main` call it
+/// explicitly. The language no longer gives that name entrypoint behavior;
+/// the file entry executes only its top-level statements.
+fn write_entry(path: impl AsRef<Path>, source: impl AsRef<str>) -> std::io::Result<()> {
+    let source = source.as_ref();
+    let has_main = source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("fn main(") || line.starts_with("pub fn main(")
+    });
+    let explicitly_calls_main = source.lines().any(|line| line.trim() == "main();");
+    let contents = if has_main && !explicitly_calls_main {
+        format!("{source}\nmain();\n")
+    } else {
+        source.to_owned()
+    };
+    std::fs::write(path, contents)
+}
+
+/// Seeds the same signed, exact-resource grant that a prior interactive
+/// operation approval would leave behind. This keeps transport integration
+/// tests focused on their host behavior without exercising an old blanket
+/// approval command.
+fn seed_exact_test_consent(project: &Path, home: &Path) {
+    let manifest_path = project.join(".zkinit");
+    let source = std::fs::read_to_string(&manifest_path).expect("permission fixture manifest");
+    let manifest = match zirk_cli::project::parse_manifest(&source) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            let legacy = zirk_cli::project::parse_legacy_manifest(&source)
+                .expect("legacy permission fixture manifest");
+            let canonical = zirk_cli::project::format_manifest(&legacy);
+            std::fs::write(&manifest_path, canonical).expect("migrate permission fixture");
+            legacy
+        }
+    };
+    let scopes = test_permission_scopes(&manifest);
+    seed_exact_test_consent_with_scopes(project, home, scopes);
+}
+
+fn test_permission_scopes(
+    manifest: &zirk_cli::project::ProjectManifest,
+) -> zirk_runtime_core::permission_grant::PermissionScopes {
+    use zirk_runtime_core::permission_grant::PermissionScopes;
+
+    PermissionScopes {
+        environment_read: manifest.environment_permissions.read_names.clone(),
+        environment_secrets: manifest.environment_permissions.secret_names.clone(),
+        environment_list_names: manifest.environment_permissions.list_names,
+        network_connect: manifest.network_permissions.connect_origins.clone(),
+        network_listen: manifest.network_permissions.listen_addresses.clone(),
+        network_udp_destinations: manifest.network_permissions.udp_destinations.clone(),
+        network_udp_listen: manifest.network_permissions.udp_listen_addresses.clone(),
+        network_udp_broadcast_destinations: manifest
+            .network_permissions
+            .udp_broadcast_destinations
+            .clone(),
+        network_udp_multicast_groups: manifest.network_permissions.udp_multicast_groups.clone(),
+        network_local_connect: manifest.network_permissions.local_connect_endpoints.clone(),
+        network_local_listen: manifest.network_permissions.local_listen_endpoints.clone(),
+        network_inspect_interfaces: manifest.network_permissions.inspect_interfaces,
+        ..PermissionScopes::default()
+    }
+}
+
+fn seed_exact_test_consent_with_scopes(
+    project: &Path,
+    home: &Path,
+    scopes: zirk_runtime_core::permission_grant::PermissionScopes,
+) {
+    use zirk_runtime_core::permission_grant::SignedPermissionGrant;
+
+    let runtime = zirk_cli::approvals::runtime_environment_for_path(project)
+        .expect("permission fixture runtime identity")
+        .expect("manifest-backed project runtime identity");
+    let security = approval_security_directory(home);
+    let approvals = security.join("approvals");
+    std::fs::create_dir_all(&approvals).expect("permission fixture approval directory");
+    let key = [0x5a; 32];
+    let key_path = security.join("permissions.key");
+    std::fs::write(&key_path, key).expect("write fixture approval key");
+    let signed = SignedPermissionGrant::sign(
+        runtime["ZIRK_RUNTIME_PROJECT_ID"].clone(),
+        runtime["ZIRK_RUNTIME_MANIFEST_DIGEST"].clone(),
+        scopes,
+        &key,
+    )
+    .expect("sign exact fixture consent");
+    let project_id = &runtime["ZIRK_RUNTIME_PROJECT_ID"];
+    std::fs::write(
+        approvals.join(format!("{project_id}.json")),
+        signed.encode().expect("encode exact fixture consent"),
+    )
+    .expect("write exact fixture consent");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("protect fixture approval key");
+        std::fs::set_permissions(
+            approvals.join(format!("{project_id}.json")),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("protect fixture consent record");
+    }
 }
 
 struct Output {
@@ -132,9 +240,14 @@ fn zirk_with_runtime_env(
 ) -> Output {
     let dir = workspace(name);
     let copied = dir.join(source.file_name().expect("file name"));
-    std::fs::copy(source, &copied).expect("copy the source");
+    if matches!(subcommand, "run" | "build") && !source.starts_with(corpus("invalid")) {
+        let contents = std::fs::read_to_string(source).expect("read the source fixture");
+        write_entry(&copied, contents).expect("write the source fixture");
+    } else {
+        std::fs::copy(source, &copied).expect("copy the source");
+    }
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .arg(subcommand)
         .arg(arg)
         .args(extra)
@@ -443,7 +556,7 @@ fn concurrent_join_round_trips_nested_managed_record_results() {
         std::process::id(),
         std::thread::current().name().unwrap_or("test")
     ));
-    std::fs::write(
+    write_entry(
         &source,
         "import { stdout } from std.io;\n\
          class Inner { text: String; construct(text: String) { this.text = text; } }\n\
@@ -472,7 +585,7 @@ fn concurrent_join_round_trips_nested_managed_record_results() {
     let dir = workspace("concurrent_managed_result_gc");
     let input_name = "managed_result.zrk";
     std::fs::copy(&source, dir.join(input_name)).expect("copy managed-result source");
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .arg("run")
         .arg(input_name)
         .env("ZIRK_GC_THRESHOLD", "8192")
@@ -535,9 +648,13 @@ fn build_produces_an_executable_that_runs_on_its_own() {
     let source = corpus("valid").join("hello.zrk");
     let dir = workspace("build_only");
     let copied = dir.join("hello.zrk");
-    std::fs::copy(&source, &copied).expect("copy the source");
+    write_entry(
+        &copied,
+        std::fs::read_to_string(&source).expect("read the source"),
+    )
+    .expect("write the source");
 
-    let build = Command::new(compiler())
+    let build = TestCommand::new(compiler())
         .arg("build")
         .arg("hello.zrk")
         .current_dir(&dir)
@@ -603,7 +720,7 @@ fn the_executable_stays_small() {
     let copied = dir.join("hello.zrk");
     std::fs::copy(&source, &copied).expect("copy the source");
 
-    let build = Command::new(compiler())
+    let build = TestCommand::new(compiler())
         .arg("build")
         .arg("hello.zrk")
         .current_dir(&dir)
@@ -637,7 +754,7 @@ fn the_executable_stays_on_disk_after_run() {
     let copied = dir.join("hello.zrk");
     std::fs::copy(&source, &copied).expect("copy the source");
 
-    Command::new(compiler())
+    TestCommand::new(compiler())
         .arg("run")
         .arg("hello.zrk")
         .current_dir(&dir)
@@ -1172,7 +1289,7 @@ fn strip_ansi(text: &str) -> String {
 #[test]
 fn a_missing_file_produces_a_diagnostic() {
     let dir = workspace("missing_file");
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .arg("run")
         .arg("does_not_exist.zrk")
         .current_dir(&dir)
@@ -1186,7 +1303,7 @@ fn a_missing_file_produces_a_diagnostic() {
 #[test]
 fn several_files_state_the_phase_they_arrive_in() {
     let dir = workspace("several_files");
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .arg("build")
         .arg("a.zrk")
         .arg("b.zrk")
@@ -1208,7 +1325,7 @@ fn later_subcommands_name_their_phase() {
         ("new", "Phase 6"),
         ("doc", "Phase 7"),
     ] {
-        let output = Command::new(compiler())
+        let output = TestCommand::new(compiler())
             .arg(subcommand)
             .output()
             .expect("run the compiler");
@@ -1225,13 +1342,64 @@ fn later_subcommands_name_their_phase() {
 #[test]
 fn help_and_version_succeed() {
     for flag in ["--help", "--version", "--list-targets"] {
-        let output = Command::new(compiler())
+        let output = TestCommand::new(compiler())
             .arg(flag)
             .output()
             .expect("run the compiler");
         assert!(output.status.success(), "`zirk {flag}` failed");
         assert!(!output.stdout.is_empty());
     }
+}
+
+#[test]
+fn init_yes_creates_canonical_defaults_and_never_overwrites() {
+    let project = workspace("init_yes_cli");
+    let first = TestCommand::new(compiler())
+        .args(["init", "-y"])
+        .current_dir(&project)
+        .output()
+        .expect("initialize with defaults");
+    assert!(
+        first.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let manifest_path = project.join(".zkinit");
+    let original = std::fs::read(&manifest_path).expect("initializer creates `.zkinit`");
+    let manifest = String::from_utf8_lossy(&original);
+    assert!(manifest.contains("version: \"0.1.0\""));
+    assert!(manifest.contains("type: application"));
+    assert!(manifest.contains("entry: \"src/main.zrk\""));
+    assert!(manifest.contains("source \"src\";"));
+    assert!(!manifest.contains("build_targets"));
+    assert!(!project.join("src").exists());
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 1);
+
+    let second = TestCommand::new(compiler())
+        .args(["init", "-y"])
+        .current_dir(&project)
+        .output()
+        .expect("refuse to replace an existing manifest");
+    assert!(!second.status.success());
+    assert_eq!(std::fs::read(&manifest_path).unwrap(), original);
+}
+
+#[test]
+fn init_without_tty_requires_yes_and_writes_nothing() {
+    let project = workspace("init_without_tty");
+    let output = TestCommand::new(compiler())
+        .arg("init")
+        .current_dir(&project)
+        .output()
+        .expect("reject interactive init without a terminal");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("interactive `zirk init` needs a terminal")
+    );
+    assert!(!project.join(".zkinit").exists());
+    assert_eq!(std::fs::read_dir(&project).unwrap().count(), 0);
 }
 
 // --- Crates of several files ------------------------------------------------
@@ -1245,10 +1413,14 @@ fn crate_of(name: &str, files: &[(&str, &str)]) -> Output {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).expect("create the directory");
         }
-        std::fs::write(&target, contents).expect("write the source");
+        if path == &files[0].0 {
+            write_entry(&target, contents).expect("write the entry source");
+        } else {
+            std::fs::write(&target, contents).expect("write the source");
+        }
     }
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .arg("run")
         .arg(files[0].0)
         .current_dir(&dir)
@@ -1265,8 +1437,8 @@ fn crate_of(name: &str, files: &[(&str, &str)]) -> Output {
 /// Runs a one-file crate while supplying deterministic process stdin.
 fn crate_of_with_input(name: &str, source: &str, input: &[u8]) -> Output {
     let dir = workspace(name);
-    std::fs::write(dir.join("main.zrk"), source).expect("write the source");
-    let mut child = Command::new(compiler())
+    write_entry(dir.join("main.zrk"), source).expect("write the source");
+    let mut child = TestCommand::new(compiler())
         .args(["run", "main.zrk"])
         .current_dir(&dir)
         .stdin(Stdio::piped())
@@ -1548,8 +1720,7 @@ fn invalid_named_http_methods_fail_before_permission_lookup() {
         "project \"invalid_named_http_method\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\n}\n}\n",
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         r#"import { HTTP, HTTPBody, HTTPClient, HTTPError, HTTPHeaders, HTTPResponse, URL } from std.http;
 import { stdout } from std.io;
 fn report(result: Result<HTTPResponse, HTTPError>): Void {
@@ -1603,30 +1774,9 @@ fn main(): Void {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit invalid-method fixture approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -1876,7 +2026,7 @@ fn environment_api_is_bundled_and_fails_closed_without_runtime_approval() {
             "main.zrk",
             "import { Env, SecretString } from std.environment;\n\
              import { stdout } from std.io;\n\
-             fn main(): Void {\n\
+             \n\
                  match Env.get(\"ZIRK_TEST_VALUE\") {\n\
                      Ok(_) => stdout.println(\"unexpected\");\n\
                      Error(_) => stdout.println(\"denied\");\n\
@@ -1909,8 +2059,7 @@ fn environment_api_is_bundled_and_fails_closed_without_runtime_approval() {
                  }\n\
                  stdout.println(SecretString(\"do-not-print\").to_string());\n                 mut secret_list: List<SecretString> = List(); secret_list.add(SecretString(\"do-not-print\")); stdout.println(secret_list);\n                 mut secret_map: Map<Int32, SecretString> = Map(); secret_map.set(1, SecretString(\"do-not-print\")); stdout.println(secret_map);\n\
                  stdout.println(SecretString(\"do-not-print\"));\n\
-                 stdout.println(\"secret={SecretString(\"do-not-print\")}\");\n\
-             }",
+                 stdout.println(\"secret={SecretString(\"do-not-print\")}\");",
         )],
     );
 
@@ -1922,387 +2071,155 @@ fn environment_api_is_bundled_and_fails_closed_without_runtime_approval() {
 }
 
 #[test]
-fn signed_project_approval_reaches_runtime_and_stale_manifest_denies() {
-    let project = workspace("environment_approved_project");
-    let home = workspace("environment_approved_home");
+fn capability_requirements_are_not_consent_and_denial_stays_local() {
+    let project = workspace("capability_requirement_without_consent");
+    let home = workspace("capability_requirement_without_consent_home");
     let toolchain_path = std::env::var_os("PATH").expect("test toolchain PATH");
-    let mut toolchain_paths = std::env::split_paths(&toolchain_path).collect::<Vec<_>>();
-    if let Some(llvm_prefix) = std::env::var_os("LLVM_SYS_201_PREFIX") {
-        let llvm_bin = PathBuf::from(llvm_prefix).join("bin");
-        if !toolchain_paths.contains(&llvm_bin) {
-            toolchain_paths.insert(0, llvm_bin);
-        }
-    }
-    let toolchain_path =
-        std::env::join_paths(toolchain_paths).expect("test toolchain PATH is valid");
     std::fs::create_dir_all(project.join("src")).unwrap();
-    let direct_package = project.join("vendor/direct");
-    let nested_package = direct_package.join("vendor/nested");
-    std::fs::create_dir_all(direct_package.join("src")).unwrap();
-    std::fs::create_dir_all(nested_package.join("src")).unwrap();
-    std::fs::write(direct_package.join("src/package.zrk"), "").unwrap();
-    std::fs::write(nested_package.join("src/package.zrk"), "").unwrap();
-    std::fs::write(
-        project.join(".zkinit"),
-        "project \"approval.fixture\"\nkind application\nentry \"src/main.zrk\"\ndependency acme.direct ^1 local \"vendor/direct\"\npermissions {\nenvironment {\nread: { names: [\"APPROVAL_FIXTURE_VALUE\", \"APPROVAL_FIXTURE_MISSING\", \"APPROVAL_FIXTURE_INT\", \"APPROVAL_FIXTURE_BAD_INT\", \"APPROVAL_FIXTURE_FLOAT\", \"APPROVAL_FIXTURE_BAD_FLOAT\", \"APPROVAL_FIXTURE_PORT\", \"APPROVAL_FIXTURE_BAD_PORT\", \"APPROVAL_FIXTURE_UNCAUGHT\", \"APPROVAL_FIXTURE_INVALID_UTF8\"]; during: runtime; }\nsecrets: { names: [\"APPROVAL_FIXTURE_SECRET\"]; during: runtime; }\nlist_names: { during: runtime; }\n}\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        direct_package.join(".zkinit"),
-        "project \"acme.direct\"\nkind package\ndependency acme.nested ^1 local \"vendor/nested\"\npermissions {\nenvironment {\nread: { names: [\"APPROVAL_DIRECT_PACKAGE_VALUE\"]; during: runtime; }\n}\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        nested_package.join(".zkinit"),
-        "project \"acme.nested\"\nkind package\npermissions {\nenvironment {\nread: { names: [\"APPROVAL_NESTED_PACKAGE_VALUE\"]; during: runtime; }\n}\n}\n",
-    )
-    .unwrap();
-    for (root, name, dependency_root) in [
-        (project.as_path(), "acme.direct", direct_package.as_path()),
-        (
-            direct_package.as_path(),
-            "acme.nested",
-            nested_package.as_path(),
-        ),
-    ] {
-        let package_manifest =
-            zirk_cli::project::read_manifest(&dependency_root.join(".zkinit")).unwrap();
-        let hash =
-            zirk_cli::project::package_integrity_hash(dependency_root, &package_manifest).unwrap();
-        std::fs::write(
-            root.join("zirk.lock"),
-            format!("{name} 1.0 local sha256:{hash} src/package.zrk\n"),
-        )
-        .unwrap();
-    }
-    std::fs::write(
-        project.join("src/main.zrk"),
-        r#"import { Env, EnvironmentParsable, SecretString } from std.environment;
-import { stderr, stdout } from std.io;
-
-class SecretFailure implements Throwable {
-    inmut value: SecretString;
-    construct(value: SecretString) { this.value = value; }
-    message(): String { return "failure: " + this.value.to_string(); }
-    code(): String { return "SECRET_FAILURE"; }
-    cause(): Error? { return null; }
-    stack_trace(): StackTrace { return StackTrace(); }
-}
-
-class Port implements EnvironmentParsable<Port> {
-    value: String;
-    construct(value: String) { this.value = value; }
-    static parse(text: String): Result<Port, String> {
-        if (text == "invalid") { return Error("invalid port"); }
-        return Ok(Port(text));
-    }
-}
-
-fn raise_secret(value: SecretString): Void throws SecretFailure {
-    throw SecretFailure(value);
-}
-
-fn main(): Void throws SecretFailure {
-    match Env.get("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("denied"); }
-    match Env.get("APPROVAL_NESTED_PACKAGE_VALUE") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("present fallback denied"); }
-    match Env.require("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("require denied"); }
-    match Env.get("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("fallback denied"); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected typed fallback parse"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Port>("APPROVAL_FIXTURE_MISSING") { Ok(port) => stdout.println(port.value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("null denied"); }
-    match Env.contains("APPROVAL_FIXTURE_VALUE") { Ok(value) => stdout.println(value); Error(_) => stdout.println("contains denied"); }
-    match Env.contains("APPROVAL_FIXTURE_MISSING") { Ok(value) => stdout.println(value); Error(_) => stdout.println("contains denied"); }
-    match Env.list_names() {
-        Ok(names) => {
-            stdout.println(names.length > 0);
-            stdout.println(names[0]);
-            stdout.println(names[1]);
-        }
-        Error(_) => stdout.println("listing denied");
-    }
-    match Env.get_int32("APPROVAL_FIXTURE_MISSING") { Error(error) => stdout.println(error.to_string()); Ok(_) => stdout.println("unexpected typed value"); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_MISSING") { Error(error) => stdout.println(error.to_string()); Ok(_) => stdout.println("unexpected generic typed value"); }
-    match Env.get_int32("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_int32("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected parsed integer"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get("APPROVAL_FIXTURE_INVALID_UTF8") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.contains("APPROVAL_FIXTURE_INVALID_UTF8") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_INT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Int32>("APPROVAL_FIXTURE_BAD_INT") { Ok(_) => stdout.println("unexpected generic parsed integer"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Port>("APPROVAL_FIXTURE_PORT") { Ok(port) => stdout.println(port.value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get<Port>("APPROVAL_FIXTURE_BAD_PORT") { Ok(_) => stdout.println("unexpected generic parsed port"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_float64("APPROVAL_FIXTURE_FLOAT") { Ok(value) => stdout.println(value); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_float64("APPROVAL_FIXTURE_BAD_FLOAT") { Ok(_) => stdout.println("unexpected parsed float"); Error(error) => stdout.println(error.to_string()); }
-    match Env.get_secret("APPROVAL_FIXTURE_SECRET") {
-        Ok(value) => {
-            stdout.println(value.to_string());
-            stdout.println(value);
-            stdout.println("secret={value}");
-            try { raise_secret(value); } catch SecretFailure(error) { stderr.println(error.message()); }
-            match Env.get("APPROVAL_FIXTURE_UNCAUGHT") {
-                Ok(flag) => { if flag == "yes" { raise_secret(value); } }
-                Error(_) => { }
-            }
-        }
-        Error(_) => stdout.println("secret denied");
-    }
-}"#,
+    let manifest = "project { name: \"approval.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nsource \"src\";\nrequires { environment.read; }\n";
+    std::fs::write(project.join(".zkinit"), manifest).unwrap();
+    write_entry(project.join("src/main.zrk"),
+        "import { Env } from std.environment;\nimport { stdout } from std.io;\nmatch Env.get(\"APPROVAL_FIXTURE_VALUE\") { Ok(value) => stdout.println(value); Error(_) => stdout.println(\"denied\"); }\nmatch Env.get(\"APPROVAL_FIXTURE_VALUE\") { Ok(value) => stdout.println(value); Error(_) => stdout.println(\"denied again\"); }\nstdout.println(\"continued\");\n",
     )
     .unwrap();
 
-    let mut approval_command = Command::new(compiler());
-    approval_command
-        .args(["permissions", "approve", "."])
+    let inspection = TestCommand::new(compiler())
+        .args(["permissions", "inspect", "."])
         .current_dir(&project)
-        .env_clear()
         .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    preserve_native_toolchain_environment(&mut approval_command);
-    let mut approval = approval_command
-        .spawn()
-        .expect("start explicit permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    assert!(String::from_utf8_lossy(&approval.stdout).contains("Approval saved"));
-    let approval_output = String::from_utf8_lossy(&approval.stdout);
-    assert!(approval_output.contains("Required by package `acme.direct`"));
-    assert!(approval_output.contains("Required by package `acme.nested`"));
-    assert!(approval_output.contains("environment.read: APPROVAL_DIRECT_PACKAGE_VALUE"));
-    assert!(approval_output.contains("environment.read: APPROVAL_NESTED_PACKAGE_VALUE"));
-    assert!(approval_output.contains("Project and dependency fingerprint:"));
-    let security_directory = approval_security_directory(&home);
-    let approved_token = zirk_cli::approvals::verified_token_in(&project, &security_directory)
-        .unwrap()
-        .expect("the launcher should accept the persisted signed approval");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            std::fs::metadata(&security_directory)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(security_directory.join("permissions.key"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
-    }
+        .output()
+        .expect("inspect the capability tree");
+    assert!(inspection.status.success());
+    let inspection = String::from_utf8_lossy(&inspection.stdout);
+    assert!(inspection.contains("Direct requires:\n  environment.read"));
+    assert!(inspection.contains(
+        "`requires` declares possible operations; saved consent contains exact resources."
+    ));
 
-    let mut run_command = Command::new(compiler());
-    run_command
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env_clear()
         .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
         .env("PATH", &toolchain_path)
-        .env("APPROVAL_FIXTURE_VALUE", "approved")
-        .env("APPROVAL_NESTED_PACKAGE_VALUE", "nested-package-approved")
-        .env("APPROVAL_FIXTURE_INT", "42")
-        .env("APPROVAL_FIXTURE_BAD_INT", "not-an-integer")
-        .env("APPROVAL_FIXTURE_FLOAT", "3.5")
-        .env("APPROVAL_FIXTURE_BAD_FLOAT", "not-a-float")
-        .env("APPROVAL_FIXTURE_PORT", "custom-port")
-        .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
-        .env("APPROVAL_FIXTURE_SECRET", "secret-value")
-        .env("APPROVAL_FIXTURE_INVALID_UTF8", {
-            #[cfg(unix)]
-            {
-                use std::os::unix::ffi::OsStringExt;
-                std::ffi::OsString::from_vec(vec![0xff])
-            }
-            #[cfg(not(unix))]
-            {
-                std::ffi::OsString::from("valid-on-this-platform")
-            }
-        });
-    preserve_native_toolchain_environment(&mut run_command);
-    let run = run_command.output().expect("run with signed approval");
+        .env("APPROVAL_FIXTURE_VALUE", "must-not-be-read")
+        .output()
+        .expect("run without an interactive terminal or saved consent");
     assert!(
         run.status.success(),
-        "{}",
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        if cfg!(unix) {
-            "approved\nnested-package-approved\napproved\napproved\nfallback denied\nMissing\n42\nParse\nMissing\nnull denied\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nInvalidEncoding\nInvalidEncoding\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
-        } else {
-            "approved\nnested-package-approved\napproved\napproved\nfallback denied\nMissing\n42\nParse\nMissing\nnull denied\ntrue\nfalse\ntrue\nAPPROVAL_FIXTURE_BAD_FLOAT\nAPPROVAL_FIXTURE_BAD_INT\nMissing\nMissing\n42\nParse\nvalid-on-this-platform\ntrue\n42\nParse\ncustom-port\nParse\n3.5\nParse\n<redacted>\n<redacted>\nsecret=<redacted>\n"
-        },
-        "stderr: {}",
+        "denied\ndenied again\ncontinued\n"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("attempted but denied environment.read for APPROVAL_FIXTURE_VALUE"),
+        "missing denied-operation warning: {stderr}"
+    );
+    assert!(
+        stderr.contains("(requested by approval.fixture (application))"),
+        "requester should be the active application call site: {stderr}"
+    );
+    assert_eq!(
+        stderr
+            .matches("attempted but denied environment.read")
+            .count(),
+        1
+    );
+    assert!(!stderr.contains("must-not-be-read"));
+    assert_eq!(
+        std::fs::read_to_string(project.join(".zkinit")).unwrap(),
+        manifest
+    );
+    assert!(!approval_security_directory(&home).exists());
+
+    let blanket = TestCommand::new(compiler())
+        .args(["permissions", "approve", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("reject the removed blanket approval command");
+    assert!(!blanket.status.success());
+    assert!(
+        String::from_utf8_lossy(&blanket.stderr)
+            .contains("blanket permission approval was removed")
+    );
+}
+
+#[test]
+fn protected_operation_prompt_uses_the_active_dependency_identity_and_path() {
+    let project = workspace("permission_dependency_requester");
+    let home = workspace("permission_dependency_requester_home");
+    let toolchain_path = std::env::var_os("PATH").expect("test toolchain PATH");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("vendor/permissions/src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"permission.consumer\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.permissions: { from: \"path:vendor/permissions\"; version: \"^1.0\"; } }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        "import { read_secret } from acme.permissions;\nread_secret();\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("vendor/permissions/.zkinit"),
+        "project { name: \"acme.permissions\"; version: \"1.0.0\"; type: package; root: \"src/package.zrk\"; }\nrequires { environment.read; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("vendor/permissions/src/package.zrk"),
+        "package acme.permissions;\nimport { Env } from std.environment;\nshare fn read_secret(): Void { mut value = Env.get(\"DEPENDENCY_ONLY_VALUE\"); _ = value; }\n",
+    )
+    .unwrap();
+
+    let install = TestCommand::new(compiler())
+        .arg("install")
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("lock local permission dependency");
+    assert!(
+        install.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&install.stdout),
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    let run = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &toolchain_path)
+        .env("DEPENDENCY_ONLY_VALUE", "must-not-be-read")
+        .output()
+        .expect("run without consent to the dependency operation");
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
     let stderr = String::from_utf8_lossy(&run.stderr);
-    assert_eq!(normalize(&stderr), "failure: <redacted>\n");
     assert!(
-        !stderr.contains("secret-value"),
-        "secret leaked through Throwable.message(): {stderr}"
+        stderr.contains("requested by acme.permissions 1.0.0 [sha256:")
+            && stderr.contains("via permission.consumer -> acme.permissions"),
+        "dependency identity and active dependency path are missing: {stderr}"
     );
-
-    let mut uncaught_command = Command::new(compiler());
-    uncaught_command
-        .args(["run", "."])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path)
-        .env("APPROVAL_FIXTURE_VALUE", "approved")
-        .env("APPROVAL_FIXTURE_INT", "42")
-        .env("APPROVAL_FIXTURE_BAD_INT", "not-an-integer")
-        .env("APPROVAL_FIXTURE_FLOAT", "3.5")
-        .env("APPROVAL_FIXTURE_BAD_FLOAT", "not-a-float")
-        .env("APPROVAL_FIXTURE_PORT", "custom-port")
-        .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
-        .env("APPROVAL_FIXTURE_SECRET", "secret-value")
-        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes");
-    preserve_native_toolchain_environment(&mut uncaught_command);
-    let uncaught = uncaught_command
-        .output()
-        .expect("run with an uncaught secret-bearing throwable");
+    assert!(!stderr.contains("requested by permission.consumer (application)"));
+    assert!(!stderr.contains("must-not-be-read"));
     assert!(
-        !uncaught.status.success(),
-        "the fixture must propagate the throwable"
-    );
-    let uncaught_stderr = String::from_utf8_lossy(&uncaught.stderr);
-    assert!(
-        uncaught_stderr.contains("failure: <redacted>"),
-        "{uncaught_stderr}"
-    );
-    assert!(
-        !uncaught_stderr.contains("secret-value"),
-        "secret leaked through unhandled exception reporting: {uncaught_stderr}"
-    );
-
-    let mut uncaught_json_command = Command::new(compiler());
-    uncaught_json_command
-        .args(["run", "--json", "."])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path)
-        .env("APPROVAL_FIXTURE_VALUE", "approved")
-        .env("APPROVAL_FIXTURE_INT", "42")
-        .env("APPROVAL_FIXTURE_BAD_INT", "not-an-integer")
-        .env("APPROVAL_FIXTURE_FLOAT", "3.5")
-        .env("APPROVAL_FIXTURE_BAD_FLOAT", "not-a-float")
-        .env("APPROVAL_FIXTURE_PORT", "custom-port")
-        .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
-        .env("APPROVAL_FIXTURE_SECRET", "secret-value")
-        .env("APPROVAL_FIXTURE_UNCAUGHT", "yes");
-    preserve_native_toolchain_environment(&mut uncaught_json_command);
-    let uncaught_json = uncaught_json_command
-        .output()
-        .expect("run with JSON diagnostics and an uncaught secret-bearing throwable");
-    assert!(
-        !uncaught_json.status.success(),
-        "the JSON fixture must propagate the throwable"
-    );
-    let json_stderr = String::from_utf8_lossy(&uncaught_json.stderr);
-    let mut stderr_lines = json_stderr.lines();
-    assert_eq!(
-        stderr_lines.next(),
-        Some("failure: <redacted>"),
-        "the program's own stderr output must remain unchanged: {json_stderr}"
-    );
-    let diagnostic_line = stderr_lines
-        .next()
-        .expect("the runtime must emit a structured diagnostic");
-    assert_eq!(stderr_lines.next(), None, "{json_stderr}");
-    let structured: serde_json::Value = serde_json::from_str(diagnostic_line)
-        .unwrap_or_else(|error| panic!("runtime diagnostic was not JSON: {error}: {json_stderr}"));
-    assert_eq!(structured.as_array().map(Vec::len), Some(1));
-    assert_eq!(structured[0]["code"], "E0601");
-    assert!(
-        !json_stderr.contains("secret-value"),
-        "secret leaked through structured runtime diagnostics: {}",
-        json_stderr
-    );
-
-    let manifest = std::fs::read_to_string(project.join(".zkinit")).unwrap();
-    std::fs::write(
-        project.join(".zkinit"),
-        manifest.replace("APPROVAL_FIXTURE_VALUE", "OTHER_APPROVAL_VALUE"),
-    )
-    .unwrap();
-    let mut stale_command = Command::new(compiler());
-    stale_command
-        .args(["run", "."])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path)
-        .env("APPROVAL_FIXTURE_VALUE", "must-not-leak")
-        .env("APPROVAL_FIXTURE_INT", "900")
-        .env("APPROVAL_FIXTURE_BAD_INT", "not-an-integer")
-        .env("APPROVAL_FIXTURE_FLOAT", "9.5")
-        .env("APPROVAL_FIXTURE_BAD_FLOAT", "not-a-float")
-        .env("APPROVAL_FIXTURE_PORT", "stale-port")
-        .env("APPROVAL_FIXTURE_BAD_PORT", "invalid")
-        .env("APPROVAL_FIXTURE_SECRET", "must-not-leak-secret")
-        .env(zirk_cli::approvals::RUNTIME_GRANT_ENV, approved_token);
-    preserve_native_toolchain_environment(&mut stale_command);
-    let stale = stale_command
-        .output()
-        .expect("run after requested scopes changed");
-    assert!(
-        stale.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stale.stderr)
-    );
-    assert_eq!(
-        normalize(&String::from_utf8_lossy(&stale.stdout)),
-        "denied\nPermissionDenied\npresent fallback denied\nrequire denied\nfallback denied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nnull denied\ncontains denied\ncontains denied\nlisting denied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nPermissionDenied\nsecret denied\n"
-    );
-    let mut revoke_command = Command::new(compiler());
-    revoke_command
-        .args(["permissions", "revoke", "."])
-        .current_dir(&project)
-        .env_clear()
-        .env("HOME", &home)
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
-        .env("PATH", &toolchain_path);
-    preserve_native_toolchain_environment(&mut revoke_command);
-    let revoke = revoke_command
-        .output()
-        .expect("revoke the project approval");
-    assert!(
-        revoke.status.success(),
-        "{}",
-        String::from_utf8_lossy(&revoke.stderr)
-    );
-    assert!(
-        zirk_cli::approvals::verified_token_in(&project, &security_directory)
+        !std::fs::read_to_string(project.join(".zkinit"))
             .unwrap()
-            .is_none()
+            .contains("requires { environment.read; }")
     );
+    assert!(!approval_security_directory(&home).exists());
 }
 
 #[test]
@@ -2324,7 +2241,6 @@ fn compiled_secret_http_sink_rejects_plaintext_before_connecting() {
     let source = r#"import { Env } from std.environment;
 import { HTTP, HTTPHeaders, HTTPMethod, URL } from std.http;
 import { stdout } from std.io;
-fn main(): Void {
     match Env.get_secret("SINK_TEST_SECRET") {
         Error(_) => stdout.println("secret denied");
         Ok(secret) => match URL.parse("ORIGIN/") {
@@ -2339,34 +2255,13 @@ fn main(): Void {
             }
         }
     }
-}"#
+"#
         .replace("ORIGIN", &origin);
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit secret and network permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -2451,8 +2346,7 @@ fn bundled_std_http_get_and_head_return_managed_responses_under_an_exact_grant()
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTP, HTTPError, HTTPStreamChunk, HTTPStreamResponse, URL }} from std.http;\n\
              import {{ stdout }} from std.io;\n\
@@ -2552,30 +2446,9 @@ fn bundled_std_http_get_and_head_return_managed_responses_under_an_exact_grant()
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -2657,7 +2530,7 @@ fn bundled_std_http_websocket_server_dispatches_approved_owner_task_session() {
     std::fs::write(project.join(".zkinit"), format!(
         "project \"std.http.websocket.server.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlisten: {{ addresses: [\"127.0.0.1:{}\"]; during: runtime; }}\n}}\n}}\n", address.port()
     )).unwrap();
-    std::fs::write(project.join("src/main.zrk"), format!(r#"
+    write_entry(project.join("src/main.zrk"), format!(r#"
 import {{ HTTPError, HTTPServer, HTTPWebSocket, HTTPWebSocketMessage }} from std.http;
 import {{ TCPListener }} from std.net::tcp;
 import {{ stdout }} from std.io;
@@ -2699,29 +2572,8 @@ fn main(): Void {{
     }}
 }}
 "#, address.port())).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -2801,32 +2653,11 @@ fn main(): Void {{
     std::fs::write(project.join(".zkinit"), format!(
         "project \"std.http.tls.websocket.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlisten: {{ addresses: [\"127.0.0.1:{port}\"]; during: runtime; }}\n}}\n}}\n"
     )).unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -2972,8 +2803,7 @@ fn bundled_std_http_websocket_client_exchanges_typed_messages_with_approved_orig
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
         r#"import {{ HTTPError, HTTPWebSocket, HTTPWebSocketMessage, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -3038,30 +2868,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("approve WebSocket origin access");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3189,8 +2998,7 @@ fn bundled_std_http2_websocket_client_uses_custom_trust_roots() {
         project.join(".zkinit"),
         format!("project \"std.http2.websocket.client.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nconnect: {{ origins: [\"https://127.0.0.1:{port}\"]; during: runtime; }}\n}}\n}}\n"),
     ).unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(r#"import {{ HTTPWebSocket, HTTPWebSocketMessage, URL }} from std.http;
 import {{ stdout }} from std.io;
 fn ignore(): Void {{ return; }}
@@ -3220,29 +3028,8 @@ fn main(): Void {{
     }}
 }}"#, root = bytes(root)),
     ).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3267,10 +3054,10 @@ fn bundled_std_http3_server_api_uses_the_official_host_binding() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join(".zkinit"),
-        "project \"std.http.http3.server.api.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+        "project { name: \"std.http.http3.server.api.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { network.udp.listen; }\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         r#"import { HTTPServer, HTTPRequest, HTTPResponse } from std.http;
 import { stdout } from std.io;
@@ -3292,7 +3079,7 @@ fn main(): Void {
     )
     .unwrap();
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .output()
@@ -3320,7 +3107,7 @@ fn bundled_http_server_control_is_shareable_idempotent_and_options_are_validated
         "project \"http.server.control.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nenvironment {\nread: { names: [\"HTTP_CONTROL_FIXTURE\"]; during: runtime; }\n}\n}\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         r#"import { HTTPServerControl, HTTPServerOptions } from std.http;
 import { stdout } from std.io;
@@ -3350,30 +3137,9 @@ fn main(): Void {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3410,8 +3176,7 @@ fn bundled_tcp_http_server_shutdown_honors_control_and_closes_resource() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPRequest, HTTPResponse, HTTPServer, HTTPServerControl, HTTPServerOptions }} from std.http;
 import {{ TCPListener }} from std.net::tcp;
@@ -3454,29 +3219,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3501,10 +3245,10 @@ fn bundled_std_http3_websocket_server_fails_closed_without_runtime_feature() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join(".zkinit"),
-        "project \"std.http.http3.websocket.server.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+        "project { name: \"std.http.http3.websocket.server.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { network.udp.listen; }\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         r#"import { HTTPError, HTTPServer, HTTPWebSocket } from std.http;
 import { stdout } from std.io;
@@ -3525,7 +3269,7 @@ fn main(): Void {
     )
     .unwrap();
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .output()
@@ -3552,7 +3296,7 @@ fn bundled_std_http3_websocket_fails_closed_without_http3_runtime_feature() {
         "project \"std.http.http3.websocket.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nnetwork {\nconnect: { origins: [\"https://127.0.0.1:443\"]; during: runtime; }\n}\n}\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         r#"import { HTTPWebSocket, URL } from std.http;
 import { stdout } from std.io;
@@ -3579,30 +3323,9 @@ fn main(): Void {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3662,38 +3385,16 @@ fn bundled_std_http1_client_interoperates_with_independent_hyper_peer() {
         format!("project \"std.http1.hyper.peer.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nconnect: {{ origins: [\"{origin}\"]; during: runtime; }}\n}}\n}}\n"),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTP, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"{origin}/interop\") {{\nError(_) => stdout.println(\"URL parse failed\");\nOk(url) => match HTTP.get(url) {{\nError(error) => stdout.println(error.to_string());\nOk(response) => {{ stdout.println(response.status_code()); stdout.println(response.protocol().to_string()); match response.text() {{ Ok(body) => stdout.println(body); Error(error) => stdout.println(error.to_string()); }} }}\n}}\n}}\n}}"
         ),
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP/1.1 peer approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -3863,8 +3564,7 @@ fn bundled_std_http_client_reuses_connection_and_scopes_cookie_jar() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTPClient, HTTPClientOptions, HTTPError, HTTPMethod, HTTPBody, HTTPHeaders, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn client_with_options(): Result<HTTPClient, HTTPError> {{ return match HTTPClientOptions.create(connect_timeout_ms: 5000, response_headers_timeout_ms: 30000, response_idle_timeout_ms: 30000, max_origins: 2) {{ Ok(options) => {{ stdout.println(options.connect_timeout_ms()); stdout.println(options.response_headers_timeout_ms()); stdout.println(options.response_idle_timeout_ms()); stdout.println(options.max_origins()); HTTPClient.create_with_options(options); }} Error(error) => Error<HTTPClient, HTTPError>(error); }}; }}\nfn main(): Void {{\nmatch URL.parse(\"http://127.0.0.1:{}/client\") {{\nOk(url) => {{ match HTTPClient.create(0) {{ Ok(_) => stdout.println(\"invalid client bounds accepted\"); Error(_) => stdout.println(\"invalid client bounds rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid connect timeout accepted\"); Error(_) => stdout.println(\"invalid connect timeout rejected\"); }} match HTTPClientOptions.create(response_headers_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid headers timeout accepted\"); Error(_) => stdout.println(\"invalid headers timeout rejected\"); }} match HTTPClientOptions.create(response_idle_timeout_ms: 0) {{ Ok(_) => stdout.println(\"invalid idle timeout accepted\"); Error(_) => stdout.println(\"invalid idle timeout rejected\"); }} match HTTPClientOptions.create(connect_timeout_ms: 3600001) {{ Ok(_) => stdout.println(\"oversized timeout accepted\"); Error(_) => stdout.println(\"oversized timeout rejected\"); }} match HTTPClientOptions.create(max_origins: 33) {{ Ok(_) => stdout.println(\"oversized pool accepted\"); Error(_) => stdout.println(\"oversized pool rejected\"); }} match client_with_options() {{\nOk(client) => {{\nmatch client.enable_cookies() {{ Ok(_) => stdout.println(\"cookies enabled\"); Error(_) => stdout.println(\"cookie setup failed\"); }}\nmatch client.clear_cookies() {{ Ok(_) => stdout.println(\"cookies cleared\"); Error(_) => stdout.println(\"cookie clear failed\"); }}\ninmut empty: Array<Byte> = [];\nmatch client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{ Ok(first) => stdout.println(first.status_code()); Error(_) => stdout.println(\"first request failed\"); }}\nmatch client.get_following(url, 20) {{ Ok(redirected) => stdout.println(redirected.status_code()); Error(_) => stdout.println(0); }}\nmatch client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"not-json\")) {{ Error(error) => match error {{ HTTPError.InvalidJson => stdout.println(\"invalid client JSON rejected\"); _ => stdout.println(\"invalid client JSON accepted\"); }}; Ok(_) => stdout.println(\"invalid client JSON accepted\"); }} match client.request_body(HTTPMethod.Post, url, HTTPBody.Json(\"true\")) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut stream_headers = HTTPHeaders.create(); _ = stream_headers.add(\"content-type\", \"application/query+json\"); match client.request_body(HTTPMethod.Query, url, HTTPBody.Stream(stream_headers, (index: UInt64): Array<Byte> => match index as Int32 {{ 0 => [115 as Byte, 116 as Byte, 114 as Byte, 101 as Byte, 97 as Byte, 109 as Byte, 101 as Byte, 100 as Byte, 45 as Byte]; 1 => [99 as Byte, 108 as Byte, 105 as Byte, 101 as Byte, 110 as Byte, 116 as Byte, 45 as Byte, 98 as Byte, 111 as Byte, 100 as Byte, 121 as Byte]; _ => {{ mut stream_done: Array<Byte> = Array(0); stream_done; }}; }})) {{ Ok(extension) => stdout.println(extension.status_code()); Error(_) => stdout.println(\"stream request failed\"); }}\nmatch URL.resolve(url, \"duplicate-location\") {{ Ok(target) => match client.get_following(target, 1) {{ Ok(_) => stdout.println(\"ambiguous reusable redirect followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"duplicate reusable URL failed\"); }}\nmatch URL.resolve(url, \"external\") {{ Ok(external) => match client.get_following(external, 1) {{ Ok(_) => stdout.println(\"external client redirect allowed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"external client URL failed\"); }}\nmatch client.close() {{ Ok(_) => stdout.println(\"client closed\"); Error(_) => stdout.println(\"client close failed\"); }} match client.close() {{ Ok(_) => stdout.println(\"client close idempotent\"); Error(_) => stdout.println(\"second client close failed\"); }}\n}}\nError(_) => stdout.println(\"client creation failed\");\n}} }}\nError(_) => stdout.println(\"invalid URL\");\n}}\n}}",
             address.port()
@@ -3872,30 +3572,9 @@ fn bundled_std_http_client_reuses_connection_and_scopes_cookie_jar() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP client permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4076,8 +3755,7 @@ fn reusable_client_redirect_policy_preserves_method_and_strips_cross_origin_cred
             first_address.port(), second_address.port()
         ),
     ).unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPBody, HTTPRedirectPolicy, HTTPRedirectResult, HTTPResponse, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4112,30 +3790,9 @@ fn main(): Void {{
         ),
     ).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start redirect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4247,8 +3904,7 @@ fn reusable_client_preserves_body_variants_for_method_preserving_redirects() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPBody, HTTPClient, HTTPFormData, HTTPMethod, HTTPMultipartBuilder, HTTPRedirectPolicy, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4290,30 +3946,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start JSON redirect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4418,8 +4053,7 @@ fn reusable_client_307_restarts_deterministic_stream_from_zero() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPBody, HTTPClient, HTTPHeaders, HTTPMethod, HTTPRedirectPolicy, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4451,30 +4085,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start stream redirect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4560,8 +4173,7 @@ fn reusable_client_303_preserves_head_and_discards_request_body() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPBody, HTTPClient, HTTPMethod, HTTPRedirectPolicy, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4586,30 +4198,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start HEAD redirect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4681,8 +4272,7 @@ fn reusable_client_rejects_ambiguous_redirect_location_without_following() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPBody, HTTPClient, HTTPMethod, HTTPRedirectPolicy, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4707,30 +4297,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start duplicate Location permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4803,8 +4372,7 @@ fn reusable_client_same_origin_policy_returns_cross_origin_redirect() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPBody, HTTPClient, HTTPMethod, HTTPRedirectPolicy, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -4830,30 +4398,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start SameOrigin redirect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4908,38 +4455,16 @@ fn http_client_options_enforce_response_header_timeout() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTPClient, HTTPClientOptions, HTTPMethod, HTTPHeaders, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"{origin}/slow-headers\") {{\nError(_) => stdout.println(\"URL error\");\nOk(url) => match HTTPClientOptions.create(connect_timeout_ms: 1000, response_headers_timeout_ms: 25, response_idle_timeout_ms: 1000) {{\nError(_) => stdout.println(\"options error\");\nOk(options) => match HTTPClient.create_with_options(options) {{\nError(_) => stdout.println(\"client error\");\nOk(client) => {{ mut empty: Array<Byte> = []; match client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{ Error(error) => stdout.println(error.to_string()); Ok(_) => stdout.println(\"late response accepted\"); }} _ = client.close(); stdout.println(\"closed\"); }}\n}}\n}}\n}}\n}}"
         ),
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP client permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -4999,38 +4524,16 @@ fn http_client_options_enforce_tls_connect_timeout() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTPClient, HTTPClientOptions, HTTPMethod, HTTPHeaders, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"{origin}/stalled-tls\") {{\nError(_) => stdout.println(\"URL error\");\nOk(url) => match HTTPClientOptions.create(connect_timeout_ms: 100, response_headers_timeout_ms: 1000, response_idle_timeout_ms: 1000) {{\nError(_) => stdout.println(\"options error\");\nOk(options) => match HTTPClient.create_with_options(options) {{\nError(_) => stdout.println(\"client error\");\nOk(client) => {{ mut empty: Array<Byte> = []; match client.request(HTTPMethod.Get, url, empty, HTTPHeaders.create()) {{ Error(error) => stdout.println(error.to_string()); Ok(_) => stdout.println(\"stalled TLS response accepted\"); }} _ = client.close(); stdout.println(\"closed\"); }}\n}}\n}}\n}}\n}}"
         ),
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTPS permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -5089,8 +4592,7 @@ fn shared_http_client_serializes_requests_across_concurrent_tasks() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPResponse, HTTPError, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -5126,30 +4628,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("approve shared HTTP client access");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -5225,8 +4706,7 @@ fn cancelled_shared_http_client_close_can_be_retried() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -5262,30 +4742,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("approve HTTP client close cancellation fixture");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -5412,8 +4871,7 @@ fn reusable_http_client_retries_safe_requests_and_rejects_unsafe_retry_policy() 
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPClient, HTTPHeaders, HTTPMethod, HTTPBody, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -5461,30 +4919,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit retry permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -5604,32 +5041,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTPS client approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -5823,30 +5239,9 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP/2 client permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    write_entry(project.join("src/main.zrk"), source).unwrap();
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -6001,38 +5396,16 @@ fn bundled_std_http_explicit_cache_reuses_get_and_revalidates_query() {
             address.port()
         ),
     ).unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTP, HTTPHeaders, HTTPMethod, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"http://127.0.0.1:{}/\") {{\nOk(url) => {{\nmatch HTTP.get_cached(url) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmatch HTTP.get_cached(url) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut headers = HTTPHeaders.create(); _ = headers.add(\"content-type\", \"application/query+json\"); _ = headers.add(\"content-language\", \"en\");\nmut payload: Array<Byte> = [123 as Byte, 125 as Byte];\nmatch HTTP.request_cached(HTTPMethod.Query, url, payload, headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut french_headers = HTTPHeaders.create(); _ = french_headers.add(\"content-type\", \"application/query+json\"); _ = french_headers.add(\"content-language\", \"fr\");\nmatch HTTP.request_cached(HTTPMethod.Query, url, payload, french_headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut other_query: Array<Byte> = [123 as Byte, 34 as Byte, 120 as Byte, 34 as Byte, 58 as Byte, 49 as Byte, 125 as Byte];\nmut other_query_headers = HTTPHeaders.create(); _ = other_query_headers.add(\"content-type\", \"application/query+json\");\nmatch HTTP.request_cached(HTTPMethod.Query, url, other_query, other_query_headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut validate_headers = HTTPHeaders.create(); _ = validate_headers.add(\"content-type\", \"application/query+json\"); _ = validate_headers.add(\"content-language\", \"en\"); _ = validate_headers.add(\"cache-control\", \"no-cache\");\nmatch HTTP.request_cached(HTTPMethod.Query, url, payload, validate_headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\n\nmut write_bytes: Array<Byte> = [119 as Byte, 114 as Byte, 105 as Byte, 116 as Byte, 101 as Byte];\nmatch HTTP.request(HTTPMethod.Post, url, write_bytes, HTTPHeaders.create()) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmatch HTTP.get_cached(url) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut upload_headers = HTTPHeaders.create(); _ = upload_headers.add(\"content-type\", \"application/octet-stream\");\nmatch HTTP.post_stream(url, upload_headers, (index: UInt64): Array<Byte> => match index as Int32 {{ 0 => [115 as Byte, 116 as Byte, 114 as Byte, 101 as Byte, 97 as Byte, 109 as Byte]; _ => {{ mut empty: Array<Byte> = Array(0); empty; }}; }}) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmatch HTTP.get_cached(url) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\nmut offline_body: Array<Byte> = [];\nmut offline_headers = HTTPHeaders.create(); _ = offline_headers.add(\"cache-control\", \"only-if-cached\");\nmatch URL.resolve(url, \"offline-only\") {{ Ok(offline_url) => match HTTP.request_cached(HTTPMethod.Get, offline_url, offline_body, offline_headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"offline URL failed\"); }}\n}}\nError(_) => stdout.println(\"invalid URL\");\n}}\n}}",
             address.port()
         ),
     ).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -6059,14 +5432,14 @@ fn bundled_std_http_get_fails_closed_without_a_network_approval() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join(".zkinit"),
-        "project \"std.http.denied.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+        "project { name: \"std.http.denied.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nsource \"src\";\nrequires { network.connect; network.listen; }\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         "import { HTTP, HTTPServer, URL } from std.http;\n\
          import { stdout } from std.io;\n\
-         fn main(): Void {\n\
+         \n\
              match URL.parse(\"ftp://127.0.0.1/\") {\n\
                  Ok(_) => stdout.println(\"unexpected URL success\");\n\
                  Error(_) => stdout.println(\"invalid URL\");\n\
@@ -6082,11 +5455,11 @@ fn bundled_std_http_get_fails_closed_without_a_network_approval() {
                  Ok(_) => stdout.println(\"unexpected listen success\");\n\
                  Error(error) => stdout.println(error.to_string());\n\
              }\n\
-         }",
+         ",
     )
     .unwrap();
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -6316,8 +5689,7 @@ fn bundled_std_http_query_and_text_post_use_exact_grant_and_media_contracts() {
             address.port()
         ),
     ).unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTP, HTTPBody, HTTPHeaders, HTTPMethod, URL }} from std.http;\nimport {{ stdout }} from std.io;\nfn main(): Void {{\nmatch URL.parse(\"http://127.0.0.1:{}\") {{\nOk(url) => {{\nmatch URL.resolve(url, \"redirect\") {{ Ok(start) => match HTTP.get_following(start) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"same-origin redirect failed\"); }} Error(_) => stdout.println(\"redirect URL resolve failed\"); }}\nmatch URL.resolve(url, \"external\") {{ Ok(start) => match HTTP.get_following(start, 1) {{ Ok(_) => stdout.println(\"external redirect unexpectedly allowed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"external URL resolve failed\"); }}\nmatch URL.resolve(url, \"query-external\") {{ Ok(start) => match HTTP.query_following(start, \"true\", 1) {{ Ok(_) => stdout.println(\"external QUERY redirect unexpectedly allowed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"external QUERY URL resolve failed\"); }}\nmatch URL.resolve(url, \"multiple-location\") {{ Ok(start) => match HTTP.get_following(start, 1) {{ Ok(_) => stdout.println(\"ambiguous GET redirect followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"multiple Location URL resolve failed\"); }}\nmatch URL.resolve(url, \"query-multiple-location\") {{ Ok(start) => match HTTP.query_following(start, \"true\", 1) {{ Ok(_) => stdout.println(\"ambiguous QUERY redirect followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"multiple QUERY Location URL resolve failed\"); }}\nmatch URL.resolve(url, \"missing-location\") {{ Ok(start) => match HTTP.get_following(start, 1) {{ Ok(_) => stdout.println(\"GET redirect without Location followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"missing Location URL resolve failed\"); }}\nmatch URL.resolve(url, \"query-missing-location\") {{ Ok(start) => match HTTP.query_following(start, \"true\", 1) {{ Ok(_) => stdout.println(\"QUERY redirect without Location followed\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"missing QUERY Location URL resolve failed\"); }}\nmatch URL.resolve(url, \"loop\") {{ Ok(start) => match HTTP.get_following(start, 1) {{ Ok(_) => stdout.println(\"redirect limit ignored\"); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"loop URL resolve failed\"); }}\nmatch HTTP.get_following(url, 21) {{ Ok(_) => stdout.println(\"redirect bound ignored\"); Error(error) => stdout.println(error.to_string()); }}\nmatch HTTP.query_following(url, \"true\", 21) {{ Ok(_) => stdout.println(\"QUERY redirect bound ignored\"); Error(error) => stdout.println(error.to_string()); }}\nmatch HTTP.query_with_content_type(url, \"x\", \"invalid media type\") {{ Ok(_) => stdout.println(\"invalid media type accepted\"); Error(_) => stdout.println(\"invalid query media rejected\"); }}\nmatch URL.resolve(url, \"indirect\") {{ Ok(query_url) => match HTTP.query_following(query_url, \"true\") {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"indirect QUERY result failed\"); }} Error(_) => stdout.println(\"query URL resolve failed\"); }}\nmatch URL.resolve(url, \"preserve-301\") {{ Ok(query_url) => match HTTP.query_following_with_content_type(query_url, \"true\", \"application/json\", 1) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"301 QUERY redirect did not preserve content\"); }} Error(_) => stdout.println(\"301 QUERY URL resolve failed\"); }}\nmatch URL.resolve(url, \"preserve-302\") {{ Ok(query_url) => match HTTP.query_following_with_content_type(query_url, \"true\", \"application/json\", 1) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"302 QUERY redirect did not preserve content\"); }} Error(_) => stdout.println(\"302 QUERY URL resolve failed\"); }}\nmatch URL.resolve(url, \"preserve\") {{ Ok(query_url) => match HTTP.query_following_with_content_type(query_url, \"true\", \"application/json\", 1) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"QUERY redirect did not preserve content\"); }} Error(_) => stdout.println(\"preserved QUERY URL resolve failed\"); }}\nmatch URL.resolve(url, \"preserve-308\") {{ Ok(query_url) => match HTTP.query_following_with_content_type(query_url, \"true\", \"application/json\", 1) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"308 QUERY redirect did not preserve content\"); }} Error(_) => stdout.println(\"308 QUERY URL resolve failed\"); }}\nmatch HTTP.query_with_content_type(url, \"select 1\", \"application/sql\") {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"typed query failed\"); }}\nmatch HTTP.post(url, \"hello\") {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"post failed\"); }}\nmatch HTTP.post_body(url, HTTPBody.Text(\"body-api\")) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"body variant post failed\"); }}\nmatch HTTP.request_body(HTTPMethod.Put, url, HTTPBody.Text(\"generic-body\")) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }}\ninmut payload: Array<Byte> = [0, 255, 65];\nmatch HTTP.post_body(url, HTTPBody.Bytes(payload)) {{ Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"byte post failed\"); }}\nmatch URL.resolve(url, \"custom\") {{ Ok(target) => {{ mut headers = HTTPHeaders.create(); _ = headers.add(\"x-request\", \"generic\"); mut bytes: Array<Byte> = [112 as Byte, 97 as Byte, 116 as Byte, 99 as Byte, 104 as Byte, 45 as Byte, 98 as Byte, 111 as Byte, 100 as Byte, 121 as Byte]; match HTTP.request(HTTPMethod.Patch, target, bytes, headers) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }} }} Error(_) => stdout.println(\"custom URL resolve failed\"); }}\ninmut empty_body: Array<Byte> = [];\nmatch HTTP.request_named(\"bad method\", url, empty_body, HTTPHeaders.create()) {{ Ok(_) => stdout.println(\"invalid extension method accepted\"); Error(_) => stdout.println(\"invalid extension method rejected\"); }}\nmatch URL.resolve(url, \"extension\") {{ Ok(target) => match HTTP.request_named(\"M-SEARCH\", target, empty_body, HTTPHeaders.create()) {{ Ok(response) => stdout.println(response.status_code()); Error(error) => stdout.println(error.to_string()); }} Error(_) => stdout.println(\"extension URL resolve failed\"); }}\n}}\nError(_) => stdout.println(\"invalid URL\");\n}}\n}}",
 
@@ -6325,29 +5697,8 @@ fn bundled_std_http_query_and_text_post_use_exact_grant_and_media_contracts() {
         ),
     ).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP QUERY approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -6649,32 +6000,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TLS connect permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -6812,32 +6142,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TCP and TLS permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7004,31 +6313,10 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit mTLS network permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7171,32 +6459,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TLS identity approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7277,32 +6544,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TLS listen permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7464,31 +6710,10 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit mTLS listener permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let mut child = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7635,8 +6860,7 @@ fn bundled_http1_server_interoperates_with_independent_hyper_peer() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPError, HTTPMethod, HTTPNext, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer }} from std.http;
 import {{ stdout }} from std.io;
@@ -7660,30 +6884,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP/1.1 listen approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let child = Command::new(compiler())
+    let child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7769,8 +6972,7 @@ fn bundled_http_server_contains_handler_throwable_and_continues_finite_scope() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPError, HTTPMethod, HTTPNext, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer }} from std.http;
 import {{ stdout }} from std.io;
@@ -7820,30 +7022,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP listen approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let child = Command::new(compiler())
+    let child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -7975,32 +7156,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTPS listen permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8118,8 +7278,7 @@ fn serve(endpoint: String): Void {{
         Ok(listener) => {{ _ = HTTPServer.serve_forever(listener, respond); }}
     }}
 }}
-fn main(): Void {{
-    inmut server_job = spawn serve("tcp://127.0.0.1:{port}");
+fn exercise_and_cancel(server_job: Job<Void>): Boolean {{
     Timer.sleep(100ms);
     match URL.parse("http://127.0.0.1:{port}/") {{
         Error(_) => stdout.println("URL invalid");
@@ -8135,6 +7294,14 @@ fn main(): Void {{
         }}
     }}
     server_job.cancel();
+    return true;
+}}
+fn main(): Void {{
+    concurrent {{
+        inmut server_job = spawn serve("tcp://127.0.0.1:{port}");
+        inmut exercised: Boolean = exercise_and_cancel(server_job);
+        _ = server_job;
+    }}
     stdout.println("server job cancelled");
 }}
 "#,
@@ -8152,30 +7319,9 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    write_entry(project.join("src/main.zrk"), source).unwrap();
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8227,10 +7373,17 @@ fn serve(endpoint: String): Void {{
         }}
     }}
 }}
-fn main(): Void {{
-    inmut server_job = spawn serve("tcp://127.0.0.1:{port}");
+fn cancel_server(server_job: Job<Void>): Boolean {{
     Timer.sleep(1000ms);
     server_job.cancel();
+    return true;
+}}
+fn main(): Void {{
+    concurrent {{
+        inmut server_job = spawn serve("tcp://127.0.0.1:{port}");
+        inmut cancelled: Boolean = cancel_server(server_job);
+        _ = server_job;
+    }}
     stdout.println("active server job cancelled");
 }}
 "#,
@@ -8247,31 +7400,10 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    write_entry(project.join("src/main.zrk"), source).unwrap();
+    seed_exact_test_consent(&project, &home);
 
-    let child = Command::new(compiler())
+    let child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8377,12 +7509,19 @@ fn serve(endpoint: String, certificate: Array<Byte>, key: Array<Byte>): Void {{
         }}
     }}
 }}
-fn main(): Void {{
-    inmut::strict certificate: Array<Byte> = [{certificate}];
-    inmut::strict key: Array<Byte> = [{private_key}];
-    inmut server_job = spawn serve("tcp://127.0.0.1:{port}", certificate, key);
+fn cancel_after_peer_disconnect(server_job: Job<Void>): Boolean {{
     while !server_job.done {{ Timer.sleep(10ms); }}
     server_job.cancel();
+    return true;
+}}
+fn main(): Void {{
+    concurrent {{
+        inmut::strict certificate: Array<Byte> = [{certificate}];
+        inmut::strict key: Array<Byte> = [{private_key}];
+        inmut server_job = spawn serve("tcp://127.0.0.1:{port}", certificate, key);
+        inmut finished: Boolean = cancel_after_peer_disconnect(server_job);
+        _ = server_job;
+    }}
 }}"#,
         port = address.port(),
         certificate = byte_literal(certificate),
@@ -8400,32 +7539,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("approve HTTP/2 TLS listener");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8591,12 +7709,7 @@ fn serve(endpoint: String, certificate: Array<Byte>, private_key: Array<Byte>): 
         }}
     }}
 }}
-fn main(): Void {{
-    inmut server_job = spawn serve(
-        "tcp://127.0.0.1:{port}",
-        [{certificate}],
-        [{private_key}],
-    );
+fn exercise_tls_and_cancel(server_job: Job<Void>): Boolean {{
     Timer.sleep(100ms);
     match URL.parse("https://127.0.0.1:{port}/") {{
         Error(_) => stdout.println("TLS URL invalid");
@@ -8607,6 +7720,18 @@ fn main(): Void {{
         }}
     }}
     server_job.cancel();
+    return true;
+}}
+fn main(): Void {{
+    concurrent {{
+        inmut server_job = spawn serve(
+            "tcp://127.0.0.1:{port}",
+            [{certificate}],
+            [{private_key}],
+        );
+        inmut exercised: Boolean = exercise_tls_and_cancel(server_job);
+        _ = server_job;
+    }}
     stdout.println("TLS server job cancelled");
 }}
 "#,
@@ -8627,30 +7752,9 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    write_entry(project.join("src/main.zrk"), source).unwrap();
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8744,32 +7848,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP/2 listen permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -8990,32 +8073,11 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    std::fs::write(project.join("src/main.zrk"), source).unwrap();
+    write_entry(project.join("src/main.zrk"), source).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut child = Command::new(compiler())
+    let mut child = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9203,8 +8265,7 @@ fn bundled_std_net_tls_client_uses_approved_origin_and_tls_handshake() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ TLSReadResult, TLSError, TLSResourceError, TLSStream }} from std.net::tls;\n\
              import {{ stdout }} from std.io;\n\
@@ -9222,30 +8283,9 @@ fn bundled_std_net_tls_client_uses_approved_origin_and_tls_handshake() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TLS permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9290,8 +8330,7 @@ fn bundled_std_net_tcp_stream_runs_an_approved_loopback_exchange() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ TCPStream }} from std.net::tcp;\n\
              import {{ stdout }} from std.io;\n\
@@ -9327,30 +8366,9 @@ fn bundled_std_net_tcp_stream_runs_an_approved_loopback_exchange() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TCP permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9394,7 +8412,7 @@ fn bundled_std_net_udp_socket_runs_an_approved_loopback_exchange() {
         ),
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         format!(
             "import {{ UDPDatagram, UDPSocket }} from std.net::udp;\n\
@@ -9428,30 +8446,9 @@ fn bundled_std_net_udp_socket_runs_an_approved_loopback_exchange() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit UDP permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9498,8 +8495,7 @@ fn bundled_std_net_udp_bound_socket_uses_separate_listen_and_send_grants() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ UDPSocket }} from std.net::udp;\n\
              import {{ stdout }} from std.io;\n\
@@ -9543,30 +8539,9 @@ fn bundled_std_net_udp_bound_socket_uses_separate_listen_and_send_grants() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit UDP bind and send permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut run = Command::new(compiler())
+    let mut run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9610,7 +8585,7 @@ fn bundled_std_net_dns_resolves_only_an_approved_origin() {
         "project \"std.net.dns.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nnetwork {\nconnect: { origins: [\"tcp://127.0.0.1:80\", \"tcp://localhost:80\"]; during: runtime; }\n}\n}\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         "import { DNS, DNSError } from std.net::dns;\n\
          import { stdout } from std.io;\n\
@@ -9627,30 +8602,9 @@ fn bundled_std_net_dns_resolves_only_an_approved_origin() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit DNS permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9681,13 +8635,11 @@ fn bundled_std_net_tcp_listener_accepts_only_with_listen_authority() {
     std::fs::write(
         project.join(".zkinit"),
         format!(
-            "project \"std.net.listener.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nlisten: {{ addresses: [\"127.0.0.1:{}\"]; during: runtime; }}\n}}\n}}\n",
-            address.port()
+            "project {{ name: \"std.net.listener.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }}\nrequires {{ network.listen; }}\n"
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ TCPListener }} from std.net::tcp;\n\
              import {{ stdout }} from std.io;\n\
@@ -9712,7 +8664,7 @@ fn bundled_std_net_tcp_listener_accepts_only_with_listen_authority() {
     )
     .unwrap();
 
-    let denied_run = Command::new(compiler())
+    let denied_run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9729,27 +8681,13 @@ fn bundled_std_net_tcp_listener_accepts_only_with_listen_authority() {
         "listen failed\nfinished\n"
     );
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit TCP listen approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        zirk_runtime_core::permission_grant::PermissionScopes {
+            network_listen: [format!("127.0.0.1:{}", address.port())].into(),
+            ..Default::default()
+        },
     );
 
     let address_for_client = address;
@@ -9771,7 +8709,7 @@ fn bundled_std_net_tcp_listener_accepts_only_with_listen_authority() {
         assert!(response.is_empty());
     });
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -9852,8 +8790,7 @@ fn bundled_http_server_sse_stream_emits_configured_heartbeats() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer }} from std.http;
 import {{ stdout }} from std.io;
@@ -9898,30 +8835,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("approve SSE listen access");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let mut server = Command::new(compiler())
+    let mut server = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -10018,8 +8934,7 @@ fn bundled_http_server_invokes_handler_on_accepted_stream() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ HTTPFormData, HTTPHeaders, HTTPMethod, HTTPNext, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer }} from std.http;\n\
              import {{ TCPListener }} from std.net::tcp;\n\
@@ -10073,28 +8988,7 @@ fn bundled_http_server_invokes_handler_on_accepted_stream() {
         ),
     )
     .unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP listen approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
     let client_address = address;
     let client = std::thread::spawn(move || {
         let mut stream = None;
@@ -10153,7 +9047,7 @@ fn bundled_http_server_invokes_handler_on_accepted_stream() {
         all_responses.extend_from_slice(&excessive_response);
         all_responses
     });
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -10234,8 +9128,7 @@ fn bundled_http_multipart_parser_preserves_binary_parts_and_untrusted_filename_m
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPError, HTTPMethod, HTTPMultipartData, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer, HTTPStreamChunk }} from std.http;
 import {{ stdout }} from std.io;
@@ -10306,30 +9199,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit multipart listener approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -10399,8 +9271,7 @@ fn bundled_http_server_routes_query_with_content_and_content_type() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
         r#"import {{ HTTPHeaders, HTTPMethod, HTTPRequest, HTTPResponse, HTTPRouteParameters, HTTPRouter, HTTPServer }} from std.http;
 import {{ stdout }} from std.io;
@@ -10438,28 +9309,7 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP QUERY listen approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
     let client_address = address;
     let client = std::thread::spawn(move || {
@@ -10518,7 +9368,7 @@ fn main(): Void {{
             response,
         )
     });
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -10679,17 +9529,17 @@ fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.math ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.math: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         dir.join("src/main.zrk"),
         "import { stdout } from std.io;\nimport { math } from acme.math;\nfn main(): Void { stdout.println(math.answer()); }",
     )
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.math\"\nkind package\n",
+        "project { name: \"acme.math\"; version: \"1.0.0\"; type: package; root: \"src/package.zrk\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -10706,11 +9556,25 @@ fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
     let hash = zirk_cli::project::package_integrity_hash(&dir.join("dep"), &manifest).unwrap();
     std::fs::write(
         dir.join("zirk.lock"),
-        format!("acme.math 1.0 local sha256:{hash} src/package.zrk\n"),
+        zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+            packages: [(
+                "acme.math".into(),
+                zirk_cli::project::LockedPackage {
+                    name: "acme.math".into(),
+                    version: manifest.version.clone(),
+                    source: "local".into(),
+                    locator: "path:dep".into(),
+                    revision: None,
+                    hash: format!("sha256:{hash}"),
+                    package_root: manifest.entry.to_string_lossy().into_owned(),
+                },
+            )]
+            .into(),
+        }),
     )
     .unwrap();
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&dir)
         .output()
@@ -10755,11 +9619,15 @@ fn two_files_may_import_from_each_other() {
         "modules_mutual",
         &[
             (
-                "a.zrk",
+                "main.zrk",
                 "import { stdout } from std.io;\n\
-                 import { b } from \"./b\";\n\
-                 share fn a(): String { return b(); }\n\
-                 fn main(): Void { stdout.println(a()); }\n",
+                 import { a } from \"./a\";\n\
+                 stdout.println(a());\n",
+            ),
+            (
+                "a.zrk",
+                "import { b } from \"./b\";\n\
+                 share fn a(): String { return b(); }\n",
             ),
             (
                 "b.zrk",
@@ -10938,9 +9806,9 @@ fn a_private_enum_is_not_reachable_from_another_file() {
 fn zirk_with_env(source_text: &str, name: &str, env: &[(&str, &str)]) -> Output {
     let dir = workspace(name);
     let file = dir.join("main.zrk");
-    std::fs::write(&file, source_text).expect("write the source fixture");
+    write_entry(&file, source_text).expect("write the source fixture");
 
-    let mut command = Command::new(compiler());
+    let mut command = TestCommand::new(compiler());
     command
         .arg("run")
         .arg(file.file_name().expect("file name"))
@@ -11589,7 +10457,7 @@ fn bundled_std_http_post_json_value_serializes_and_sends_json_media_type() {
         ),
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTP, HTTPBody, HTTPJsonSerializable, URL }} from std.http;
@@ -11630,30 +10498,9 @@ class JsonFlag implements HTTPJsonSerializable<JsonFlag> {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP POST JSON approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -11752,8 +10599,7 @@ fn bundled_http_form_builder_encodes_and_sends_a_bounded_request_body() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
         r#"import {{ HTTP, HTTPBody, HTTPError, HTTPFormData, HTTPMultipartBuilder, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -11801,30 +10647,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP form permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -11956,8 +10781,7 @@ fn bundled_http_sse_client_returns_typed_events_and_reconnect_metadata() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTPEventPoll, HTTPEventStream, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -12040,30 +10864,9 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit SSE network approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let output = Command::new(compiler())
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12164,8 +10967,7 @@ fn bundled_http_streaming_post_sends_bounded_chunks_with_backpressure() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTP, HTTPBody, HTTPHeaders, HTTPMethod, HTTPStreamProducerError, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -12230,29 +11032,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP upload permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12301,8 +11082,7 @@ fn http_stream_producer_errors_are_typed_and_abort_before_connecting() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTP, HTTPError, HTTPHeaders, HTTPMethod, HTTPStreamProducerError, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -12338,29 +11118,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit streaming producer permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12418,8 +11177,7 @@ fn buffered_http_response_can_transfer_its_one_shot_body_to_streaming_reader() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ HTTP, HTTPError, HTTPStreamChunk, URL }} from std.http;
 import {{ stdout }} from std.io;
@@ -12479,29 +11237,8 @@ fn main(): Void {{
         ),
     )
     .unwrap();
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit buffered response stream approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12565,7 +11302,7 @@ fn cancelling_structured_task_aborts_streaming_http_upload() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(project.join(".zkinit"), format!(
         "project \"http.stream.cancel.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {{\nnetwork {{\nconnect: {{ origins: [\"http://127.0.0.1:{}\"]; during: runtime; }}\n}}\n}}\n", address.port())).unwrap();
-    std::fs::write(project.join("src/main.zrk"), format!(r#"import {{ HTTP, HTTPError, HTTPHeaders, URL }} from std.http;
+    write_entry(project.join("src/main.zrk"), format!(r#"import {{ HTTP, HTTPError, HTTPHeaders, URL }} from std.http;
 import {{ stdout }} from std.io;
 fn upload(endpoint: String): Void {{
     mut headers = HTTPHeaders.create();
@@ -12580,36 +11317,22 @@ fn upload(endpoint: String): Void {{
         }}
     }}
 }}
-fn main(): Void {{
-    inmut request_job = spawn upload("http://127.0.0.1:{}/upload");
+fn cancel_upload(request_job: Job<Void>): Boolean {{
     Timer.sleep(500ms);
     request_job.cancel();
+    return true;
+}}
+fn main(): Void {{
+    concurrent {{
+        inmut request_job = spawn upload("http://127.0.0.1:{}/upload");
+        inmut cancelled: Boolean = cancel_upload(request_job);
+        _ = request_job;
+    }}
     stdout.println("upload task joined");
 }}"#, address.port())).unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let output = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let output = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12784,8 +11507,7 @@ fn bundled_std_http_authenticated_proxy_uses_environment_secret_only_for_proxy()
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ Env }} from std.environment;
 import {{ HTTPClient, HTTPProxy, HTTPMethod, HTTPHeaders, URL }} from std.http;
@@ -12826,29 +11548,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit HTTP proxy and secret approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -12941,8 +11642,7 @@ fn bundled_std_http_authenticated_https_proxy_uses_custom_trust_root() {
         .map(|byte| format!("{byte} as Byte"))
         .collect::<Vec<_>>()
         .join(", ");
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ Env }} from std.environment;
 import {{ HTTPClient, HTTPProxy, HTTPMethod, HTTPHeaders, URL }} from std.http;
@@ -12982,28 +11682,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}",
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13169,8 +11849,7 @@ fn bundled_http_client_uses_authenticated_proxy_for_custom_root_tunnel() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             r#"import {{ Env }} from std.environment;
 import {{ HTTPClient, HTTPClientOptions, HTTPHeaders, HTTPMethod, HTTPProxy, URL }} from std.http;
@@ -13231,29 +11910,8 @@ fn main(): Void {{
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start HTTPS proxy and destination grant approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
-    let run = Command::new(compiler())
+    seed_exact_test_consent(&project, &home);
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13284,8 +11942,7 @@ fn bundled_std_net_interfaces_returns_an_approved_typed_snapshot() {
         "project \"std.net.interfaces.fixture\"\nkind application\nentry \"src/main.zrk\"\npermissions {\nnetwork {\ninspect_interfaces: { enabled: true; during: runtime; }\n}\n}\n",
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         "import { NetworkInterfaces } from std.net::interfaces;\n\
          import { stdout } from std.io;\n\
          fn main(): Void {\n\
@@ -13305,30 +11962,9 @@ fn bundled_std_net_interfaces_returns_an_approved_typed_snapshot() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit interface inspection approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13359,10 +11995,10 @@ fn bundled_std_net_interfaces_denies_snapshot_without_authority() {
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join(".zkinit"),
-        "project \"std.net.interfaces.denied.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+        "project { name: \"std.net.interfaces.denied.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { network.inspect_interfaces; }\n",
     )
     .unwrap();
-    std::fs::write(
+    write_entry(
         project.join("src/main.zrk"),
         "import { NetworkInterfaces } from std.net::interfaces;\n\
          import { stdout } from std.io;\n\
@@ -13375,7 +12011,7 @@ fn bundled_std_net_interfaces_denies_snapshot_without_authority() {
     )
     .unwrap();
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13408,8 +12044,7 @@ fn bundled_std_net_local_streams_run_an_approved_unix_socket_exchange() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ LocalListener, LocalReadResult, LocalStaleEndpointPolicy, LocalStream }} from std.net::local;\n\
              import {{ stdout }} from std.io;\n\
@@ -13447,30 +12082,9 @@ fn bundled_std_net_local_streams_run_an_approved_unix_socket_exchange() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit local endpoint permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13503,8 +12117,7 @@ fn bundled_std_net_local_streams_run_an_approved_named_pipe_exchange() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ LocalListener, LocalReadResult, LocalStaleEndpointPolicy, LocalStream }} from std.net::local;\n\
              import {{ stdout }} from std.io;\n\
@@ -13542,30 +12155,9 @@ fn bundled_std_net_local_streams_run_an_approved_named_pipe_exchange() {
     )
     .unwrap();
 
-    let mut approval = Command::new(compiler())
-        .args(["permissions", "approve", "."])
-        .current_dir(&project)
-        .env("HOME", &home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start explicit named pipe permission approval");
-    approval
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"approve\n")
-        .unwrap();
-    let approval = approval.wait_with_output().unwrap();
-    assert!(
-        approval.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&approval.stdout),
-        String::from_utf8_lossy(&approval.stderr)
-    );
+    seed_exact_test_consent(&project, &home);
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)
@@ -13590,11 +12182,10 @@ fn bundled_std_net_local_listener_denies_missing_authority_before_path_creation(
     let endpoint = format!("unix://{}", socket.display());
     std::fs::write(
         project.join(".zkinit"),
-        "project \"std.net.local.denied.fixture\"\nkind application\nentry \"src/main.zrk\"\n",
+        "project { name: \"std.net.local.denied.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { network.local.listen; }\n",
     )
     .unwrap();
-    std::fs::write(
-        project.join("src/main.zrk"),
+    write_entry(project.join("src/main.zrk"),
         format!(
             "import {{ LocalListener, LocalStaleEndpointPolicy }} from std.net::local;\n\
              import {{ stdout }} from std.io;\n\
@@ -13608,7 +12199,7 @@ fn bundled_std_net_local_listener_denies_missing_authority_before_path_creation(
     )
     .unwrap();
 
-    let run = Command::new(compiler())
+    let run = TestCommand::new(compiler())
         .args(["run", "."])
         .current_dir(&project)
         .env("HOME", &home)

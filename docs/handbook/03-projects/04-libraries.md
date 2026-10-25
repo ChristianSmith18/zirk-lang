@@ -1,16 +1,35 @@
 # Package libraries
 
-A library is a package project (`kind package`) that publishes typed API and
-portable IR. Its `package` root and `share mod` declarations define the public
-surface; a consumer imports the logical package name, never its checkout path.
-It cannot declare application globals or grant itself final permissions.
-Instead it declares `requires` for build effects used by decorators; the
-consuming application grants them. Public decorator contracts include targets,
-configuration and ordering dependencies, while applications are erased after
-expansion.
+A library is a package project. Its `project.root` selects its importable public
+root (default `src/package.zrk`); it is not an application entry and is not
+executed as the application. Consumers import its stable logical name rather
+than the checkout or download path.
 
-Distributed `.zpkg` files also carry manifest, documentation, and license material.
+```text
+project {
+    name: "acme.http";
+    version: "2.1.0";
+    type: package;
+    authors: ["Acme Engineering"];
+    description: "HTTP client and server primitives.";
+    license: "Apache-2.0";
+    root: "src/package.zrk";
+}
+
+requires {
+    network.connect;
+}
+```
+
+A package can declare normal and development dependencies and its own
+capability requirements. It cannot declare application globals or grant
+consent. Transitive requirements retain their requester identity and dependency
+path in the consuming application's requirement tree.
+
+Distributed `.zpkg` publication and remote registry/Git acquisition remain
+separate package-manager delivery limits; see the
+[package status catalog](../../init/ZIRK_FEATURE_STATUS.md).
 
 ---
 
-**Previous:** [← Applications](03-applications.md) · **Next:** [ Entry Point](05-entry-point.md)
+**Previous:** [← Applications](03-applications.md) · **Next:** [Project entry](05-entry-point.md)

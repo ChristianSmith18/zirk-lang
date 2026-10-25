@@ -21,6 +21,18 @@ pub mod symbols {
     pub const GC_MUTEX_ACQUIRE: &str = "zirk_rt_gc_mutex_acquire";
     /// Releases the current participant's acquisition and writes status out.
     pub const GC_MUTEX_RELEASE: &str = "zirk_rt_gc_mutex_release";
+    /// Roots a long-lived managed object and returns its runtime root handle.
+    pub const GLOBAL_ROOT_ADD: &str = "zirk_rt_global_root_add";
+    /// Initializes revision/subscriber state for one project-global cell.
+    pub const GLOBAL_WATCH_RESET: &str = "zirk_rt_global_watch_reset";
+    /// Registers a typed event channel and returns token plus snapshot revision.
+    pub const GLOBAL_WATCH_SUBSCRIBE: &str = "zirk_rt_global_watch_subscribe";
+    /// Publishes a change to bounded subscribers while the global cell is locked.
+    pub const GLOBAL_WATCH_PUBLISH: &str = "zirk_rt_global_watch_publish";
+    /// Reads a queued change or terminal subscription status without blocking.
+    pub const GLOBAL_WATCH_NEXT: &str = "zirk_rt_global_watch_next";
+    /// Closes a subscription and releases its managed channel root.
+    pub const GLOBAL_WATCH_CLOSE: &str = "zirk_rt_global_watch_close";
     /// Runs a synchronous borrowed-payload callback and releases via RAII.
     pub const GC_MUTEX_WITH: &str = "zirk_rt_gc_mutex_with";
     pub const ATOMIC_MANAGED_NEW: &str = "zirk_rt_atomic_managed_new";
@@ -217,6 +229,11 @@ pub mod symbols {
     pub const ENVIRONMENT_GET: &str = "zirk_environment_get";
     /// `zirk_environment_get_secret(name, out)`.
     pub const ENVIRONMENT_GET_SECRET: &str = "zirk_environment_get_secret";
+    /// Sets the package identity used to attribute the immediately following
+    /// protected runtime operation.
+    pub const PERMISSION_REQUESTER_SET: &str = "zirk_rt_permission_requester_set";
+    /// Clears the package identity after the protected runtime operation.
+    pub const PERMISSION_REQUESTER_CLEAR: &str = "zirk_rt_permission_requester_clear";
     /// `zirk_environment_contains(name, out)`.
     pub const ENVIRONMENT_CONTAINS: &str = "zirk_environment_contains";
     /// `zirk_environment_list_names(out)`.
@@ -614,6 +631,12 @@ pub struct Runtime<'ctx> {
     pub gc_mutex_alloc: FunctionValue<'ctx>,
     pub gc_mutex_acquire: FunctionValue<'ctx>,
     pub gc_mutex_release: FunctionValue<'ctx>,
+    pub global_root_add: FunctionValue<'ctx>,
+    pub global_watch_reset: FunctionValue<'ctx>,
+    pub global_watch_subscribe: FunctionValue<'ctx>,
+    pub global_watch_publish: FunctionValue<'ctx>,
+    pub global_watch_next: FunctionValue<'ctx>,
+    pub global_watch_close: FunctionValue<'ctx>,
     pub gc_mutex_with: FunctionValue<'ctx>,
     pub atomic_managed_new: FunctionValue<'ctx>,
     pub atomic_managed_load: FunctionValue<'ctx>,
@@ -708,6 +731,8 @@ pub struct Runtime<'ctx> {
     pub io_stdin_read_exact: FunctionValue<'ctx>,
     pub environment_get: FunctionValue<'ctx>,
     pub environment_get_secret: FunctionValue<'ctx>,
+    pub permission_requester_set: FunctionValue<'ctx>,
+    pub permission_requester_clear: FunctionValue<'ctx>,
     pub environment_contains: FunctionValue<'ctx>,
     pub environment_list_names: FunctionValue<'ctx>,
     pub network_tcp_connect: FunctionValue<'ctx>,
@@ -1006,6 +1031,45 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let gc_mutex_release = module.add_function(
         symbols::GC_MUTEX_RELEASE,
         i32.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let global_root_add = module.add_function(
+        symbols::GLOBAL_ROOT_ADD,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let global_watch_reset = module.add_function(
+        symbols::GLOBAL_WATCH_RESET,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let global_watch_subscribe = module.add_function(
+        symbols::GLOBAL_WATCH_SUBSCRIBE,
+        i32.fn_type(&[ptr.into(), ptr.into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let global_watch_publish = module.add_function(
+        symbols::GLOBAL_WATCH_PUBLISH,
+        i64.fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let global_watch_next = module.add_function(
+        symbols::GLOBAL_WATCH_NEXT,
+        i32.fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let global_watch_close = module.add_function(
+        symbols::GLOBAL_WATCH_CLOSE,
+        context.bool_type().fn_type(&[i64.into()], false),
         external,
     );
     let gc_mutex_with = module.add_function(
@@ -1509,6 +1573,16 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let environment_get_secret = module.add_function(
         symbols::ENVIRONMENT_GET_SECRET,
         void.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let permission_requester_set = module.add_function(
+        symbols::PERMISSION_REQUESTER_SET,
+        void.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let permission_requester_clear = module.add_function(
+        symbols::PERMISSION_REQUESTER_CLEAR,
+        void.fn_type(&[], false),
         external,
     );
     let environment_contains = module.add_function(
@@ -3113,6 +3187,12 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         gc_mutex_alloc,
         gc_mutex_acquire,
         gc_mutex_release,
+        global_root_add,
+        global_watch_reset,
+        global_watch_subscribe,
+        global_watch_publish,
+        global_watch_next,
+        global_watch_close,
         gc_mutex_with,
         atomic_managed_new,
         atomic_managed_load,
@@ -3207,6 +3287,8 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         io_stdin_read_exact,
         environment_get,
         environment_get_secret,
+        permission_requester_set,
+        permission_requester_clear,
         environment_contains,
         environment_list_names,
         network_tcp_connect,

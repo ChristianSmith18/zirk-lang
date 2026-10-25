@@ -2100,7 +2100,6 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "futures-util",
- "getrandom 0.2.17",
  "hmac",
  "http",
  "http-body-util",
@@ -2108,6 +2107,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "nix",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -2239,6 +2239,7 @@ dependencies = [
  "bytes",
  "corosensei",
  "futures-util",
+ "getrandom 0.2.17",
  "h3",
  "h3-quinn",
  "http",

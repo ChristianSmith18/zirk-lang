@@ -25,8 +25,10 @@ mod types;
 
 pub use checker::{
     Capture, CheckedProgram, ConcurrentPlan, EffectSummary, GenericCallInfo, LambdaInfo,
-    OwnershipMarkers, OwnershipProperties, ServiceSpawnInfo, SettledPlan, TypeMapEntry,
-    TypeMapKind, check,
+    OwnershipMarkers, OwnershipProperties, ProjectGlobalCallInfo, ProjectGlobalInfo,
+    ProjectGlobalOperation, ProjectGlobalSpec, ProjectGlobalSubscriptionCallInfo,
+    ProjectGlobalSubscriptionOperation, ServiceSpawnInfo, SettledPlan, TypeMapEntry, TypeMapKind,
+    check, check_with_globals,
 };
 pub use ide::{
     ReferenceRole, SemanticIndex, SemanticReference, SemanticSymbol, SemanticSymbolKind,

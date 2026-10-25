@@ -1,13 +1,21 @@
 # Zirk — Master specification
 
-Status: living normative design for Zirk 1.x
+Status: historical master snapshot; current project/runtime/permission contracts are maintained in the linked live specifications
 Initial publication: 12 August 2026
-Last normative checkpoint: 20 August 2026
+Last checkpoint in this snapshot: 20 August 2026
 Source extension: `.zrk`
 CLI: `zirk`
 Manifest: `.zkinit`
 Lockfile: `zirk.lock`
 Distributable package: `.zpkg`
+
+
+> **Current project-system contract (25 October 2026):** this snapshot's older
+> `fn main`, global `use`, `permissions`, and phase examples are historical.
+> For current project entry and `.zkinit`, read
+> [`ZIRK_LANGUAGE_SPEC.md`](ZIRK_LANGUAGE_SPEC.md),
+> [`ZIRK_RUNTIME_SPEC.md`](ZIRK_RUNTIME_SPEC.md), and
+> [`ERROR_RESOURCE_PERMISSION_SEMANTICS.md`](ERROR_RESOURCE_PERMISSION_SEMANTICS.md).
 
 > **Authorial language checkpoint — 15 August 2026.** The language author's
 > numbered handbook annotations supersede older omissions and contradictory
@@ -211,9 +219,7 @@ project {
 ```text
 import { stdout } from std.io;
 
-fn main(): Void {
-    stdout.println("Hello from Zirk");
-}
+stdout.println("Hello from Zirk");
 ```
 
 ## 6. Foundational contracts
@@ -250,19 +256,23 @@ fn main(): Void {
 
 ## 7. Distribution and security
 
-An `application` may declare globals and grants the final permissions. A
-`library` cannot declare globals; it declares `requires`. The application uses
-`permissions` with per-operation `during: build | runtime | both`. Packages include a typed public API, a portable
-intermediate representation, a manifest, documentation and a license. In the
-final build, every piece is compiled for the same target.
+An application may declare typed globals and capability requirements. A
+package cannot own application globals and declares the same `requires` list
+for the capabilities its code may attempt. The selected application file
+executes its file-scope statements; source `fn main` is optional ordinary code.
 
-Permissions are finite capabilities declared in `.zkinit`, but declaration is
-not consent. A signed external approval binds exact authority/requesters to the
-project name and canonical location. Trusted interactive commands may show and
-apply a narrow manifest diff only after explicit consent; unchanged signed
-fingerprints take an incremental fast path. CI is noninteractive and deployed
-programs never prompt. Tokens and secret values are never stored in `.zkinit`,
-`zirk.lock`, diagnostics, or approval history.
+`requires` is one finite list, without `permissions`,
+`compile_permissions`, or `during` sections. A declaration is not user
+consent. Exact resources are approved by the user and saved outside the
+repository in a signed record associated with the canonical project and locked
+requester graph. At first use, an interactive runtime identifies the operation,
+resource, and requester and accepts `y/n`; non-interactive execution denies an
+unapproved operation locally. Manifest migration never creates consent.
+
+Current enforcement covers network and environment/secret APIs. Filesystem and
+process capability identifiers remain reserved until compiler-owned APIs exist.
+For current details, see the live specifications linked at the top of this
+historical snapshot.
 
 ## 8. Completeness criterion
 

@@ -22,6 +22,15 @@ native/interpreter parity coverage includes the documented overflow edges.
 
 Current high-impact delivery limits include:
 
+- `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
+  entry selection without a required source `fn main`, dependency/dev-dependency
+  graphs, typed application globals, and one `requires` capability list. Runtime
+  consent is exact-resource and operation-local. Current enforced protected
+  APIs are environment/secrets and networking; filesystem/process capability
+  IDs remain reserved because compiler-owned APIs are not exposed. See the
+  [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
+  chapters for the tested surface.
+
 - `std.environment`, `std.net`, and `std.http` are bundled native previews;
   the archived first delivery passes full-workspace native CI on macOS ARM64,
   Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965, compiler

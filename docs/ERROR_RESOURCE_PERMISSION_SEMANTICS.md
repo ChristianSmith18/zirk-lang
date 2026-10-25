@@ -1,6 +1,6 @@
 # Zirk Errors, Resources, and Permissions
 
-Status: **authorial source of truth**, accepted 16 August 2026.
+Status: **authorial source of truth**, updated 25 October 2026.
 
 This checkpoint defines final failure, deterministic-resource, and authority
 semantics independently of implementation phase. Read it after
@@ -191,106 +191,101 @@ responsibility. Cancellation and task aggregation await resource cleanup before
 propagating their final outcome; see
 [`STRUCTURED_CONCURRENCY_SEMANTICS.md`](STRUCTURED_CONCURRENCY_SEMANTICS.md).
 
-## 5. Permission declarations
+## 5. Capability requirements
 
-Zirk exposes only two authority blocks:
+`.zkinit` exposes one finite `requires` block for applications and packages.
+It lists capability identifiers only; resource scopes are determined and
+checked at the protected operation. No `permissions`, `compile_permissions`,
+`during`, build/runtime/test subsection, or per-environment block is part of
+the canonical manifest.
 
-- `requires`: a library requests capabilities but grants none.
-- `permissions`: an application grants capabilities to declared requesters.
-
-Each operation declares `during: build`, `runtime`, or `both`; there is no
-public top-level `compile_permissions` block.
-
-```zirk
-permissions {
-    filesystem {
-        read: { paths: ["./config/**"]; during: runtime; }
-    }
-    network {
-        connect: { origins: ["https://api.example.com:443"]; during: runtime; }
-    }
+```text
+requires {
+    filesystem.read;
+    filesystem.write;
+    network.connect;
+    network.listen;
+    network.udp.send;
+    network.udp.listen;
+    network.local.connect;
+    network.local.listen;
+    network.inspect_interfaces;
+    environment.read;
+    environment.list_names;
+    secrets.read;
+    process.execute;
+    process.shell;
 }
 ```
 
-The compiler infers effects through privileged calls, functions, methods,
-lambdas, closures, generators, and higher-order callables. Permission syntax is
-not added to `Fn`, but compiler/callable metadata retains the requirement and
-diagnostics show the call path to the privileged API. `.zkinit` is the only
-grant location.
+The compiler infers effects through functions, methods, lambdas, closures,
+generators, callbacks, and higher-order callables. Effect metadata retains the
+protected API, source location, requesting package, and dependency path without
+adding permission syntax to `Fn`. Package requirements propagate through the
+locked graph; a package requests capability but never grants authority. The
+application does not copy every transitive requirement by hand.
 
-## 6. Scoped authority
+A requirement is not user consent. Missing consent does not prevent startup.
+At the operation boundary the runtime checks the concrete resource; if denied,
+the API returns its ordinary typed error. A preserved `Result` can be handled
+with `match`; in an ordinary value context, the existing projection yields
+`null`. The operation has no protected host side effect, a warning identifies
+capability/resource/requester without secret values, and unrelated execution
+continues unless user code stops it.
 
-- Filesystem grants distinguish read/write and canonical path patterns; checks
-  resolve `.`/`..`, enforce symlink policy, and prevent validation/use races.
-- Network grants restrict protocol, host, port, redirects, DNS results, and
-  reconnects. Leaving the authorized origin requires another grant.
-- Process grants restrict the canonical executable and optionally argument
-  forms. `arguments: all` warns. Shell execution is a separate critical grant.
-- Environment grants restrict names and phase. Secrets use `SecretString`, are
-  never logged or traced, and require deliberate reveal at an authorized
-  boundary.
+## 6. Concrete resources and current enforcement
 
-```zirk
-Environment
-Env // exact preferred alias
+Connect and listen authority are separate. Environment reads and secret reads
+are separate. Each request uses a canonical concrete resource, not a broad
+implicit grant. Runtime-enforced operations include environment names and
+secrets, HTTP destination and configured proxy origins, DNS answers, redirects,
+TCP and UDP listener endpoints, UDP destinations, broadcast/multicast scopes,
+local socket endpoints, and interface inspection. OS-assigned port `0` is
+checked as an ephemeral bind request for the requested address.
 
-Env.get(name): Result<String,EnvironmentError>
-Env.require(name): Result<String,EnvironmentError>
-Env.get_secret(name): Result<SecretString,SecretError>
-Env.contains(name): Result<Boolean,EnvironmentError>
-Env.list_names(): Result<List<String>,EnvironmentError>
-```
+The manifest accepts the finite filesystem and process identifiers, but this
+checkout does not yet expose compiler-owned filesystem or process APIs to
+normalize and enforce those capabilities. They remain reserved and do not
+create access. Native/FFI capabilities remain outside this initial vocabulary.
 
-Every environment operation returns `Result` so explicit inspection can
-distinguish absence, permission, encoding, and platform failure. Ordinary value
-use of a Result may project any failure to `null`; `Env.list_names` requires broad
-environment-read authority. Environment writes are excluded initially. A
-dynamic target outside the effective grant returns the privileged operation's
-typed `PermissionDeniedError`; deployed programs never prompt or modify their
-own manifest.
+## 7. User-owned consent
 
-## 7. Consent is not source text
+Consent is stored outside the repository in a private, user-owned approval
+record authenticated with a local key. It binds the canonical project identity,
+exact resource scopes, and locked dependency/requester graph including package
+version, integrity, and paths. Direct `requires` declarations are excluded from
+the project identity digest so adding a missing declaration after a successful
+first-use decision does not invalidate that exact resource decision. Changing
+the project location or identity, lock selection, requester version/integrity,
+or dependency path invalidates the affected record. The approval record's
+scopes remain exact; a manifest edit alone never grants authority.
 
-`.zkinit` states what is requested. Consent lives outside the repository in a
-signed Zirk approval record protected by the OS key store. It binds:
+## 8. First-use prompt and audit
 
-- project name and absolute canonical location;
-- OS user and device;
-- exact permission scopes and build/runtime phases;
-- requesting dependency names, versions, integrity, and transitive paths;
-- approval timestamp and Zirk version.
+At the protected operation, an interactive runtime displays project, operation,
+capability, resource, requesting package, and dependency path, then asks
+`[y/N]`. Yes saves that exact scope and permits the current operation. For a
+direct application call, Zirk creates a minimal `.zkinit` if necessary and adds
+a missing `requires` declaration. A transitive dependency's requirement is
+not copied into the application's manifest. No denies that operation without
+writing manifest or consent. Without a terminal, the runtime denies
+immediately, warns, and never waits for input.
 
-Moving or renaming a project requires new consent. Widening a grant, adding or
-updating a requester, changing integrity/path/phase, or invalidating approval
-also requires consent even if textual scopes look unchanged. Removing or
-narrowing authority does not. Editing `.zkinit`, copying another approval,
-tampering with storage, or deleting it grants nothing; failure reconstructs
-analysis or asks again. Build code has no public access to approval storage.
-
-## 8. Incremental approval and tooling
-
-Every authority-bearing `zirk build`, `run`, `test`, or equivalent command
-compares signed project-location, manifest, permission, lockfile, requester-
-subgraph, and approval fingerprints. Exact matches take a constant-time fast
-path. A change recomputes only affected graph segments.
-
-An interactive trusted CLI shows the exact grant, phase, call path, requester,
-dependency path, and manifest diff, then offers allow once, approve the exact
-set, or deny. Approval edits `.zkinit` with its parser/formatter and records a
-signature. Dynamic scopes require manual patterns. `all` is legal only after a
-critical warning and typing the project name; generic `--yes` cannot approve
-it. CI uses protected explicit policy and fails noninteractively on widening.
+The CLI provides:
 
 ```text
-zirk permissions show
-zirk permissions diff
-zirk permissions approve
-zirk permissions revoke
-zirk permissions history
+zirk permissions inspect .
+zirk permissions diff .
+zirk permissions history .
+zirk permissions revoke .
 ```
 
-History records who approved which project/location/requester/scope/phase and
-when, without secrets. Revocation applies before the next privileged action.
+`inspect` and `diff` show direct/transitive requirements against exact saved
+resources. `history` verifies signed approval/revocation events and records
+requester, actor, resource, and time without secrets. `revoke` removes the
+project approval before the next protected operation. The former blanket
+`permissions approve` action is intentionally unavailable; the CLI directs
+the user to the resource-specific prompt.
 
 ---
 

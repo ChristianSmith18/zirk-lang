@@ -7,7 +7,7 @@ use zirk_ast::{Expr, Ident, ModuleDecl, Stmt};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
 use zirk_parser::{codes as parser_codes, parse};
-use zirk_sema::{Base, Type, check, codes};
+use zirk_sema::{Base, ProjectGlobalSpec, Type, check, check_with_globals, codes};
 
 /// Standard stream calls (`stdout.println`, `stderr.print`, ...) require an
 /// explicit `std.io` import (see `add-stdin-stdout-standard-library`). Source
@@ -55,6 +55,366 @@ fn parse_and_check(source_text: &str) -> (SourceMap, DiagnosticSink) {
     }
     check(&sources, &program, &mut sink);
     (sources, sink)
+}
+
+#[test]
+fn project_globals_are_resolved_against_the_merged_program_types() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "app/src/main.zrk",
+        "class Settings { construct() { } }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let globals = [ProjectGlobalSpec {
+        name: "settings".into(),
+        type_name: "Settings".into(),
+        type_source: None,
+        readonly: true,
+        has_explicit_default: false,
+        default_function: None,
+        span: None,
+    }];
+
+    let checked = check_with_globals(&sources, &program, &globals, &mut sink);
+    assert!(
+        !sink.has_errors(),
+        "global type should resolve from the project source graph: {}",
+        sink.render(RenderStyle::Human)
+    );
+    let resolved = checked.project_globals.get("settings").unwrap();
+    assert!(resolved.readonly);
+    let Base::Class(class_id) = resolved.ty.base else {
+        panic!("expected Settings class type, got {:?}", resolved.ty);
+    };
+    assert_eq!(checked.classes[class_id as usize].name, "Settings");
+}
+
+#[test]
+fn project_global_default_selects_one_constructor_and_reports_ambiguity() {
+    fn check_global(source_text: &str) -> (zirk_sema::CheckedProgram, DiagnosticSink) {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("app/src/main.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = tokenize(source, &mut sink);
+        let program = parse(source, &tokens, &mut sink);
+        let checked = check_with_globals(
+            &sources,
+            &program,
+            &[ProjectGlobalSpec {
+                name: "person".into(),
+                type_name: "Person".into(),
+                type_source: None,
+                readonly: false,
+                has_explicit_default: false,
+                default_function: None,
+                span: None,
+            }],
+            &mut sink,
+        );
+        (checked, sink)
+    }
+
+    let (checked, sink) = check_global(
+        "class Person { name: String; construct(name: String) { this.name = name; } }",
+    );
+    assert!(!sink.has_errors(), "{}", sink.render(RenderStyle::Human));
+    assert_eq!(
+        checked.project_globals["person"].default_constructor,
+        Some(0)
+    );
+
+    let (checked, sink) = check_global(
+        "class Address { construct(city: String) { } } class Person { construct(address: Address) { } }",
+    );
+    assert!(
+        !sink.has_errors(),
+        "nested constructor parameters derive their own defaults: {}",
+        sink.render(RenderStyle::Human)
+    );
+    assert_eq!(
+        checked.project_globals["person"].default_constructor,
+        Some(0)
+    );
+
+    let (checked, sink) =
+        check_global("class Person { construct(name: String = \"anonymous\") { } }");
+    assert!(
+        !sink.has_errors(),
+        "a declared constructor-parameter default is eligible: {}",
+        sink.render(RenderStyle::Human)
+    );
+    assert_eq!(
+        checked.project_globals["person"].default_constructor,
+        Some(0)
+    );
+
+    let (_checked, sink) =
+        check_global("class Person { construct(name: String) { } construct(age: Int32) { } }");
+    let diagnostics = sink.render(RenderStyle::Human);
+    assert!(sink.has_errors());
+    assert!(
+        diagnostics.contains("more than one constructor of `Person`"),
+        "{diagnostics}"
+    );
+
+    let (_checked, sink) = check_global("class Person { construct(name: Char) { } }");
+    let diagnostics = sink.render(RenderStyle::Human);
+    assert!(
+        diagnostics.contains("no constructor of `Person` has parameters with derivable defaults"),
+        "a type without a default cannot satisfy the constructor: {diagnostics}"
+    );
+}
+
+#[test]
+fn project_global_get_and_set_are_typed_from_manifest_keys() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "app/src/main.zrk",
+        "fn counter(): Int32 { return Global.get(\"counter\"); }\n\
+         fn replace(): Void { Global.set(\"counter\", 7); }\n\
+         fn frozen(): String { return Global.get(\"frozen\"); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check_with_globals(
+        &sources,
+        &program,
+        &[
+            ProjectGlobalSpec {
+                name: "counter".into(),
+                type_name: "Int32".into(),
+                type_source: None,
+                readonly: false,
+                has_explicit_default: false,
+                default_function: None,
+                span: None,
+            },
+            ProjectGlobalSpec {
+                name: "frozen".into(),
+                type_name: "String".into(),
+                type_source: None,
+                readonly: true,
+                has_explicit_default: false,
+                default_function: None,
+                span: None,
+            },
+        ],
+        &mut sink,
+    );
+
+    assert!(
+        !sink.has_errors(),
+        "manifest-typed reads and a mutable replacement should check: {}",
+        sink.render(RenderStyle::Human)
+    );
+    let calls = checked.project_global_calls.values().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 3);
+    assert!(calls.iter().any(|call| {
+        call.name == "counter"
+            && call.operation == zirk_sema::ProjectGlobalOperation::Get
+            && call.ty == Type::INT32
+    }));
+    assert!(calls.iter().any(|call| {
+        call.name == "counter"
+            && call.operation == zirk_sema::ProjectGlobalOperation::Set
+            && call.ty == Type::INT32
+    }));
+    assert!(calls.iter().any(|call| {
+        call.name == "frozen"
+            && call.operation == zirk_sema::ProjectGlobalOperation::Get
+            && call.ty == Type::STRING
+    }));
+}
+
+#[test]
+fn project_global_calls_reject_wrong_types_dynamic_unknown_and_readonly_writes() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "app/src/main.zrk",
+        "fn wrong_read(): String { return Global.get(\"counter\"); }\n\
+         fn wrong_set(): Void { Global.set(\"counter\", \"seven\"); }\n\
+         fn explicit_override(): String { return Global.get<String>(\"counter\"); }\n\
+         fn dynamic(key: String): Int32 { return Global.get(key); }\n\
+         fn unknown(): Int32 { return Global.get(\"missing\"); }\n\
+         fn readonly_write(): Void { Global.set(\"frozen\", \"new\"); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let _checked = check_with_globals(
+        &sources,
+        &program,
+        &[
+            ProjectGlobalSpec {
+                name: "counter".into(),
+                type_name: "Int32".into(),
+                type_source: None,
+                readonly: false,
+                has_explicit_default: false,
+                default_function: None,
+                span: None,
+            },
+            ProjectGlobalSpec {
+                name: "frozen".into(),
+                type_name: "String".into(),
+                type_source: None,
+                readonly: true,
+                has_explicit_default: false,
+                default_function: None,
+                span: None,
+            },
+        ],
+        &mut sink,
+    );
+    let diagnostics = sink.render(RenderStyle::Human);
+
+    assert!(
+        sink.has_errors(),
+        "invalid global operations must fail sema"
+    );
+    assert!(
+        diagnostics.contains("cannot override the manifest type"),
+        "{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("requires a literal manifest key"),
+        "{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("project global `missing` is not declared"),
+        "{diagnostics}"
+    );
+    assert!(diagnostics.contains("read-only"), "{diagnostics}");
+    assert!(
+        diagnostics.contains(codes::TYPE_MISMATCH.as_str()),
+        "{diagnostics}"
+    );
+}
+
+#[test]
+fn project_global_snapshots_reject_types_without_deep_clone_semantics() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "app/src/main.zrk",
+        "class Holder { pointer: Pointer<Int32>?; }\n\
+         fn value(): Holder { return Global.get(\"holder\"); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let _checked = check_with_globals(
+        &sources,
+        &program,
+        &[ProjectGlobalSpec {
+            name: "holder".into(),
+            type_name: "Holder".into(),
+            type_source: None,
+            readonly: false,
+            has_explicit_default: false,
+            default_function: None,
+            span: None,
+        }],
+        &mut sink,
+    );
+
+    let diagnostics = sink.render(RenderStyle::Human);
+    assert!(
+        diagnostics.contains("cannot be used as an immutable snapshot"),
+        "mutable global values need a sound deep-clone contract: {diagnostics}"
+    );
+}
+
+#[test]
+fn project_global_watch_infers_subscription_element_type() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "app/src/main.zrk",
+        "share class GlobalSnapshot<T> { value: T; revision: UInt64; }\n\
+         share class GlobalChange<T> { previous: T; current: T; revision: UInt64; }\n\
+         share enum GlobalWatchError { Lagged, Closed, RuntimeFailure }\n\
+         share abstract class GlobalSubscription<T> {}\n\
+         fn subscribe(): GlobalSubscription<Int32> { return Global.watch(\"counter\"); }\n\
+         fn current(subscription: GlobalSubscription<Int32>): GlobalSnapshot<Int32> { return subscription.snapshot(); }\n\
+         fn change(subscription: GlobalSubscription<Int32>): Result<GlobalChange<Int32>?, GlobalWatchError> { return subscription.next(); }\n\
+         fn stop(subscription: GlobalSubscription<Int32>): Void { subscription.close(); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check_with_globals(
+        &sources,
+        &program,
+        &[ProjectGlobalSpec {
+            name: "counter".into(),
+            type_name: "Int32".into(),
+            type_source: None,
+            readonly: false,
+            has_explicit_default: false,
+            default_function: None,
+            span: None,
+        }],
+        &mut sink,
+    );
+
+    let diagnostics = sink.render(RenderStyle::Human);
+    assert_eq!(
+        sink.diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == zirk_diagnostics::Severity::Error)
+            .count(),
+        0,
+        "the typed watch API should check without diagnostics: {diagnostics}"
+    );
+
+    let (call_span, call) = checked
+        .project_global_calls
+        .iter()
+        .next()
+        .expect("Global.watch should retain its manifest-resolved call metadata");
+    assert_eq!(call.operation, zirk_sema::ProjectGlobalOperation::Watch);
+    assert_eq!(call.name, "counter");
+    assert_eq!(call.ty, Type::INT32);
+    let Type {
+        base: zirk_sema::Base::Instance(instance),
+        ..
+    } = checked.expr_types[call_span]
+    else {
+        panic!(
+            "watch should return a generic subscription, got {:?}",
+            checked.expr_types[call_span]
+        );
+    };
+    let instance = &checked.generic_instances[instance as usize];
+    assert_eq!(
+        checked.classes[instance.class as usize].name,
+        "GlobalSubscription"
+    );
+    assert_eq!(instance.args, vec![Type::INT32]);
+
+    let operations: std::collections::HashSet<_> = checked
+        .project_global_subscription_calls
+        .values()
+        .map(|call| call.operation)
+        .collect();
+    assert_eq!(
+        operations,
+        [
+            zirk_sema::ProjectGlobalSubscriptionOperation::Snapshot,
+            zirk_sema::ProjectGlobalSubscriptionOperation::Next,
+            zirk_sema::ProjectGlobalSubscriptionOperation::Close,
+        ]
+        .into_iter()
+        .collect()
+    );
 }
 
 fn bundled_standard_package(
@@ -926,23 +1286,17 @@ fn valid_unused_job_handle_discharged_with_wildcard() {
 }
 
 #[test]
-fn invalid_program_without_main() {
-    let output = rejected("fn other(): Void { }");
-    assert!(output.contains(codes::MISSING_ENTRYPOINT.as_str()));
-    assert!(output.contains("= help:"));
+fn a_program_does_not_need_a_source_level_main_function() {
+    accepted("fn other(): Void { }");
 }
 
 #[test]
-fn invalid_main_with_the_wrong_signature() {
+fn main_is_an_ordinary_function_name() {
     for source_text in [
         "fn main(): Int32 { return 1; }",
         "fn main(a: Int32): Void { }",
     ] {
-        let output = rejected(source_text);
-        assert!(
-            output.contains(codes::INVALID_ENTRYPOINT.as_str()),
-            "for `{source_text}`:\n{output}"
-        );
+        accepted(source_text);
     }
 }
 

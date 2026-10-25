@@ -5,9 +5,10 @@ APIs for files, directories, metadata, permissions, links, temporary storage,
 locks and change notification. Filesystem operations accept `Path`; accepting a
 `String` is convenience conversion, never textual path concatenation.
 
-> **Implementation status:** target Zirk 1.x contract. The current runtime may
-> implement only a subset. Every example requires an appropriate filesystem
-> grant in `.zkinit`.
+> **Implementation status:** target Zirk 1.x contract. Filesystem APIs are not
+> currently exposed by the compiler. `filesystem.read` and `filesystem.write`
+> are reserved capability identifiers; the examples below describe the future
+> API contract, not runnable operations in this checkout.
 
 ## Opening files
 
@@ -171,7 +172,7 @@ requires a rescan rather than pretending the event history is complete.
 
 ## Errors, permissions and races
 
-`FileError`/`FsError` distinguish not found, denied, already exists, wrong type,
+When these APIs are delivered, `FileError`/`FsError` will distinguish not found, denied, already exists, wrong type,
 invalid path, closed resource, encoding failure, allocation/size limit,
 unsupported operation, lock contention and system failure. Filesystem grants
 separate read and write patterns. Checks canonicalize `.`/`..`, apply symlink

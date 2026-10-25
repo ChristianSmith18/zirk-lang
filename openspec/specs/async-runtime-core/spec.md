@@ -192,20 +192,20 @@ NOT cancel a task merely because another task rejected.
 - **WHEN** a `Task.settled` input set has one task that fulfills, one that throws, and one that is cancelled
 - **THEN** the result lists ordered `Fulfilled`, `Rejected`, and `Cancelled` settlements and no task was cancelled because of a sibling's rejection
 
-### Requirement: Executor owns the root scope of `main`
+### Requirement: Executor owns the root scope of the selected entry
 
-The runtime entry SHALL run `main`'s body as the root branch of an implicit
-`concurrent` scope and SHALL NOT return the program's exit status until that
-branch and every branch it owns have completed, or been cancelled and cleaned
-(ambient timers are cancelled on normal exit). An exception that escapes the root
-branch SHALL cause a nonzero exit status.
+The runtime SHALL run the selected Zirk entry file's top-level body as the root
+branch of an implicit `concurrent` scope and SHALL NOT return the program's
+exit status until that branch and every branch it owns have completed, or been
+cancelled and cleaned (ambient timers are cancelled on normal exit). An
+exception that escapes the root branch SHALL cause a nonzero exit status.
 
 #### Scenario: Program waits for spawned children
-- **WHEN** `main` spawns a branch and reaches the end of its body while the branch runs
+- **WHEN** the selected entry spawns a branch and reaches the end of its body while the branch runs
 - **THEN** the process does not exit until the branch has finished or been cancelled and cleaned
 
 #### Scenario: Uncaught failure in the root branch
-- **WHEN** an exception escapes `main`'s body after children are cleaned
+- **WHEN** an exception escapes the selected entry body after children are cleaned
 - **THEN** the process exits with a nonzero status
 
 ### Requirement: Scope join runtime

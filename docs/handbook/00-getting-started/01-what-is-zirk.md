@@ -6,14 +6,12 @@ That combination matters because many programs eventually cross abstraction leve
 
 ## A first look
 
-The smallest useful program imports standard output and defines the application entry point:
+The smallest useful program imports standard output and uses the selected file as its entry:
 
 ```zirk
 import { stdout } from std.io;
 
-fn main(): Void {
-    stdout.println("Hello from Zirk");
-}
+stdout.println("Hello from Zirk");
 ```
 
 Even this small program exposes several parts of the language:
@@ -36,7 +34,7 @@ project {
 }
 ```
 
-The manifest is code-shaped and typed, but it has a specific declarative role. It identifies the entry file, dependencies, permissions, targets, and build settings for the project.
+The manifest is code-shaped and typed, but it has a specific declarative role. It identifies the entry/root, dependencies, globals, targets, and capability requirements for the project. User consent for exact protected resources is handled separately at runtime.
 
 ## Static types without constant annotation
 

@@ -1,50 +1,50 @@
 # CLI
 
-The official CLI covers `new`, `init`, `run`, `build`, `check`, `test`, `bench`,
-`format`, `lint`, `prepare`, dependency commands, packaging, publishing, docs,
-and `permissions show|diff|approve|revoke|history`. Output is deterministic and
-`--json` supports automation.
+The implemented CLI includes `init`, `run`, `build`, `check`, `migrate`,
+dependency resolution commands, and `permissions inspect|diff|approve|revoke|history`.
+Other documented Zirk 1.x commands remain subject to the feature status
+catalog.
 
-Authority-bearing commands perform an incremental signed fingerprint check
-before executing build/runtime code. Interactive approval shows exact scope,
-phase, call path, requester and manifest diff. CI never prompts; broad `all`
-grants require reinforced project-name confirmation and ignore generic `--yes`.
-
-## Everyday workflow
+## Initialize a project
 
 ```bash
-zirk check
-zirk test
-zirk build --target aarch64-macos
-zirk run -- arg1 arg2
+zirk init
+zirk init -y
 ```
 
-`run` and `build` may also receive a Zirk source file. Its extension is
-optional at the command line: `zirk run hello` is equivalent to
-`zirk run hello.zrk`, and `zirk build hello` is equivalent to
-`zirk build hello.zrk`. The source file on disk still uses the `.zrk`
-extension.
+Interactive mode asks one question at a time and shows each default. Enter
+accepts the default; optional metadata and target lists can be left blank.
+`-y` selects application type, a directory-derived name, version `0.1.0`,
+entry `src/main.zrk`, and source root `src`. It works without a terminal.
+Neither mode overwrites `.zkinit` or creates source files.
 
-`check` stops after frontend validation and must not require LLVM, a linker, or
-the runtime archive. `build` writes artifacts without executing them. `run`
-builds incrementally and then starts the application; arguments after `--`
-belong to the program. `--dry-run` prints the resolved plan and authority checks
-without executing build scripts, native tools, or application code.
+## Run an application
 
-Common operational flags include `--json`, `--verbose`, `--target`, profile
-selection, `--warnings-as-errors`, and cache inspection/cleaning. Structured
-output and exit codes are stable enough for editors and CI; prompts are never
-written in JSON or noninteractive mode.
+```bash
+zirk run
+zirk run src/dev.zrk
+```
 
-Dependency and publishing commands update `.zkinit` and `zirk.lock` only
-through reviewable deterministic changes. Permission commands inspect or revoke
-the signed external approval record; editing the manifest alone never grants
-authority.
+Without a source path, `run` discovers the nearest application `.zkinit` and
+executes its configured/default entry. A source path selects the entry for
+that invocation while preserving its project dependencies, lockfile, globals,
+and requirements. A standalone file uses standalone import rules. Source entry
+files execute file-scope statements; no user `fn main` is required.
 
-> **Implementation status:** `build` and `run` exist for the current compiler
-> subset. The complete command surface is the Zirk 1.x target and each command
-> must advertise partial availability rather than silently omitting stages.
+`check` analyzes without generating code, `build` produces artifacts without
+running the application, and `run` builds and starts it. Target selection uses
+the explicit CLI `--target`, then an application's `build_targets` list, then
+host detection; `run` always chooses the host target.
+
+## Permission commands
+
+`permissions inspect` and `diff` show the dependency requirement tree and exact
+saved resource scopes. `history` shows authenticated approval and revocation
+events. `revoke` invalidates the saved project record. `approve` does not mint a
+blanket grant: first-use consent is requested at the operation with a `y/n`
+prompt. A noninteractive protected operation fails closed and can be handled by
+Zirk code.
 
 ---
 
-**Previous:** [← Diagnostics](07-diagnostics.md) · **Next:** [ Formatter](09-formatter.md)
+**Previous:** [← Diagnostics](07-diagnostics.md) · **Next:** [Formatter](09-formatter.md)

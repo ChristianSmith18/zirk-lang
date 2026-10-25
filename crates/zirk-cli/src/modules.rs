@@ -22,7 +22,7 @@ use crate::{
     codes,
     project::{self, ProjectManifest},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use zirk_ast::{ImportSource, Program};
 use zirk_diagnostics::{Diagnostic, DiagnosticSink, FileId, SourceFile, SourceMap};
@@ -32,9 +32,22 @@ pub struct Crate {
     pub sources: SourceMap,
     /// One parsed program per file, in the order the files were loaded.
     pub units: Vec<Unit>,
+    /// Files named only as `.zkinit` custom-global type sources contribute
+    /// declarations to semantic analysis, but their file-scope statements do
+    /// not become runtime module initializers.
+    pub type_only_files: HashSet<FileId>,
     /// Filesystem roots the loader authorized for this module graph. Editor
     /// indexes may inspect these roots, but must not broaden them.
     pub module_roots: ModuleRoots,
+    /// The validated application/package model that owns this graph, if the
+    /// entry was discovered through a project manifest.
+    pub project: Option<ProjectContext>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectContext {
+    pub manifest: ProjectManifest,
+    pub root: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,16 +81,85 @@ pub fn load_project_with_overlay(
     overlay: &HashMap<PathBuf, String>,
     sink: &mut DiagnosticSink,
 ) -> Option<Crate> {
+    load_project_with_overlay_and_development(start, overlay, false, sink)
+}
+
+/// Loads an explicit source entry using the nearest project's dependency and
+/// capability context. The entry must remain inside that project root.
+pub fn load_project_entry(start: &Path, entry: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
+    load_project_entry_with_overlay(start, entry, &HashMap::new(), sink)
+}
+
+pub fn load_project_entry_with_overlay(
+    start: &Path,
+    entry: &Path,
+    overlay: &HashMap<PathBuf, String>,
+    sink: &mut DiagnosticSink,
+) -> Option<Crate> {
+    load_project_graph(start, Some(entry), overlay, false, sink)
+}
+
+/// Loads a project graph that includes the current application's direct
+/// `dev_dependencies`. Development tools such as the future test runner use
+/// this entry point; package development dependencies remain private.
+pub fn load_project_for_development(start: &Path, sink: &mut DiagnosticSink) -> Option<Crate> {
+    load_project_with_overlay_and_development(start, &HashMap::new(), true, sink)
+}
+
+pub fn load_project_with_overlay_and_development(
+    start: &Path,
+    overlay: &HashMap<PathBuf, String>,
+    include_dev_dependencies: bool,
+    sink: &mut DiagnosticSink,
+) -> Option<Crate> {
+    load_project_graph(start, None, overlay, include_dev_dependencies, sink)
+}
+
+fn load_project_graph(
+    start: &Path,
+    entry_override: Option<&Path>,
+    overlay: &HashMap<PathBuf, String>,
+    include_dev_dependencies: bool,
+    sink: &mut DiagnosticSink,
+) -> Option<Crate> {
     let overlay = normalize_overlay(overlay);
-    let manifest_path = project::discover(start)?;
-    let manifest = match project::read_manifest(&manifest_path) {
+    let overlay_root = if start.file_name().is_some_and(|name| name == ".zkinit") {
+        start.parent().unwrap_or(start)
+    } else {
+        start
+    };
+    let manifest_path = project::discover(start).or_else(|| {
+        overlay
+            .keys()
+            .find(|path| {
+                path.file_name().is_some_and(|name| name == ".zkinit")
+                    && (path.parent() == Some(overlay_root)
+                        || path.parent().is_some_and(|parent| {
+                            absolute_normalize(parent) == absolute_normalize(overlay_root)
+                        }))
+            })
+            .cloned()
+    })?;
+    let manifest_source = absolute_normalize(&manifest_path);
+    let manifest_result = overlay
+        .get(&manifest_source)
+        .map(|source| project::parse_manifest(source))
+        .unwrap_or_else(|| project::read_manifest(&manifest_path));
+    let manifest = match manifest_result {
         Ok(manifest) => manifest,
         Err(error) => {
             sink.emit(Diagnostic::error(codes::INVALID_PROJECT, error.to_string()));
             return None;
         }
     };
-    let root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let root = manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if let Err(error) = project::validate_global_type_sources(root, &manifest) {
+        sink.emit(Diagnostic::error(codes::INVALID_PROJECT, error.to_string()));
+        return None;
+    }
     let lock_path = root.join("zirk.lock");
     let lock = if lock_path.exists() {
         match project::read_lockfile(&lock_path) {
@@ -90,19 +172,28 @@ pub fn load_project_with_overlay(
     } else {
         None
     };
-    if let Err(error) = project::validate_lockfile(root, &manifest, lock.as_ref()) {
+    if let Err(error) = project::validate_lockfile_with_dev(
+        root,
+        &manifest,
+        lock.as_ref(),
+        include_dev_dependencies,
+    ) {
         sink.emit(Diagnostic::error(codes::INVALID_PROJECT, error.to_string()));
         return None;
     }
     let empty_lock = project::Lockfile {
         packages: std::collections::BTreeMap::new(),
     };
+    let entry = entry_override
+        .map(absolute_normalize)
+        .unwrap_or_else(|| root.join(&manifest.entry));
     load_with_project(
-        &root.join(&manifest.entry),
+        &entry,
         &manifest,
         lock.as_ref().unwrap_or(&empty_lock),
         root,
         &overlay,
+        include_dev_dependencies,
         sink,
     )
 }
@@ -133,6 +224,7 @@ pub fn load_with_overlay(
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
+        loading_stack: Vec::new(),
         overlay: &overlay,
         package_roots: package_roots.clone(),
         local_root: local_root.clone(),
@@ -144,10 +236,12 @@ pub fn load_with_overlay(
     Some(Crate {
         sources: loader.sources,
         units: loader.units,
+        type_only_files: HashSet::new(),
         module_roots: ModuleRoots {
             local_root,
             packages: package_directories(&package_roots),
         },
+        project: None,
     })
 }
 
@@ -164,10 +258,16 @@ fn load_with_project(
     lock: &project::Lockfile,
     root: &Path,
     overlay: &HashMap<PathBuf, String>,
+    include_dev_dependencies: bool,
     sink: &mut DiagnosticSink,
 ) -> Option<Crate> {
     let resolved_package_roots: HashMap<String, PathBuf> =
-        match project::resolve_package_roots(root, manifest, lock) {
+        match project::resolve_package_roots_with_dev(
+            root,
+            manifest,
+            lock,
+            include_dev_dependencies,
+        ) {
             Ok(roots) => roots
                 .into_iter()
                 .map(|(name, entry)| {
@@ -191,19 +291,41 @@ fn load_with_project(
         sources: SourceMap::new(),
         units: Vec::new(),
         by_path: HashMap::new(),
+        loading_stack: Vec::new(),
         overlay,
         package_roots: package_roots.clone(),
         local_root: local_root.clone(),
         sink,
     };
     loader.load(entry, None, &loader.local_root.clone())?;
+    let type_sources = manifest
+        .globals
+        .values()
+        .filter_map(|global| global.from.as_ref())
+        .map(|source| root.join(source))
+        .collect::<Vec<_>>();
+    let mut type_only_files = HashSet::new();
+    for source in type_sources {
+        let loaded_before = loader.by_path.values().copied().collect::<HashSet<_>>();
+        loader.load(&source, None, &loader.local_root.clone())?;
+        for file in loader.by_path.values() {
+            if !loaded_before.contains(file) {
+                type_only_files.insert(*file);
+            }
+        }
+    }
     Some(Crate {
         sources: loader.sources,
         units: loader.units,
+        type_only_files,
         module_roots: ModuleRoots {
             local_root,
             packages: package_directories(&package_roots),
         },
+        project: Some(ProjectContext {
+            manifest: manifest.clone(),
+            root: absolute_normalize(root),
+        }),
     })
 }
 
@@ -277,6 +399,9 @@ struct Loader<'a> {
     units: Vec<Unit>,
     /// Files already loaded, so a diamond of imports reads each one once.
     by_path: HashMap<PathBuf, FileId>,
+    /// Active depth-first import path. It distinguishes executable
+    /// initialization cycles from harmless declaration-only cycles.
+    loading_stack: Vec<LoadingEntry>,
     /// In-memory text that shadows the filesystem, keyed by normalized path.
     overlay: &'a HashMap<PathBuf, String>,
     /// Logical package roots resolved from the project manifest. Non-local
@@ -285,6 +410,11 @@ struct Loader<'a> {
     /// Filesystem boundary for the local project (canonicalized for each check).
     local_root: PathBuf,
     sink: &'a mut DiagnosticSink,
+}
+
+struct LoadingEntry {
+    path: PathBuf,
+    has_executable_body: bool,
 }
 
 impl Loader<'_> {
@@ -300,6 +430,36 @@ impl Loader<'_> {
     ) -> Option<()> {
         let path = absolute_normalize(path);
         let (path, identity_path) = self.authorize_path(&path, authorized_root, from)?;
+
+        if let Some(cycle_start) = self
+            .loading_stack
+            .iter()
+            .position(|entry| entry.path == identity_path)
+        {
+            let cycle = &self.loading_stack[cycle_start..];
+            if cycle.iter().any(|entry| entry.has_executable_body) {
+                let mut paths: Vec<_> = cycle
+                    .iter()
+                    .map(|entry| entry.path.display().to_string())
+                    .collect();
+                paths.push(identity_path.display().to_string());
+                let message = format!(
+                    "executable module initialization cycle: {}",
+                    paths.join(" -> ")
+                );
+                let mut diagnostic = Diagnostic::error(codes::IMPORT_CYCLE, message)
+                    .with_cause("at least one file in this import cycle has file-scope statements")
+                    .with_help("break the cycle or move shared declarations into a declaration-only module");
+                if let Some((file, span)) = from {
+                    let span = zirk_diagnostics::Span::in_file(file, span.start, span.end);
+                    diagnostic = diagnostic
+                        .at(self.sources.location(span))
+                        .with_snippet(self.sources.snippet(span));
+                }
+                self.sink.emit(diagnostic);
+            }
+            return Some(());
+        }
 
         if self.by_path.contains_key(&identity_path) {
             return Some(());
@@ -356,10 +516,14 @@ impl Loader<'_> {
             package_root: package_root.display().to_string(),
         });
         let file = self.sources.add(source);
-        self.by_path.insert(identity_path, file);
+        self.by_path.insert(identity_path.clone(), file);
 
         let tokens = zirk_lexer::tokenize(self.sources.file(file), self.sink);
         let mut program = zirk_parser::parse(self.sources.file(file), &tokens, self.sink);
+        self.loading_stack.push(LoadingEntry {
+            path: identity_path.clone(),
+            has_executable_body: !program.body.is_empty(),
+        });
 
         // Imports are followed even when the file had errors: reporting every
         // file's problems in one run beats one file per invocation.
@@ -438,6 +602,7 @@ impl Loader<'_> {
             }
         }
 
+        self.loading_stack.pop();
         self.units.push(Unit { program });
 
         Some(())
@@ -704,12 +869,7 @@ mod tests {
         write(
             &dir,
             ".zkinit",
-            "project \"app\"\nkind application\nentry \"src/main.zrk\"\ndependency acme.web ^1 local \"dep\"",
-        );
-        write(
-            &dir,
-            "zirk.lock",
-            "acme.web 1.0 local sha256:fixture src/package.zrk",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.web: { from: \"path:dep\"; } }",
         );
         write(
             &dir.join("src"),
@@ -719,7 +879,7 @@ mod tests {
         write(
             &dir.join("dep"),
             ".zkinit",
-            "project \"acme.web\"\nkind package",
+            "project { name: \"acme.web\"; version: \"1.0.0\"; type: package; }",
         );
         write(
             &dir.join("dep/src"),
@@ -730,13 +890,404 @@ mod tests {
         let dependency_root = dir.join("dep");
         let dependency_manifest = project::read_manifest(&dependency_root.join(".zkinit")).unwrap();
         let hash = project::package_integrity_hash(&dependency_root, &dependency_manifest).unwrap();
+        let package = project::LockedPackage {
+            name: "acme.web".into(),
+            version: "1.0.0".into(),
+            source: "local".into(),
+            locator: "path:dep".into(),
+            revision: None,
+            hash: format!("sha256:{hash}"),
+            package_root: "src/package.zrk".into(),
+        };
         write(
             &dir,
             "zirk.lock",
-            &format!("acme.web 1.0 local sha256:{hash} src/package.zrk"),
+            &project::format_lockfile(&project::Lockfile {
+                packages: [(package.name.clone(), package)].into(),
+            }),
         );
         let mut sink = DiagnosticSink::new();
         let krate = load_project(&dir, &mut sink).unwrap();
+        assert_eq!(krate.units.len(), 3);
+        assert!(!sink.has_errors());
+    }
+
+    #[test]
+    fn explicit_project_entry_keeps_manifest_lock_dependency_global_and_requirement_context() {
+        let dir = scratch("explicit-project-entry-context");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("vendor/runtime/src")).unwrap();
+        write(
+            &dir,
+            ".zkinit",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.runtime: { from: \"path:vendor/runtime\"; } }\nglobals { counter: UInt64; }\nrequires { filesystem.read; }",
+        );
+        write(&dir, "src/main.zrk", "mut main_entry = true;\n");
+        write(
+            &dir,
+            "src/alternate.zrk",
+            "import { Helper } from acme.runtime;\nmut explicit_entry = true;\n",
+        );
+        write(
+            &dir,
+            "vendor/runtime/.zkinit",
+            "project { name: \"acme.runtime\"; version: \"1.0.0\"; type: package; }",
+        );
+        write(
+            &dir,
+            "vendor/runtime/src/package.zrk",
+            "package acme.runtime;\nshare class Helper { }\n",
+        );
+
+        let dependency_root = dir.join("vendor/runtime");
+        let dependency_manifest = project::read_manifest(&dependency_root.join(".zkinit")).unwrap();
+        let hash = project::package_integrity_hash(&dependency_root, &dependency_manifest).unwrap();
+        let package = project::LockedPackage {
+            name: "acme.runtime".into(),
+            version: "1.0.0".into(),
+            source: "local".into(),
+            locator: "path:vendor/runtime".into(),
+            revision: None,
+            hash: format!("sha256:{hash}"),
+            package_root: "src/package.zrk".into(),
+        };
+        write(
+            &dir,
+            "zirk.lock",
+            &project::format_lockfile(&project::Lockfile {
+                packages: [(package.name.clone(), package)].into(),
+            }),
+        );
+
+        let explicit = dir.join("src/alternate.zrk");
+        let mut sink = DiagnosticSink::new();
+        let krate = load_project_entry(&explicit, &explicit, &mut sink)
+            .expect("the explicit file loads with its nearest project context");
+        assert_eq!(
+            Path::new(krate.sources.entry().name())
+                .canonicalize()
+                .unwrap(),
+            explicit.canonicalize().unwrap()
+        );
+        assert!(krate.module_roots.packages.contains_key("acme.runtime"));
+        let project_context = krate.project.as_ref().expect("project context is retained");
+        assert!(
+            project_context
+                .manifest
+                .dependencies
+                .contains_key("acme.runtime")
+        );
+        assert!(project_context.manifest.globals.contains_key("counter"));
+        assert!(
+            project_context
+                .manifest
+                .requires
+                .contains(&project::Capability::FilesystemRead)
+        );
+        assert!(
+            !sink.has_errors(),
+            "{}",
+            sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+
+        let mut frontend_sink = DiagnosticSink::new();
+        let frontend = crate::frontend::run_frontend(&explicit, &mut frontend_sink)
+            .expect("the explicit entry is checked against the application globals");
+        assert!(frontend.checked.project_globals.contains_key("counter"));
+        assert!(frontend.module_roots.packages.contains_key("acme.runtime"));
+        assert!(
+            !frontend_sink.has_errors(),
+            "{}",
+            frontend_sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+    }
+
+    #[test]
+    fn development_loader_adds_root_dev_packages_without_inheriting_package_dev_deps() {
+        let dir = scratch("development-packages");
+        write(
+            &dir,
+            ".zkinit",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.runtime: { from: \"path:vendor/runtime\"; } }\ndev_dependencies { acme.testkit: { from: \"path:dev/testkit\"; } }",
+        );
+        fs::create_dir_all(dir.join("src")).unwrap();
+        write(&dir, "src/main.zrk", "");
+        for (path, name) in [
+            ("vendor/runtime", "acme.runtime"),
+            ("vendor/hidden", "acme.hidden"),
+            ("dev/testkit", "acme.testkit"),
+        ] {
+            fs::create_dir_all(dir.join(path).join("src")).unwrap();
+            write(
+                &dir,
+                &format!("{path}/.zkinit"),
+                &format!("project {{ name: \"{name}\"; version: \"1.0.0\"; type: package; }}"),
+            );
+            write(&dir, &format!("{path}/src/package.zrk"), "");
+        }
+        write(
+            &dir,
+            "vendor/runtime/.zkinit",
+            "project { name: \"acme.runtime\"; version: \"1.0.0\"; type: package; }\ndev_dependencies { acme.hidden: { from: \"path:../hidden\"; } }",
+        );
+
+        let mut locked = std::collections::BTreeMap::new();
+        for (name, relative, locator) in [
+            ("acme.runtime", "vendor/runtime", "path:vendor/runtime"),
+            ("acme.testkit", "dev/testkit", "path:dev/testkit"),
+        ] {
+            let package_root = dir.join(relative);
+            let manifest = project::read_manifest(&package_root.join(".zkinit")).unwrap();
+            let hash = project::package_integrity_hash(&package_root, &manifest).unwrap();
+            let package = project::LockedPackage {
+                name: name.into(),
+                version: "1.0.0".into(),
+                source: "local".into(),
+                locator: locator.into(),
+                revision: None,
+                hash: format!("sha256:{hash}"),
+                package_root: manifest.entry.to_string_lossy().into_owned(),
+            };
+            locked.insert(name.into(), package);
+        }
+        write(
+            &dir,
+            "zirk.lock",
+            &project::format_lockfile(&project::Lockfile { packages: locked }),
+        );
+
+        let mut runtime_sink = DiagnosticSink::new();
+        let runtime = load_project(&dir, &mut runtime_sink).unwrap();
+        assert!(runtime.module_roots.packages.contains_key("acme.runtime"));
+        assert!(!runtime.module_roots.packages.contains_key("acme.testkit"));
+        assert!(!runtime.module_roots.packages.contains_key("acme.hidden"));
+
+        let mut development_sink = DiagnosticSink::new();
+        let development = load_project_for_development(&dir, &mut development_sink).unwrap();
+        assert!(
+            development
+                .module_roots
+                .packages
+                .contains_key("acme.testkit")
+        );
+        assert!(
+            !development
+                .module_roots
+                .packages
+                .contains_key("acme.hidden")
+        );
+        assert!(!runtime_sink.has_errors());
+        assert!(!development_sink.has_errors());
+    }
+
+    #[test]
+    fn file_initializers_follow_depth_first_import_order_and_visit_diamonds_once() {
+        let dir = scratch("initializer-order");
+        write(
+            &dir,
+            "main.zrk",
+            "import { a } from \"./a\";\nimport { b } from \"./b\";\nreport(\"main\");",
+        );
+        write(&dir, "a.zrk", "import { c } from \"./c\";\nreport(\"a\");");
+        write(&dir, "b.zrk", "import { c } from \"./c\";\nreport(\"b\");");
+        write(&dir, "c.zrk", "report(\"c\");");
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&dir.join("main.zrk"), &mut sink).unwrap();
+        let order: Vec<_> = krate
+            .units
+            .iter()
+            .map(|unit| {
+                Path::new(krate.sources.file(unit.program.span.file).name())
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(order, ["c.zrk", "a.zrk", "b.zrk", "main.zrk"]);
+        assert!(krate.units.iter().all(|unit| unit.program.body.len() == 1));
+        assert!(!sink.has_errors());
+    }
+
+    #[test]
+    fn application_manifest_context_is_retained_with_the_loaded_graph() {
+        let dir = scratch("application-context");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join(".zkinit"),
+            "project { name: \"demo.globals\"; version: \"0.1.0\"; type: application; }\nglobals { count: UInt64; }\n",
+        )
+        .unwrap();
+        write(&dir.join("src"), "main.zrk", "mut ready = true;\n");
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load_project(&dir, &mut sink).unwrap();
+        let project = krate.project.expect("project context is attached");
+        assert_eq!(project.manifest.name, "demo.globals");
+        assert_eq!(project.manifest.globals["count"].type_name, "UInt64");
+        assert_eq!(project.root, absolute_normalize(&dir));
+        assert!(!sink.has_errors());
+
+        let mut frontend_sink = DiagnosticSink::new();
+        let frontend = crate::frontend::run_frontend(&dir, &mut frontend_sink)
+            .expect("the project frontend resolves its declared global");
+        let global = frontend.checked.project_globals.get("count").unwrap();
+        assert_eq!(global.ty, zirk_sema::Type::from_name("UInt64").unwrap());
+        assert!(!global.readonly);
+        assert!(!frontend_sink.has_errors());
+    }
+
+    #[test]
+    fn global_from_file_is_loaded_for_custom_type_resolution_without_module_startup() {
+        let dir = scratch("global-from-source");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        write(
+            &dir,
+            ".zkinit",
+            "project { name: \"demo.settings\"; version: \"0.1.0\"; type: application; }\nglobals { settings: { type: Settings; from: \"src/settings.zrk\"; } }",
+        );
+        write(&dir, "src/main.zrk", "mut ready = true;\n");
+        write(&dir, "src/settings.zrk", "share class Settings { }\n");
+
+        let mut sink = DiagnosticSink::new();
+        let frontend = crate::frontend::run_frontend(&dir, &mut sink).unwrap_or_else(|| {
+            panic!(
+                "the manifest's exact custom-type source is loaded:\n{}",
+                sink.render(zirk_diagnostics::RenderStyle::Human)
+            )
+        });
+        let global = &frontend.checked.project_globals["settings"];
+        let class_id = match global.ty.base {
+            zirk_sema::Base::Class(id) => id,
+            other => panic!("expected the custom class type, got {other:?}"),
+        };
+        assert_eq!(frontend.checked.classes[class_id as usize].name, "Settings");
+        assert!(
+            frontend
+                .sources
+                .files()
+                .any(|(_, file)| file.name().ends_with("src/settings.zrk"))
+        );
+        assert!(!frontend.program.functions.iter().any(|function| {
+            function.name.name.starts_with("$zirk.module.")
+                && frontend.sources.files().any(|(file, source)| {
+                    source.name().ends_with("src/settings.zrk")
+                        && function.name.name == format!("$zirk.module.{}", file.0)
+                })
+        }));
+        assert!(
+            !sink.has_errors(),
+            "{}",
+            sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+
+        write(&dir, "src/settings.zrk", "share class Other { }\n");
+        let manifest = project::read_manifest(&dir.join(".zkinit")).unwrap();
+        let mismatch = project::validate_global_type_sources(&dir, &manifest).unwrap_err();
+        assert!(mismatch.to_string().contains("does not declare that type"));
+
+        write(
+            &dir,
+            "src/settings.zrk",
+            "share class Settings { }\nmut accidental_side_effect = true;\n",
+        );
+        let manifest = project::read_manifest(&dir.join(".zkinit")).unwrap();
+        let executable = project::validate_global_type_sources(&dir, &manifest).unwrap_err();
+        assert!(
+            executable
+                .to_string()
+                .contains("must not contain executable file-scope statements")
+        );
+
+        write(
+            &dir,
+            ".zkinit",
+            "project { name: \"demo.settings\"; version: \"0.1.0\"; type: application; }\nglobals { settings: { type: Settings; from: \"src/missing.zrk\"; } }",
+        );
+        let manifest = project::read_manifest(&dir.join(".zkinit")).unwrap();
+        let missing = project::validate_global_type_sources(&dir, &manifest).unwrap_err();
+        assert!(missing.to_string().contains("src/missing.zrk"));
+    }
+
+    #[test]
+    fn explicit_project_global_default_is_type_checked_and_retained_as_initializer() {
+        let dir = scratch("global-default");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join(".zkinit"),
+            "project { name: \"demo.defaults\"; version: \"0.1.0\"; type: application; }\nglobals { count: { type: UInt64; default: 0; } }\n",
+        )
+        .unwrap();
+        write(&dir.join("src"), "main.zrk", "");
+
+        let mut sink = DiagnosticSink::new();
+        let frontend = crate::frontend::run_frontend(&dir, &mut sink)
+            .expect("a type-correct explicit global default checks");
+        let global = &frontend.checked.project_globals["count"];
+        assert_eq!(
+            global.default_function.as_deref(),
+            Some("$zirk.global.default.0")
+        );
+        assert!(
+            frontend
+                .program
+                .functions
+                .iter()
+                .any(|function| function.name.name == "$zirk.global.default.0")
+        );
+
+        fs::write(
+            dir.join(".zkinit"),
+            "project { name: \"demo.defaults\"; version: \"0.1.0\"; type: application; }\nglobals { count: { type: UInt64; default: \"wrong\"; } }\n",
+        )
+        .unwrap();
+        let mut invalid_sink = DiagnosticSink::new();
+        assert!(crate::frontend::run_frontend(&dir, &mut invalid_sink).is_none());
+        let diagnostic = invalid_sink.render(zirk_diagnostics::RenderStyle::Human);
+        assert!(
+            diagnostic.contains("returned type does not match"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(".zkinit/globals/0-count.zrk"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn executable_module_cycles_report_the_complete_cycle() {
+        let dir = scratch("initializer-cycle");
+        write(
+            &dir,
+            "main.zrk",
+            "import { a } from \"./a\";\nreport(\"main\");",
+        );
+        write(&dir, "a.zrk", "import { b } from \"./b\";\nreport(\"a\");");
+        write(&dir, "b.zrk", "import { a } from \"./a\";\nreport(\"b\");");
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&dir.join("main.zrk"), &mut sink).unwrap();
+        assert!(sink.has_errors());
+        let diagnostic = sink
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == codes::IMPORT_CYCLE)
+            .unwrap();
+        assert!(diagnostic.message.contains("a.zrk"));
+        assert!(diagnostic.message.contains("b.zrk"));
+        assert_eq!(krate.units.len(), 3);
+    }
+
+    #[test]
+    fn declaration_only_import_cycles_remain_valid() {
+        let dir = scratch("declaration-cycle");
+        write(&dir, "main.zrk", "import { A } from \"./a\";");
+        write(&dir, "a.zrk", "import { B } from \"./b\";\nclass A { }");
+        write(&dir, "b.zrk", "import { A } from \"./a\";\nclass B { }");
+
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&dir.join("main.zrk"), &mut sink).unwrap();
         assert_eq!(krate.units.len(), 3);
         assert!(!sink.has_errors());
     }

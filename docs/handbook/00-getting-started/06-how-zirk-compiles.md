@@ -18,10 +18,7 @@ These stages power `zirk check`, formatting, linting, and language-server featur
 
 Decorators and tools use a public, immutable, versioned Syntax API rather than mutating compiler internals. Generated transformations return to parsing, resolution, typing, and validation. Diagnostics retain a relationship between original and generated source.
 
-Compile-time code does not receive unrestricted filesystem, network, or process
-access. A package declares narrow `requires`; the application grants matching
-`permissions` operations with `during: build`. Signed approval is checked
-before expansion, and unchanged fingerprints take an incremental fast path.
+Compile-time decorator code uses the validated Syntax API and receives no unrestricted filesystem, network, or process access. `.zkinit` has one `requires` list and no separate build-time permission phase. Runtime consent is checked later at each concrete protected operation.
 
 ## Portable typed IR
 

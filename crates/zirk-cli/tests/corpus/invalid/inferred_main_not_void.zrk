@@ -1,5 +1,0 @@
-// Inference does not relax the entrypoint: a `main` whose body returns a
-// value infers a non-`Void` return and fails entrypoint validation.
-fn main() {
-    return 0;
-}

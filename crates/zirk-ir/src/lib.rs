@@ -36,8 +36,8 @@ pub use atomic::{
 pub use ir::{
     BinaryOp, Block, BlockId, BranchKind, ClosureLayout, ContractTable, EnumLayout, ExternFn,
     FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, MutexId, Nullable,
-    ObjectField, ObjectLayout, Operand, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId,
-    ValueLayout,
+    ObjectField, ObjectLayout, Operand, ProjectGlobalLayout, ProjectGlobalWatchEvent, Slot, SlotId,
+    StringId, Terminator, UnaryOp, ValueId, ValueLayout,
 };
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use verify::{IrError, verify};

@@ -1,8 +1,16 @@
 import { stdout } from std.io;
 
+fn cancel_and_report(job: Job<Void>): Boolean {
+    Timer.sleep(10ms);
+    stdout.println("caller cancellation requested");
+    job.cancel();
+    return true;
+}
+
 fn main(): Void {
-    inmut::strict values: List<Int32> = [1, 2, 3, 4];
-    mut job = spawn {
+    concurrent {
+        inmut::strict values: List<Int32> = [1, 2, 3, 4];
+        inmut job = spawn {
         mut results = Concurrent.each(values,(value: Int32): Int32 => {
             stdout.println("callback started");
             try {
@@ -13,8 +21,8 @@ fn main(): Void {
             return value;
         }, 2);
         stdout.println("returned partial results");
-    };
-    Timer.sleep(10ms);
-    job.cancel();
-    stdout.println("caller cancellation requested");
+        };
+        inmut cancelled: Boolean = cancel_and_report(job);
+        _ = job;
+    }
 }

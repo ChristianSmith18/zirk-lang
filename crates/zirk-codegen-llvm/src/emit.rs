@@ -39,8 +39,8 @@ use zirk_ir as ir;
 /// Phase 8.
 const FUNCTION_PREFIX: &str = "zk_";
 
-/// Name of the Zirk entrypoint, per `ZIRK_RUNTIME_SPEC.md` section 2.
-const ENTRYPOINT: &str = "main";
+/// Generated application body. Source-level `main` is an ordinary function.
+const ENTRYPOINT: &str = "$zirk.entry";
 
 /// The LLVM signature of a closure's lifted body.
 ///
@@ -186,6 +186,25 @@ fn emit_inner<'ctx>(
             let global = llvm.add_global(bytes.get_type(), None, &format!("zk.str.{index}"));
             global.set_initializer(&bytes);
             global.set_constant(true);
+            global.set_linkage(Linkage::Private);
+            global.as_pointer_value()
+        })
+        .collect();
+
+    // Application state cells are shared by every source function in this
+    // emitted module. The runtime root registry keeps each allocated cell
+    // alive for the process lifetime; these private globals hold their handles.
+    let project_global_handles: Vec<PointerValue> = module
+        .project_globals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let global = llvm.add_global(
+                context.ptr_type(AddressSpace::default()),
+                None,
+                &format!("zk.project.global.{index}"),
+            );
+            global.set_initializer(&context.ptr_type(AddressSpace::default()).const_null());
             global.set_linkage(Linkage::Private);
             global.as_pointer_value()
         })
@@ -423,6 +442,7 @@ fn emit_inner<'ctx>(
             runtime: &runtime,
             functions: &functions,
             strings: &strings,
+            project_global_handles: &project_global_handles,
             descriptors: &descriptors,
             closure_descriptors: &closure_descriptors,
             debug: debug.as_ref(),
@@ -1298,9 +1318,9 @@ fn declare_extern_fn<'ctx>(
 
 /// Emits the C `main` the operating system invokes.
 ///
-/// It is what materializes the lifecycle of `ZIRK_RUNTIME_SPEC.md` section 2:
-/// the runtime is initialized, Zirk's `main` runs, and the runtime is shut down
-/// before returning the exit code.
+/// It materializes the lifecycle in `ZIRK_RUNTIME_SPEC.md` section 2: the
+/// runtime is initialized, the selected file's generated entry runs, and the
+/// runtime is shut down before returning the exit code.
 fn emit_c_entrypoint<'ctx>(
     context: &'ctx Context,
     builder: &Builder<'ctx>,
@@ -1371,6 +1391,7 @@ struct FunctionEmitter<'ctx, 'a> {
     runtime: &'a runtime::Runtime<'ctx>,
     functions: &'a HashMap<String, FunctionValue<'ctx>>,
     strings: &'a [PointerValue<'ctx>],
+    project_global_handles: &'a [PointerValue<'ctx>],
     /// The type descriptor of each class, by layout id.
     descriptors: &'a [PointerValue<'ctx>],
     /// The capture-block descriptor of each closure layout, by layout id.
@@ -1698,6 +1719,682 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             &self.module.values,
             &self.module.enums,
         )
+    }
+
+    fn emit_project_global_init(&mut self, global: u32, value_slot: ir::SlotId) -> IntValue<'ctx> {
+        let payload_ty = self.module.project_globals[global as usize].payload;
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.init.status")
+            .expect("allocate project-global initialization status");
+        self.builder
+            .build_store(status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global status");
+        let (offsets, offset_count) =
+            self.gc_offsets_for(payload_ty, &format!("zk.project.global.offsets.{global}"));
+        let handle = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_alloc,
+                &[
+                    self.slots[&value_slot].into(),
+                    self.byte_size_of(payload_ty).into(),
+                    self.byte_align_of(payload_ty).into(),
+                    offsets.into(),
+                    offset_count.into(),
+                    status_out.into(),
+                ],
+                "project.global.handle",
+            )
+            .expect("allocate project-global state cell")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex allocator returns a handle")
+            .into_pointer_value();
+        let root_handle = self
+            .builder
+            .build_call(
+                self.runtime.global_root_add,
+                &[handle.into()],
+                "project.global.root.handle",
+            )
+            .expect("register project-global state root")
+            .try_as_basic_value()
+            .basic()
+            .expect("global root registration returns a handle")
+            .into_int_value();
+        let allocation_status = self
+            .builder
+            .build_load(i32_ty, status_out, "project.global.alloc.status")
+            .expect("load project-global allocation status")
+            .into_int_value();
+        let allocation_ok = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                allocation_status,
+                i32_ty.const_zero(),
+                "project.global.alloc.ok",
+            )
+            .expect("check project-global allocation");
+        let root_ok = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                root_handle,
+                i64_ty.const_zero(),
+                "project.global.root.ok",
+            )
+            .expect("check project-global root registration");
+        let fully_initialized = self
+            .builder
+            .build_and(allocation_ok, root_ok, "project.global.ready")
+            .expect("combine project-global initialization checks");
+        let safe_handle = self
+            .builder
+            .build_select(
+                fully_initialized,
+                handle,
+                ptr_ty.const_null(),
+                "project.global.safe.handle",
+            )
+            .expect("select rooted project-global handle")
+            .into_pointer_value();
+        self.builder
+            .build_call(
+                self.runtime.global_watch_reset,
+                &[safe_handle.into()],
+                "project.global.watch.reset",
+            )
+            .expect("initialize project-global watch state");
+        self.builder
+            .build_store(self.project_global_handles[global as usize], safe_handle)
+            .expect("publish project-global state handle");
+        let root_failure = self
+            .builder
+            .build_select(
+                root_ok,
+                i32_ty.const_zero(),
+                i32_ty.const_int(1, false),
+                "project.global.root.status",
+            )
+            .expect("select root registration status")
+            .into_int_value();
+        self.builder
+            .build_select(
+                allocation_ok,
+                root_failure,
+                allocation_status,
+                "project.global.init.result",
+            )
+            .expect("select project-global initialization status")
+            .into_int_value()
+    }
+
+    fn emit_project_global_get(&mut self, global: u32, out: ir::SlotId) -> IntValue<'ctx> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let handle = self
+            .builder
+            .build_load(
+                ptr_ty,
+                self.project_global_handles[global as usize],
+                "project.global.handle",
+            )
+            .expect("load project-global handle")
+            .into_pointer_value();
+        let payload_out = self
+            .builder
+            .build_alloca(ptr_ty, "project.global.payload.out")
+            .expect("allocate project-global payload pointer");
+        let status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.get.status.out")
+            .expect("allocate project-global read status");
+        self.builder
+            .build_store(payload_out, ptr_ty.const_null())
+            .expect("initialize project-global payload pointer");
+        self.builder
+            .build_store(status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global read status");
+        let acquired = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_acquire,
+                &[handle.into(), payload_out.into(), status_out.into()],
+                "project.global.get.acquire.status",
+            )
+            .expect("acquire project-global state cell")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex acquire returns status")
+            .into_int_value();
+        let okay = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                acquired,
+                i32_ty.const_zero(),
+                "project.global.get.acquired",
+            )
+            .expect("check project-global acquire status");
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("project-global read is emitted inside a function");
+        let failed_block = self
+            .context
+            .append_basic_block(function, "project.global.get.failed");
+        let success_block = self
+            .context
+            .append_basic_block(function, "project.global.get.success");
+        let done_block = self
+            .context
+            .append_basic_block(function, "project.global.get.done");
+        self.builder
+            .build_conditional_branch(okay, success_block, failed_block)
+            .expect("branch on project-global acquire status");
+
+        self.builder.position_at_end(failed_block);
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join failed project-global read");
+
+        self.builder.position_at_end(success_block);
+        let payload_ty = self.module.project_globals[global as usize].payload;
+        let payload_pointer = self
+            .builder
+            .build_load(ptr_ty, payload_out, "project.global.payload")
+            .expect("load project-global payload address")
+            .into_pointer_value();
+        let payload = self
+            .builder
+            .build_load(
+                self.llvm_type(payload_ty)
+                    .expect("global payload has a value type"),
+                payload_pointer,
+                "project.global.snapshot.source",
+            )
+            .expect("load project-global snapshot");
+        self.builder
+            .build_store(self.slots[&out], payload)
+            .expect("root project-global snapshot payload");
+        let release_status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.get.release.status.out")
+            .expect("allocate project-global release status");
+        self.builder
+            .build_store(release_status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global release status");
+        let released = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_release,
+                &[handle.into(), release_status_out.into()],
+                "project.global.get.release.status",
+            )
+            .expect("release project-global state cell")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex release returns status")
+            .into_int_value();
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join successful project-global read");
+
+        self.builder.position_at_end(done_block);
+        let status = self
+            .builder
+            .build_phi(i32_ty, "project.global.get.status")
+            .expect("merge project-global read status");
+        status.add_incoming(&[(&acquired, failed_block), (&released, success_block)]);
+        status.as_basic_value().into_int_value()
+    }
+
+    fn emit_project_global_set(
+        &mut self,
+        global: u32,
+        value: ir::Operand,
+        event: Option<ir::ProjectGlobalWatchEvent>,
+    ) -> IntValue<'ctx> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let handle = self
+            .builder
+            .build_load(
+                ptr_ty,
+                self.project_global_handles[global as usize],
+                "project.global.handle",
+            )
+            .expect("load project-global handle")
+            .into_pointer_value();
+        let payload_out = self
+            .builder
+            .build_alloca(ptr_ty, "project.global.payload.out")
+            .expect("allocate project-global payload pointer");
+        let status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.set.status.out")
+            .expect("allocate project-global write status");
+        self.builder
+            .build_store(payload_out, ptr_ty.const_null())
+            .expect("initialize project-global payload pointer");
+        self.builder
+            .build_store(status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global write status");
+        let acquired = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_acquire,
+                &[handle.into(), payload_out.into(), status_out.into()],
+                "project.global.set.acquire.status",
+            )
+            .expect("acquire project-global state cell for replacement")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex acquire returns status")
+            .into_int_value();
+        let okay = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                acquired,
+                i32_ty.const_zero(),
+                "project.global.set.acquired",
+            )
+            .expect("check project-global acquire status");
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("project-global replacement is emitted inside a function");
+        let failed_block = self
+            .context
+            .append_basic_block(function, "project.global.set.failed");
+        let success_block = self
+            .context
+            .append_basic_block(function, "project.global.set.success");
+        let done_block = self
+            .context
+            .append_basic_block(function, "project.global.set.done");
+        self.builder
+            .build_conditional_branch(okay, success_block, failed_block)
+            .expect("branch on project-global acquire status");
+
+        self.builder.position_at_end(failed_block);
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join failed project-global replacement");
+
+        self.builder.position_at_end(success_block);
+        let payload_ty = self.module.project_globals[global as usize].payload;
+        let payload_pointer = self
+            .builder
+            .build_load(ptr_ty, payload_out, "project.global.payload")
+            .expect("load project-global payload address")
+            .into_pointer_value();
+        if let Some(event) = event {
+            let event_ty = self.slot_types[&event.object_slot];
+            let event_object = self
+                .builder
+                .build_load(
+                    ptr_ty,
+                    self.slots[&event.object_slot],
+                    "project.global.event",
+                )
+                .expect("load project-global event object")
+                .into_pointer_value();
+            let previous_pointer = self.field_pointer_of_type(
+                event_object,
+                event_ty,
+                event.previous_field,
+                "project.global.event.previous",
+                false,
+            );
+            let previous = self
+                .builder
+                .build_load(
+                    self.llvm_type(payload_ty)
+                        .expect("watched global payload has a value type"),
+                    payload_pointer,
+                    "project.global.previous",
+                )
+                .expect("read project-global previous value");
+            self.builder
+                .build_store(previous_pointer, previous)
+                .expect("store project-global event previous value");
+            let changed =
+                self.emit_project_global_values_equal(previous, self.operand(value), payload_ty);
+            let changed = self
+                .builder
+                .build_not(changed, "project.global.changed")
+                .expect("invert project-global equality");
+            let revision_pointer = self.field_pointer_of_type(
+                event_object,
+                event_ty,
+                event.revision_field,
+                "project.global.event.revision",
+                false,
+            );
+            let event_size = self.byte_size_of(event_ty);
+            self.builder
+                .build_call(
+                    self.runtime.global_watch_publish,
+                    &[
+                        handle.into(),
+                        self.slots[&event.object_slot].into(),
+                        event_size.into(),
+                        revision_pointer.into(),
+                        changed.into(),
+                    ],
+                    "project.global.watch.publish",
+                )
+                .expect("publish project-global change event");
+        }
+        self.builder
+            .build_store(payload_pointer, self.operand(value))
+            .expect("replace project-global snapshot");
+        let release_status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.set.release.status.out")
+            .expect("allocate project-global release status");
+        self.builder
+            .build_store(release_status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global release status");
+        let released = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_release,
+                &[handle.into(), release_status_out.into()],
+                "project.global.set.release.status",
+            )
+            .expect("release project-global state cell after replacement")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex release returns status")
+            .into_int_value();
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join successful project-global replacement");
+
+        self.builder.position_at_end(done_block);
+        let status = self
+            .builder
+            .build_phi(i32_ty, "project.global.set.status")
+            .expect("merge project-global replacement status");
+        status.add_incoming(&[(&acquired, failed_block), (&released, success_block)]);
+        status.as_basic_value().into_int_value()
+    }
+
+    /// Equality used by watched project globals. The semantic checker admits
+    /// only the same value families handled here: scalar equality, recursive
+    /// tuple equality, and classes that provide `_equals`.
+    fn emit_project_global_values_equal(
+        &mut self,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+        ty: ir::IrType,
+    ) -> IntValue<'ctx> {
+        match ty {
+            ir::IrType::Value(id) => {
+                let layout = self.module.values[id as usize].clone();
+                let left = left.into_struct_value();
+                let right = right.into_struct_value();
+                let mut equal = self.context.bool_type().const_all_ones();
+                for (index, field) in layout.fields.iter().enumerate() {
+                    let left_field = self
+                        .builder
+                        .build_extract_value(left, index as u32, "global.equal.left.field")
+                        .expect("extract watched tuple field");
+                    let right_field = self
+                        .builder
+                        .build_extract_value(right, index as u32, "global.equal.right.field")
+                        .expect("extract watched tuple field");
+                    let field_equal =
+                        self.emit_project_global_values_equal(left_field, right_field, field.ty);
+                    equal = self
+                        .builder
+                        .build_and(equal, field_equal, "global.equal.fields")
+                        .expect("combine watched tuple equality");
+                }
+                equal
+            }
+            ir::IrType::Object(id) => {
+                let symbol = self.module.objects[id as usize]
+                    .methods
+                    .iter()
+                    .find(|name| name.ends_with("$_equals"))
+                    .expect("a watched class accepted by sema has `_equals`");
+                self.builder
+                    .build_call(
+                        self.functions[symbol],
+                        &[left.into(), right.into()],
+                        "project.global.equals",
+                    )
+                    .expect("call watched class `_equals`")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("class `_equals` returns a value")
+                    .into_int_value()
+            }
+            ir::IrType::Decimal => {
+                let ordering = self.emit_decimal_call(
+                    "zirk_rt_decimal_cmp",
+                    &[(left, ir::IrType::Decimal), (right, ir::IrType::Decimal)],
+                    ir::IrType::Int(ir::IntWidth::I32),
+                );
+                self.builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        ordering.into_int_value(),
+                        self.context.i32_type().const_zero(),
+                        "project.global.decimal.equal",
+                    )
+                    .expect("compare watched decimals")
+            }
+            _ => self
+                .emit_binary(ir::BinaryOp::Eq, left, right, false, ty)
+                .into_int_value(),
+        }
+    }
+
+    fn emit_project_global_watch_subscribe(
+        &mut self,
+        global: u32,
+        channel: ir::Operand,
+        snapshot_out: ir::SlotId,
+        token_out: ir::SlotId,
+        revision_out: ir::SlotId,
+    ) -> IntValue<'ctx> {
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i32_ty = self.context.i32_type();
+        let handle = self
+            .builder
+            .build_load(
+                ptr_ty,
+                self.project_global_handles[global as usize],
+                "project.global.watch.handle",
+            )
+            .expect("load project-global watch handle")
+            .into_pointer_value();
+        let payload_out = self
+            .builder
+            .build_alloca(ptr_ty, "project.global.watch.payload.out")
+            .expect("allocate project-global watch payload pointer");
+        let acquire_status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.watch.acquire.status.out")
+            .expect("allocate project-global watch acquire status");
+        self.builder
+            .build_store(payload_out, ptr_ty.const_null())
+            .expect("initialize project-global watch payload pointer");
+        self.builder
+            .build_store(acquire_status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global watch acquire status");
+        let acquired = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_acquire,
+                &[handle.into(), payload_out.into(), acquire_status_out.into()],
+                "project.global.watch.acquire.status",
+            )
+            .expect("acquire project-global cell for watch registration")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex acquire returns status")
+            .into_int_value();
+        let okay = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                acquired,
+                i32_ty.const_zero(),
+                "project.global.watch.acquired",
+            )
+            .expect("check project-global watch acquire status");
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("project-global watch registration is emitted inside a function");
+        let failed_block = self
+            .context
+            .append_basic_block(function, "project.global.watch.failed");
+        let success_block = self
+            .context
+            .append_basic_block(function, "project.global.watch.success");
+        let done_block = self
+            .context
+            .append_basic_block(function, "project.global.watch.done");
+        self.builder
+            .build_conditional_branch(okay, success_block, failed_block)
+            .expect("branch on project-global watch acquire status");
+
+        self.builder.position_at_end(failed_block);
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join failed project-global watch registration");
+
+        self.builder.position_at_end(success_block);
+        let payload_ty = self.module.project_globals[global as usize].payload;
+        let payload_pointer = self
+            .builder
+            .build_load(ptr_ty, payload_out, "project.global.watch.payload")
+            .expect("load project-global watch payload address")
+            .into_pointer_value();
+        let payload = self
+            .builder
+            .build_load(
+                self.llvm_type(payload_ty)
+                    .expect("global watch payload has a value type"),
+                payload_pointer,
+                "project.global.watch.snapshot.source",
+            )
+            .expect("load project-global watch snapshot");
+        self.builder
+            .build_store(self.slots[&snapshot_out], payload)
+            .expect("root project-global watch snapshot payload");
+        let registered = self
+            .builder
+            .build_call(
+                self.runtime.global_watch_subscribe,
+                &[
+                    handle.into(),
+                    self.operand(channel).into(),
+                    self.slots[&token_out].into(),
+                    self.slots[&revision_out].into(),
+                ],
+                "project.global.watch.subscribe.status",
+            )
+            .expect("register project-global watch channel")
+            .try_as_basic_value()
+            .basic()
+            .expect("global watch subscribe returns status")
+            .into_int_value();
+        let registered_ok = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                registered,
+                i32_ty.const_zero(),
+                "project.global.watch.registered",
+            )
+            .expect("check project-global watch registration status");
+        let release_status_out = self
+            .builder
+            .build_alloca(i32_ty, "project.global.watch.release.status.out")
+            .expect("allocate project-global watch release status");
+        self.builder
+            .build_store(release_status_out, i32_ty.const_int(4, false))
+            .expect("initialize project-global watch release status");
+        let released = self
+            .builder
+            .build_call(
+                self.runtime.gc_mutex_release,
+                &[handle.into(), release_status_out.into()],
+                "project.global.watch.release.status",
+            )
+            .expect("release project-global cell after watch registration")
+            .try_as_basic_value()
+            .basic()
+            .expect("GC mutex release returns status")
+            .into_int_value();
+        let success_status = self
+            .builder
+            .build_select(
+                registered_ok,
+                released,
+                registered,
+                "project.global.watch.success.status",
+            )
+            .expect("select project-global watch registration status")
+            .into_int_value();
+        self.builder
+            .build_unconditional_branch(done_block)
+            .expect("join successful project-global watch registration");
+
+        self.builder.position_at_end(done_block);
+        let status = self
+            .builder
+            .build_phi(i32_ty, "project.global.watch.status")
+            .expect("merge project-global watch registration status");
+        status.add_incoming(&[(&acquired, failed_block), (&success_status, success_block)]);
+        status.as_basic_value().into_int_value()
+    }
+
+    fn emit_project_global_watch_next(
+        &mut self,
+        token: ir::Operand,
+        out: ir::SlotId,
+    ) -> IntValue<'ctx> {
+        self.builder
+            .build_call(
+                self.runtime.global_watch_next,
+                &[
+                    self.operand(token).into_int_value().into(),
+                    self.slots[&out].into(),
+                ],
+                "project.global.watch.next.status",
+            )
+            .expect("read project-global watch event")
+            .try_as_basic_value()
+            .basic()
+            .expect("global watch next returns status")
+            .into_int_value()
+    }
+
+    fn emit_project_global_watch_close(&mut self, token: ir::Operand) {
+        self.builder
+            .build_call(
+                self.runtime.global_watch_close,
+                &[self.operand(token).into_int_value().into()],
+                "project.global.watch.close",
+            )
+            .expect("close project-global subscription");
     }
 
     /// The byte size `ty` occupies, as an LLVM `i64` constant expression
@@ -3592,6 +4289,30 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
     }
 
     fn emit_instruction(&mut self, instruction: &ir::Instruction) {
+        let requester = self
+            .module
+            .capability_requesters
+            .get(&instruction.span)
+            .cloned();
+        if let Some(requester) = &requester {
+            let global = self
+                .builder
+                .build_global_string_ptr(requester, "zk.permission.requester")
+                .expect("create protected call-site requester string");
+            self.builder
+                .build_call(
+                    self.runtime.permission_requester_set,
+                    &[
+                        global.as_pointer_value().into(),
+                        self.context
+                            .i64_type()
+                            .const_int(requester.len() as u64, false)
+                            .into(),
+                    ],
+                    "",
+                )
+                .expect("set protected call-site requester");
+        }
         let value: Option<BasicValueEnum> = match &instruction.kind {
             ir::InstKind::BorrowViewLoad { view } => {
                 let ty = self.llvm_type(instruction.ty).expect("borrow payload type");
@@ -3756,6 +4477,40 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .basic()
                         .expect("mutex.with returns status"),
                 )
+            }
+            ir::InstKind::ProjectGlobalInit { global, value_slot } => {
+                Some(self.emit_project_global_init(*global, *value_slot).into())
+            }
+            ir::InstKind::ProjectGlobalGet { global, out } => {
+                Some(self.emit_project_global_get(*global, *out).into())
+            }
+            ir::InstKind::ProjectGlobalSet {
+                global,
+                value,
+                event,
+            } => Some(self.emit_project_global_set(*global, *value, *event).into()),
+            ir::InstKind::ProjectGlobalWatchSubscribe {
+                global,
+                channel,
+                snapshot_out,
+                token_out,
+                revision_out,
+            } => Some(
+                self.emit_project_global_watch_subscribe(
+                    *global,
+                    *channel,
+                    *snapshot_out,
+                    *token_out,
+                    *revision_out,
+                )
+                .into(),
+            ),
+            ir::InstKind::ProjectGlobalWatchNext { token, out } => {
+                Some(self.emit_project_global_watch_next(*token, *out).into())
+            }
+            ir::InstKind::ProjectGlobalWatchClose { token } => {
+                self.emit_project_global_watch_close(*token);
+                None
             }
             ir::InstKind::MutexNew {
                 payload,
@@ -12908,6 +13663,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 None
             }
         };
+
+        if requester.is_some() {
+            self.builder
+                .build_call(self.runtime.permission_requester_clear, &[], "")
+                .expect("clear protected call-site requester");
+        }
 
         if let (Some(result), Some(value)) = (instruction.result, value) {
             self.values.insert(result, value);

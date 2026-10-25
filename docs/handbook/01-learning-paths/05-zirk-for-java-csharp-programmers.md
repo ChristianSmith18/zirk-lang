@@ -34,11 +34,11 @@ available.
 
 ## Applications decide capabilities
 
-Libraries cannot grant themselves filesystem or network access. They declare requirements; applications grant the final finite permission set in `.zkinit`. Compile-time decorators have a separate permission boundary.
+Applications and packages declare the same finite `requires` capabilities. A declaration is not consent: the user approves an exact resource when protected code reaches it. The current compiler does not expose protected host operations to decorators, and there is no separate compile-time permission phase.
 
 ## Recommended route
 
-Focus on immutability levels, algebraic enums and matching, `Result`, resource-safe control flow, structured concurrency, permissions, and portable packages. Then use the class and interface chapters to map the familiar parts precisely.
+Focus on immutability levels, algebraic enums and matching, `Result`, resource-safe control flow, structured concurrency, capability requirements, and portable packages. Then use the class and interface chapters to map the familiar parts precisely.
 
 ---
 

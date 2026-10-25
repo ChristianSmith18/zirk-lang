@@ -108,8 +108,8 @@ The target checker tracks:
 - unsafe transaction, rollback eligibility and irreversible `commit` effects.
 
 Effects remain callable/compiler metadata rather than extra syntax in `Fn`.
-Application grants remain in `.zkinit`; successful type/effect checking never
-grants authority.
+Capability requirements are declared in `.zkinit`; successful type/effect
+checking never grants authority. Exact user consent is checked at runtime.
 
 ## Decorator rechecking
 

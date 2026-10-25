@@ -5,7 +5,7 @@
 //! are rejected before module loading begins.
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use zirk_ast::Program;
 
@@ -13,6 +13,92 @@ use zirk_ast::Program;
 pub enum ProjectKind {
     Application,
     Package,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Capability {
+    FilesystemRead,
+    FilesystemWrite,
+    NetworkConnect,
+    NetworkListen,
+    NetworkUdpSend,
+    NetworkUdpListen,
+    NetworkLocalConnect,
+    NetworkLocalListen,
+    NetworkInspectInterfaces,
+    EnvironmentRead,
+    EnvironmentListNames,
+    SecretsRead,
+    ProcessExecute,
+    ProcessShell,
+}
+
+impl Capability {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "filesystem.read" => Self::FilesystemRead,
+            "filesystem.write" => Self::FilesystemWrite,
+            "network.connect" => Self::NetworkConnect,
+            "network.listen" => Self::NetworkListen,
+            "network.udp.send" => Self::NetworkUdpSend,
+            "network.udp.listen" => Self::NetworkUdpListen,
+            "network.local.connect" => Self::NetworkLocalConnect,
+            "network.local.listen" => Self::NetworkLocalListen,
+            "network.inspect_interfaces" => Self::NetworkInspectInterfaces,
+            "environment.read" => Self::EnvironmentRead,
+            "environment.list_names" => Self::EnvironmentListNames,
+            "secrets.read" => Self::SecretsRead,
+            "process.execute" => Self::ProcessExecute,
+            "process.shell" => Self::ProcessShell,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemRead => "filesystem.read",
+            Self::FilesystemWrite => "filesystem.write",
+            Self::NetworkConnect => "network.connect",
+            Self::NetworkListen => "network.listen",
+            Self::NetworkUdpSend => "network.udp.send",
+            Self::NetworkUdpListen => "network.udp.listen",
+            Self::NetworkLocalConnect => "network.local.connect",
+            Self::NetworkLocalListen => "network.local.listen",
+            Self::NetworkInspectInterfaces => "network.inspect_interfaces",
+            Self::EnvironmentRead => "environment.read",
+            Self::EnvironmentListNames => "environment.list_names",
+            Self::SecretsRead => "secrets.read",
+            Self::ProcessExecute => "process.execute",
+            Self::ProcessShell => "process.shell",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestSpan {
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManifestSpans {
+    pub fields: BTreeMap<String, ManifestSpan>,
+    pub dependencies: BTreeMap<String, ManifestSpan>,
+    pub dev_dependencies: BTreeMap<String, ManifestSpan>,
+    pub globals: BTreeMap<String, ManifestSpan>,
+    pub requirements: BTreeMap<Capability, ManifestSpan>,
+    pub source_roots: Vec<ManifestSpan>,
+    pub build_targets: Vec<ManifestSpan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalVariable {
+    pub type_name: String,
+    pub default: Option<String>,
+    pub from: Option<PathBuf>,
+    pub readonly: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +114,30 @@ pub struct Dependency {
     pub name: String,
     pub constraint: String,
     pub source: DependencySource,
+    pub revision: Option<String>,
+    pub integrity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectManifest {
     pub name: String,
+    pub version: String,
     pub kind: ProjectKind,
+    pub authors: Vec<String>,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    /// Effective source file selected as application entry or package root.
     pub entry: PathBuf,
+    /// Public source root for packages; equal to `entry` for the current
+    /// package-loading compatibility layer.
+    pub package_root: Option<PathBuf>,
     pub source_roots: Vec<PathBuf>,
+    pub build_targets: Vec<String>,
     pub dependencies: BTreeMap<String, Dependency>,
+    pub dev_dependencies: BTreeMap<String, Dependency>,
+    pub globals: BTreeMap<String, GlobalVariable>,
+    pub requires: std::collections::BTreeSet<Capability>,
+    pub spans: ManifestSpans,
     /// Environment requirements declared by this application or package.
     /// Declarations describe requested authority only; they never grant it.
     pub environment_permissions: EnvironmentPermissions,
@@ -65,11 +166,15 @@ pub struct NetworkPermissions {
     pub inspect_interfaces: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LockedPackage {
     pub name: String,
     pub version: String,
     pub source: String,
+    #[serde(default)]
+    pub locator: String,
+    #[serde(default)]
+    pub revision: Option<String>,
     pub hash: String,
     pub package_root: String,
 }
@@ -173,17 +278,42 @@ fn quoted(value: &str) -> Result<String, ProjectError> {
         .ok_or_else(|| ProjectError("expected a quoted value".into()))
 }
 
-/// Parses the deliberately line-oriented manifest subset used by the package
-/// loader. Every logical field is explicit, which makes failures deterministic
-/// and keeps package transport out of source imports.
+/// Parses and validates the canonical `.zkinit` grammar.
 pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
+    if looks_like_legacy_manifest(text) {
+        return Err(ProjectError(
+            "legacy `.zkinit` syntax is not accepted for normal project loading; run `zirk migrate --check` to preview conversion".into(),
+        ));
+    }
+    crate::manifest_parser::parse_manifest(text)
+}
+
+fn looks_like_legacy_manifest(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        line.starts_with("project \"")
+            || line.starts_with("kind ")
+            || line.starts_with("entry \"")
+            || line.starts_with("dependency ")
+    })
+}
+
+/// Formats a project model in the canonical, stable `.zkinit` representation.
+pub fn format_manifest(manifest: &ProjectManifest) -> String {
+    crate::manifest_parser::format_manifest(manifest)
+}
+
+/// Reads legacy manifests only for the explicit migration path. Ordinary
+/// project loading calls [`parse_manifest`] and rejects the removed syntax.
+pub fn parse_legacy_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
     let mut name = None;
+    let mut version = None;
     let mut kind = None;
     let mut entry = None;
     let mut source_roots = Vec::new();
     let mut dependencies = BTreeMap::new();
     let mut environment_permissions = EnvironmentPermissions::default();
     let mut network_permissions = NetworkPermissions::default();
+    let mut project_block = false;
     let mut permission_block: Option<&str> = None;
     let mut environment_block = false;
     let mut network_block = false;
@@ -192,6 +322,41 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
     {
+        if raw == "project {" {
+            if project_block || permission_block.is_some() {
+                return Err(ProjectError(
+                    "nested `.zkinit` blocks are not allowed".into(),
+                ));
+            }
+            project_block = true;
+            continue;
+        }
+        if project_block {
+            if raw == "}" {
+                project_block = false;
+                continue;
+            }
+            let (field, value) = raw
+                .strip_suffix(';')
+                .unwrap_or(raw)
+                .split_once(':')
+                .ok_or_else(|| ProjectError(format!("invalid project field `{raw}`")))?;
+            let value = value.trim();
+            match field.trim() {
+                "name" => name = Some(quoted(value)?),
+                "version" => {
+                    version = Some(quoted(value)?);
+                }
+                "type" => {
+                    kind = Some(parse_project_kind(value.trim_end_matches(';').trim())?);
+                }
+                "entry" => entry = Some(PathBuf::from(quoted(value)?)),
+                other => {
+                    return Err(ProjectError(format!("unknown project field `{other}`")));
+                }
+            }
+            continue;
+        }
         if raw == "permissions {" {
             if permission_block.is_some() {
                 return Err(ProjectError(
@@ -228,17 +393,7 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
                         ProjectError("project needs a name".into())
                     })?)?)
             }
-            Some("kind") => {
-                kind = Some(match pieces.next() {
-                    Some("application") => ProjectKind::Application,
-                    Some("package") => ProjectKind::Package,
-                    _ => {
-                        return Err(ProjectError(
-                            "kind must be `application` or `package`".into(),
-                        ));
-                    }
-                })
-            }
+            Some("kind") => kind = Some(parse_project_kind(pieces.next().unwrap_or_default())?),
             Some("entry") => {
                 entry =
                     Some(PathBuf::from(quoted(pieces.next().ok_or_else(|| {
@@ -292,6 +447,8 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
                         name: package,
                         constraint,
                         source,
+                        revision: None,
+                        integrity: None,
                     },
                 );
             }
@@ -303,7 +460,7 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
             None => {}
         }
     }
-    if permission_block.is_some() || environment_block || network_block {
+    if project_block || permission_block.is_some() || environment_block || network_block {
         return Err(ProjectError("unclosed `.zkinit` permissions block".into()));
     }
     let name = name.ok_or_else(|| ProjectError("manifest is missing `project`".into()))?;
@@ -318,15 +475,148 @@ pub fn parse_manifest(text: &str) -> Result<ProjectManifest, ProjectError> {
     if source_roots.is_empty() {
         source_roots.push(PathBuf::from("src"));
     }
+    let mut requires = std::collections::BTreeSet::new();
+    if !environment_permissions.read_names.is_empty() {
+        requires.insert(Capability::EnvironmentRead);
+    }
+    if environment_permissions.list_names {
+        requires.insert(Capability::EnvironmentListNames);
+    }
+    if !environment_permissions.secret_names.is_empty() {
+        requires.insert(Capability::SecretsRead);
+    }
+    if !network_permissions.connect_origins.is_empty() {
+        requires.insert(Capability::NetworkConnect);
+    }
+    if !network_permissions.listen_addresses.is_empty() {
+        requires.insert(Capability::NetworkListen);
+    }
+    if !network_permissions.udp_destinations.is_empty()
+        || !network_permissions.udp_broadcast_destinations.is_empty()
+        || !network_permissions.udp_multicast_groups.is_empty()
+    {
+        requires.insert(Capability::NetworkUdpSend);
+    }
+    if !network_permissions.udp_listen_addresses.is_empty() {
+        requires.insert(Capability::NetworkUdpListen);
+    }
+    if !network_permissions.local_connect_endpoints.is_empty() {
+        requires.insert(Capability::NetworkLocalConnect);
+    }
+    if !network_permissions.local_listen_endpoints.is_empty() {
+        requires.insert(Capability::NetworkLocalListen);
+    }
+    if network_permissions.inspect_interfaces {
+        requires.insert(Capability::NetworkInspectInterfaces);
+    }
     Ok(ProjectManifest {
         name,
+        version: version.unwrap_or_else(|| "0.1.0".into()),
         kind,
-        entry,
+        authors: Vec::new(),
+        description: None,
+        license: None,
+        entry: entry.clone(),
+        package_root: (kind == ProjectKind::Package).then_some(entry),
         source_roots,
+        build_targets: Vec::new(),
         dependencies,
+        dev_dependencies: BTreeMap::new(),
+        globals: BTreeMap::new(),
+        requires,
+        spans: ManifestSpans::default(),
         environment_permissions,
         network_permissions,
     })
+}
+
+/// Converts supported legacy manifest text to the canonical syntax. Mapped
+/// permissions are declarations only; this function never creates consent.
+pub fn migrate_legacy_manifest_text(text: &str) -> Result<String, ProjectError> {
+    let manifest = parse_legacy_manifest(text)?;
+    if let Some(dependency) = manifest.dependencies.values().find(|dependency| {
+        matches!(dependency.source, DependencySource::Git(_)) && dependency.revision.is_none()
+    }) {
+        return Err(ProjectError(format!(
+            "legacy Git dependency `{}` has no immutable revision; add an explicit `rev` before migration",
+            dependency.name
+        )));
+    }
+    Ok(format_manifest(&manifest))
+}
+
+/// Returns the canonical preview and, when requested, atomically replaces the
+/// manifest while preserving the original at `<manifest>.pre-migrate`.
+pub fn migrate_manifest_file(path: &Path, apply: bool) -> Result<(String, String), ProjectError> {
+    let original = std::fs::read_to_string(path)
+        .map_err(|error| ProjectError(format!("could not read `{}`: {error}", path.display())))?;
+    let converted = migrate_legacy_manifest_text(&original)?;
+    if !apply {
+        return Ok((original, converted));
+    }
+
+    let backup = path.with_file_name(format!(
+        "{}.pre-migrate",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let mut backup_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup)
+        .map_err(|error| {
+            ProjectError(format!(
+                "could not create recoverable backup `{}`: {error}",
+                backup.display()
+            ))
+        })?;
+    use std::io::Write;
+    backup_file
+        .write_all(original.as_bytes())
+        .and_then(|_| backup_file.sync_all())
+        .map_err(|error| {
+            ProjectError(format!(
+                "could not write recoverable backup `{}`: {error}",
+                backup.display()
+            ))
+        })?;
+
+    let temp = path.with_file_name(format!(".zkinit.tmp.{}", std::process::id()));
+    let write_result = (|| {
+        let mut temp_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| {
+                ProjectError(format!("could not create temporary manifest: {error}"))
+            })?;
+        temp_file
+            .write_all(converted.as_bytes())
+            .and_then(|_| temp_file.sync_all())
+            .map_err(|error| {
+                ProjectError(format!("could not write temporary manifest: {error}"))
+            })?;
+        std::fs::rename(&temp, path).map_err(|error| {
+            ProjectError(format!(
+                "could not atomically replace `{}`: {error}",
+                path.display()
+            ))
+        })
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    write_result?;
+    Ok((original, converted))
+}
+
+fn parse_project_kind(value: &str) -> Result<ProjectKind, ProjectError> {
+    match value {
+        "application" => Ok(ProjectKind::Application),
+        "package" => Ok(ProjectKind::Package),
+        _ => Err(ProjectError(
+            "project type must be `application` or `package`".into(),
+        )),
+    }
 }
 
 fn parse_network_permission(
@@ -575,6 +865,37 @@ fn parse_environment_permission(
 }
 
 pub fn parse_lockfile(text: &str) -> Result<Lockfile, ProjectError> {
+    if text.trim_start().starts_with('{') {
+        let document: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| ProjectError(format!("invalid `zirk.lock` JSON: {error}")))?;
+        let version = document
+            .get("lock_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| ProjectError("`zirk.lock` is missing numeric `lock_version`".into()))?;
+        if version != 2 {
+            return Err(ProjectError(format!(
+                "unsupported `zirk.lock` version {version}; expected 2"
+            )));
+        }
+        let packages = document
+            .get("packages")
+            .cloned()
+            .ok_or_else(|| ProjectError("`zirk.lock` is missing `packages`".into()))?;
+        let packages: BTreeMap<String, LockedPackage> = serde_json::from_value(packages)
+            .map_err(|error| ProjectError(format!("invalid locked package record: {error}")))?;
+        for (name, package) in &packages {
+            if name != &package.name {
+                return Err(ProjectError(format!(
+                    "lock package key `{name}` does not match its logical name `{}`",
+                    package.name
+                )));
+            }
+        }
+        return Ok(Lockfile { packages });
+    }
+
+    // Read-only support for the previous five-column format is retained so
+    // `zirk migrate` and old lock diagnostics can identify stale projects.
     let mut packages = BTreeMap::new();
     for raw in text
         .lines()
@@ -597,6 +918,8 @@ pub fn parse_lockfile(text: &str) -> Result<Lockfile, ProjectError> {
             name: fields[0].into(),
             version: fields[1].into(),
             source: fields[2].into(),
+            locator: String::new(),
+            revision: None,
             hash: fields[3].into(),
             package_root: fields[4].into(),
         };
@@ -605,11 +928,185 @@ pub fn parse_lockfile(text: &str) -> Result<Lockfile, ProjectError> {
     Ok(Lockfile { packages })
 }
 
+pub fn format_lockfile(lock: &Lockfile) -> String {
+    let value = serde_json::json!({
+        "lock_version": 2,
+        "packages": lock.packages,
+    });
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| "{}".into()) + "\n"
+}
+
+pub fn dependency_locator(source: &DependencySource) -> String {
+    match source {
+        DependencySource::Local(path) => format!("path:{}", path.to_string_lossy()),
+        DependencySource::Registry(name) => format!("registry:{name}"),
+        DependencySource::Git(url) => format!("git+{url}"),
+        DependencySource::Vendored(path) => format!("vendored:{}", path.to_string_lossy()),
+    }
+}
+
+pub(crate) fn canonical_child_without_symlinks(
+    base: &Path,
+    relative: &Path,
+    label: &str,
+) -> Result<PathBuf, ProjectError> {
+    if relative.is_absolute() {
+        return Err(ProjectError(format!("{label} must be a relative path")));
+    }
+    let mut cursor = base.canonicalize().map_err(|error| {
+        ProjectError(format!(
+            "could not resolve {label} base `{}`: {error}",
+            base.display()
+        ))
+    })?;
+    for component in relative.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(ProjectError(format!("{label} must be project-relative")));
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                cursor.pop();
+            }
+            std::path::Component::Normal(part) => cursor.push(part),
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&cursor)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(ProjectError(format!(
+                "{label} contains symbolic link `{}`",
+                cursor.display()
+            )));
+        }
+    }
+    cursor.canonicalize().map_err(|error| {
+        ProjectError(format!(
+            "could not resolve {label} `{}`: {error}",
+            relative.display()
+        ))
+    })
+}
+
+/// Resolves the optional source file attached to each custom application
+/// global and rejects missing paths or symbolic-link escapes before source
+/// loading begins.
+pub fn validate_global_type_sources(
+    root: &Path,
+    manifest: &ProjectManifest,
+) -> Result<(), ProjectError> {
+    for (name, global) in &manifest.globals {
+        let Some(source) = &global.from else {
+            continue;
+        };
+        let path = canonical_child_without_symlinks(
+            root,
+            source,
+            &format!("global `{name}` type source"),
+        )?;
+        if !path.is_file() {
+            return Err(ProjectError(format!(
+                "global `{name}` type source `{}` is not a file",
+                source.display()
+            )));
+        }
+        let source_text = std::fs::read_to_string(&path).map_err(|error| {
+            ProjectError(format!(
+                "could not read global `{name}` type source `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        let source_file = zirk_diagnostics::SourceFile::new(path.to_string_lossy(), &source_text);
+        let mut diagnostics = zirk_diagnostics::DiagnosticSink::new();
+        let tokens = zirk_lexer::tokenize(&source_file, &mut diagnostics);
+        let program = zirk_parser::parse(&source_file, &tokens, &mut diagnostics);
+        if diagnostics.has_errors() {
+            return Err(ProjectError(format!(
+                "global `{name}` type source `{}` contains invalid Zirk syntax",
+                source.display()
+            )));
+        }
+        if !program.body.is_empty() {
+            return Err(ProjectError(format!(
+                "global `{name}` type source `{}` must not contain executable file-scope statements",
+                source.display()
+            )));
+        }
+        let declares_type = program
+            .classes
+            .iter()
+            .any(|declaration| declaration.name.name == global.type_name)
+            || program
+                .enums
+                .iter()
+                .any(|declaration| declaration.name.name == global.type_name)
+            || program
+                .contracts
+                .iter()
+                .any(|declaration| declaration.name.name == global.type_name)
+            || program
+                .type_aliases
+                .iter()
+                .any(|declaration| declaration.name.name == global.type_name);
+        if !declares_type {
+            return Err(ProjectError(format!(
+                "global `{name}` declares type `{}`, but `{}` does not declare that type",
+                global.type_name,
+                source.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn version_matches(constraint: &str, version: &str) -> Result<bool, ProjectError> {
+    if constraint.is_empty() {
+        return Ok(true);
+    }
+    let version = parse_semver_version(version).ok_or_else(|| {
+        ProjectError(format!(
+            "package version `{version}` is not valid semantic versioning"
+        ))
+    })?;
+    let requirement = semver::VersionReq::parse(constraint).map_err(|error| {
+        ProjectError(format!(
+            "invalid version requirement `{constraint}`: {error}"
+        ))
+    })?;
+    Ok(requirement.matches(&version))
+}
+
+pub fn lock_version_satisfies(constraint: &str, version: &str) -> Result<bool, ProjectError> {
+    version_matches(constraint, version)
+}
+
+fn parse_semver_version(value: &str) -> Option<semver::Version> {
+    semver::Version::parse(value).ok().or_else(|| {
+        let components: Vec<_> = value.split('.').collect();
+        match components.as_slice() {
+            [major] if major.bytes().all(|byte| byte.is_ascii_digit()) => {
+                semver::Version::parse(&format!("{major}.0.0")).ok()
+            }
+            [major, minor]
+                if major.bytes().all(|byte| byte.is_ascii_digit())
+                    && minor.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                semver::Version::parse(&format!("{major}.{minor}.0")).ok()
+            }
+            _ => None,
+        }
+    })
+}
+
 pub fn discover(start: &Path) -> Option<PathBuf> {
-    let mut cursor = if start.is_dir() {
+    let absolute_start = if start.is_absolute() {
         start.to_path_buf()
     } else {
-        start.parent()?.to_path_buf()
+        std::env::current_dir().ok()?.join(start)
+    };
+    let mut cursor = if absolute_start.is_dir() {
+        absolute_start
+    } else {
+        absolute_start.parent()?.to_path_buf()
     };
     loop {
         let manifest = cursor.join(".zkinit");
@@ -665,9 +1162,43 @@ pub fn resolve_local_roots(
             else {
                 continue;
             };
-            let dependency_root = root.join(path);
-            let dependency_manifest = read_manifest(&dependency_root.join(".zkinit"))?;
-            visit(&dependency_root, &dependency_manifest, roots, stack)?;
+            let canonical_dependency_root = canonical_child_without_symlinks(
+                root,
+                path,
+                &format!("local dependency `{}`", dependency.name),
+            )?;
+            let dependency_manifest = read_manifest(&canonical_dependency_root.join(".zkinit"))?;
+            if dependency_manifest.kind != ProjectKind::Package
+                || dependency_manifest.name != dependency.name
+            {
+                return Err(ProjectError(format!(
+                    "local dependency `{}` resolves to `{}`; its manifest must declare the same package name and `type: package`",
+                    dependency.name, dependency_manifest.name
+                )));
+            }
+            if !version_matches(&dependency.constraint, &dependency_manifest.version)? {
+                return Err(ProjectError(format!(
+                    "local dependency `{}` has version `{}` which does not satisfy `{}`",
+                    dependency.name, dependency_manifest.version, dependency.constraint
+                )));
+            }
+            let package_manifest_path = canonical_child_without_symlinks(
+                &canonical_dependency_root,
+                Path::new(".zkinit"),
+                &format!("local dependency `{}` manifest", dependency.name),
+            )?;
+            if !package_manifest_path.starts_with(&canonical_dependency_root) {
+                return Err(ProjectError(format!(
+                    "local dependency `{}` manifest escapes its canonical package root",
+                    dependency.name
+                )));
+            }
+            visit(
+                &canonical_dependency_root,
+                &dependency_manifest,
+                roots,
+                stack,
+            )?;
         }
         stack.pop();
         Ok(())
@@ -677,29 +1208,99 @@ pub fn resolve_local_roots(
     Ok(roots)
 }
 
-/// Resolves every materialized dependency transport to its public entrypoint.
-/// Registry and Git acquisition remain separate from graph loading: once a
-/// verified artifact is cached, it is loaded exactly like a local package.
+/// Resolves every locked package through its logical name. Remote transports
+/// are materialized by `zirk install`; all packages then use the same source
+/// import namespace.
 pub fn resolve_package_roots(
     root: &Path,
     manifest: &ProjectManifest,
     lock: &Lockfile,
 ) -> Result<BTreeMap<String, PathBuf>, ProjectError> {
-    let mut roots = resolve_local_roots(root, manifest)?;
-    for dependency in manifest.dependencies.values() {
-        let entry = lock.packages.get(&dependency.name).ok_or_else(|| {
-            ProjectError(format!(
-                "dependency `{}` is missing from `zirk.lock`",
-                dependency.name
-            ))
-        })?;
-        let package_root = resolved_dependency_root(root, dependency, entry)
-            .expect("every dependency transport has a materialized root");
-        roots.insert(
-            dependency.name.clone(),
-            package_root.join(&entry.package_root),
-        );
+    resolve_package_roots_with_dev(root, manifest, lock, false)
+}
+
+/// Resolves the runtime graph and, when requested, the current application's
+/// direct development dependencies. Package development dependencies are
+/// never inherited while traversing a dependency graph.
+pub fn resolve_package_roots_with_dev(
+    root: &Path,
+    manifest: &ProjectManifest,
+    lock: &Lockfile,
+    include_root_dev_dependencies: bool,
+) -> Result<BTreeMap<String, PathBuf>, ProjectError> {
+    fn visit(
+        root: &Path,
+        manifest: &ProjectManifest,
+        lock: &Lockfile,
+        roots: &mut BTreeMap<String, PathBuf>,
+        visited: &mut BTreeSet<PathBuf>,
+        include_root_dev_dependencies: bool,
+    ) -> Result<(), ProjectError> {
+        validate_lockfile_with_dev(root, manifest, Some(lock), include_root_dev_dependencies)?;
+        let mut dependencies: Vec<_> = manifest.dependencies.values().collect();
+        if include_root_dev_dependencies {
+            dependencies.extend(manifest.dev_dependencies.values());
+        }
+        for dependency in dependencies {
+            let entry = lock.packages.get(&dependency.name).ok_or_else(|| {
+                ProjectError(format!(
+                    "dependency `{}` is missing from `zirk.lock`",
+                    dependency.name
+                ))
+            })?;
+            let package_root =
+                resolved_dependency_root(root, dependency, entry).ok_or_else(|| {
+                    ProjectError(format!(
+                        "dependency `{}` has no materialized package identity",
+                        dependency.name
+                    ))
+                })?;
+            let canonical_root = match &dependency.source {
+                DependencySource::Local(path) | DependencySource::Vendored(path) => {
+                    canonical_child_without_symlinks(
+                        root,
+                        path,
+                        &format!("dependency `{}` package root", dependency.name),
+                    )?
+                }
+                DependencySource::Registry(_) | DependencySource::Git(_) => {
+                    package_root.canonicalize().map_err(|error| {
+                        ProjectError(format!(
+                            "could not resolve dependency `{}` cache `{}`: {error}",
+                            dependency.name,
+                            package_root.display()
+                        ))
+                    })?
+                }
+            };
+            let package_manifest = read_manifest(&canonical_root.join(".zkinit"))?;
+            roots.insert(
+                dependency.name.clone(),
+                canonical_root.join(&entry.package_root),
+            );
+            if visited.insert(canonical_root.clone()) {
+                visit(
+                    &canonical_root,
+                    &package_manifest,
+                    lock,
+                    roots,
+                    visited,
+                    false,
+                )?;
+            }
+        }
+        Ok(())
     }
+
+    let mut roots = BTreeMap::new();
+    visit(
+        root,
+        manifest,
+        lock,
+        &mut roots,
+        &mut BTreeSet::new(),
+        include_root_dev_dependencies,
+    )?;
     Ok(roots)
 }
 
@@ -721,12 +1322,19 @@ pub fn resolved_dependency_root(
         DependencySource::Local(ref path) | DependencySource::Vendored(ref path) => {
             Some(root.join(path))
         }
-        DependencySource::Registry(_) | DependencySource::Git(_) => Some(
-            root.join(".zirk")
-                .join("packages")
-                .join(&dependency.name)
-                .join(&lock.version),
-        ),
+        DependencySource::Registry(_) | DependencySource::Git(_) => {
+            let identity = lock
+                .revision
+                .as_deref()
+                .or_else(|| lock.hash.strip_prefix("sha256:"))?;
+            Some(
+                root.join(".zirk")
+                    .join("packages")
+                    .join(&dependency.name)
+                    .join(&lock.version)
+                    .join(identity),
+            )
+        }
     }
 }
 
@@ -735,12 +1343,27 @@ pub fn validate_lockfile(
     manifest: &ProjectManifest,
     lock: Option<&Lockfile>,
 ) -> Result<(), ProjectError> {
-    if manifest.dependencies.is_empty() {
+    validate_lockfile_with_dev(root, manifest, lock, false)
+}
+
+pub fn validate_lockfile_with_dev(
+    root: &Path,
+    manifest: &ProjectManifest,
+    lock: Option<&Lockfile>,
+    include_root_dev_dependencies: bool,
+) -> Result<(), ProjectError> {
+    if manifest.dependencies.is_empty()
+        && (!include_root_dev_dependencies || manifest.dev_dependencies.is_empty())
+    {
         return Ok(());
     }
     let lock =
         lock.ok_or_else(|| ProjectError("project dependencies require `zirk.lock`".into()))?;
-    for dependency in manifest.dependencies.values() {
+    let mut dependencies: Vec<_> = manifest.dependencies.values().collect();
+    if include_root_dev_dependencies {
+        dependencies.extend(manifest.dev_dependencies.values());
+    }
+    for dependency in dependencies {
         let entry = lock.packages.get(&dependency.name).ok_or_else(|| {
             ProjectError(format!(
                 "dependency `{}` is missing from `zirk.lock`",
@@ -765,6 +1388,44 @@ pub fn validate_lockfile(
                 dependency.name, entry.source
             )));
         }
+        let expected_locator = dependency_locator(&dependency.source);
+        if entry.locator.is_empty() {
+            return Err(ProjectError(format!(
+                "lock entry `{}` lacks its source locator; run `zirk install` to refresh `zirk.lock`",
+                dependency.name
+            )));
+        }
+        if entry.locator != expected_locator {
+            return Err(ProjectError(format!(
+                "lock entry `{}` uses locator `{}` but the manifest declares `{expected_locator}`",
+                dependency.name, entry.locator
+            )));
+        }
+        match &dependency.source {
+            DependencySource::Git(_) => {
+                let revision = entry.revision.as_deref().ok_or_else(|| {
+                    ProjectError(format!(
+                        "Git lock entry `{}` is missing its immutable revision",
+                        dependency.name
+                    ))
+                })?;
+                if !matches!(revision.len(), 40 | 64)
+                    || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(ProjectError(format!(
+                        "Git lock entry `{}` has a non-immutable revision `{revision}`",
+                        dependency.name
+                    )));
+                }
+            }
+            _ if entry.revision.is_some() => {
+                return Err(ProjectError(format!(
+                    "non-Git lock entry `{}` must not contain a Git revision",
+                    dependency.name
+                )));
+            }
+            _ => {}
+        }
         if entry.package_root.is_empty() || Path::new(&entry.package_root).is_absolute() {
             return Err(ProjectError(format!(
                 "lock entry `{}` has an invalid package root",
@@ -773,11 +1434,40 @@ pub fn validate_lockfile(
         }
 
         if let Some(package_root) = resolved_dependency_root(root, dependency, entry) {
-            let package_manifest = read_manifest(&package_root.join(".zkinit"))?;
+            let canonical_root = match &dependency.source {
+                DependencySource::Local(path) | DependencySource::Vendored(path) => {
+                    canonical_child_without_symlinks(
+                        root,
+                        path,
+                        &format!("dependency `{}` package root", dependency.name),
+                    )?
+                }
+                DependencySource::Registry(_) | DependencySource::Git(_) => {
+                    package_root.canonicalize().map_err(|error| {
+                        ProjectError(format!(
+                            "could not resolve package root `{}`: {error}",
+                            package_root.display()
+                        ))
+                    })?
+                }
+            };
+            let package_manifest = read_manifest(&canonical_root.join(".zkinit"))?;
             if package_manifest.name != dependency.name {
                 return Err(ProjectError(format!(
                     "dependency `{}` resolves to package `{}`",
                     dependency.name, package_manifest.name
+                )));
+            }
+            if package_manifest.version != entry.version {
+                return Err(ProjectError(format!(
+                    "dependency `{}` declares version `{}` but the lock selects `{}`",
+                    dependency.name, package_manifest.version, entry.version
+                )));
+            }
+            if !version_matches(&dependency.constraint, &entry.version)? {
+                return Err(ProjectError(format!(
+                    "locked version `{}` for dependency `{}` does not satisfy `{}`",
+                    entry.version, dependency.name, dependency.constraint
                 )));
             }
             let expected_entry = package_manifest.entry.display().to_string();
@@ -785,6 +1475,17 @@ pub fn validate_lockfile(
                 return Err(ProjectError(format!(
                     "lock entry `{}` points at `{}` but the package entry is `{expected_entry}`",
                     dependency.name, entry.package_root
+                )));
+            }
+            let canonical_entry = canonical_child_without_symlinks(
+                &canonical_root,
+                Path::new(&entry.package_root),
+                &format!("dependency `{}` entry", dependency.name),
+            )?;
+            if !canonical_entry.starts_with(&canonical_root) || !canonical_entry.is_file() {
+                return Err(ProjectError(format!(
+                    "package `{}` entry escapes its canonical package root",
+                    dependency.name
                 )));
             }
             let expected_hash = entry.hash.strip_prefix("sha256:").ok_or_else(|| {
@@ -801,7 +1502,15 @@ pub fn validate_lockfile(
                     dependency.name
                 )));
             }
-            let actual_hash = package_integrity_hash(&package_root, &package_manifest)?;
+            if let Some(expected_integrity) = &dependency.integrity
+                && expected_integrity != &entry.hash
+            {
+                return Err(ProjectError(format!(
+                    "lock entry `{}` integrity differs from the manifest locator",
+                    dependency.name
+                )));
+            }
+            let actual_hash = package_integrity_hash(&canonical_root, &package_manifest)?;
             if expected_hash != actual_hash {
                 return Err(ProjectError(format!(
                     "package `{}` does not match the integrity hash in `zirk.lock`",
@@ -825,6 +1534,18 @@ pub fn package_integrity_hash(
         root: &Path,
         files: &mut Vec<PathBuf>,
     ) -> Result<(), ProjectError> {
+        let canonical_directory = directory.canonicalize().map_err(|error| {
+            ProjectError(format!(
+                "could not resolve package source `{}`: {error}",
+                directory.display()
+            ))
+        })?;
+        if !canonical_directory.starts_with(root) {
+            return Err(ProjectError(format!(
+                "package source `{}` escapes its canonical package root",
+                directory.display()
+            )));
+        }
         let entries = std::fs::read_dir(directory).map_err(|error| {
             ProjectError(format!(
                 "could not read package source `{}`: {error}",
@@ -834,9 +1555,21 @@ pub fn package_integrity_hash(
         for entry in entries {
             let entry = entry.map_err(|error| ProjectError(error.to_string()))?;
             let path = entry.path();
-            if path.is_dir() {
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                ProjectError(format!(
+                    "could not inspect package path `{}`: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(ProjectError(format!(
+                    "package source contains symlink `{}`; package integrity requires regular files",
+                    path.display()
+                )));
+            }
+            if metadata.is_dir() {
                 collect(&path, root, files)?;
-            } else if path.is_file() {
+            } else if metadata.is_file() {
                 let relative = path.strip_prefix(root).unwrap_or(&path);
                 if relative
                     .extension()
@@ -849,14 +1582,25 @@ pub fn package_integrity_hash(
         Ok(())
     }
 
+    let canonical_root = root.canonicalize().map_err(|error| {
+        ProjectError(format!(
+            "could not resolve package root `{}`: {error}",
+            root.display()
+        ))
+    })?;
     let mut files = Vec::new();
     for source_root in &manifest.source_roots {
-        collect(&root.join(source_root), root, &mut files)?;
+        let source_directory =
+            canonical_child_without_symlinks(&canonical_root, source_root, "package source root")?;
+        collect(&source_directory, &canonical_root, &mut files)?;
     }
     files.sort();
     let mut hasher = Sha256::new();
     for path in files {
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+        let relative = path
+            .strip_prefix(&canonical_root)
+            .unwrap_or(&path)
+            .to_string_lossy();
         let bytes = std::fs::read(&path).map_err(|error| {
             ProjectError(format!("could not read `{}`: {error}", path.display()))
         })?;
@@ -871,9 +1615,274 @@ pub fn package_integrity_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_manifest_parses_all_project_sections_with_spans() {
+        let manifest = parse_manifest(
+            r#"project {
+    name: "acme.api";
+    version: "1.2.0";
+    type: application;
+    authors: ["Acme Engineering"];
+    description: "HTTP API";
+    license: "MIT";
+    entry: "src/server.zrk";
+}
+source "src";
+source "generated";
+build_targets { "x86_64-linux"; "aarch64-macos"; }
+dependencies {
+    acme.http: "^2.1";
+    acme.shared: { from: "path:../shared"; }
+    acme.crypto: { from: "git+https://code.example/acme/crypto"; rev: "v1.4.2"; }
+    acme.private: { from: "registry:company"; version: "^3.0"; }
+}
+dev_dependencies { acme.testkit: "^0.8"; }
+globals {
+    request_count: UInt64;
+    settings: { type: Settings; from: "src/config.zrk"; readonly: true; }
+    retry_limit: { type: UInt32; default: 0; }
+}
+requires { filesystem.read; network.listen; }
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.name, "acme.api");
+        assert_eq!(manifest.version, "1.2.0");
+        assert_eq!(manifest.entry, PathBuf::from("src/server.zrk"));
+        assert_eq!(
+            manifest.source_roots,
+            [PathBuf::from("src"), PathBuf::from("generated")]
+        );
+        assert_eq!(manifest.build_targets, ["x86_64-linux", "aarch64-macos"]);
+        assert_eq!(manifest.dependencies["acme.http"].constraint, "^2.1");
+        assert_eq!(
+            manifest.dependencies["acme.shared"].source,
+            DependencySource::Local("../shared".into())
+        );
+        assert_eq!(
+            manifest.dependencies["acme.crypto"].revision.as_deref(),
+            Some("v1.4.2")
+        );
+        assert!(manifest.dev_dependencies.contains_key("acme.testkit"));
+        assert_eq!(manifest.globals["settings"].type_name, "Settings");
+        assert!(manifest.globals["settings"].readonly);
+        assert_eq!(
+            manifest.globals["retry_limit"].default.as_deref(),
+            Some("0")
+        );
+        assert!(manifest.requires.contains(&Capability::FilesystemRead));
+        assert!(manifest.requires.contains(&Capability::NetworkListen));
+        assert!(manifest.spans.fields.contains_key("project.entry"));
+        assert!(manifest.spans.dependencies.contains_key("acme.crypto"));
+        assert!(
+            manifest
+                .spans
+                .fields
+                .contains_key("dependencies.acme.crypto.rev")
+        );
+        assert!(manifest.spans.globals.contains_key("settings"));
+        assert!(manifest.spans.fields.contains_key("globals.settings.from"));
+        assert!(
+            manifest
+                .spans
+                .requirements
+                .contains_key(&Capability::NetworkListen)
+        );
+    }
+
+    #[test]
+    fn canonical_manifest_formatting_is_idempotent_and_keeps_ordered_targets() {
+        let manifest = parse_manifest(
+            r#"project { name: "acme.app"; version: "0.1.0"; type: application; }
+build_targets { "aarch64-macos"; "x86_64-linux"; }
+dependencies { acme.lib: "^1.0"; }
+requires { network.listen; filesystem.read; }
+"#,
+        )
+        .unwrap();
+        let formatted = format_manifest(&manifest);
+        let reparsed = parse_manifest(&formatted).unwrap();
+        assert_eq!(reparsed.name, manifest.name);
+        assert_eq!(reparsed.version, manifest.version);
+        assert_eq!(reparsed.kind, manifest.kind);
+        assert_eq!(reparsed.entry, manifest.entry);
+        assert_eq!(reparsed.source_roots, manifest.source_roots);
+        assert_eq!(reparsed.build_targets, manifest.build_targets);
+        assert_eq!(reparsed.dependencies, manifest.dependencies);
+        assert_eq!(reparsed.requires, manifest.requires);
+        assert_eq!(format_manifest(&reparsed), formatted);
+    }
+
+    #[test]
+    fn canonical_manifest_reports_unknown_capability_and_legacy_permission_syntax() {
+        let unknown = "project { name: \"a\"; version: \"0.1.0\"; type: application; }\nrequires { filesystem.read; camera.open; }";
+        let error = parse_manifest(unknown).unwrap_err().to_string();
+        assert!(error.contains("unknown capability `camera.open`"));
+        assert!(error.contains("at 2:"));
+        let legacy =
+            "project { name: \"a\"; version: \"0.1.0\"; type: application; }\npermissions {}";
+        let error = parse_manifest(legacy).unwrap_err().to_string();
+        assert!(error.contains("legacy permission syntax was removed"));
+        assert!(error.contains("requires"));
+    }
+
+    #[test]
+    fn canonical_manifest_reports_type_and_license_fields_at_their_locations() {
+        let wrong_type =
+            parse_manifest("project {\n name: 42;\n version: \"0.1.0\";\n type: application;\n }")
+                .unwrap_err()
+                .to_string();
+        assert!(wrong_type.contains("`project.name` must be a string"));
+        assert!(wrong_type.contains("2:2"));
+
+        let invalid_license = parse_manifest(
+            "project {\n name: \"app\";\n version: \"0.1.0\";\n type: application;\n license: \"MIT OR\";\n }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(invalid_license.contains("project.license"));
+        assert!(invalid_license.contains("5:2"));
+    }
+
+    #[test]
+    fn canonical_manifest_applies_project_type_defaults_and_rejects_incompatible_fields() {
+        let application =
+            parse_manifest("project { name: \"app\"; version: \"0.1.0\"; type: application; }")
+                .unwrap();
+        assert_eq!(application.entry, PathBuf::from("src/main.zrk"));
+        assert_eq!(application.source_roots, [PathBuf::from("src")]);
+
+        let package =
+            parse_manifest("project { name: \"lib\"; version: \"0.1.0\"; type: package; }")
+                .unwrap();
+        assert_eq!(package.entry, PathBuf::from("src/package.zrk"));
+        assert_eq!(package.package_root, Some(PathBuf::from("src/package.zrk")));
+
+        let error = parse_manifest(
+            "project { name: \"lib\"; version: \"0.1.0\"; type: package; entry: \"src/main.zrk\"; }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("project.entry"));
+        assert!(error.contains("only valid for an application"));
+
+        let error = parse_manifest(
+            "project { name: \"lib\"; version: \"0.1.0\"; type: package; }\nbuild_targets { \"x86_64-linux\"; }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("build_targets"));
+        assert!(error.contains("only valid for applications"));
+
+        let error = parse_manifest(
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"../outside.zrk\"; }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("project.entry"));
+        assert!(error.contains("project-relative path"));
+
+        let error = parse_manifest(
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; }\nbuild_targets { \"wasm32-surprise\"; }",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unsupported build target"));
+    }
+
+    #[test]
+    fn canonical_dependency_errors_point_to_the_offending_field() {
+        let error = parse_manifest(
+            "project { name: \"a\"; version: \"0.1.0\"; type: application; }\ndependencies {\n dep: { from: \"git+https://example.test/dep\"; version: \"^1\"; }\n}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Git locator requires an immutable `dependency.rev`"));
+        assert!(error.contains("dependency.from"));
+
+        let error = parse_manifest(
+            "project { name: \"a\"; version: \"0.1.0\"; type: application; }\ndependencies {\n dep: { from: 42; }\n}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("dependency.from` must be a string"));
+        assert!(error.contains("at 3:"), "{error}");
+    }
+
+    #[test]
+    fn legacy_manifest_migration_converts_grants_to_requirements_only() {
+        let legacy = r#"project {
+    name: "legacy-app";
+    version: "2.3.0";
+    type: application;
+    entry: "src/start.zrk";
+}
+permissions {
+    environment {
+        read: { names: ["APP_MODE"]; during: runtime; }
+        secrets: { names: ["DB_PASSWORD"]; during: runtime; }
+    }
+    network {
+        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
+    }
+}"#;
+        let canonical = migrate_legacy_manifest_text(legacy).unwrap();
+        let migrated = parse_manifest(&canonical).unwrap();
+        assert_eq!(migrated.version, "2.3.0");
+        assert_eq!(migrated.entry, PathBuf::from("src/start.zrk"));
+        assert!(migrated.requires.contains(&Capability::EnvironmentRead));
+        assert!(migrated.requires.contains(&Capability::SecretsRead));
+        assert!(migrated.requires.contains(&Capability::NetworkListen));
+        assert!(migrated.environment_permissions.read_names.is_empty());
+        assert!(migrated.network_permissions.listen_addresses.is_empty());
+        assert!(!canonical.contains("during:"));
+    }
+
+    #[test]
+    fn legacy_package_entry_migrates_to_root_and_unpinned_git_is_rejected() {
+        let package = r#"project {
+    name: "acme.old";
+    version: "1.0.0";
+    type: package;
+    entry: "src/api.zrk";
+}"#;
+        let canonical = migrate_legacy_manifest_text(package).unwrap();
+        assert!(canonical.contains("root: \"src/api.zrk\";"));
+        assert!(!canonical.contains("entry:"));
+
+        let unpinned_git = "project \"app\"\nkind application\ndependency acme.git ^1 git \"https://example.test/acme.git\"";
+        let error = migrate_legacy_manifest_text(unpinned_git).unwrap_err();
+        assert!(error.to_string().contains("immutable revision"));
+    }
+
+    #[test]
+    fn explicit_manifest_migration_apply_keeps_a_recoverable_original() {
+        let root = std::env::temp_dir().join(format!("zirk-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(".zkinit");
+        let original = "project \"migrate.app\"\nkind application\n";
+        std::fs::write(&path, original).unwrap();
+
+        let (preview_original, preview) = migrate_manifest_file(&path, false).unwrap();
+        assert_eq!(preview_original, original);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(parse_manifest(&preview).is_ok());
+
+        migrate_manifest_file(&path, true).unwrap();
+        assert!(parse_manifest(&std::fs::read_to_string(&path).unwrap()).is_ok());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".zkinit.pre-migrate")).unwrap(),
+            original
+        );
+        assert!(migrate_manifest_file(&path, true).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn manifest_models_package_identity_roots_and_dependencies() {
-        let manifest = parse_manifest("project \"acme.cli\"\nkind package\nsource \"src\"\ndependency acme.web ^1.0 local \"../web\"").unwrap();
+        let manifest = parse_legacy_manifest("project \"acme.cli\"\nkind package\nsource \"src\"\ndependency acme.web ^1.0 local \"../web\"").unwrap();
         assert_eq!(manifest.kind, ProjectKind::Package);
         assert_eq!(manifest.entry, PathBuf::from("src/package.zrk"));
         assert!(manifest.dependencies.contains_key("acme.web"));
@@ -881,8 +1890,34 @@ mod tests {
     }
 
     #[test]
+    fn manifest_parses_documented_project_block_and_permissions() {
+        let manifest = parse_legacy_manifest(
+            r#"project {
+    name: "demo-http";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+permissions {
+    network {
+        listen: { addresses: ["127.0.0.1:8081"]; during: runtime; }
+    }
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.name, "demo-http");
+        assert_eq!(manifest.kind, ProjectKind::Application);
+        assert_eq!(manifest.entry, PathBuf::from("main.zrk"));
+        assert_eq!(
+            manifest.network_permissions.listen_addresses,
+            ["127.0.0.1:8081"].into_iter().map(str::to_owned).collect()
+        );
+    }
+
+    #[test]
     fn manifest_parses_exact_environment_requirements_without_granting_them() {
-        let manifest = parse_manifest(
+        let manifest = parse_legacy_manifest(
             r#"project "acme.cli"
 kind application
 permissions {
@@ -911,12 +1946,12 @@ list_names: { during: runtime; }
     #[test]
     fn manifest_cannot_request_runtime_internal_environment_names() {
         let manifest = "project \"app\"\nkind application\npermissions {\nenvironment {\nread: { names: [\"zirk_runtime_permission_grant\"]; during: runtime; }\n}\n}\n";
-        assert!(parse_manifest(manifest).is_err());
+        assert!(parse_legacy_manifest(manifest).is_err());
     }
 
     #[test]
     fn manifest_parses_exact_network_origins_and_listen_addresses() {
-        let manifest = parse_manifest(
+        let manifest = parse_legacy_manifest(
             r#"project "acme.server"
 kind application
 permissions {
@@ -945,7 +1980,7 @@ listen: { addresses: ["127.0.0.1:8080", "[::1]:8443"]; during: runtime; }
 
     #[test]
     fn manifest_parses_transport_specific_network_authority() {
-        let manifest = parse_manifest(
+        let manifest = parse_legacy_manifest(
             r#"project "network.app"
 kind application
 permissions {
@@ -1063,8 +2098,28 @@ inspect_interfaces: { enabled: true; during: runtime; }
     }
 
     #[test]
+    fn canonical_lockfile_roundtrips_locator_revision_integrity_and_root() {
+        let package = LockedPackage {
+            name: "acme.crypto".into(),
+            version: "1.4.2".into(),
+            source: "git".into(),
+            locator: "git+https://code.example/acme/crypto".into(),
+            revision: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            hash: format!("sha256:{}", "a".repeat(64)),
+            package_root: "src/package.zrk".into(),
+        };
+        let lock = Lockfile {
+            packages: [(package.name.clone(), package)].into(),
+        };
+        let encoded = format_lockfile(&lock);
+        let decoded = parse_lockfile(&encoded).unwrap();
+        assert_eq!(decoded, lock);
+        assert!(encoded.contains("\"lock_version\": 2"));
+    }
+
+    #[test]
     fn lockfile_must_cover_each_dependency_with_the_declared_transport() {
-        let manifest = parse_manifest(
+        let manifest = parse_legacy_manifest(
             "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"",
         )
         .unwrap();
@@ -1077,25 +2132,43 @@ inspect_interfaces: { enabled: true; during: runtime; }
     fn cached_registry_package_has_the_same_logical_root_as_a_local_package() {
         let root = std::env::temp_dir().join(format!("zirk-registry-root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let cached = root.join(".zirk/packages/acme.web/1.0");
-        std::fs::create_dir_all(cached.join("src")).unwrap();
+        let staging = root.join("staging-package");
+        std::fs::create_dir_all(staging.join("src")).unwrap();
         std::fs::write(
             root.join(".zkinit"),
-            "project \"app\"\nkind application\ndependency acme.web ^1 registry \"https://registry.example\"",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.web: { from: \"registry:default\"; version: \"^1\"; } }",
         )
         .unwrap();
-        std::fs::write(cached.join(".zkinit"), "project \"acme.web\"\nkind package").unwrap();
-        std::fs::write(cached.join("src/package.zrk"), "package acme.web;").unwrap();
-        let dependency_manifest = read_manifest(&cached.join(".zkinit")).unwrap();
-        let hash = package_integrity_hash(&cached, &dependency_manifest).unwrap();
-        let manifest = read_manifest(&root.join(".zkinit")).unwrap();
-        let lock = parse_lockfile(&format!(
-            "acme.web 1.0 registry sha256:{hash} src/package.zrk"
-        ))
+        std::fs::write(
+            staging.join(".zkinit"),
+            "project { name: \"acme.web\"; version: \"1.0.0\"; type: package; }",
+        )
         .unwrap();
+        std::fs::write(staging.join("src/package.zrk"), "package acme.web;").unwrap();
+        let dependency_manifest = read_manifest(&staging.join(".zkinit")).unwrap();
+        let hash = package_integrity_hash(&staging, &dependency_manifest).unwrap();
+        let cached = root.join(".zirk/packages/acme.web/1.0.0").join(&hash);
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        std::fs::rename(&staging, &cached).unwrap();
+        let manifest = read_manifest(&root.join(".zkinit")).unwrap();
+        let package = LockedPackage {
+            name: "acme.web".into(),
+            version: "1.0.0".into(),
+            source: "registry".into(),
+            locator: "registry:default".into(),
+            revision: None,
+            hash: format!("sha256:{hash}"),
+            package_root: "src/package.zrk".into(),
+        };
+        let lock = Lockfile {
+            packages: [(package.name.clone(), package)].into(),
+        };
         validate_lockfile(&root, &manifest, Some(&lock)).unwrap();
         let roots = resolve_package_roots(&root, &manifest, &lock).unwrap();
-        assert_eq!(roots["acme.web"], cached.join("src/package.zrk"));
+        assert_eq!(
+            roots["acme.web"],
+            cached.join("src/package.zrk").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1105,12 +2178,12 @@ inspect_interfaces: { enabled: true; during: runtime; }
         std::fs::create_dir_all(root.join("b")).unwrap();
         std::fs::write(
             root.join(".zkinit"),
-            "project \"a\"\nkind package\ndependency b ^1 local \"b\"",
+            "project { name: \"a\"; version: \"1.0.0\"; type: package; }\ndependencies { b: { from: \"path:b\"; version: \"^1\"; } }",
         )
         .unwrap();
         std::fs::write(
             root.join("b/.zkinit"),
-            "project \"b\"\nkind package\ndependency a ^1 local \"..\"",
+            "project { name: \"b\"; version: \"1.0.0\"; type: package; }\ndependencies { a: { from: \"path:..\"; version: \"^1\"; } }",
         )
         .unwrap();
         let error =
@@ -1133,7 +2206,7 @@ inspect_interfaces: { enabled: true; during: runtime; }
 
     #[test]
     fn package_artifact_plans_are_inspectable_but_not_publishable() {
-        let manifest = parse_manifest("project \"acme.api\"\nkind package").unwrap();
+        let manifest = parse_legacy_manifest("project \"acme.api\"\nkind package").unwrap();
         let plan = artifact_plan(
             manifest,
             PackageApi {

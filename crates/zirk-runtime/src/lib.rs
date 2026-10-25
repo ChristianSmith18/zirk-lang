@@ -66,6 +66,8 @@ pub mod local_transport;
 // spawn/await/sleep/is_done are used only by tests until the language surface lands
 mod executor;
 mod failure;
+// Bounded event queues for project-global subscriptions.
+mod global_watch;
 mod host_signal;
 mod io;
 mod journal;

@@ -30,6 +30,7 @@ struct OwnedHttpClient {
     executor_id: u64,
     project_id: String,
     manifest_digest: String,
+    proxy_origin: Option<String>,
     gate: crate::sync_primitives::CooperativeSemaphore,
     request_slots: crate::sync_primitives::CooperativeSemaphore,
     close_gate: crate::sync_primitives::CooperativeSemaphore,
@@ -1106,8 +1107,9 @@ pub unsafe extern "C-unwind" fn zirk_http_server_serve_http3(
             let max_queued_response_bytes = usize::try_from(max_queued_response_bytes)
                 .map_err(|_| crate::http_runtime::HttpRuntimeError::InvalidRequest)?;
             let callback = callback.ok_or(crate::http_runtime::HttpRuntimeError::Protocol)?;
-            let grant = crate::permissions::current_network_grant()
-                .map_err(|_| crate::http_runtime::HttpRuntimeError::PermissionDenied)?;
+            let grant =
+                crate::permissions::network_grant_for("network.udp.listen", &address.to_string())
+                    .map_err(|_| crate::http_runtime::HttpRuntimeError::PermissionDenied)?;
             let server_config = crate::network_transport::TlsServerConfig::from_der(
                 certificates,
                 private_key,
@@ -1520,7 +1522,9 @@ pub unsafe extern "C-unwind" fn zirk_http_server_websocket_serve_http3_once(
             let private_key = unsafe { crate::array::copy_byte_array(private_key_der, 64 * 1024) }
                 .filter(|key| !key.is_empty())
                 .ok_or(0)?;
-            let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+            let grant =
+                crate::permissions::network_grant_for("network.udp.listen", &address.to_string())
+                    .map_err(|_| 1)?;
             let server_config = crate::network_transport::TlsServerConfig::from_der(
                 certificates,
                 private_key,
@@ -2577,6 +2581,7 @@ fn create_http_client_config_with_timeouts_and_protocol(
     (|| {
         let verified = crate::permissions::verified_grant().ok_or(1)?;
         let max_origins = usize::try_from(max_origins).map_err(|_| 0)?;
+        let proxy_origin = proxy.as_ref().map(|proxy| proxy.origin());
         let pool = crate::http_runtime::HttpClientPool::new_shared_with_protocol(
             max_origins,
             timeouts,
@@ -2605,6 +2610,7 @@ fn create_http_client_config_with_timeouts_and_protocol(
                 executor_id: crate::executor::current_executor_id(),
                 project_id: verified.project_id().to_owned(),
                 manifest_digest: verified.manifest_digest().to_owned(),
+                proxy_origin,
                 gate,
                 request_slots,
                 close_gate,
@@ -2803,7 +2809,12 @@ pub unsafe extern "C" fn zirk_http_client_request(
         request.set_body(body).map_err(|_| 4)?;
         validate_client_request(&request)?;
         let request_for_invalidation = request.clone();
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let origin = request.url.origin();
+        let grant = crate::permissions::network_grant_for_http_request(
+            &origin,
+            client.proxy_origin.as_deref(),
+        )
+        .map_err(|_| 1)?;
         if client.closed.load(Ordering::Acquire) {
             return Err(0);
         }
@@ -3004,7 +3015,11 @@ pub unsafe extern "C" fn zirk_http_client_request_stream(
         let request_for_cache_invalidation = request.clone();
         let origin = request.url.origin();
         let request_url = request.url.clone();
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for_http_request(
+            &request.url.origin(),
+            client.proxy_origin.as_deref(),
+        )
+        .map_err(|_| 1)?;
         if client.closed.load(Ordering::Acquire) {
             return Err(0);
         }
@@ -3192,10 +3207,11 @@ unsafe fn connect_http_websocket(
         }
         let url =
             zirk_runtime_core::http_values::Url::parse(unsafe { url.as_str() }).map_err(|_| 0)?;
-        let grant = crate::permissions::current_network_grant().map_err(|error| match error {
-            zirk_runtime_core::network_policy::NetworkPolicyError::PermissionDenied => 1,
-            _ => 0,
-        })?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|error| match error {
+                zirk_runtime_core::network_policy::NetworkPolicyError::PermissionDenied => 1,
+                _ => 0,
+            })?;
         let origin = match unsafe { origin.as_str() } {
             "" => None,
             value => Some(value),
@@ -3604,7 +3620,8 @@ pub unsafe extern "C" fn zirk_http_get(url: *const c_void, out: *mut HttpGetOut)
             return Err(0);
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let request = HttpRequestValues::new(HttpMethod::Get, url);
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
@@ -3634,7 +3651,8 @@ pub unsafe extern "C" fn zirk_http_get_cached(url: *const c_void, out: *mut Http
             return Err(0);
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         grant.authorize_origin(&url.origin()).map_err(|_| 1)?;
         let verified = crate::permissions::verified_grant().ok_or(1)?;
         let partition = cache_partition(verified.project_id(), verified.manifest_digest());
@@ -3856,7 +3874,8 @@ pub unsafe extern "C" fn zirk_http_request(
         request.headers = decode_all_headers(&header_block)?;
         request.set_body(body).map_err(|_| 4)?;
         validate_client_request(&request)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &request.url.origin())
+            .map_err(|_| 1)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
         successful_response(
@@ -3919,7 +3938,8 @@ pub unsafe extern "C" fn zirk_http_request_cached(
         request.headers = decode_all_headers(&header_block)?;
         request.set_body(body).map_err(|_| 4)?;
         validate_client_request(&request)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &request.url.origin())
+            .map_err(|_| 1)?;
         grant
             .authorize_origin(&request.url.origin())
             .map_err(|_| 1)?;
@@ -3982,7 +4002,8 @@ pub unsafe extern "C" fn zirk_http_request_secret(
             unsafe { header_name.as_str() },
             unsafe { secret_value.as_str() }.to_owned(),
         )?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &request.url.origin())
+            .map_err(|_| 1)?;
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
         successful_response(
@@ -4055,7 +4076,8 @@ pub unsafe extern "C" fn zirk_http_get_stream(
             return Err(0);
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let encoded_headers =
             unsafe { crate::array::copy_byte_array(headers, MAX_ENCODED_HTTP_HEADER_BLOCK_BYTES) }
                 .ok_or(3)?;
@@ -4231,7 +4253,8 @@ pub unsafe extern "C" fn zirk_http_request_stream(
             unsafe { crate::array::copy_byte_array(headers, MAX_ENCODED_HTTP_HEADER_BLOCK_BYTES) }
                 .ok_or(3)?;
         let headers = decode_all_headers(&encoded_headers)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(method, url);
         request.method_token = method_token.to_owned();
         request.headers = headers;
@@ -4606,7 +4629,8 @@ pub unsafe extern "C" fn zirk_http_head(url: *const c_void, out: *mut HttpGetOut
             return Err(0);
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let request = HttpRequestValues::new(HttpMethod::Head, url);
         let response =
             crate::http_runtime::send_once(request, Arc::clone(&grant)).map_err(error_code)?;
@@ -4644,7 +4668,8 @@ pub unsafe extern "C" fn zirk_http_query(
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
         let body = unsafe { query_string.as_str() }.as_bytes().to_vec();
         validate_json_document(&body).map_err(error_code)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(HttpMethod::Query, url);
         request
             .headers
@@ -4692,7 +4717,8 @@ pub unsafe extern "C" fn zirk_http_query_with_content_type(
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
         let body = unsafe { query_string.as_str() }.as_bytes().to_vec();
         let content_type = unsafe { content_type_string.as_str() };
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(HttpMethod::Query, url);
         request
             .headers
@@ -4734,7 +4760,8 @@ pub unsafe extern "C" fn zirk_http_post(
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
         let body = unsafe { body_string.as_str() }.as_bytes().to_vec();
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(HttpMethod::Post, url);
         request
             .headers
@@ -4776,7 +4803,8 @@ pub unsafe extern "C" fn zirk_http_post_json(
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
         let body = unsafe { body_string.as_str() }.as_bytes().to_vec();
         validate_json_document(&body).map_err(error_code)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(HttpMethod::Post, url);
         request
             .headers
@@ -4815,7 +4843,8 @@ pub unsafe extern "C" fn zirk_http_post_bytes(
         };
         let url = Url::parse(unsafe { url_string.as_str() }).map_err(|_| 0)?;
         let body = copy_response_bytes(body)?;
-        let grant = crate::permissions::current_network_grant().map_err(|_| 1)?;
+        let grant = crate::permissions::network_grant_for("network.connect", &url.origin())
+            .map_err(|_| 1)?;
         let mut request = HttpRequestValues::new(HttpMethod::Post, url);
         request
             .headers
@@ -4939,6 +4968,7 @@ mod tests {
             executor_id: 17,
             project_id: "project-a".into(),
             manifest_digest: "manifest-a".into(),
+            proxy_origin: None,
             gate: crate::sync_primitives::CooperativeSemaphore::new(1, 1).unwrap(),
             request_slots: crate::sync_primitives::CooperativeSemaphore::new(8, 8).unwrap(),
             close_gate: crate::sync_primitives::CooperativeSemaphore::new(1, 1).unwrap(),

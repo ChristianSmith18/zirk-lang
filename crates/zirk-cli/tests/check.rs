@@ -27,6 +27,21 @@ fn corpus(kind: &str) -> PathBuf {
         .join(kind)
 }
 
+fn host_target() -> &'static str {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86", "windows") => "x86-windows",
+        ("x86_64", "windows") => "x86_64-windows",
+        ("aarch64", "windows") => "aarch64-windows",
+        ("x86", "linux") => "x86-linux",
+        ("x86_64", "linux") => "x86_64-linux",
+        ("arm", "linux") => "armv7-linux",
+        ("aarch64", "linux") => "aarch64-linux",
+        ("x86_64", "macos") => "x86_64-macos",
+        ("aarch64", "macos") => "aarch64-macos",
+        _ => panic!("this test needs a supported host target"),
+    }
+}
+
 /// A private working directory per test.
 fn workspace(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -39,9 +54,20 @@ fn lock_local_dependency(root: &Path, package: &str, dependency_dir: &str) {
     let dependency_root = root.join(dependency_dir);
     let manifest = zirk_cli::project::read_manifest(&dependency_root.join(".zkinit")).unwrap();
     let hash = zirk_cli::project::package_integrity_hash(&dependency_root, &manifest).unwrap();
+    let locked = zirk_cli::project::LockedPackage {
+        name: package.into(),
+        version: manifest.version,
+        source: "local".into(),
+        locator: format!("path:{dependency_dir}"),
+        revision: None,
+        hash: format!("sha256:{hash}"),
+        package_root: manifest.entry.to_string_lossy().into_owned(),
+    };
     std::fs::write(
         root.join("zirk.lock"),
-        format!("{package} 1.0 local sha256:{hash} src/package.zrk\n"),
+        zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+            packages: [(package.into(), locked)].into(),
+        }),
     )
     .unwrap();
 }
@@ -169,7 +195,7 @@ fn a_package_project_is_discovered_from_its_directory() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"demo.package\"\nkind package\nentry \"src/package.zrk\"\nsource \"src\"\n",
+        "project { name: \"demo.package\"; version: \"0.1.0\"; type: package; root: \"src/package.zrk\"; }\nsource \"src\";\n",
     )
     .unwrap();
     std::fs::write(
@@ -190,12 +216,658 @@ fn a_package_project_is_discovered_from_its_directory() {
 }
 
 #[test]
+fn an_application_entry_is_checked_without_a_source_main_function() {
+    let dir = workspace("application_entry_without_main");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.app\"; version: \"0.1.0\"; type: application; entry: \"src/start.zrk\"; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/start.zrk"),
+        "mut initialized = true;\ninitialized = false;",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("check application manifest entry");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn source_main_is_checked_as_an_ordinary_function() {
+    let dir = workspace("ordinary_main_function");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "fn main(value: Int32): Int32 { return value; }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check ordinary main function");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn pathless_run_uses_the_manifest_entry_and_executes_file_scope() {
+    let dir = workspace("pathless_run_entry");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.run\"; version: \"0.1.0\"; type: application; entry: \"src/start.zrk\"; }\nbuild_targets { \"x86_64-macos\"; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/start.zrk"),
+        "import { stdout } from std.io;\nstdout.println(\"from-entry\");",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .arg("run")
+        .current_dir(&dir)
+        .output()
+        .expect("run the manifest entry");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "from-entry\n"
+    );
+}
+
+#[test]
+fn source_main_is_not_invoked_implicitly_after_entry_selection() {
+    let dir = workspace("source_main_not_entry");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { stdout } from std.io;\nfn main(): Void { stdout.println(\"function-main\"); }\nstdout.println(\"file-entry\");\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run a file with an ordinary function named main");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "file-entry\n"
+    );
+}
+
+#[test]
+fn build_cli_target_overrides_manifest_list_and_run_rejects_target_override() {
+    let dir = workspace("build_target_override");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let other_target = if host_target() == "x86_64-macos" {
+        "x86_64-linux"
+    } else {
+        "x86_64-macos"
+    };
+    std::fs::write(
+        dir.join(".zkinit"),
+        format!(
+            "project {{ name: \"demo.targets\"; version: \"0.1.0\"; type: application; }}\nbuild_targets {{ \"{other_target}\"; }}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/main.zrk"), "mut ready = true;\n").unwrap();
+    let configured = Command::new(compiler())
+        .args(["build", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("inspect the manifest build target");
+    assert!(!configured.status.success());
+    assert!(
+        String::from_utf8_lossy(&configured.stderr).contains("native linking for `"),
+        "{}",
+        String::from_utf8_lossy(&configured.stderr)
+    );
+    let built = Command::new(compiler())
+        .args(["build", "--target", host_target(), "."])
+        .current_dir(&dir)
+        .output()
+        .expect("build using the CLI target override");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let run = Command::new(compiler())
+        .args(["run", "--target", host_target(), "src/main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("reject target selection for run");
+    assert!(!run.status.success());
+    assert!(String::from_utf8_lossy(&run.stderr).contains("does not accept `--target`"));
+}
+
+#[test]
+fn explicit_run_path_overrides_the_manifest_entry_with_project_context() {
+    let dir = workspace("explicit_run_entry");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.run\"; version: \"0.1.0\"; type: application; entry: \"src/start.zrk\"; }",
+    )
+    .unwrap();
+    for (file, text) in [
+        ("start.zrk", "stdout.println(\"manifest-entry\");"),
+        ("alternate.zrk", "stdout.println(\"explicit-entry\");"),
+    ] {
+        std::fs::write(
+            dir.join("src").join(file),
+            format!("import {{ stdout }} from std.io;\n{text}"),
+        )
+        .unwrap();
+    }
+    let output = Command::new(compiler())
+        .args(["run", "src/alternate.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run explicit project source");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "explicit-entry\n"
+    );
+}
+
+#[test]
+fn pathless_run_rejects_package_projects() {
+    let dir = workspace("pathless_run_package");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.package\"; version: \"1.0.0\"; type: package; }",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .arg("run")
+        .current_dir(&dir)
+        .output()
+        .expect("reject pathless package run");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot start a package project"));
+}
+
+#[test]
+fn pathless_run_without_a_manifest_has_a_targeted_diagnostic() {
+    let dir = workspace("pathless_run_missing_manifest");
+    let output = Command::new(compiler())
+        .arg("run")
+        .current_dir(&dir)
+        .output()
+        .expect("report a missing application manifest");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no project manifest was found"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn project_global_default_constructs_custom_value_once_before_entry_initializers() {
+    let dir = workspace("global_default_custom_constructor");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.person\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nglobals { person: Person; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\nclass Person { name: String; construct(name: String) { this.name = name; stdout.println(\"person:\" + name); } }\nstdout.println(\"entry\");\n",
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .arg("run")
+        .current_dir(&dir)
+        .output()
+        .expect("initialize a custom project global");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "person:\nentry\n"
+    );
+}
+
+#[test]
+fn project_global_get_and_set_keep_custom_values_as_independent_snapshots() {
+    let dir = workspace("project_global_snapshots");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.snapshot\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nglobals { profile: Profile; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\n\
+         import { observe } from \"./reader\";\n\
+         class Profile { mut name: String; mut maybe: String?; construct(name: String) { this.name = name; } }\n\
+         mut first = Global.get(\"profile\");\n\
+         first.name = \"changed read\";\n\
+         if (Global.get(\"profile\").name == \"\") { stdout.println(\"get-isolated\"); }\n\
+         observe();\n\
+         mut candidate = Profile(\"external\");\n\
+         Global.set(\"profile\", candidate);\n\
+         candidate.name = \"changed after set\";\n\
+         if (Global.get(\"profile\").name == \"external\") { stdout.println(\"set-isolated\"); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/reader.zrk"),
+        "import { stdout } from std.io;\n\
+         share fn observe(): Void { }\n\
+         if (Global.get(\"profile\").name == \"\") { stdout.println(\"module-saw-default\"); }",
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run"])
+        .current_dir(&dir)
+        .output()
+        .expect("run project-global snapshot program");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "module-saw-default\nget-isolated\nset-isolated\n"
+    );
+}
+
+#[test]
+fn project_global_watch_captures_snapshots_publishes_changes_and_closes() {
+    let dir = workspace("project_global_watch_runtime");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.watch\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nglobals { counter: Int32; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\n\
+         fn make_counter_watch(): GlobalSubscription<Int32> {\n\
+         mut created = Global.watch(\"counter\");\n\
+             return created;\n\
+         }\n\
+         mut subscription = make_counter_watch();\n\
+         mut initial = subscription.snapshot();\n\
+         if (initial.value == 0 && initial.revision == 0) { stdout.println(\"initial\"); }\n\
+         Global.set(\"counter\", 1);\n\
+         match subscription.next() {\n\
+             Ok(change) => {\n\
+                 match change {\n\
+                     null => stdout.println(\"unexpected empty change\");\n\
+                     value => {\n\
+                         stdout.println(value.previous);\n\
+                         stdout.println(value.current);\n\
+                         stdout.println(value.revision);\n\
+                     }\n\
+                 }\n\
+             }\n\
+             Error(_) => stdout.println(\"unexpected watch error\");\n\
+         }\n\
+         Global.set(\"counter\", 1);\n\
+         match subscription.next() {\n\
+             Ok(change) => match change {\n\
+                 null => stdout.println(\"unchanged\");\n\
+                 _ => stdout.println(\"unexpected extra change\");\n\
+             }\n\
+             Error(_) => stdout.println(\"unexpected unchanged error\");\n\
+         }\n\
+         subscription.close();\n\
+         match subscription.next() {\n\
+             Ok(_) => stdout.println(\"close was not observed\");\n\
+             Error(error) => match error {\n\
+                 GlobalWatchError.Closed => stdout.println(\"closed\");\n\
+                 _ => stdout.println(\"wrong close error\");\n\
+             }\n\
+         }",
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run"])
+        .current_dir(&dir)
+        .output()
+        .expect("run project-global watch program");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "initial\n0\n1\n1\nunchanged\nclosed\n",
+        "runtime diagnostics: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn failed_project_global_constructor_stops_imported_module_initialization() {
+    let dir = workspace("project_global_initializer_failure");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.global-failure\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nglobals { profile: Profile; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { observe } from \"./reader\";\n\
+         class Profile { construct(name: String) { throw InvalidArgumentError(\"global init failed\"); } }\n\
+         observe();",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/reader.zrk"),
+        "import { stdout } from std.io;\n\
+         share fn observe(): Void { }\n\
+         stdout.println(\"module-ran\");",
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["run"])
+        .current_dir(&dir)
+        .output()
+        .expect("run project with a failing global constructor");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "no imported module body may run before global construction succeeds"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("global init failed"),
+        "startup failure should report the thrown constructor error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn project_global_custom_type_source_must_exist_inside_the_project() {
+    let dir = workspace("global_type_source_missing");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.globals\"; version: \"0.1.0\"; type: application; }\nglobals { settings: { type: Settings; from: \"src/settings.zrk\"; } }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/main.zrk"), "mut ready = true;\n").unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("validate a custom global type source");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("global `settings` type source"), "{stderr}");
+}
+
+#[test]
+fn project_global_custom_type_must_be_declared_in_its_from_file() {
+    let dir = workspace("global_type_source_wrong_type");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.globals\"; version: \"0.1.0\"; type: application; }\nglobals { settings: { type: Settings; from: \"src/settings.zrk\"; } }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/main.zrk"), "mut ready = true;\n").unwrap();
+    std::fs::write(dir.join("src/settings.zrk"), "class Other { }\n").unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("validate the type named by a custom global");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not declare that type"), "{stderr}");
+}
+
+#[test]
+fn imported_file_scope_runs_depth_first_and_once_for_a_diamond() {
+    let dir = workspace("module_initializer_runtime_order");
+    for (file, text) in [
+        (
+            "main.zrk",
+            "import { stdout } from std.io;\nimport { a } from \"./a\";\nimport { b } from \"./b\";\nstdout.println(\"main\");\n",
+        ),
+        (
+            "a.zrk",
+            "import { stdout } from std.io;\nimport { shared } from \"./shared\";\nfn a(): Void { }\nstdout.println(\"a\");\n",
+        ),
+        (
+            "b.zrk",
+            "import { stdout } from std.io;\nimport { shared } from \"./shared\";\nfn b(): Void { }\nstdout.println(\"b\");\n",
+        ),
+        (
+            "shared.zrk",
+            "import { stdout } from std.io;\nfn shared(): Void { }\nstdout.println(\"shared\");\n",
+        ),
+    ] {
+        std::fs::write(dir.join(file), text).unwrap();
+    }
+    let output = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("run imported file initializers");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "shared\na\nb\nmain\n"
+    );
+}
+
+#[test]
+fn multiple_package_reexports_initialize_the_shared_source_only_once() {
+    let dir = workspace("package_reexport_initializer_once");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.reexports\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.graph: { from: \"path:dep\"; version: \"^1.0\"; } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\nimport { left } from acme.graph;\nstdout.println(\"entry\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project { name: \"acme.graph\"; version: \"1.0.0\"; type: package; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.graph;\nshare mod left from \"./left\";\nshare mod right from \"./right\";\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/left.zrk"),
+        "import { stdout } from std.io;\nshare mod shared from \"./shared\";\nstdout.println(\"left\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/right.zrk"),
+        "import { stdout } from std.io;\nshare mod shared from \"./shared\";\nstdout.println(\"right\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/shared.zrk"),
+        "import { stdout } from std.io;\nshare fn marker(): Void { }\nstdout.println(\"shared\");\n",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.graph", "dep");
+
+    let output = Command::new(compiler())
+        .args(["run", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run a package with two reexports of one module");
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
+        "shared\nleft\nright\nentry\n"
+    );
+}
+
+#[test]
+fn imported_type_errors_prevent_all_file_scope_side_effects() {
+    let dir = workspace("module_type_error_prevents_effects");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { stdout } from std.io;\nimport { broken } from \"./broken\";\nstdout.println(\"entry-ran\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("broken.zrk"),
+        "import { stdout } from std.io;\nfn broken(): Void { }\nstdout.println(\"module-ran\");\nmut invalid: Int32 = \"not an integer\";\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("reject project before runtime effects");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+}
+
+#[test]
+fn executable_import_cycles_fail_before_any_file_scope_side_effects() {
+    let dir = workspace("module_cycle_prevents_effects");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { stdout } from std.io;\nimport { a } from \"./a\";\nstdout.println(\"entry-ran\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.zrk"),
+        "import { stdout } from std.io;\nimport { b } from \"./b\";\nfn a(): Void { }\nstdout.println(\"a-ran\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.zrk"),
+        "import { a } from \"./a\";\nfn b(): Void { }\nreport(\"b-ran\");\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["run", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("reject executable import cycle");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("initialization cycle"), "{stderr}");
+    assert!(
+        stderr.contains("a.zrk") && stderr.contains("b.zrk"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn explicit_source_inside_a_project_keeps_the_project_dependency_graph() {
+    let dir = workspace("explicit_project_entry");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor/lib/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"demo.app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.lib: { from: \"path:vendor/lib\"; version: \"^1.0\"; } }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/lib/.zkinit"),
+        "project { name: \"acme.lib\"; version: \"1.0.0\"; type: package; }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("vendor/lib/src/package.zrk"),
+        "package acme.lib;\nshare class Api { }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/alternate.zrk"),
+        "import { Api } from acme.lib;\nmut api = Api();",
+    )
+    .unwrap();
+    lock_local_dependency(&dir, "acme.lib", "vendor/lib");
+    let output = Command::new(compiler())
+        .args(["check", "src/alternate.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check explicit project source entry");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn exact_environment_requirements_are_accepted_in_a_project_manifest() {
     let dir = workspace("environment_manifest_check");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"demo.environment\"\nkind application\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\nsecrets: { names: [\"DB_PASSWORD\"]; during: runtime; }\nlist_names: { during: runtime; }\n}\n}\n",
+        "project { name: \"demo.environment\"; version: \"0.1.0\"; type: application; }\nrequires { environment.read; secrets.read; environment.list_names; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -216,6 +888,63 @@ fn exact_environment_requirements_are_accepted_in_a_project_manifest() {
 }
 
 #[test]
+fn protected_standard_api_effects_propagate_through_static_function_calls() {
+    let dir = workspace("protected_api_effect_propagation");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { Env } from std.environment;\n\
+         fn read_mode(): Void { mut mode = Env.get(\"APP_MODE\"); _ = mode; }\n\
+         fn wrapper(): Void { read_mode(); }\n\
+         fn receive(action: Fn() => Void): Void { action(); }\n\
+         fn callback_wrapper(): Void { receive((): Void => { read_mode(); }); }\n\
+         fn indirect_wrapper(): Void { mut action: Fn() => Void = read_mode; action(); }\n\
+         fn main(): Void { wrapper(); callback_wrapper(); indirect_wrapper(); }",
+    )
+    .unwrap();
+    let mut sink = zirk_diagnostics::DiagnosticSink::new();
+    let result = zirk_cli::frontend::run_frontend(&dir.join("main.zrk"), &mut sink)
+        .expect("the protected API program should typecheck");
+    assert!(
+        !sink.has_errors(),
+        "{}",
+        sink.render(zirk_diagnostics::RenderStyle::Human)
+    );
+    assert!(
+        result
+            .checked
+            .protected_api_effects
+            .values()
+            .any(|effect| effect == "environment.read")
+    );
+    assert!(
+        result
+            .checked
+            .protected_api_requesters
+            .values()
+            .any(|requester| requester == "local")
+    );
+    for function_name in [
+        "read_mode",
+        "wrapper",
+        "callback_wrapper",
+        "indirect_wrapper",
+        "main",
+    ] {
+        let function = result
+            .program
+            .functions
+            .iter()
+            .find(|function| function.name.name == function_name)
+            .expect("test function is present");
+        assert!(
+            result.checked.callable_capability_effects[&function.name.span]
+                .contains("environment.read"),
+            "{function_name} lost its transitive capability effect"
+        );
+    }
+}
+
+#[test]
 fn a_malformed_project_manifest_is_rejected_before_source_checking() {
     let dir = workspace("invalid_package_manifest");
     std::fs::write(dir.join(".zkinit"), "project \"broken\"\nkind unknown\n").unwrap();
@@ -232,7 +961,11 @@ fn a_malformed_project_manifest_is_rejected_before_source_checking() {
 fn a_lockfile_without_an_integrity_hash_is_rejected_before_source_checking() {
     let dir = workspace("invalid_package_lock");
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join(".zkinit"), "project \"app\"\nkind application\n").unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("zirk.lock"),
         "acme.web 1.0 local - src/package.zrk\n",
@@ -254,7 +987,7 @@ fn a_tampered_local_package_is_rejected_before_its_body_is_checked() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.web: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -264,7 +997,7 @@ fn a_tampered_local_package_is_rejected_before_its_body_is_checked() {
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.web\"\nkind package\n",
+        "project { name: \"acme.web\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -272,9 +1005,20 @@ fn a_tampered_local_package_is_rejected_before_its_body_is_checked() {
         "package acme.web;\nthis is deliberately not valid Zirk",
     )
     .unwrap();
+    let locked = zirk_cli::project::LockedPackage {
+        name: "acme.web".into(),
+        version: "1.0.0".into(),
+        source: "local".into(),
+        locator: "path:dep".into(),
+        revision: None,
+        hash: format!("sha256:{}", "0".repeat(64)),
+        package_root: "src/package.zrk".into(),
+    };
     std::fs::write(
         dir.join("zirk.lock"),
-        "acme.web 1.0 local sha256:0000000000000000000000000000000000000000000000000000000000000000 src/package.zrk\n",
+        zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+            packages: [("acme.web".into(), locked)].into(),
+        }),
     )
     .unwrap();
     let output = Command::new(compiler())
@@ -298,7 +1042,11 @@ fn a_tampered_local_package_is_rejected_before_its_body_is_checked() {
 fn an_undeclared_package_is_rejected_before_type_checking() {
     let dir = workspace("undeclared_package_import");
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join(".zkinit"), "project \"app\"\nkind application\n").unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("src/main.zrk"),
         "import { Api } from acme.web;\nfn main(): Void { Api(); }",
@@ -322,7 +1070,7 @@ fn a_declared_local_package_root_is_loaded_by_logical_name() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.web: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -337,7 +1085,7 @@ fn a_declared_local_package_root_is_loaded_by_logical_name() {
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.web\"\nkind package\n",
+        "project { name: \"acme.web\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -422,7 +1170,7 @@ fn external_println_export_never_receives_the_standard_output_implementation() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.io ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.io: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -432,7 +1180,7 @@ fn external_println_export_never_receives_the_standard_output_implementation() {
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.io\"\nkind package\n",
+        "project { name: \"acme.io\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -823,7 +1571,7 @@ fn a_user_defined_http_type_does_not_acquire_bundled_native_bindings() {
          class HTTP {\n\
              static get_native(value: String): String { return \"user:\" + value; }\n\
          }\n\
-         fn main(): Void { stdout.println(HTTP.get_native(\"ordinary\")); }\n",
+         stdout.println(HTTP.get_native(\"ordinary\"));\n",
     )
     .unwrap();
     let output = Command::new(compiler())
@@ -1256,7 +2004,7 @@ fn package_module_members_open_and_qualify_from_a_root_reexport() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.cli ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.cli: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1271,7 +2019,7 @@ fn package_module_members_open_and_qualify_from_a_root_reexport() {
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.cli\"\nkind package\n",
+        "project { name: \"acme.cli\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1304,7 +2052,7 @@ fn opened_module_member_collisions_require_qualification_without_source_order() 
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.cli ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.cli: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1319,7 +2067,7 @@ fn opened_module_member_collisions_require_qualification_without_source_order() 
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.cli\"\nkind package\n",
+        "project { name: \"acme.cli\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1355,7 +2103,7 @@ fn module_values_types_and_direct_member_imports_resolve() {
     std::fs::create_dir_all(dir.join("dep/src")).unwrap();
     std::fs::write(
         dir.join(".zkinit"),
-        "project \"app\"\nkind application\ndependency acme.web ^1 local \"dep\"\n",
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.web: { from: \"path:dep\"; version: \"^1\"; } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1370,7 +2118,7 @@ fn module_values_types_and_direct_member_imports_resolve() {
     .unwrap();
     std::fs::write(
         dir.join("dep/.zkinit"),
-        "project \"acme.web\"\nkind package\n",
+        "project { name: \"acme.web\"; version: \"1.0.0\"; type: package; }\n",
     )
     .unwrap();
     std::fs::write(

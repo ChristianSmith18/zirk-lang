@@ -1,21 +1,17 @@
 # Packages
 
-Zirk packages distribute typed public API, portable IR, manifest metadata, documentation, and licensing in `.zpkg`. Resolution is locked and verified; final code generation aligns every package with the application target and ABI.
+Zirk's project model separates a package's stable logical name from its
+registry, Git, local, or vendored source. `zirk.lock` records exact source and
+integrity metadata. Applications and packages declare capability needs in the
+same `requires` block; signed user consent remains outside the package and
+lockfile and applies to exact resources at runtime.
 
-A package is not a preauthorized executable bundle. Libraries declare
-`requires`, applications grant `permissions`, and signed consent remains
-external to both package and lockfile. Native artifacts and build-time code are
-visible supply-chain boundaries reviewed by `zirk prepare`.
-
-In the current native `std.net` and `std.environment` preview, package
-`.zkinit` files express runtime permission requirements with a `permissions`
-block. This is declaration only; the application approval command collects the
-locked dependency graph's requirements and requests explicit consent.
-
-Read this unit in order when publishing. Consumers normally use `zirk add` and
-commit both manifest and lockfile changes after reviewing version, integrity,
-requirements, targets, and requester paths.
+Local/vendored graph traversal, logical imports, and lock metadata validation
+are implemented. Registry/Git acquisition, verified remote archives, and
+publication remain partial; check the
+[feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) before relying on
+the broader package lifecycle contract.
 
 ---
 
-**Previous:** [← Benchmarks](../08-testing/07-benchmarks.md) · **Next:** [ Package Anatomy](01-package-anatomy.md)
+**Previous:** [← Benchmarks](../08-testing/07-benchmarks.md) · **Next:** [Package Anatomy](01-package-anatomy.md)

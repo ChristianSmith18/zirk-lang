@@ -12,6 +12,7 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:zirk",
+    "onLanguage:zirk-init",
     "onDebugResolve:zirk",
     "onDebugInitialConfigurations:zirk"
   ],
@@ -218,8 +219,8 @@
       },
       {
         "language": "zirk-init",
-        "scopeName": "source.zirk",
-        "path": "./syntaxes/zirk.tmLanguage.json"
+        "scopeName": "source.zirk-init",
+        "path": "./syntaxes/zkinit.tmLanguage.json"
       }
     ],
     "semanticTokenScopes": [

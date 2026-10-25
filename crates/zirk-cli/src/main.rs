@@ -14,6 +14,7 @@
 //! `ZIRK_COMPILER_SPEC.md` section 9 — `test`, `bench`, `format`, `lint` —
 //! arrive in later phases, and each says so when invoked.
 
+use std::io::IsTerminal;
 #[cfg(feature = "backend")]
 use std::path::PathBuf;
 use zirk_cli::{codes, frontend};
@@ -36,6 +37,10 @@ fn dispatch(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("check") => check(&args[1..]),
         Some("format") => format(&args[1..]),
+        Some("migrate") => migrate(&args[1..]),
+        Some("init") => init(&args[1..]),
+        Some("install") if args.len() == 1 => install(false),
+        Some("update") if args.len() == 1 => install(true),
         #[cfg(not(target_arch = "wasm32"))]
         Some("permissions") => permissions(&args[1..]),
         Some("uninstall") => uninstall(&args[1..]),
@@ -69,9 +74,9 @@ fn dispatch(args: &[String]) -> i32 {
         }
 
         // Subcommands of `COMPILER_SPEC` section 9 that arrive later.
-        Some(later @ ("test" | "bench" | "lint" | "new" | "init" | "doc")) => {
+        Some(later @ ("test" | "bench" | "lint" | "new" | "doc")) => {
             let phase = match later {
-                "test" | "new" | "init" => Phase::SIX,
+                "test" | "new" => Phase::SIX,
                 "lint" => Phase::NINE,
                 _ => Phase::SEVEN,
             };
@@ -134,6 +139,172 @@ fn format(args: &[String]) -> i32 {
         }
     }
     i32::from(failed || drift)
+}
+
+fn migrate(args: &[String]) -> i32 {
+    let apply = args.iter().any(|arg| arg == "--apply");
+    let check = args.iter().any(|arg| arg == "--check");
+    let paths: Vec<_> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
+    if (apply && check)
+        || paths.len() > 1
+        || args
+            .iter()
+            .any(|arg| arg.starts_with("--") && arg != "--apply" && arg != "--check")
+    {
+        return fail(
+            codes::INVALID_USAGE,
+            "invalid `zirk migrate` arguments",
+            "migration accepts one manifest path and either `--check` or `--apply`",
+            Some("run `zirk migrate --check [project-or-.zkinit]` before `zirk migrate --apply`"),
+        );
+    }
+
+    let provided = paths
+        .first()
+        .map(|value| std::path::Path::new(value.as_str()));
+    let manifest = match provided {
+        Some(path) if path.is_dir() => path.join(".zkinit"),
+        Some(path) => path.to_path_buf(),
+        None => std::path::PathBuf::from(".zkinit"),
+    };
+    match zirk_cli::project::migrate_manifest_file(&manifest, apply) {
+        Ok((original, _converted)) if apply => {
+            println!("Migrated {}", manifest.display());
+            println!("Recoverable original: {}.pre-migrate", manifest.display());
+            if legacy_entry_defines_main(&manifest, &original) {
+                println!(
+                    "Source note: the legacy entry defines `fn main`; migration did not rewrite or invoke it. Review the new top-level entry behavior separately."
+                );
+            }
+            0
+        }
+        Ok((original, converted)) => {
+            print_manifest_diff(&original, &converted);
+            println!(
+                "Preview only. Run `zirk migrate --apply {}` to write this conversion.",
+                manifest.display()
+            );
+            if legacy_entry_defines_main(&manifest, &original) {
+                println!(
+                    "Source note: the legacy entry defines `fn main`; migration will not rewrite or invoke it."
+                );
+            }
+            0
+        }
+        Err(error) => fail(
+            codes::INVALID_USAGE,
+            "could not migrate `.zkinit`",
+            &error.to_string(),
+            Some("run `zirk migrate --check` and resolve the reported legacy fields"),
+        ),
+    }
+}
+
+fn print_manifest_diff(original: &str, converted: &str) {
+    println!("--- .zkinit (legacy)");
+    println!("+++ .zkinit (canonical preview)");
+    for line in original.lines() {
+        println!("-{line}");
+    }
+    for line in converted.lines() {
+        println!("+{line}");
+    }
+}
+
+fn legacy_entry_defines_main(manifest_path: &std::path::Path, source: &str) -> bool {
+    let Some(parent) = manifest_path.parent() else {
+        return false;
+    };
+    let Ok(manifest) = zirk_cli::project::parse_legacy_manifest(source) else {
+        return false;
+    };
+    if manifest.kind != zirk_cli::project::ProjectKind::Application {
+        return false;
+    }
+    let Ok(entry) = std::fs::read_to_string(parent.join(manifest.entry)) else {
+        return false;
+    };
+    let entry_path = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("<legacy-entry>");
+    let source_file = zirk_diagnostics::SourceFile::new(entry_path.to_string_lossy(), &entry);
+    let mut sink = zirk_diagnostics::DiagnosticSink::new();
+    let tokens = zirk_lexer::tokenize(&source_file, &mut sink);
+    let program = zirk_parser::parse(&source_file, &tokens, &mut sink);
+    program
+        .functions
+        .iter()
+        .any(|function| function.name.name == "main")
+}
+
+fn init(args: &[String]) -> i32 {
+    if args.iter().any(|argument| argument != "-y") || args.len() > 1 {
+        return fail(
+            codes::INVALID_USAGE,
+            "invalid `zirk init` arguments",
+            "the initializer accepts no arguments or `-y`",
+            Some("run `zirk init` for prompts or `zirk init -y` for canonical defaults"),
+        );
+    }
+    let mode = if args.first().is_some_and(|argument| argument == "-y") {
+        zirk_cli::initializer::InitMode::Yes
+    } else {
+        if !std::io::stdin().is_terminal() {
+            return fail(
+                codes::INVALID_USAGE,
+                "interactive `zirk init` needs a terminal",
+                "stdin is not attached to a terminal, so no answers can be collected",
+                Some("run `zirk init -y` to create a manifest with the documented defaults"),
+            );
+        }
+        zirk_cli::initializer::InitMode::Interactive
+    };
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            return fail(
+                codes::INVALID_USAGE,
+                "could not locate the current directory",
+                &error.to_string(),
+                None,
+            );
+        }
+    };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match zirk_cli::initializer::initialize(&root, mode, &mut stdin.lock(), &mut stdout.lock()) {
+        Ok(path) => {
+            println!("Created {}", path.display());
+            0
+        }
+        Err(error) => fail(
+            codes::INVALID_PROJECT,
+            "could not initialize the project",
+            &error,
+            Some("review the answers and run `zirk init` again; no existing manifest was changed"),
+        ),
+    }
+}
+
+fn install(update: bool) -> i32 {
+    match zirk_cli::packages::install_current_project(update) {
+        Ok(lock) => {
+            let action = if update { "Updated" } else { "Installed" };
+            println!("{action} {} locked dependencies.", lock.packages.len());
+            0
+        }
+        Err(error) => fail(
+            codes::INVALID_PROJECT,
+            if update {
+                "could not update project dependencies"
+            } else {
+                "could not install project dependencies"
+            },
+            &error.to_string(),
+            Some("check `.zkinit`, the configured registry, and the requested source revisions"),
+        ),
+    }
 }
 
 fn collect_format_targets(path: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
@@ -216,14 +387,58 @@ fn compile(args: &[String], action: Action) -> i32 {
     let json = args.iter().any(|a| a == "--json");
     let debug_info = args.iter().any(|a| a == "--debug-info");
     let color = frontend::resolve_color(color_choice(args).as_deref());
-    let files: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let mut files = Vec::new();
+    let mut explicit_target = None;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].as_str();
+        if argument == "--target" {
+            if explicit_target.is_some() || index + 1 >= args.len() {
+                return fail(
+                    codes::INVALID_USAGE,
+                    "invalid `--target` option",
+                    "the option requires one target name and may appear only once",
+                    Some("run `zirk --list-targets` to see supported targets"),
+                );
+            }
+            index += 1;
+            explicit_target = Some(args[index].clone());
+        } else if let Some(target) = argument.strip_prefix("--target=") {
+            if explicit_target.replace(target.to_string()).is_some() || target.is_empty() {
+                return fail(
+                    codes::INVALID_USAGE,
+                    "invalid `--target` option",
+                    "the option requires one target name and may appear only once",
+                    Some("run `zirk --list-targets` to see supported targets"),
+                );
+            }
+        } else if !argument.starts_with("--") {
+            files.push(&args[index]);
+        }
+        index += 1;
+    }
 
-    if files.is_empty() {
+    if action == Action::Run && explicit_target.is_some() {
+        return fail(
+            codes::INVALID_USAGE,
+            "`zirk run` does not accept `--target`",
+            "run always uses the compiler host target",
+            Some("remove `--target` or use `zirk build --target <target>`"),
+        );
+    }
+
+    let directory_argument = files.first().is_some_and(|file| {
+        let path = std::path::Path::new(file);
+        path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit")
+    });
+    let pathless_run = action == Action::Run && (files.is_empty() || directory_argument);
+
+    if files.is_empty() && !pathless_run {
         return fail(
             codes::INVALID_USAGE,
             "no source file was given",
-            "the subcommand needs a source file",
-            Some("write `zirk run program` or `zirk run program.zrk`"),
+            "`zirk build` needs a source file or project entry",
+            Some("write `zirk build program` or `zirk build program.zrk`"),
         );
     }
 
@@ -236,12 +451,116 @@ fn compile(args: &[String], action: Action) -> i32 {
         );
     }
 
-    let raw = std::path::Path::new(files[0]);
-    let path = if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
-        raw.to_path_buf()
+    let project_start = if let Some(file) = files.first() {
+        let path = std::path::Path::new(file);
+        if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+            path
+        } else {
+            std::path::Path::new(".")
+        }
     } else {
-        frontend::resolve_source_path(files[0].as_str())
+        std::path::Path::new(".")
     };
+    let path = if pathless_run {
+        let Some(manifest_path) = zirk_cli::project::discover(project_start) else {
+            return fail(
+                codes::INVALID_PROJECT,
+                "pathless `zirk run` requires an application `.zkinit` entry",
+                "no project manifest was found from the current directory",
+                Some("run `zirk init` or provide an explicit source path"),
+            );
+        };
+        match zirk_cli::project::read_manifest(&manifest_path) {
+            Ok(manifest) if manifest.kind == zirk_cli::project::ProjectKind::Application => {}
+            Ok(_) => {
+                return fail(
+                    codes::INVALID_PROJECT,
+                    "pathless `zirk run` cannot start a package project",
+                    "a package has a reusable root, not an application entry",
+                    Some("provide an explicit source file to run within the package context"),
+                );
+            }
+            Err(error) => {
+                return fail(
+                    codes::INVALID_PROJECT,
+                    "could not read the project manifest",
+                    &error.to_string(),
+                    Some("repair `.zkinit` or run `zirk migrate --check`"),
+                );
+            }
+        }
+        manifest_path
+    } else {
+        let raw = std::path::Path::new(files[0]);
+        if raw.is_dir() || raw.file_name().is_some_and(|name| name == ".zkinit") {
+            raw.to_path_buf()
+        } else {
+            frontend::resolve_source_path(files[0].as_str())
+        }
+    };
+
+    if action == Action::Build {
+        let manifest = zirk_cli::project::discover(&path)
+            .map(|manifest_path| zirk_cli::project::read_manifest(&manifest_path))
+            .transpose();
+        let manifest = match manifest {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                return fail(
+                    codes::INVALID_PROJECT,
+                    "could not read the project manifest",
+                    &error.to_string(),
+                    Some("repair `.zkinit` or run `zirk migrate --check`"),
+                );
+            }
+        };
+        if let Some(manifest) = &manifest {
+            if manifest.kind == zirk_cli::project::ProjectKind::Package
+                && !manifest.build_targets.is_empty()
+            {
+                return fail(
+                    codes::INVALID_PROJECT,
+                    "a package cannot select application build targets",
+                    "`build_targets` is an application-only manifest field",
+                    Some("remove `build_targets` from the package `.zkinit`"),
+                );
+            }
+        }
+        let host_target = host_target_name();
+        let selected = select_build_targets(
+            explicit_target.as_deref(),
+            manifest
+                .as_ref()
+                .map(|manifest| manifest.build_targets.as_slice())
+                .unwrap_or_default(),
+            host_target,
+        );
+        let selected = match selected {
+            Ok(selected) => selected,
+            Err(error) => {
+                return fail(
+                    codes::INVALID_USAGE,
+                    "unsupported build target selection",
+                    &error,
+                    Some("run `zirk --list-targets` to see supported targets"),
+                );
+            }
+        };
+        if let Some(target) = selected
+            .iter()
+            .find(|target| target.as_str() != host_target)
+        {
+            return fail(
+                codes::NOT_IMPLEMENTED,
+                &format!("native linking for `{target}` is not available in this installation"),
+                "the compiler can emit objects for this target, but a matching Zirk runtime archive and linker sysroot are not configured",
+                Some(
+                    "build for the host target or install the matching cross-compilation toolchain and runtime",
+                ),
+            );
+        }
+    }
+
     let output_dir = PathBuf::from(OUTPUT_DIR);
     let compilation = if debug_info {
         driver::compile_with_debug_info(&path, &output_dir)
@@ -270,7 +589,20 @@ fn compile(args: &[String], action: Action) -> i32 {
                     return 1;
                 }
             };
-            match driver::run_with_runtime_grant(&executable, grant.as_deref(), json) {
+            let runtime_environment = match zirk_cli::approvals::runtime_environment_for_path(&path)
+            {
+                Ok(environment) => environment,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    return 1;
+                }
+            };
+            match driver::run_with_runtime_permissions(
+                &executable,
+                grant.as_deref(),
+                json,
+                runtime_environment.as_ref(),
+            ) {
                 Ok(code) => code,
                 Err(diagnostic) => {
                     eprint!("{}", diagnostic.render_colored(color));
@@ -278,6 +610,43 @@ fn compile(args: &[String], action: Action) -> i32 {
                 }
             }
         }
+    }
+}
+
+#[cfg(feature = "backend")]
+fn select_build_targets(
+    explicit: Option<&str>,
+    manifest_targets: &[String],
+    host: &str,
+) -> Result<Vec<String>, String> {
+    if let Some(target) = explicit {
+        if zirk_codegen_llvm::target_by_name(target).is_none() {
+            return Err(format!("`{target}` is not a supported Zirk target"));
+        }
+        return Ok(vec![target.to_string()]);
+    }
+    if !manifest_targets.is_empty() {
+        return Ok(manifest_targets.to_vec());
+    }
+    if zirk_codegen_llvm::target_by_name(host).is_none() {
+        return Err(format!("host target `{host}` is not supported by Zirk"));
+    }
+    Ok(vec![host.to_string()])
+}
+
+#[cfg(feature = "backend")]
+fn host_target_name() -> &'static str {
+    match (std::env::consts::ARCH, std::env::consts::OS) {
+        ("x86", "windows") => "x86-windows",
+        ("x86_64", "windows") => "x86_64-windows",
+        ("aarch64", "windows") => "aarch64-windows",
+        ("x86", "linux") => "x86-linux",
+        ("x86_64", "linux") => "x86_64-linux",
+        ("arm", "linux") => "armv7-linux",
+        ("aarch64", "linux") => "aarch64-linux",
+        ("x86_64", "macos") => "x86_64-macos",
+        ("aarch64", "macos") => "aarch64-macos",
+        _ => "unsupported-host",
     }
 }
 
@@ -314,6 +683,33 @@ fn fail(code: zirk_diagnostics::Code, message: &str, cause: &str, help: Option<&
 #[cfg(not(target_arch = "wasm32"))]
 fn permissions(args: &[String]) -> i32 {
     match args {
+        [command, project] if command == "inspect" => {
+            match zirk_cli::approvals::inspect(std::path::Path::new(project)) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    1
+                }
+            }
+        }
+        [command, project] if command == "diff" => {
+            match zirk_cli::approvals::diff(std::path::Path::new(project)) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    1
+                }
+            }
+        }
+        [command, project] if command == "history" => {
+            match zirk_cli::approvals::history(std::path::Path::new(project)) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("ERROR: {error}");
+                    1
+                }
+            }
+        }
         [command, project] if command == "approve" || command == "revoke" => {
             let project = std::path::Path::new(project);
             let result = if command == "approve" {
@@ -332,8 +728,10 @@ fn permissions(args: &[String]) -> i32 {
         _ => fail(
             codes::INVALID_USAGE,
             "invalid permissions command",
-            "permission grants are approved or revoked explicitly for a project manifest",
-            Some("write `zirk permissions approve|revoke <project-directory-or-.zkinit>`"),
+            "requirements and exact consent can be inspected or diffed; approval is requested at protected operations and recorded in history",
+            Some(
+                "write `zirk permissions inspect|diff|history|revoke <project-directory-or-.zkinit>`; exact consent is requested by `zirk run` at the protected operation",
+            ),
         ),
     }
 }
@@ -480,13 +878,22 @@ fn help() {
     println!("Subcommands:");
     println!("  check <file>       validate the frontend only");
     println!("  format [--check] [--diff] <target>...  canonicalize Zirk source files");
+    println!(
+        "  migrate --check|--apply [project-or-.zkinit]  preview or apply legacy manifest migration"
+    );
+    println!("  init [-y]          create a canonical `.zkinit` manifest");
+    println!("  install            resolve dependencies and write `zirk.lock`");
+    println!("  update             refresh locked dependency selections");
     #[cfg(not(target_arch = "wasm32"))]
-    println!("  permissions approve|revoke <project>  manage exact .zkinit runtime scopes");
+    println!(
+        "  permissions inspect|diff|history|revoke <project>  review requirements and saved consent"
+    );
     println!("  uninstall          remove the managed per-user Zirk installation");
     #[cfg(feature = "backend")]
     {
         println!("  build <file>       compile to a native executable");
         println!("      --debug-info   include source-level DWARF for native debugging");
+        println!("      --target NAME  select one supported build target");
         println!("  run <file>         compile and run");
     }
     println!();
@@ -500,6 +907,54 @@ fn help() {
     println!("The `.zrk` extension is optional: `main` and `main.zrk` are equivalent.");
     println!();
     println!("Artifacts are written to `{OUTPUT_DIR}/`.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch;
+
+    #[cfg(feature = "backend")]
+    #[test]
+    fn build_target_selection_obeys_cli_manifest_host_precedence() {
+        let manifest = vec!["x86_64-macos".to_string(), "aarch64-macos".to_string()];
+        assert_eq!(
+            super::select_build_targets(None, &manifest, "aarch64-macos").unwrap(),
+            manifest
+        );
+        assert_eq!(
+            super::select_build_targets(Some("aarch64-macos"), &manifest, "x86_64-macos").unwrap(),
+            ["aarch64-macos"]
+        );
+        assert_eq!(
+            super::select_build_targets(None, &[], "x86_64-macos").unwrap(),
+            ["x86_64-macos"]
+        );
+    }
+
+    #[test]
+    fn migrate_check_and_apply_have_explicit_write_boundary() {
+        let root = std::env::temp_dir().join(format!("zirk-cli-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join(".zkinit");
+        let legacy = "project \"cli.migrate\"\nkind application\n";
+        std::fs::write(&manifest, legacy).unwrap();
+        let path = manifest.to_string_lossy().to_string();
+
+        assert_eq!(
+            dispatch(&["migrate".into(), "--check".into(), path.clone()]),
+            0
+        );
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), legacy);
+        assert_eq!(dispatch(&["migrate".into(), "--apply".into(), path]), 0);
+        let converted = std::fs::read_to_string(&manifest).unwrap();
+        assert!(converted.contains("type: application"));
+        assert_eq!(
+            std::fs::read_to_string(root.join(".zkinit.pre-migrate")).unwrap(),
+            legacy
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(feature = "backend")]

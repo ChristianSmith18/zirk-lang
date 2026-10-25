@@ -31,6 +31,7 @@ sha2.workspace = true
 hmac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 bytes = "1"
@@ -42,9 +43,6 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 tokio = { version = "1", default-features = false, features = ["io-util", "net", "rt", "time"] }
 tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

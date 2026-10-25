@@ -4,8 +4,11 @@
 captures results and binds every child to structured cancellation and cleanup.
 The executable and its arguments are always separate.
 
-> **Implementation status:** target Zirk 1.x contract. Process, environment and
-> shell permissions must be granted separately in `.zkinit`.
+> **Implementation status:** target Zirk 1.x contract. Process and shell APIs
+> are not currently exposed by the compiler. `process.execute` and
+> `process.shell` are reserved capability identifiers. The implemented
+> environment APIs use the shared `requires` declaration and exact runtime
+> consent described in the permissions guide.
 
 ## Commands and results
 
@@ -128,11 +131,13 @@ be expressed structurally.
 
 ## Permissions and portability
 
-Process grants restrict the canonical executable and optionally safe argument
-forms. `arguments: all` is possible but warned. Environment access and shell
-execution need their own grants. Platform-specific signals and termination
-behavior are represented through typed capabilities and documented fallbacks;
-portable code must not assume POSIX signal numbers on every target.
+The target process contract restricts the canonical executable and optionally
+safe argument forms. `arguments: all` is possible but warned. When the API is
+implemented, process and shell operations will use distinct identifiers in
+the same `requires` list and ask consent for their exact executable or command.
+Platform-specific signals and termination behavior are represented through
+typed capabilities and documented fallbacks; portable code must not assume
+POSIX signal numbers on every target.
 
 ---
 

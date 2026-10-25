@@ -6,11 +6,9 @@
 ```zirk
 import { stdin, stdout, stderr } from std.io;
 
-fn main(): Void {
-    println("ready"); // opened from stdout
-    stdout.println("explicit");
-    stderr.println("warning");
-}
+println("ready"); // opened from stdout
+stdout.println("explicit");
+stderr.println("warning");
 ```
 
 Importing a module opens its unique shared members. Explicit calls always use

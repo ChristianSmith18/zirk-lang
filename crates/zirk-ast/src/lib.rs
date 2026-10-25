@@ -97,8 +97,16 @@ pub struct Program {
     pub type_aliases: Vec<TypeAliasDecl>,
     /// `extern "C" fn name(...): T;` (roadmap Phase 4e, `ADR-015`).
     pub externs: Vec<ExternFnDecl>,
+    /// Executable statements written at file scope, in source order. Project
+    /// loading moves these into private file initializers after the complete
+    /// static graph has been parsed.
+    pub body: Vec<Stmt>,
     pub span: Span,
 }
+
+/// Unspellable source-level symbol used for generated file and application
+/// entry functions. The lexer does not allow `$` in identifiers.
+pub const GENERATED_ENTRYPOINT: &str = "$zirk.entry";
 
 /// `package acme.web;` — the package identity of a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]

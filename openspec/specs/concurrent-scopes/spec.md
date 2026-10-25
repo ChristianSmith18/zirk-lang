@@ -96,14 +96,15 @@ branch value.
 - **WHEN** a branch returns `Error(problem)` normally while a sibling runs
 - **THEN** the sibling is not cancelled and the block completes with that branch's value being `Error(problem)`
 
-### Requirement: `main` runs in an implicit `concurrent` scope
+### Requirement: The selected entry runs in an implicit `concurrent` scope
 
-The body of `main` SHALL be an implicit `concurrent` scope. Top-level `spawn`,
-`Timer.after`, and `Timer.every` SHALL be owned by it. The process SHALL NOT exit
-until `main`'s explicit body has completed and its owned branches have been
-joined or (for ambient timers, and on an exceptional exit) cancelled and cleaned.
+The selected application entry's top-level body SHALL be an implicit
+`concurrent` scope. Top-level `spawn`, `Timer.after`, and `Timer.every` SHALL
+be owned by it. The process SHALL NOT exit until that body has completed and
+its owned branches have been joined or (for ambient timers, and on an
+exceptional exit) cancelled and cleaned.
 
-#### Scenario: spawned work outlives the last statement of main
-- **WHEN** `main` spawns a branch and then reaches the end of its body
+#### Scenario: spawned work outlives the selected entry body
+- **WHEN** the selected entry spawns a branch and then reaches the end of its body
 - **THEN** the implicit scope waits for that branch before the process exits
 

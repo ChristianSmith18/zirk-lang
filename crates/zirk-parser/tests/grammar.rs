@@ -8,6 +8,27 @@ use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile};
 use zirk_lexer::tokenize;
 use zirk_parser::{codes, parse};
 
+#[test]
+fn file_scope_statements_keep_their_source_order() {
+    let parsed = program("mut count = 1;\ncount = count + 1;\nreport(count);");
+    assert_eq!(parsed.body.len(), 3);
+    assert!(matches!(parsed.body[0], Stmt::Let(_)));
+    assert!(matches!(parsed.body[1], Stmt::Assign(_)));
+    assert!(matches!(parsed.body[2], Stmt::Expr(_)));
+}
+
+#[test]
+fn static_imports_must_precede_file_scope_statements() {
+    let output = errors("mut count = 1;\nimport { increment } from \"./counter\";");
+    assert!(output.contains("static imports must precede file-scope statements"));
+}
+
+#[test]
+fn return_is_rejected_at_file_scope() {
+    let output = errors("return;");
+    assert!(output.contains("not allowed at file scope"));
+}
+
 /// Parses expecting no errors.
 fn program(source_text: &str) -> Program {
     let source = SourceFile::new("test.zrk", source_text);

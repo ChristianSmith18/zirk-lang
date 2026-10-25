@@ -28,6 +28,39 @@ static UDP_SOCKETS: OnceLock<Mutex<HashMap<u64, OwnedUdpSocket>>> = OnceLock::ne
 static LOCAL_STREAMS: OnceLock<Mutex<HashMap<u64, OwnedLocalStream>>> = OnceLock::new();
 static LOCAL_LISTENERS: OnceLock<Mutex<HashMap<u64, OwnedLocalListener>>> = OnceLock::new();
 
+fn network_connect_grant(
+    endpoint: &str,
+) -> Option<std::sync::Arc<zirk_runtime_core::network_policy::EffectiveNetworkGrant>> {
+    match canonical_connect_origin(endpoint) {
+        Some(origin) => crate::permissions::network_grant_for("network.connect", &origin).ok(),
+        None => None,
+    }
+}
+
+fn canonical_connect_origin(endpoint: &str) -> Option<String> {
+    if let Ok(origin) = NetworkOrigin::parse(endpoint) {
+        return Some(origin.as_str().to_owned());
+    }
+    let parsed = url::Url::parse(endpoint).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.host_str().is_none()
+    {
+        return None;
+    }
+    let host = match parsed.host()? {
+        url::Host::Domain(host) => host.to_ascii_lowercase(),
+        url::Host::Ipv4(host) => host.to_string(),
+        url::Host::Ipv6(host) => format!("[{host}]"),
+    };
+    let port = parsed.port_or_known_default()?;
+    let canonical = format!("{}://{host}:{port}", parsed.scheme());
+    NetworkOrigin::parse(&canonical)
+        .ok()
+        .map(|origin| origin.as_str().to_owned())
+}
+
 struct OwnedTcpStream {
     owner: TaskId,
     stream: TcpStream,
@@ -383,6 +416,20 @@ fn parse_udp_multicast_group(text: &str) -> Result<std::net::IpAddr, NetworkTran
     Ok(group)
 }
 
+fn request_udp_send_grant(
+    address: std::net::SocketAddr,
+) -> Option<std::sync::Arc<zirk_runtime_core::network_policy::EffectiveNetworkGrant>> {
+    if address.ip().is_multicast()
+        && !crate::permissions::request_resource(
+            "network.udp.send",
+            &format!("udp-multicast://{}", address.ip()),
+        )
+    {
+        return None;
+    }
+    crate::permissions::network_grant_for("network.udp.send", &format!("udp://{address}")).ok()
+}
+
 /// Parses a plain IP literal and returns its canonical textual form.
 /// Host names, scoped IPv6 literals, and ports are rejected; no DNS query is
 /// performed.
@@ -651,7 +698,7 @@ pub unsafe extern "C" fn zirk_network_tls_connect(endpoint: *const c_void, out: 
         unsafe { set_out(out, empty_out(1, 0)) };
         return;
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -775,7 +822,7 @@ pub unsafe extern "C" fn zirk_network_tls_connect_with_roots(
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -845,7 +892,7 @@ pub unsafe extern "C" fn zirk_network_tls_connect_with_alpn(
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -947,7 +994,7 @@ pub unsafe extern "C" fn zirk_network_tls_connect_with_client_identity(
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -1023,7 +1070,7 @@ pub unsafe extern "C" fn zirk_network_tls_upgrade_tcp(
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -1235,7 +1282,9 @@ unsafe fn tls_listener_bind(
         return;
     };
     let address = std::net::SocketAddr::new(ip, origin.port());
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) =
+        crate::permissions::network_grant_for("network.listen", &address.to_string()).ok()
+    else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -1724,7 +1773,7 @@ pub unsafe extern "C" fn zirk_network_udp_connect(endpoint: *const c_void, out: 
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = request_udp_send_grant(address) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -1777,7 +1826,9 @@ pub unsafe extern "C" fn zirk_network_udp_bind(endpoint: *const c_void, out: *mu
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) =
+        crate::permissions::network_grant_for("network.udp.listen", &address.to_string()).ok()
+    else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -1869,10 +1920,15 @@ pub unsafe extern "C" fn zirk_network_udp_send_to(
             return;
         }
     };
+    let Some(grant) = request_udp_send_grant(peer) else {
+        unsafe { set_out(out, empty_out(1, 1)) };
+        return;
+    };
     let result =
         copy_zirk_bytes_limited(bytes, crate::network_transport::MAX_UDP_IPV6_DATAGRAM_BYTES)
             .and_then(|bytes| {
-                with_udp_socket(handle, |socket| {
+                with_udp_socket_mut(handle, |socket| {
+                    socket.replace_grant(grant);
                     socket.send_to(
                         &bytes,
                         peer,
@@ -1914,10 +1970,15 @@ pub unsafe extern "C" fn zirk_network_udp_send_broadcast(
             return;
         }
     };
+    let Some(grant) = request_udp_send_grant(destination) else {
+        unsafe { set_out(out, empty_out(1, 1)) };
+        return;
+    };
     let result =
         copy_zirk_bytes_limited(bytes, crate::network_transport::MAX_UDP_IPV4_DATAGRAM_BYTES)
             .and_then(|bytes| {
-                with_udp_socket(handle, |socket| {
+                with_udp_socket_mut(handle, |socket| {
+                    socket.replace_grant(grant);
                     socket.send_broadcast(
                         &bytes,
                         destination,
@@ -1959,10 +2020,15 @@ pub unsafe extern "C" fn zirk_network_udp_send_multicast(
             return;
         }
     };
+    let Some(grant) = request_udp_send_grant(destination) else {
+        unsafe { set_out(out, empty_out(1, 1)) };
+        return;
+    };
     let result =
         copy_zirk_bytes_limited(bytes, crate::network_transport::MAX_UDP_IPV6_DATAGRAM_BYTES)
             .and_then(|bytes| {
-                with_udp_socket(handle, |socket| {
+                with_udp_socket_mut(handle, |socket| {
+                    socket.replace_grant(grant);
                     socket.send_multicast(
                         &bytes,
                         destination,
@@ -2003,7 +2069,22 @@ pub unsafe extern "C" fn zirk_network_udp_join_multicast(
             return;
         }
     };
-    let result = with_udp_socket_mut(handle, |socket| socket.join_multicast(group));
+    if !crate::permissions::request_resource(
+        "network.udp.send",
+        &format!("udp-multicast://{group}"),
+    ) {
+        unsafe { set_out(out, empty_out(1, 1)) };
+        return;
+    }
+    let grant = crate::permissions::current_network_grant();
+    let result = grant
+        .map_err(|_| TcpApiError::Transport(NetworkTransportError::PermissionDenied))
+        .and_then(|grant| {
+            with_udp_socket_mut(handle, |socket| {
+                socket.replace_grant(grant);
+                socket.join_multicast(group)
+            })
+        });
     let outcome = match result {
         Ok(()) => empty_out(0, 0),
         Err(error) => empty_out(1, error_code(error)),
@@ -2138,7 +2219,10 @@ pub unsafe extern "C" fn zirk_network_local_connect(endpoint: *const c_void, out
         unsafe { set_out(out, empty_out(1, 0)) };
         return;
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = crate::permissions::network_grant_for("network.local.connect", unsafe {
+        endpoint.as_str()
+    })
+    .ok() else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -2188,7 +2272,10 @@ pub unsafe extern "C" fn zirk_network_local_bind(
         unsafe { set_out(out, empty_out(1, 0)) };
         return;
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) =
+        crate::permissions::network_grant_for("network.local.listen", unsafe { endpoint.as_str() })
+            .ok()
+    else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -2442,7 +2529,7 @@ pub unsafe extern "C" fn zirk_network_dns_resolve(endpoint: *const c_void, out: 
         unsafe { set_out(out, empty_out(1, 0)) };
         return;
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) = network_connect_grant(unsafe { endpoint.as_str() }) else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -2499,6 +2586,10 @@ pub unsafe extern "C" fn zirk_network_dns_resolve(endpoint: *const c_void, out: 
 /// `out` must point to writable `NetworkOut` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_network_interfaces_snapshot(out: *mut NetworkOut) {
+    if !crate::permissions::request_resource("network.inspect_interfaces", "network interfaces") {
+        unsafe { set_out(out, empty_out(1, 0)) };
+        return;
+    }
     let Some(grant) = crate::permissions::current_network_grant().ok() else {
         unsafe { set_out(out, empty_out(1, 0)) };
         return;
@@ -2602,7 +2693,9 @@ pub unsafe extern "C" fn zirk_network_tcp_connect(endpoint: *const c_void, out: 
             return;
         }
     };
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) =
+        crate::permissions::network_grant_for("network.connect", origin.as_str()).ok()
+    else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };
@@ -2661,7 +2754,9 @@ pub unsafe extern "C" fn zirk_network_tcp_listen(endpoint: *const c_void, out: *
         return;
     };
     let address = std::net::SocketAddr::new(ip, origin.port());
-    let Some(grant) = crate::permissions::current_network_grant().ok() else {
+    let Some(grant) =
+        crate::permissions::network_grant_for("network.listen", &address.to_string()).ok()
+    else {
         unsafe { set_out(out, empty_out(1, 1)) };
         return;
     };

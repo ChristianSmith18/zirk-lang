@@ -1,14 +1,30 @@
-# Library Requirements
+# Library requirements
 
-Libraries declare `requires` for capabilities their public behavior needs. Applications decide whether to satisfy those requirements and may reject a dependency whose needs exceed policy.
+Packages declare capability needs in the same finite `requires` block as
+applications:
 
-Requirements should be narrow and explain which API needs them. Optional functionality must not inflate every consumer's required permission set.
+```text
+requires {
+    network.connect;
+}
+```
 
-Each request identifies scope and phase. A library requests but never grants.
-The application approval records the exact requester name, version, integrity,
-transitive path and phase; updating code that receives authority requires fresh
-consent even if the textual permission scope is unchanged.
+The compiler infers protected effects through direct and indirect calls,
+closures, callbacks, and package boundaries. The manifest declaration is the
+package's statement of possible behavior; it does not grant permission. At
+runtime, the application user's consent is checked for the concrete resource.
+
+The consuming application's internal requirement tree preserves the original
+requesting package and all paths through which it is used. Equivalent exact
+scopes may share a saved consent decision, while inspection still reports each
+requester. The application does not need to duplicate a dependency's
+requirement in its own `.zkinit`.
+
+Optional library features should be structured so consumers can use
+unprivileged APIs without invoking protected operations. A missing grant
+denies only the attempted operation and is returned through the API's normal
+error contract.
 
 ---
 
-**Previous:** [← Compile Permissions](08-compile-permissions.md) · **Next:** [ Build Targets](10-build-targets.md)
+**Previous:** [← Permission phases](08-compile-permissions.md) · **Next:** [Build targets](10-build-targets.md)

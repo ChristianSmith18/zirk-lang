@@ -137,9 +137,7 @@ Modes do not use magic strings: they are expressed through options/enums. Errors
 distinguish not found, permission denied, already exists, invalid path, wrong
 type, EOF where applicable, and system failure.
 
-The filesystem requires read/write permissions with a declarable scope. The
-runtime validates real paths where necessary to prevent escapes through `..` or
-symlinks.
+The proposed filesystem surface uses separate `filesystem.read` and `filesystem.write` capability requirements and checks canonical resources at the operation boundary. Compiler-owned filesystem APIs are not exposed in this checkout, so these capability identifiers remain reserved and do not grant access.
 
 ## 5. `std.path`
 
@@ -361,11 +359,7 @@ explicit interoperability configuration and older versions are forbidden.
 Custom trust, mTLS, SNI, ALPN, and resumption are typed. No general-purpose
 certificate-validation bypass exists.
 
-`permissions.network.connect.origins` and
-`permissions.network.listen.addresses` are distinct scopes. Resolutions,
-redirects, reconnects, proxies, TLS names, binds, multicast/broadcast, custom
-resolvers, local sockets, and interface inspection are validated at their
-dynamic boundary. Network waits suspend tasks rather than allocating one thread
+`.zkinit` declares network capability kinds in the single `requires` list; it has no `permissions.network.*` resource block. The runtime asks for or checks concrete origins, resolved addresses, redirects, reconnects, proxies, TLS names, binds, multicast/broadcast destinations, local sockets, and interface inspection at their dynamic boundaries. Network waits suspend tasks rather than allocating one thread
 per socket, and all queues, buffers, attempts, and handshake work have safe
 bounds.
 
@@ -617,9 +611,7 @@ authorized sink boundary. Environment mutation
 is not in the initial API; child configuration belongs to `std.process` and
 tests use isolated runner environments.
 
-Filesystem, network and process APIs use scoped permissions and return typed
-permission denial. Process execution validates canonical executable and
-allowed argument forms; shell execution is separate high-risk authority.
+Network and environment APIs use exact operation-boundary consent and return typed permission denial. Filesystem and process capability identifiers are reserved because compiler-owned APIs are not exposed in this checkout; future process execution and shell APIs require separate capability identities and runtime enforcement.
 
 `Function(P...) => R` is the long callable type and `Fn(P...) => R` its
 preferred alias. `Clone` means deep logical independence, is required for a

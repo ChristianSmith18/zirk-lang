@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 
 const LANGUAGE_ID = 'zirk';
+const INIT_LANGUAGE_ID = 'zirk-init';
 const DIAGNOSTIC_SOURCE = 'zirk';
 const OUTPUT_CHANNEL_NAME = 'Zirk';
 const CONFIG_SECTION = 'zirk';
@@ -93,6 +94,24 @@ const BRAND_TEXTMATE_RULES = [
     { scope: ['comment.line.double-slash.zirk', 'comment.block.zirk'], settings: { foreground: '#A3A3AF', fontStyle: 'italic' } },
 ];
 
+// `.zkinit` has its own language id and grammar so configuration roles remain
+// readable without changing the coloring of ordinary `.zrk` source files.
+const BRAND_ZKINIT_TEXTMATE_RULES = [
+    { scope: 'keyword.control.section.zirk-init', settings: { foreground: '#8E6CFF' } },
+    { scope: 'variable.other.key.zirk-init', settings: { foreground: '#F7C65C' } },
+    { scope: 'support.constant.capability.zirk-init', settings: { foreground: '#A78BFA' } },
+    { scope: 'storage.type.builtin.zirk-init', settings: { foreground: '#32D4C6' } },
+    { scope: 'entity.name.type.custom.zirk-init', settings: { foreground: '#34D399' } },
+    { scope: 'constant.language.option.zirk-init', settings: { foreground: '#F4A261' } },
+    { scope: 'constant.language.build-target.zirk-init', settings: { foreground: '#60A5FA' } },
+    { scope: 'constant.language.boolean.zirk-init', settings: { foreground: '#FF6B81' } },
+    { scope: 'string.quoted.double.zirk-init', settings: { foreground: '#FF4FA3' } },
+    { scope: 'constant.other.version.zirk-init', settings: { foreground: '#FF4FA3' } },
+    { scope: 'constant.numeric.zirk-init', settings: { foreground: '#60A5FA' } },
+    { scope: ['punctuation.section.braces.zirk-init', 'punctuation.separator.key-value.zirk-init', 'punctuation.terminator.zirk-init'], settings: { foreground: '#8E6CFF' } },
+    { scope: ['comment.line.double-slash.zirk-init', 'comment.line.number-sign.zirk-init'], settings: { foreground: '#A3A3AF', fontStyle: 'italic' } },
+];
+
 // Semantic tokens arrive after TextMate's first paint. These language-qualified
 // selectors keep the same Zirk palette when the language server refines symbol
 // roles, while leaving semantic colors in every other language to its theme.
@@ -150,7 +169,9 @@ async function applyBrandPalette(enabled) {
     const editorConfig = vscode.workspace.getConfiguration('editor');
     const current = editorConfig.get('tokenColorCustomizations') || {};
     const kept = (current.textMateRules || []).filter(rule => !isZirkScopeRule(rule));
-    const textMateRules = enabled ? [...kept, ...BRAND_TEXTMATE_RULES] : kept;
+    const textMateRules = enabled
+        ? [...kept, ...BRAND_TEXTMATE_RULES, ...BRAND_ZKINIT_TEXTMATE_RULES]
+        : kept;
     const next = { ...current, textMateRules };
     if (next.textMateRules.length === 0) {
         delete next.textMateRules;
@@ -1063,7 +1084,10 @@ async function startLanguageClient(context) {
         'Zirk Language Server',
         { command: executable },
         {
-            documentSelector: [{ scheme: 'file', language: LANGUAGE_ID }],
+            documentSelector: [
+                { scheme: 'file', language: LANGUAGE_ID },
+                { scheme: 'file', language: INIT_LANGUAGE_ID },
+            ],
             middleware: {
                 handleDiagnostics(uri, diagnostics, next) {
                     const key = uri.toString();

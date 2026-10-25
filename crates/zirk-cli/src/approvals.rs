@@ -1,11 +1,14 @@
 //! Explicit, project-bound local permission approvals.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use zirk_runtime_core::permission_grant::{PermissionScopes, SignedPermissionGrant};
+use zirk_runtime_core::permission_grant::{
+    PermissionHistoryAction, PermissionScopes, SignedPermissionGrant, SignedPermissionHistoryEvent,
+    VerifiedPermissionHistoryEvent,
+};
 
 use crate::project::{self, ProjectError, ProjectKind, ProjectManifest};
 
@@ -28,8 +31,24 @@ struct ApprovalContext {
     project_kind: ProjectKind,
     project_id: String,
     manifest_digest: String,
-    scopes: PermissionScopes,
-    package_requirements: Vec<(String, PermissionScopes)>,
+    direct_requires: BTreeSet<crate::project::Capability>,
+    effective_requires: BTreeSet<crate::project::Capability>,
+    requirement_tree: Vec<RequirementNode>,
+}
+
+#[derive(Debug, Clone)]
+struct RequirementNode {
+    name: String,
+    version: String,
+    integrity: String,
+    path: Vec<String>,
+    requires: BTreeSet<crate::project::Capability>,
+}
+
+enum ConsentState {
+    Missing,
+    Stale,
+    Current(PermissionScopes),
 }
 
 fn context(start: &Path) -> Result<ApprovalContext, ApprovalError> {
@@ -43,21 +62,30 @@ fn context(start: &Path) -> Result<ApprovalContext, ApprovalError> {
         .ok_or_else(|| ApprovalError("the project manifest has no parent directory".into()))?
         .to_path_buf();
     let manifest = project::read_manifest(&manifest_path).map_err(project_error)?;
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|error| ApprovalError(format!("could not read `.zkinit`: {error}")))?;
     let project_id = project_id(&root, &manifest.name);
     let mut fingerprint = Sha256::new();
     fingerprint.update(b"zirk-permission-approval-v2\0");
-    digest_field(&mut fingerprint, &manifest_bytes);
-    let mut requested_scopes = scopes(&manifest);
-    let mut package_requirements = Vec::new();
+    // Direct `requires` declarations describe possible operations, while
+    // saved grants contain concrete resources. Keep requirements out of the
+    // app identity digest so a first-use approval can add its capability to
+    // `.zkinit` without invalidating the exact resource grant it just saved.
+    // All other project fields and the full locked dependency graph remain
+    // part of the fingerprint.
+    let mut identity_manifest = manifest.clone();
+    identity_manifest.requires.clear();
+    digest_field(
+        &mut fingerprint,
+        project::format_manifest(&identity_manifest).as_bytes(),
+    );
+    let mut effective_requires = manifest.requires.clone();
+    let mut requirement_tree = Vec::new();
     collect_package_requirements(
         &root,
         &manifest,
-        &mut requested_scopes,
-        &mut package_requirements,
+        &mut effective_requires,
+        &mut requirement_tree,
+        &mut vec![manifest.name.clone()],
         &mut fingerprint,
-        &mut BTreeSet::new(),
     )?;
     let manifest_digest = format!("{:x}", fingerprint.finalize());
     Ok(ApprovalContext {
@@ -66,18 +94,19 @@ fn context(start: &Path) -> Result<ApprovalContext, ApprovalError> {
         project_kind: manifest.kind,
         project_id,
         manifest_digest,
-        scopes: requested_scopes,
-        package_requirements,
+        direct_requires: manifest.requires,
+        effective_requires,
+        requirement_tree,
     })
 }
 
 fn collect_package_requirements(
     root: &Path,
     manifest: &ProjectManifest,
-    effective: &mut PermissionScopes,
-    package_requirements: &mut Vec<(String, PermissionScopes)>,
+    effective_requires: &mut BTreeSet<crate::project::Capability>,
+    requirement_tree: &mut Vec<RequirementNode>,
+    path: &mut Vec<String>,
     fingerprint: &mut Sha256,
-    visited: &mut BTreeSet<PathBuf>,
 ) -> Result<(), ApprovalError> {
     if manifest.dependencies.is_empty() {
         return Ok(());
@@ -117,9 +146,6 @@ fn collect_package_requirements(
                     dependency.name
                 ))
             })?;
-        if !visited.insert(package_root.clone()) {
-            continue;
-        }
         let manifest_path = package_root.join(".zkinit");
         let package_bytes = std::fs::read(&manifest_path).map_err(|error| {
             ApprovalError(format!(
@@ -142,19 +168,578 @@ fn collect_package_requirements(
 
         digest_path_field(fingerprint, &package_root);
         digest_field(fingerprint, &package_bytes);
-        let requirements = scopes(&package_manifest);
-        merge_scopes(effective, &requirements);
-        package_requirements.push((package_manifest.name.clone(), requirements));
+        effective_requires.extend(package_manifest.requires.iter().copied());
+        let mut dependency_path = path.clone();
+        dependency_path.push(package_manifest.name.clone());
+        requirement_tree.push(RequirementNode {
+            name: package_manifest.name.clone(),
+            version: entry.version.clone(),
+            integrity: entry.hash.clone(),
+            path: dependency_path.clone(),
+            requires: package_manifest.requires.clone(),
+        });
+        if path.contains(&package_manifest.name) {
+            continue;
+        }
+        path.push(package_manifest.name.clone());
         collect_package_requirements(
             &package_root,
             &package_manifest,
-            effective,
-            package_requirements,
+            effective_requires,
+            requirement_tree,
+            path,
             fingerprint,
-            visited,
+        )?;
+        path.pop();
+    }
+    Ok(())
+}
+
+/// Prints the manifest's finite capability requirements with each locked
+/// requester and dependency path. This is an inventory only; it grants no
+/// authority and never edits the manifest or approval store.
+pub fn inspect(start: &Path) -> Result<(), ApprovalError> {
+    let context = context(start)?;
+    let consent = load_consent_state(&context, &data_root()?)?;
+    println!("Project: {}", context.project_name);
+    println!("Location: {}", context.root.display());
+    println!("Direct requires:");
+    if context.direct_requires.is_empty() {
+        println!("  (none)");
+    }
+    for capability in &context.direct_requires {
+        println!("  {}", capability.as_str());
+    }
+    println!("Dependency requirements:");
+    if context.requirement_tree.is_empty() {
+        println!("  (none)");
+    }
+    for node in &context.requirement_tree {
+        println!(
+            "  {} {} [{}] via {}",
+            node.name,
+            node.version,
+            &node.integrity,
+            node.path.join(" -> ")
+        );
+        if node.requires.is_empty() {
+            println!("    (none)");
+        }
+        for capability in &node.requires {
+            println!("    {}", capability.as_str());
+        }
+    }
+    println!("Effective requires:");
+    if context.effective_requires.is_empty() {
+        println!("  (none)");
+    }
+    for capability in &context.effective_requires {
+        println!("  {}", capability.as_str());
+    }
+    println!("Saved exact consent:");
+    match consent {
+        ConsentState::Missing => println!("  (none)"),
+        ConsentState::Stale => println!("  (stale or unverifiable; grants no authority)"),
+        ConsentState::Current(scopes) => {
+            if scope_entries(&scopes).is_empty() {
+                println!("  (none)");
+            }
+            print_scopes(&scopes);
+        }
+    }
+    println!("`requires` declares possible operations; saved consent contains exact resources.");
+    Ok(())
+}
+
+/// Compares the locked capability tree with currently trusted exact-resource
+/// consent. Requirements never grant authority by themselves.
+pub fn diff(start: &Path) -> Result<(), ApprovalError> {
+    let context = context(start)?;
+    let consent = load_consent_state(&context, &data_root()?)?;
+    let scopes = match &consent {
+        ConsentState::Current(scopes) => scopes.clone(),
+        ConsentState::Missing | ConsentState::Stale => PermissionScopes::default(),
+    };
+    println!("Project: {}", context.project_name);
+    println!("Requirement and consent diff:");
+    match consent {
+        ConsentState::Missing => println!("  Approval record: missing"),
+        ConsentState::Stale => {
+            println!("  Approval record: stale or unverifiable; grants no authority")
+        }
+        ConsentState::Current(_) => println!("  Approval record: current"),
+    }
+    if context.effective_requires.is_empty() {
+        println!("  No capabilities are declared by the application or its dependencies.");
+    }
+    for capability in &context.effective_requires {
+        let resources = scope_entries(&scopes)
+            .into_iter()
+            .filter(|(name, _)| name == capability.as_str())
+            .map(|(_, resource)| resource)
+            .collect::<Vec<_>>();
+        let requesters = requesters_for(&context, *capability);
+        println!("  {}", capability.as_str());
+        if requesters.is_empty() {
+            println!("    Declared by: (requester not present in the locked tree)");
+        } else {
+            for requester in requesters {
+                println!("    Declared by: {requester}");
+            }
+        }
+        if resources.is_empty() {
+            println!(
+                "    Consent: no exact resource saved; first use will ask interactively or deny without a TTY"
+            );
+        } else {
+            for resource in resources {
+                println!("    Saved resource: {resource}");
+            }
+        }
+    }
+    let declared = context
+        .effective_requires
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<BTreeSet<_>>();
+    for (capability, resource) in scope_entries(&scopes) {
+        if !declared.contains(capability.as_str()) {
+            println!("  Saved but undeclared: {capability} {resource}");
+        }
+    }
+    Ok(())
+}
+
+/// Prints authenticated, user-owned approval and revocation history without
+/// storing or displaying secret values.
+pub fn history(start: &Path) -> Result<(), ApprovalError> {
+    let context = context(start)?;
+    let events = read_history(&context, &data_root()?)?;
+    println!("Project: {}", context.project_name);
+    if events.is_empty() {
+        println!("Permission history: (none)");
+        return Ok(());
+    }
+    println!("Permission history (timestamps are UTC Unix milliseconds):");
+    for event in events {
+        let action = match event.action() {
+            PermissionHistoryAction::Approved => "approved",
+            PermissionHistoryAction::Revoked => "revoked",
+        };
+        println!(
+            "  {} {} {} at {} by {} (requested by {}; manifest {})",
+            action,
+            event.capability(),
+            event.resource(),
+            event.timestamp_unix_ms(),
+            event.actor(),
+            event.requester(),
+            &event.manifest_digest()[..12]
+        );
+    }
+    Ok(())
+}
+
+fn load_consent_state(
+    context: &ApprovalContext,
+    security_directory: &Path,
+) -> Result<ConsentState, ApprovalError> {
+    let key_path = security_directory.join("permissions.key");
+    let key = match std::fs::symlink_metadata(&key_path) {
+        Ok(_) => read_secure_key(&key_path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ConsentState::Missing),
+        Err(error) => {
+            return Err(ApprovalError(format!(
+                "could not inspect approval key: {error}"
+            )));
+        }
+    };
+    let path = grant_path(&key_path, &context.project_id);
+    let encoded = match std::fs::read_to_string(&path) {
+        Ok(encoded) => encoded,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(ConsentState::Missing),
+        Err(error) => {
+            return Err(ApprovalError(format!(
+                "could not read approval record: {error}"
+            )));
+        }
+    };
+    let Ok(signed) = SignedPermissionGrant::decode(&encoded) else {
+        return Ok(ConsentState::Stale);
+    };
+    let Ok(verified) = signed.verify(&key) else {
+        return Ok(ConsentState::Stale);
+    };
+    if verified.project_id() != context.project_id
+        || verified.manifest_digest() != context.manifest_digest
+    {
+        return Ok(ConsentState::Stale);
+    }
+    Ok(ConsentState::Current(verified.scopes().clone()))
+}
+
+fn requesters_for(
+    context: &ApprovalContext,
+    capability: crate::project::Capability,
+) -> Vec<String> {
+    let mut requesters = Vec::new();
+    if context.direct_requires.contains(&capability) {
+        requesters.push(format!("{} (application)", context.project_name));
+    }
+    for node in &context.requirement_tree {
+        if node.requires.contains(&capability) {
+            requesters.push(format!(
+                "{} {} [{}] via {}",
+                node.name,
+                node.version,
+                node.integrity,
+                node.path.join(" -> ")
+            ));
+        }
+    }
+    requesters
+}
+
+fn scope_entries(scopes: &PermissionScopes) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut add = |capability: &str, values: &BTreeSet<String>| {
+        entries.extend(
+            values
+                .iter()
+                .cloned()
+                .map(|resource| (capability.to_owned(), resource)),
+        );
+    };
+    add("filesystem.read", &scopes.filesystem_read);
+    add("filesystem.write", &scopes.filesystem_write);
+    add("environment.read", &scopes.environment_read);
+    add("secrets.read", &scopes.environment_secrets);
+    add("network.connect", &scopes.network_connect);
+    add("network.listen", &scopes.network_listen);
+    add("network.udp.send", &scopes.network_udp_destinations);
+    add("network.udp.listen", &scopes.network_udp_listen);
+    add("network.local.connect", &scopes.network_local_connect);
+    add("network.local.listen", &scopes.network_local_listen);
+    add("process.execute", &scopes.process_execute);
+    add("process.shell", &scopes.process_shell);
+    drop(add);
+    entries.extend(scopes.network_udp_multicast_groups.iter().map(|group| {
+        (
+            "network.udp.send".to_owned(),
+            format!("udp-multicast://{group}"),
+        )
+    }));
+    if scopes.environment_list_names {
+        entries.push((
+            "environment.list_names".into(),
+            "all environment names".into(),
+        ));
+    }
+    if scopes.network_inspect_interfaces {
+        entries.push((
+            "network.inspect_interfaces".into(),
+            "network interfaces".into(),
+        ));
+    }
+    entries.sort();
+    entries
+}
+
+fn read_history(
+    context: &ApprovalContext,
+    security_directory: &Path,
+) -> Result<Vec<VerifiedPermissionHistoryEvent>, ApprovalError> {
+    let key_path = security_directory.join("permissions.key");
+    let key = match std::fs::symlink_metadata(&key_path) {
+        Ok(_) => read_secure_key(&key_path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(ApprovalError(format!(
+                "could not inspect approval key: {error}"
+            )));
+        }
+    };
+    let path = history_path(security_directory, &context.project_id);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(ApprovalError(format!(
+                "could not inspect permission history: {error}"
+            )));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        return Err(ApprovalError(
+            "permission history must be a regular file".into(),
+        ));
+    }
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|error| ApprovalError(format!("could not read permission history: {error}")))?;
+    let mut events = Vec::new();
+    for (line_number, line) in contents.lines().enumerate() {
+        let signed = SignedPermissionHistoryEvent::decode(line).map_err(|error| {
+            ApprovalError(format!(
+                "permission history line {} is invalid: {error:?}",
+                line_number + 1
+            ))
+        })?;
+        let event = signed.verify(&key).map_err(|error| {
+            ApprovalError(format!(
+                "permission history line {} failed verification: {error:?}",
+                line_number + 1
+            ))
+        })?;
+        if event.project_id() == context.project_id {
+            events.push(event);
+        }
+    }
+    events.sort_by_key(VerifiedPermissionHistoryEvent::timestamp_unix_ms);
+    Ok(events)
+}
+
+fn append_history_event(
+    security_directory: &Path,
+    context: &ApprovalContext,
+    action: PermissionHistoryAction,
+    capability: &str,
+    resource: &str,
+    requester: &str,
+    actor: &str,
+) -> Result<(), ApprovalError> {
+    use std::fs::OpenOptions;
+
+    let key = read_secure_key(&security_directory.join("permissions.key"))?;
+    let timestamp_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| ApprovalError(format!("system clock is invalid: {error}")))?
+        .as_millis();
+    let event = SignedPermissionHistoryEvent::sign(
+        context.project_id.clone(),
+        context.manifest_digest.clone(),
+        timestamp_unix_ms,
+        action,
+        capability,
+        resource,
+        requester,
+        actor,
+        &key,
+    )
+    .map_err(|error| ApprovalError(format!("could not sign permission history: {error:?}")))?;
+    let encoded = format!(
+        "{}\n",
+        event
+            .encode()
+            .map_err(|error| ApprovalError(format!("could not encode history event: {error:?}")))?
+    );
+    let directory = history_directory(security_directory);
+    ensure_private_directory(&directory)?;
+    let path = history_path(security_directory, &context.project_id);
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| ApprovalError(format!("could not write permission history: {error}")))?;
+    file.write_all(encoded.as_bytes())
+        .and_then(|()| file.sync_data())
+        .map_err(|error| ApprovalError(format!("could not save permission history: {error}")))
+}
+
+fn history_directory(security_directory: &Path) -> PathBuf {
+    security_directory.join("approval-history")
+}
+
+fn history_path(security_directory: &Path, project_id: &str) -> PathBuf {
+    history_directory(security_directory).join(format!("{project_id}.jsonl"))
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), ApprovalError> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| ApprovalError(format!("could not create permission history: {error}")))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| ApprovalError(format!("could not inspect permission history: {error}")))?;
+    if !metadata.file_type().is_dir() {
+        return Err(ApprovalError(
+            "permission history path must be a real directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(ApprovalError(
+                "permission history is not owned by the current user".into(),
+            ));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| ApprovalError(format!("could not secure permission history: {error}")),
         )?;
     }
     Ok(())
+}
+
+/// Returns trusted launcher metadata for the generated runtime. Environment
+/// values are installed by the CLI after removing inherited Zirk values so
+/// the child cannot accidentally borrow another project's identity.
+pub fn runtime_environment_for_path(
+    path: &Path,
+) -> Result<Option<BTreeMap<String, String>>, ApprovalError> {
+    let Some(project_root) = project_root_for_execution_path(path) else {
+        return standalone_runtime_environment(path);
+    };
+    let context = context(&project_root)?;
+    let manifest_template = project::format_manifest(
+        &project::read_manifest(&context.root.join(".zkinit")).map_err(project_error)?,
+    );
+    let mut package_paths = BTreeMap::<String, Vec<String>>::new();
+    for node in &context.requirement_tree {
+        package_paths
+            .entry(node.name.clone())
+            .or_default()
+            .push(format!(
+                "{} {} [{}] via {}",
+                node.name,
+                node.version,
+                node.integrity,
+                node.path.join(" -> ")
+            ));
+    }
+    let requirements = context
+        .effective_requires
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let package_paths = serde_json::to_string(&package_paths)
+        .map_err(|error| ApprovalError(format!("could not encode package provenance: {error}")))?;
+    let mut environment = BTreeMap::new();
+    environment.insert("ZIRK_RUNTIME_PROJECT_ID".into(), context.project_id);
+    environment.insert(
+        "ZIRK_RUNTIME_MANIFEST_DIGEST".into(),
+        context.manifest_digest,
+    );
+    environment.insert("ZIRK_RUNTIME_PROJECT_NAME".into(), context.project_name);
+    environment.insert(
+        "ZIRK_RUNTIME_PROJECT_ROOT".into(),
+        context.root.display().to_string(),
+    );
+    environment.insert(
+        "ZIRK_RUNTIME_MANIFEST".into(),
+        context.root.join(".zkinit").display().to_string(),
+    );
+    environment.insert("ZIRK_RUNTIME_REQUIRES".into(), requirements);
+    environment.insert("ZIRK_RUNTIME_PACKAGE_PATHS".into(), package_paths);
+    environment.insert("ZIRK_RUNTIME_MANIFEST_TEMPLATE".into(), manifest_template);
+    environment.insert(
+        "ZIRK_RUNTIME_SECURITY_DIR".into(),
+        data_root()?.display().to_string(),
+    );
+    Ok(Some(environment))
+}
+
+fn standalone_runtime_environment(
+    source_path: &Path,
+) -> Result<Option<BTreeMap<String, String>>, ApprovalError> {
+    if source_path
+        .extension()
+        .is_none_or(|extension| extension != "zrk")
+    {
+        return Ok(None);
+    }
+    let source_path = source_path.canonicalize().map_err(|error| {
+        ApprovalError(format!(
+            "could not resolve standalone source `{}`: {error}",
+            source_path.display()
+        ))
+    })?;
+    let root = source_path
+        .parent()
+        .ok_or_else(|| ApprovalError("standalone source has no parent directory".into()))?
+        .to_path_buf();
+    let entry = source_path
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| ApprovalError("standalone source has no file name".into()))?;
+    let directory = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let slug = normalize_project_slug(directory);
+    let manifest = ProjectManifest {
+        name: format!("local.{slug}"),
+        version: "0.1.0".into(),
+        kind: ProjectKind::Application,
+        authors: Vec::new(),
+        description: None,
+        license: None,
+        entry,
+        package_root: None,
+        source_roots: vec![PathBuf::from(".")],
+        build_targets: Vec::new(),
+        dependencies: BTreeMap::new(),
+        dev_dependencies: BTreeMap::new(),
+        globals: BTreeMap::new(),
+        requires: BTreeSet::new(),
+        spans: Default::default(),
+        environment_permissions: Default::default(),
+        network_permissions: Default::default(),
+    };
+    let manifest_template = project::format_manifest(&manifest);
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(b"zirk-permission-approval-v2\0");
+    digest_field(&mut fingerprint, manifest_template.as_bytes());
+    let manifest_digest = format!("{:x}", fingerprint.finalize());
+    let package_paths = serde_json::to_string(&BTreeMap::<String, Vec<String>>::new())
+        .map_err(|error| ApprovalError(format!("could not encode package provenance: {error}")))?;
+    let mut environment = BTreeMap::new();
+    environment.insert(
+        "ZIRK_RUNTIME_PROJECT_ID".into(),
+        project_id(&root, &manifest.name),
+    );
+    environment.insert("ZIRK_RUNTIME_MANIFEST_DIGEST".into(), manifest_digest);
+    environment.insert("ZIRK_RUNTIME_PROJECT_NAME".into(), manifest.name);
+    environment.insert(
+        "ZIRK_RUNTIME_PROJECT_ROOT".into(),
+        root.display().to_string(),
+    );
+    environment.insert(
+        "ZIRK_RUNTIME_MANIFEST".into(),
+        root.join(".zkinit").display().to_string(),
+    );
+    environment.insert("ZIRK_RUNTIME_REQUIRES".into(), String::new());
+    environment.insert("ZIRK_RUNTIME_PACKAGE_PATHS".into(), package_paths);
+    environment.insert("ZIRK_RUNTIME_MANIFEST_TEMPLATE".into(), manifest_template);
+    environment.insert(
+        "ZIRK_RUNTIME_SECURITY_DIR".into(),
+        data_root()?.display().to_string(),
+    );
+    Ok(Some(environment))
+}
+
+fn normalize_project_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character.to_ascii_lowercase());
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    if slug.is_empty() {
+        "project".into()
+    } else {
+        slug
+    }
 }
 
 fn digest_field(digest: &mut Sha256, bytes: &[u8]) {
@@ -192,43 +777,11 @@ fn project_id(root: &Path, name: &str) -> String {
     format!("{:x}", identity.finalize())
 }
 
-fn merge_scopes(target: &mut PermissionScopes, source: &PermissionScopes) {
-    target
-        .environment_read
-        .extend(source.environment_read.iter().cloned());
-    target
-        .environment_secrets
-        .extend(source.environment_secrets.iter().cloned());
-    target.environment_list_names |= source.environment_list_names;
-    target
-        .network_connect
-        .extend(source.network_connect.iter().cloned());
-    target
-        .network_listen
-        .extend(source.network_listen.iter().cloned());
-    target
-        .network_udp_destinations
-        .extend(source.network_udp_destinations.iter().cloned());
-    target
-        .network_udp_listen
-        .extend(source.network_udp_listen.iter().cloned());
-    target
-        .network_udp_broadcast_destinations
-        .extend(source.network_udp_broadcast_destinations.iter().cloned());
-    target
-        .network_udp_multicast_groups
-        .extend(source.network_udp_multicast_groups.iter().cloned());
-    target
-        .network_local_connect
-        .extend(source.network_local_connect.iter().cloned());
-    target
-        .network_local_listen
-        .extend(source.network_local_listen.iter().cloned());
-    target.network_inspect_interfaces |= source.network_inspect_interfaces;
-}
-
+#[cfg(test)]
 fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
     PermissionScopes {
+        filesystem_read: Default::default(),
+        filesystem_write: Default::default(),
         environment_read: manifest.environment_permissions.read_names.clone(),
         environment_secrets: manifest.environment_permissions.secret_names.clone(),
         environment_list_names: manifest.environment_permissions.list_names,
@@ -244,80 +797,21 @@ fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
         network_local_connect: manifest.network_permissions.local_connect_endpoints.clone(),
         network_local_listen: manifest.network_permissions.local_listen_endpoints.clone(),
         network_inspect_interfaces: manifest.network_permissions.inspect_interfaces,
+        process_execute: Default::default(),
+        process_shell: Default::default(),
     }
-}
-
-fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn project_error(error: ProjectError) -> ApprovalError {
     ApprovalError(error.to_string())
 }
 
-/// Displays the exact declared scopes and records consent only after the user
-/// types the explicit confirmation word `approve`.
-pub fn approve(start: &Path) -> Result<(), ApprovalError> {
-    let context = context(start)?;
-    if context.project_kind != ProjectKind::Application {
-        return Err(ApprovalError(
-            "only an application project can receive runtime permissions; packages may only declare requirements".into(),
-        ));
-    }
-    if context.scopes == PermissionScopes::default() {
-        return Err(ApprovalError(
-            "this project declares no environment or network permissions".into(),
-        ));
-    }
-
-    println!("Project: {}", context.project_name);
-    println!("Location: {}", context.root.display());
-    println!("Requested runtime permissions (application plus dependency requirements):");
-    print_scopes(&context.scopes);
-    for (package, requirements) in &context.package_requirements {
-        if requirements != &PermissionScopes::default() {
-            println!("  Required by package `{package}`:");
-            print_scopes_indented(requirements);
-        }
-    }
-    println!(
-        "Project and dependency fingerprint: {}",
-        context.manifest_digest
-    );
-    print!("Type `approve` to grant exactly these permissions: ");
-    io::stdout()
-        .flush()
-        .map_err(|error| ApprovalError(format!("could not write approval prompt: {error}")))?;
-    let mut confirmation = String::new();
-    io::stdin()
-        .read_line(&mut confirmation)
-        .map_err(|error| ApprovalError(format!("could not read approval: {error}")))?;
-    if confirmation.trim() != "approve" {
-        return Err(ApprovalError(
-            "permission approval was not confirmed".into(),
-        ));
-    }
-
-    let (key, key_path) = load_or_create_key(&data_root()?)?;
-    let signed = SignedPermissionGrant::sign(
-        context.project_id,
-        context.manifest_digest,
-        context.scopes,
-        &key,
-    )
-    .map_err(|error| ApprovalError(format!("could not sign permission approval: {error:?}")))?;
-    let grant_path = grant_path(&key_path, signed.project_id());
-    atomic_write(
-        &grant_path,
-        signed
-            .encode()
-            .map_err(|error| {
-                ApprovalError(format!("could not encode permission approval: {error:?}"))
-            })?
-            .as_bytes(),
-    )?;
-    println!("Approval saved for this project and locked dependency graph.");
-    Ok(())
+/// Blanket approval was replaced by a resource-specific prompt at the
+/// protected operation. Keep this entry point for a clear migration message.
+pub fn approve(_start: &Path) -> Result<(), ApprovalError> {
+    Err(ApprovalError(
+        "blanket permission approval was removed; run the project and answer y/n when a protected operation requests an exact resource".into(),
+    ))
 }
 
 /// Removes the saved approval for this project without changing its manifest.
@@ -328,12 +822,50 @@ pub fn revoke(start: &Path) -> Result<(), ApprovalError> {
 /// Removes a project approval from an explicit security directory.
 pub fn revoke_in(start: &Path, security_directory: &Path) -> Result<(), ApprovalError> {
     let context = context(start)?;
+    let consent = load_consent_state(&context, security_directory)?;
+    let previous_history = read_history(&context, security_directory).unwrap_or_default();
     let grant_path = grant_path(
         &security_directory.join("permissions.key"),
         &context.project_id,
     );
     match std::fs::remove_file(&grant_path) {
-        Ok(()) => println!("Permission approval revoked for {}.", context.project_name),
+        Ok(()) => {
+            let mut revoked = match consent {
+                ConsentState::Current(scopes) => scope_entries(&scopes),
+                ConsentState::Missing | ConsentState::Stale => Vec::new(),
+            };
+            if revoked.is_empty() {
+                revoked.push((
+                    "permissions.revoke".into(),
+                    "stale or unverified project approval record".into(),
+                ));
+            }
+            let actor = current_user();
+            for (capability, resource) in revoked {
+                let requester = previous_history
+                    .iter()
+                    .rev()
+                    .find(|event| {
+                        event.action() == PermissionHistoryAction::Approved
+                            && event.capability() == capability
+                            && event.resource() == resource
+                    })
+                    .map(VerifiedPermissionHistoryEvent::requester)
+                    .unwrap_or("project-level approval record");
+                if let Err(error) = append_history_event(
+                    security_directory,
+                    &context,
+                    PermissionHistoryAction::Revoked,
+                    &capability,
+                    &resource,
+                    requester,
+                    &actor,
+                ) {
+                    eprintln!("warning: approval was revoked but history was not updated: {error}");
+                }
+            }
+            println!("Permission approval revoked for {}.", context.project_name);
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             println!(
                 "No saved permission approval exists for {}.",
@@ -363,9 +895,7 @@ pub fn verified_token_in(
     security_directory: &Path,
 ) -> Result<Option<String>, ApprovalError> {
     let context = context(start)?;
-    if context.project_kind != ProjectKind::Application
-        || context.scopes == PermissionScopes::default()
-    {
+    if context.project_kind != ProjectKind::Application {
         return Ok(None);
     }
     let key_path = security_directory.join("permissions.key");
@@ -398,7 +928,6 @@ pub fn verified_token_in(
     })?;
     if verified.project_id() != context.project_id
         || verified.manifest_digest() != context.manifest_digest
-        || verified.scopes() != &context.scopes
     {
         return Ok(None);
     }
@@ -408,15 +937,36 @@ pub fn verified_token_in(
 /// Creates the child runtime's authenticated grant token for `zirk run`.
 /// Projects with missing/stale approval receive no token and stay denied.
 pub fn runtime_token_for_path(path: &Path) -> Result<Option<String>, ApprovalError> {
-    let project_path = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
-        path
-    } else {
+    let Some(project_path) = project_root_for_execution_path(path) else {
         return Ok(None);
     };
-    verified_token(project_path)
+    verified_token(&project_path)
+}
+
+fn project_root_for_execution_path(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
+        return Some(path.to_path_buf());
+    }
+    if path.extension().is_none_or(|extension| extension != "zrk") {
+        return None;
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    parent
+        .ancestors()
+        .find(|directory| directory.join(".zkinit").is_file())
+        .map(Path::to_path_buf)
 }
 
 pub fn print_scopes(scopes: &PermissionScopes) {
+    for path in &scopes.filesystem_read {
+        println!("  filesystem.read: {path}");
+    }
+    for path in &scopes.filesystem_write {
+        println!("  filesystem.write: {path}");
+    }
     for name in &scopes.environment_read {
         println!("  environment.read: {name}");
     }
@@ -453,45 +1003,18 @@ pub fn print_scopes(scopes: &PermissionScopes) {
     if scopes.network_inspect_interfaces {
         println!("  network.inspect_interfaces: enabled");
     }
+    for executable in &scopes.process_execute {
+        println!("  process.execute: {executable}");
+    }
+    for command in &scopes.process_shell {
+        println!("  process.shell: {command}");
+    }
 }
 
-fn print_scopes_indented(scopes: &PermissionScopes) {
-    for name in &scopes.environment_read {
-        println!("    environment.read: {name}");
-    }
-    for name in &scopes.environment_secrets {
-        println!("    environment.secrets: {name}");
-    }
-    if scopes.environment_list_names {
-        println!("    environment.list_names: all visible names");
-    }
-    for origin in &scopes.network_connect {
-        println!("    network.connect: {origin}");
-    }
-    for address in &scopes.network_listen {
-        println!("    network.listen: {address}");
-    }
-    for destination in &scopes.network_udp_destinations {
-        println!("    network.udp_send: {destination}");
-    }
-    for address in &scopes.network_udp_listen {
-        println!("    network.udp_listen: {address}");
-    }
-    for destination in &scopes.network_udp_broadcast_destinations {
-        println!("    network.udp_broadcast: {destination}");
-    }
-    for group in &scopes.network_udp_multicast_groups {
-        println!("    network.udp_multicast: {group}");
-    }
-    for endpoint in &scopes.network_local_connect {
-        println!("    network.local_connect: {endpoint}");
-    }
-    for endpoint in &scopes.network_local_listen {
-        println!("    network.local_listen: {endpoint}");
-    }
-    if scopes.network_inspect_interfaces {
-        println!("    network.inspect_interfaces: enabled");
-    }
+fn current_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "current user".into())
 }
 
 fn data_root() -> Result<PathBuf, ApprovalError> {
@@ -506,21 +1029,6 @@ fn data_root() -> Result<PathBuf, ApprovalError> {
         .ok_or_else(|| ApprovalError("HOME is not set".into()))?
         .join(".local/share/zirk");
     Ok(root.join("security"))
-}
-
-fn load_or_create_key(directory: &Path) -> Result<(Vec<u8>, PathBuf), ApprovalError> {
-    std::fs::create_dir_all(directory)
-        .map_err(|error| ApprovalError(format!("could not create permission storage: {error}")))?;
-    secure_directory(directory)?;
-    let path = directory.join("permissions.key");
-    if path.exists() {
-        return Ok((read_secure_key(&path)?, path));
-    }
-    let mut key = vec![0_u8; 32];
-    getrandom::getrandom(&mut key)
-        .map_err(|error| ApprovalError(format!("could not generate an approval key: {error}")))?;
-    create_private_file(&path, &key)?;
-    Ok((key, path))
 }
 
 fn read_secure_key(path: &Path) -> Result<Vec<u8>, ApprovalError> {
@@ -546,6 +1054,7 @@ fn read_secure_key(path: &Path) -> Result<Vec<u8>, ApprovalError> {
     Ok(key)
 }
 
+#[cfg(test)]
 fn secure_directory(_path: &Path) -> Result<(), ApprovalError> {
     let metadata = std::fs::symlink_metadata(_path)
         .map_err(|error| ApprovalError(format!("could not inspect permission storage: {error}")))?;
@@ -569,23 +1078,6 @@ fn secure_directory(_path: &Path) -> Result<(), ApprovalError> {
     Ok(())
 }
 
-fn create_private_file(path: &Path, contents: &[u8]) -> Result<(), ApprovalError> {
-    use std::fs::OpenOptions;
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| ApprovalError(format!("could not create approval key: {error}")))?;
-    file.write_all(contents)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| ApprovalError(format!("could not save approval key: {error}")))
-}
-
 fn grant_path(key_path: &Path, project_id: &str) -> PathBuf {
     key_path
         .parent()
@@ -594,41 +1086,42 @@ fn grant_path(key_path: &Path, project_id: &str) -> PathBuf {
         .join(format!("{project_id}.json"))
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ApprovalError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| ApprovalError("approval file has no parent directory".into()))?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| ApprovalError(format!("could not create approval directory: {error}")))?;
-    secure_directory(parent)?;
-    let mut random = [0_u8; 8];
-    getrandom::getrandom(&mut random).map_err(|error| {
-        ApprovalError(format!("could not generate a temporary filename: {error}"))
-    })?;
-    let temporary = parent.join(format!(".approval-{}.tmp", digest(&random)));
-    create_private_file(&temporary, contents)?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|error| {
-            ApprovalError(format!("could not replace permission approval: {error}"))
-        })?;
-    }
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(ApprovalError(format!(
-            "could not install permission approval: {error}"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn write_test_key(path: &Path, key: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, key).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    fn permission_project(root: &Path) -> PathBuf {
+        let project = root.join("app");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/main.zrk"), "").unwrap();
+        std::fs::write(
+            project.join(".zkinit"),
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { network.connect; }\n",
+        )
+        .unwrap();
+        project
+    }
+
+    #[test]
+    fn blanket_approval_is_rejected_in_favor_of_exact_first_use_consent() {
+        let error =
+            approve(Path::new("unused")).expect_err("blanket approval must not mint a grant");
+        assert!(error.to_string().contains("exact resource"));
+    }
+
     #[test]
     fn manifest_permission_scopes_are_exact() {
-        let manifest = project::parse_manifest(
+        let manifest = project::parse_legacy_manifest(
             "project \"app\"\nkind application\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\nsecrets: { names: [\"DB_PASSWORD\"]; during: runtime; }\nlist_names: { during: runtime; }\n}\nnetwork {\nconnect: { origins: [\"https://api.example:443\"]; during: runtime; }\nlisten: { addresses: [\"127.0.0.1:8080\"]; during: runtime; }\n}\n}\n",
         )
         .unwrap();
@@ -647,12 +1140,63 @@ mod tests {
     }
 
     #[test]
-    fn runtime_token_is_only_loaded_for_a_project_entry_path() {
+    fn source_paths_resolve_to_their_nearest_project_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "zirk-permission-source-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join(".zkinit"), "project \"app\"\nkind application\n").unwrap();
+        let source = root.join("src/nested/main.zrk");
+        std::fs::write(&source, "fn main(): Void {}\n").unwrap();
+
+        assert_eq!(project_root_for_execution_path(&source), Some(root.clone()));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runtime_token_without_a_project_manifest_is_not_loaded() {
         assert!(
             runtime_token_for_path(Path::new("src/main.zrk"))
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn standalone_runtime_context_prepares_a_stable_application_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "zirk-standalone-runtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("start-here.zrk");
+        std::fs::write(&source, "").unwrap();
+
+        let environment = runtime_environment_for_path(&source).unwrap().unwrap();
+        let manifest =
+            project::parse_manifest(&environment["ZIRK_RUNTIME_MANIFEST_TEMPLATE"]).unwrap();
+        assert_eq!(
+            manifest.name,
+            format!("local.{}", root.file_name().unwrap().to_string_lossy())
+        );
+        assert_eq!(manifest.version, "0.1.0");
+        assert_eq!(manifest.kind, ProjectKind::Application);
+        assert_eq!(manifest.entry, PathBuf::from("start-here.zrk"));
+        assert_eq!(manifest.source_roots, [PathBuf::from(".")]);
+        assert!(manifest.requires.is_empty());
+        assert_eq!(environment["ZIRK_RUNTIME_PROJECT_NAME"], manifest.name);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -691,7 +1235,7 @@ mod tests {
         std::fs::create_dir_all(&security).unwrap();
         std::fs::write(
             project.join(".zkinit"),
-            "project \"app\"\nkind application\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\n}\n}\n",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; }\n",
         )
         .unwrap();
 
@@ -701,7 +1245,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_permissions_are_transitive_and_invalidate_saved_approval() {
+    fn dependency_requirements_are_transitive_and_invalidate_saved_approval() {
         let base = std::env::temp_dir().join(format!(
             "zirk-permission-dependency-{}-{}",
             std::process::id(),
@@ -713,7 +1257,6 @@ mod tests {
         let app = base.join("app");
         let direct = app.join("vendor/direct");
         let nested = direct.join("vendor/nested");
-        let security = base.join("security");
         std::fs::create_dir_all(app.join("src")).unwrap();
         std::fs::create_dir_all(direct.join("src")).unwrap();
         std::fs::create_dir_all(nested.join("src")).unwrap();
@@ -722,81 +1265,115 @@ mod tests {
         std::fs::write(nested.join("src/package.zrk"), "").unwrap();
         std::fs::write(
             app.join(".zkinit"),
-            "project \"app\"\nkind application\ndependency acme.direct ^1 local \"vendor/direct\"\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\n}\n}\n",
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; }\ndependencies { acme.direct: { from: \"path:vendor/direct\"; } }\nrequires { environment.read; }\n",
         )
         .unwrap();
         std::fs::write(
             direct.join(".zkinit"),
-            "project \"acme.direct\"\nkind package\ndependency acme.nested ^1 local \"vendor/nested\"\npermissions {\nenvironment {\nsecrets: { names: [\"DIRECT_SECRET\"]; during: runtime; }\n}\n}\n",
+            "project { name: \"acme.direct\"; version: \"1.0.0\"; type: package; }\ndependencies { acme.nested: { from: \"path:vendor/nested\"; } }\nrequires { secrets.read; }\n",
         )
         .unwrap();
         std::fs::write(
             nested.join(".zkinit"),
-            "project \"acme.nested\"\nkind package\npermissions {\nnetwork {\nconnect: { origins: [\"https://api.example:443\"]; during: runtime; }\n}\n}\n",
+            "project { name: \"acme.nested\"; version: \"1.0.0\"; type: package; }\nrequires { network.connect; }\n",
         )
         .unwrap();
 
-        fn write_lock(root: &Path, dep_root: &Path, name: &str) {
+        fn write_lock(root: &Path, dep_root: &Path, name: &str, locator: &str) {
             let package_manifest = project::read_manifest(&dep_root.join(".zkinit")).unwrap();
             let hash = project::package_integrity_hash(dep_root, &package_manifest).unwrap();
+            let package = project::LockedPackage {
+                name: name.into(),
+                version: package_manifest.version,
+                source: "local".into(),
+                locator: locator.into(),
+                revision: None,
+                hash: format!("sha256:{hash}"),
+                package_root: "src/package.zrk".into(),
+            };
             std::fs::write(
                 root.join("zirk.lock"),
-                format!("{name} 1.0 local sha256:{hash} src/package.zrk\n"),
+                project::format_lockfile(&project::Lockfile {
+                    packages: [(package.name.clone(), package)].into(),
+                }),
             )
             .unwrap();
         }
-        write_lock(&app, &direct, "acme.direct");
-        write_lock(&direct, &nested, "acme.nested");
+        write_lock(&app, &direct, "acme.direct", "path:vendor/direct");
+        write_lock(&direct, &nested, "acme.nested", "path:vendor/nested");
 
         let approval = context(&app).unwrap();
-        assert_eq!(
-            approval.scopes.environment_read,
-            ["APP_MODE".to_owned()].into()
-        );
-        assert_eq!(
-            approval.scopes.environment_secrets,
-            ["DIRECT_SECRET".to_owned()].into()
-        );
-        assert_eq!(
-            approval.scopes.network_connect,
-            ["https://api.example:443".to_owned()].into()
-        );
-        assert_eq!(approval.package_requirements.len(), 2);
+        assert_eq!(approval.requirement_tree.len(), 2);
 
-        let (key, key_path) = load_or_create_key(&security).unwrap();
-        let signed = SignedPermissionGrant::sign(
-            approval.project_id.clone(),
-            approval.manifest_digest.clone(),
-            approval.scopes.clone(),
-            &key,
-        )
-        .unwrap();
-        let saved = grant_path(&key_path, signed.project_id());
-        atomic_write(&saved, signed.encode().unwrap().as_bytes()).unwrap();
-        assert!(verified_token_in(&app, &security).unwrap().is_some());
-
+        let original_digest = approval.manifest_digest;
         let mut changed_nested_manifest = std::fs::read_to_string(nested.join(".zkinit")).unwrap();
-        changed_nested_manifest = changed_nested_manifest.replace("api.example", "other.example");
+        changed_nested_manifest =
+            changed_nested_manifest.replace("network.connect", "network.listen");
         std::fs::write(nested.join(".zkinit"), changed_nested_manifest).unwrap();
-        assert!(verified_token_in(&app, &security).unwrap().is_none());
+        assert_ne!(context(&app).unwrap().manifest_digest, original_digest);
 
         std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
-    fn packages_cannot_approve_runtime_scopes() {
-        let directory =
-            std::env::temp_dir().join(format!("zirk-permission-package-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join(".zkinit"),
-            "project \"dependency\"\nkind package\npermissions {\nenvironment {\nread: { names: [\"APP_MODE\"]; during: runtime; }\n}\n}\n",
+    fn bulk_approval_is_unavailable_for_every_project_kind() {
+        let error = approve(Path::new("unused")).unwrap_err();
+        assert!(error.to_string().contains("exact resource"));
+    }
+
+    #[test]
+    fn consent_diff_and_revocation_use_only_the_current_signed_record() {
+        let base = std::env::temp_dir().join(format!(
+            "zirk-permission-diff-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = permission_project(&base);
+        let security = base.join("security");
+        std::fs::create_dir_all(security.join("approvals")).unwrap();
+        let key = [42; 32];
+        write_test_key(&security.join("permissions.key"), &key);
+        let context = context(&project).unwrap();
+        let scopes = PermissionScopes {
+            network_connect: ["https://api.example:443".to_owned()].into(),
+            ..PermissionScopes::default()
+        };
+        let signed = SignedPermissionGrant::sign(
+            context.project_id.clone(),
+            context.manifest_digest.clone(),
+            scopes.clone(),
+            &key,
         )
         .unwrap();
-        let error = approve(&directory).unwrap_err();
-        assert!(error.to_string().contains("packages may only declare"));
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::write(
+            grant_path(&security.join("permissions.key"), &context.project_id),
+            signed.encode().unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            load_consent_state(&context, &security).unwrap(),
+            ConsentState::Current(scopes)
+                if scopes.network_connect.contains("https://api.example:443")
+        ));
+        let entries = scope_entries(&scopes);
+        assert!(entries.contains(&("network.connect".into(), "https://api.example:443".into())));
+
+        revoke_in(&project, &security).unwrap();
+        assert!(matches!(
+            load_consent_state(&context, &security).unwrap(),
+            ConsentState::Missing
+        ));
+        let events = read_history(&context, &security).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action(), PermissionHistoryAction::Revoked);
+        assert_eq!(events[0].capability(), "network.connect");
+        assert_eq!(events[0].resource(), "https://api.example:443");
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[cfg(unix)]

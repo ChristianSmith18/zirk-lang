@@ -575,6 +575,14 @@ pub struct ObjectConformanceRequirement {
 #[derive(Debug, Clone, Default)]
 pub struct Module {
     pub functions: Vec<Function>,
+    /// Package identity at compiler-resolved protected API call sites. The
+    /// native backend brackets the corresponding runtime operation with this
+    /// requester so prompts identify the package that actually called it.
+    pub capability_requesters: std::collections::HashMap<Span, String>,
+    /// Application-only project globals. Each payload is backed by a
+    /// GC-managed mutex cell so replacement and snapshot reads remain
+    /// synchronized across executor workers.
+    pub project_globals: Vec<ProjectGlobalLayout>,
     /// String literals, deduplicated. The backend materializes them as
     /// constants and the runtime turns them into `String` values.
     pub strings: Vec<String>,
@@ -642,6 +650,31 @@ pub struct ExternFn {
     pub name: String,
     pub params: Vec<IrType>,
     pub return_type: IrType,
+}
+
+/// One typed application global carried from `.zkinit` into native lowering.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectGlobalLayout {
+    pub name: String,
+    pub payload: IrType,
+    pub readonly: bool,
+    pub snapshot_cloneable: bool,
+    /// The generated function whose return value initializes this slot.
+    pub default_function: Option<String>,
+    /// Specialized `GlobalChange<T>` layout when this project declares at
+    /// least one `Global.watch` call for the cell.
+    pub watch_change: Option<IrType>,
+}
+
+/// The event object a watched global replacement populates while the cell is
+/// locked. `current` is prepared by lowering; the backend fills `previous`
+/// from the locked cell and the runtime stamps `revision` before enqueueing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectGlobalWatchEvent {
+    pub object_slot: SlotId,
+    pub previous_field: u32,
+    pub current_field: u32,
+    pub revision_field: u32,
 }
 
 /// What one object holds in memory.
@@ -965,6 +998,48 @@ impl Instruction {
 /// What an instruction does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstKind {
+    /// Creates the GC mutex cell for one project global from its manifest
+    /// default. Initialization is emitted before imported module bodies.
+    ProjectGlobalInit {
+        global: u32,
+        /// Rooted staging slot for the initializer value. Global allocation
+        /// may collect, so the value must remain visible to the shadow stack.
+        value_slot: SlotId,
+    },
+    /// Reads a project global into an independent snapshot. The backend writes
+    /// the payload to `out` while holding the cell lock.
+    ProjectGlobalGet {
+        global: u32,
+        out: SlotId,
+    },
+    /// Replaces a project global payload under its cell lock.
+    ProjectGlobalSet {
+        global: u32,
+        value: Operand,
+        event: Option<ProjectGlobalWatchEvent>,
+    },
+    /// Atomically captures a project-global value and registers a bounded
+    /// change channel while the global cell is locked. Writes snapshot,
+    /// token, and revision to caller-owned rooted slots; produces runtime
+    /// status as I32.
+    ProjectGlobalWatchSubscribe {
+        global: u32,
+        channel: Operand,
+        snapshot_out: SlotId,
+        token_out: SlotId,
+        revision_out: SlotId,
+    },
+    /// Receives the next queued `GlobalChange<T>` object pointer without
+    /// blocking. Writes it to `out` and returns the runtime watch status.
+    ProjectGlobalWatchNext {
+        token: Operand,
+        out: SlotId,
+    },
+    /// Closes a project-global subscription token and releases its channel
+    /// root. Repeated close calls are harmless.
+    ProjectGlobalWatchClose {
+        token: Operand,
+    },
     /// Abstract lock ownership marker. Source lowering remains gated until a
     /// runtime ABI and cleanup-edge implementation consume this operation.
     MutexAcquire {

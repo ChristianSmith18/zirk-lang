@@ -1,3 +1,8 @@
-project "semantic-workspace-fixture"
-kind application
-entry "src/main.zrk"
+project {
+    name: "semantic-workspace-fixture";
+    version: "0.1.0";
+    type: application;
+    entry: "src/main.zrk";
+}
+
+source "src";

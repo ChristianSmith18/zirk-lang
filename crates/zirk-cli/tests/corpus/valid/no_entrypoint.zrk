@@ -1,0 +1,5 @@
+import { stdout } from std.io;
+
+fn helper(): Void { }
+
+stdout.println("file body ran without fn main");

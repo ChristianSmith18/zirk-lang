@@ -229,14 +229,23 @@ pub fn compiler_binding_for_member(module: &str, name: &str) -> Option<&'static 
         .map(|entry| entry.compiler_binding)
 }
 
-/// Private environment implementation leaf. It is only considered while
-/// checking the compiler-bundled source module; applications cannot import or
-/// call it as a public host API.
+/// Environment API and implementation bindings. Callers must first establish
+/// that the class declaration came from the compiler-bundled `std.environment`
+/// package; application declarations with the same spelling are not enough.
 pub fn compiler_binding_for_environment_member(module: &str, name: &str) -> Option<&'static str> {
     if module != "environment" {
         return None;
     }
     match name {
+        "get" => Some("std.environment.Environment.get"),
+        "get_int32" => Some("std.environment.Environment.get_int32"),
+        "get_float64" => Some("std.environment.Environment.get_float64"),
+        "require" => Some("std.environment.Environment.require"),
+        "contains" => Some("std.environment.Environment.contains"),
+        "get_secret" => Some("std.environment.Environment.get_secret"),
+        "list_names" => Some("std.environment.Environment.list_names"),
+        // The string reader is a compiler-owned leaf that lowers through the
+        // generic Environment.get runtime operation.
         "get_string_native" => Some("std.environment.Environment.get"),
         "get_secret_value" => Some("std.environment.Environment.get_secret_value"),
         "contains_authorized" => Some("std.environment.Environment.contains_authorized"),

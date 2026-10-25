@@ -5,10 +5,8 @@ response. The current server API serves a configured finite number of requests
 and then releases its listener.
 
 ```text
-permissions {
-    network {
-        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
-    }
+requires {
+    network.listen;
 }
 ```
 
@@ -20,8 +18,7 @@ fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
     return HTTPResponse.from_json(200, { value: 42 });
 }
 
-fn main(): Void {
-    match HTTPServer.bind("tcp://127.0.0.1:8080") {
+match HTTPServer.bind("tcp://127.0.0.1:8080") {
         Ok(listener) => {
             mut router: HTTPRouter = HTTPRouter();
             match router.route(HTTPMethod.Get, "/health", health) {
@@ -33,11 +30,10 @@ fn main(): Void {
             };
         }
         Error(error) => stderr.println(error);
-    }
 }
 ```
 
-`HTTPServer.bind` checks the exact listen permission before opening the socket.
+`HTTPServer.bind` checks the exact listen endpoint before opening the socket. The `requires` entry declares the capability; first use asks for consent to `127.0.0.1:8080`.
 `HTTPRouter.route` validates route patterns and rejects duplicate or ambiguous
 routes. The server preview uses a finite request bound; this example accepts
 one request, sends its response, and closes the listener. For a longer-lived

@@ -32,6 +32,10 @@ fn llvm_ir(source_text: &str) -> String {
 }
 
 fn checked_ir(source_text: &str) -> zirk_ir::Module {
+    checked_ir_with_entry(source_text, true)
+}
+
+fn checked_ir_with_entry(source_text: &str, synthesize_entry: bool) -> zirk_ir::Module {
     let needs_streams = ["stdout.", "stderr.", "stdin."]
         .iter()
         .any(|prefix| source_text.contains(prefix));
@@ -68,6 +72,41 @@ fn checked_ir(source_text: &str) -> zirk_ir::Module {
                 .extend(module.body.type_aliases.iter().cloned());
         }
         program.modules.extend(standard_modules);
+    }
+    if synthesize_entry {
+        // The CLI creates an internal entry wrapper from file-scope statements.
+        // Most historical emitter fixtures use `fn main` as a convenient
+        // container, so mirror that body into the explicit test entry while
+        // leaving `main` an ordinary source function.
+        let mut statements = program.body.clone();
+        if let Some(main) = program
+            .functions
+            .iter()
+            .find(|function| function.name.name == "main" && function.params.is_empty())
+        {
+            let call = zirk_ast::CallExpr {
+                callee: Box::new(zirk_ast::Expr::Path(Ident::new("main", main.name.span))),
+                type_args: Vec::new(),
+                args: Vec::new(),
+                span: main.span,
+            };
+            statements.push(zirk_ast::Stmt::Expr(zirk_ast::ExprStmt {
+                expr: zirk_ast::Expr::Call(call),
+                span: main.span,
+            }));
+        }
+        let span = program.span;
+        program.functions.push(zirk_ast::FnDecl {
+            name: Ident::new(zirk_ast::GENERATED_ENTRYPOINT, span),
+            type_params: Vec::new(),
+            params: Vec::new(),
+            return_type: Some(zirk_ast::TypeRef::new("Void", span)),
+            throws: None,
+            body: zirk_ast::Block { statements, span },
+            shared: false,
+            is_unsafe: false,
+            span,
+        });
     }
     let checked = check(&sources, &program, &mut sink);
 
@@ -193,6 +232,16 @@ fn a_c_entrypoint_is_generated() {
 }
 
 #[test]
+fn source_main_alone_does_not_become_the_process_entrypoint() {
+    let ir = llvm_ir_for_module(&checked_ir_with_entry("fn main(): Void { }", false));
+    assert!(ir.contains("define void @zk_main()"));
+    assert!(
+        !ir.contains("define i32 @main()"),
+        "only the compiler-owned entry wrapper creates a process entrypoint:\n{ir}"
+    );
+}
+
+#[test]
 fn zirk_functions_are_prefixed() {
     // A Zirk function named `printf` must not become the C one.
     let ir = llvm_ir("fn printf(): Void { }\nfn main(): Void { }");
@@ -213,7 +262,10 @@ fn the_entrypoint_wraps_main_with_the_runtime_lifecycle() {
     let init = entrypoint
         .find(symbols::INIT)
         .expect("calls the initializer");
-    let zirk = entrypoint.find("@zk_main").expect("calls Zirk main");
+    assert!(
+        entrypoint.contains("@\"zk_$zirk.entry\""),
+        "the C entrypoint calls the compiler-owned Zirk wrapper:\n{entrypoint}"
+    );
     let deadline_policy = entrypoint
         .find("zirk_rt_run_main_cli")
         .expect("CLI entrypoint selects the bounded deadline policy");
@@ -222,8 +274,20 @@ fn the_entrypoint_wraps_main_with_the_runtime_lifecycle() {
         .expect("calls the shutdown");
 
     assert!(
-        init < deadline_policy && deadline_policy < zirk && zirk < shutdown,
-        "the order must be init, main, shutdown:\n{entrypoint}"
+        init < deadline_policy && deadline_policy < shutdown,
+        "the order must be init, executor, shutdown:\n{entrypoint}"
+    );
+
+    let generated_entry = ir
+        .split("define void @\"zk_$zirk.entry\"")
+        .nth(1)
+        .expect("the compiler-owned Zirk entry wrapper exists");
+    let zirk = generated_entry
+        .find("@zk_main")
+        .expect("the fixture wrapper explicitly calls its ordinary main function");
+    assert!(
+        generated_entry[..zirk].ends_with("call void "),
+        "the wrapper dispatches to the fixture's ordinary `main` function:\n{generated_entry}"
     );
 }
 

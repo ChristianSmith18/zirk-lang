@@ -19,7 +19,7 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `unify-objects-and-contracts`, **2026-10-23**.
+Last reviewed for `complete-zkinit-project-runtime`, **2026-10-25**.
 
 ## Browser-hosted interpreter tooling
 
@@ -80,7 +80,7 @@ native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `fn main(): Void` | yes | yes | yes | yes | yes | yes | `ZIRK_AGENT_PROMPT.md` Phase 1; end-to-end `hello.zrk` works. |
+| File-scope application entry (no required `fn main`) | yes | yes | yes | yes | yes | yes | The selected file executes top-level statements; `fn main` is an ordinary callable. Module initialization is depth-first and once-only. |
 | `Void`, `Int32`, `Boolean`, `String` | yes | yes | yes | yes | yes | yes | `Type::from_name` resolves every one. |
 | `mut`/`inmut` | yes | yes | yes | yes | yes | yes | — |
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
@@ -228,8 +228,10 @@ native backend is delivered.
 
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
-| `.zkinit` / multi-file projects | yes | yes | yes | partial | no | yes | `add-packages-and-module-exports`: project discovery, package/application identity, root-confined quoted local imports, logical package imports, `share mod` roots, local/vendored graph traversal and lock metadata validation reach `check`/`build`/`run`. Registry/Git acquisition, verified archive hashes and publication remain pending. |
-| `requires`/`during: build` manifest | no | no | no | no | no | no | Spec defined; not started. |
+| `.zkinit` / multi-file projects | n/a | yes | yes | yes | yes | partial | `complete-zkinit-project-runtime`: typed manifest, project discovery, application entry/package root, local/vendored graph, lock metadata, top-level initialization, globals, dependencies, migration, and `zirk init` are implemented. Registry/Git acquisition and publication remain partial. |
+| Unified `requires` and first-use consent | n/a | yes | yes | yes | partial | yes | One capability list, provenance tree, signed exact-resource consent, operation-local prompts, no-TTY denial, inspection/diff/history/revoke. Runtime enforcement covers environment/secrets and network APIs; filesystem/process APIs are not exposed yet. |
+| Application globals | n/a | yes | yes | yes | yes | yes | Typed manifest keys, defaults, custom type source, `Global.get`/`set`/`watch`, snapshot replacement, revisioned changes, bounded subscriptions, and readonly checks have focused CLI/runtime coverage. |
+| `zirk init` | n/a | yes | yes | n/a | n/a | yes | Interactive prompts and `-y` defaults atomically create only `.zkinit`; existing manifests are protected. |
 
 ## Phase 7 — Standard library
 

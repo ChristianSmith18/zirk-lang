@@ -25,71 +25,44 @@ raise the same controlled failures the rest of the language uses.
 Normative order:
 
 ```text
-validate .zkinit and permissions
+validate .zkinit and the complete static dependency graph
     ↓
-load minimal runtime
+load the minimal runtime
     ↓
-initialize globals in a deterministic order
+initialize application globals
     ↓
-invoke main()
+initialize imported modules once, depth-first in source import order
     ↓
-run structured concurrency scopes
+execute the selected application entry's top-level statements in order
     ↓
-ordered shutdown of resources and managed threads
+join structured work and close managed resources
     ↓
-flush streams and terminate with an exit code
+shut down the runtime, flush streams, and return the process status
 ```
 
-`main` is the only executable symbol of the `project.entry` file:
+`project.entry` selects the file whose top-level statements start the
+application. If omitted, the application default is `src/main.zrk`. An explicit
+`zirk run <path>` selects that file for the invocation while retaining its
+project context; pathless `zirk run` discovers the application's `.zkinit` and
+uses its configured/default entry. An imported module initializes before its
+importer and only once. Compilation and type checking of the full graph finish
+before any entry or module body runs. Cycles requiring execution of a partially
+initialized module are rejected.
 
-```text
-fn main(): Void { ... }
-```
+There is no required source-level `fn main`. A function with that name is an
+ordinary function and runs only when called. The generated executable retains
+an internal platform entry to initialize the runtime, execute the selected
+Zirk file body, and shut down. Global initialization failure prevents imported
+module and entry bodies from executing and is reported through compiler/runtime
+diagnostics.
 
-It may also return a code or a `Result` defined by the entrypoint contract. A
-failure during globals prevents `main` from running and produces a deterministic
-diagnostic.
+Normal termination happens when the selected file body ends and its structured
+work/resources have concluded. Orphan work is never silently awaited.
 
-Normal termination happens when `main` ends and all of its root scopes have
-concluded. Orphan work is never silently awaited.
-
-**Implementation status.** The generated C `main` calls `zirk_rt_init`, then
-`zirk_rt_run_main_cli(zirk_main)`, then — as before — checks for an uncaught Zirk
-exception, then `zirk_rt_shutdown`. Both `zirk_rt_run_main` and
-`zirk_rt_run_main_cli` run `zirk_main` as the
-**root task (task 0)** of the single-threaded cooperative executor (`ADR-017`)
-and returns only once task 0 and every task it spawned has completed or been
-cleaned — so a background task keeps the process alive after `main` returns. The
-root task gets an 8 MiB stack (`main` historically ran on the OS main-thread
-stack); spawned tasks get 128 KiB. For a program with no `concurrent` / `spawn` yet,
-the selected run-main entrypoint is exactly one run of `zirk_main` to completion.
-
-The runtime also has a provisional, runtime-internal detached-job entry point
-(`zirk_rt_background_spawn`), separate from ordinary structured spawn. It
-admits at most 256 live jobs per executor run, retains each capture block as a
-GC root, and records completion/failure with the background supervisor. When
-the root task completes, admission closes, detached jobs receive cooperative
-cancellation, and the executor allows a fixed five-second grace before
-reporting unfinished job IDs to stderr. This is not yet a Zirk language API:
-`App.background`, `Concurrent.detach`, configurable grace, services, signal
-handling, and managed native-thread integration remain unavailable. The
-executor cannot preempt a task that never yields.
-
-The provisional background-spawn ABI distinguishes status `1` (background
-quota full) from status `4` (the executor's separate 4,096-task quota full),
-so source lowering can report `BackgroundCapacityError` and `TaskCapacityError`
-respectively. Status `2` means background admission is draining; status `3`
-means an internal duplicate/ID-exhaustion condition. Source-level status
-translation is not implemented yet.
-
-The Rust runtime also exposes a bounded `ServiceSupervisor` lifecycle model
-(default capacity 64). It tracks `Created`/`Starting`/`Ready`/`Draining`/
-`Stopped`, required-service readiness, and reverse actual-start-order shutdown.
-Services may declare dependencies on already registered services; startup is
-rejected until those dependencies are ready, and the registration rule makes
-dependency cycles impossible. This module records state and ordering only: it
-does not launch service tasks, retain their managed captures, receive host
-signals, or provide the Zirk `application.spawn_service` API.
+**Implementation status.** Native code generation dispatches to an internal
+file-body entry wrapper. Runtime and global initialization happen before
+imported-module and application-entry execution. The selected body runs without
+a user `main` function.
 
 ## 3. Scheduler and I/O reactor
 
@@ -408,24 +381,36 @@ not promise to continue normal execution.
 
 ## 12. Security and permissions
 
-The runtime enforces declared permissions for filesystem, network, processes,
-environment and other capabilities. A library declares requirements; the
-application grants the final set. The absence of a permission produces a clear
-error, not an automatic grant.
+Applications and packages declare one finite `requires` list. A declaration
+records possible capability needs, not user consent. The locked dependency
+graph preserves every requester and dependency path. Concrete resource consent
+is checked at the operation boundary and stored in a user-owned signed record
+outside the repository.
 
-The effective grant is the intersection of signed developer approval and the
-application declaration. Approval is external and bound to project name,
-canonical location, user/device, scope/phase and exact requester
-versions/integrity/paths. Filesystem targets are canonicalized with symlink
-escape protection; network redirects and DNS results remain in origin scope;
-process arguments and shell authority are checked separately; secrets redact.
-Runtime never prompts or self-edits a manifest.
+Missing consent does not stop startup. A protected operation without matching
+consent is denied before its protected host effect; a preserved `Result` can
+carry the typed error to `match`, while ordinary value use follows the
+language's existing projection to `null`. The runtime emits a deduplicated
+warning with capability, resource, and requester, and allows unrelated program
+execution to continue.
 
-Explicit throwables preserve identity, cause and suppressed failures. Traces
-materialize lazily, reconstruct logical task/generator frames where metadata
-permits, and never capture locals or secrets by default.
+An interactive first use identifies the project, operation, exact resource,
+requesting package, and dependency path, then accepts `y` or `n`. Approval
+persists only that resource scope and adds a missing direct capability
+declaration to the application `.zkinit`; rejection records no approval and
+changes no manifest. Non-interactive operation fails closed without prompting.
 
+The delivered native permission boundaries cover environment reads/secrets,
+HTTP connect destinations and proxy hops, DNS/redirect checks, TCP/UDP
+listeners and destinations, local endpoints, and interface inspection.
+Filesystem and process capability identifiers are reserved, because
+compiler-owned filesystem/process APIs are not exposed in this checkout.
 `unsafe` does not bypass permissions or operating-system validations.
+
+The CLI inspects requirements and saved scopes with `permissions inspect` and
+`permissions diff`, verifies signed history with `permissions history`, and
+removes the current project approval with `permissions revoke`. Blanket
+approval is unavailable.
 
 ## 13. Observability
 

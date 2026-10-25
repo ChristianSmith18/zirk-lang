@@ -22,7 +22,7 @@ use tower_lsp::{LanguageServer, LspService};
 
 use zirk_cli::frontend;
 use zirk_diagnostics::{
-    Diagnostic as ZirkDiagnostic, DiagnosticSink, FileId, Severity, SourceMap, Span,
+    Diagnostic as ZirkDiagnostic, DiagnosticSink, FileId, Severity, SourceFile, SourceMap, Span,
 };
 use zirk_ide::{IdeSnapshot, Position as IdePosition};
 use zirk_sema::{ReferenceRole, SemanticIndex, SemanticSymbolKind, TypeMapEntry, TypeMapKind};
@@ -62,12 +62,138 @@ pub fn analyze_with_overlays(
     path: &Path,
     overlays: &HashMap<std::path::PathBuf, String>,
 ) -> Analysis {
+    if let Some((manifest_path, text)) = overlays
+        .iter()
+        .find(|(path, _)| path.file_name().is_some_and(|name| name == ".zkinit"))
+        && let Err(error) = zirk_cli::project::parse_manifest(text)
+    {
+        return Analysis {
+            diagnostics: vec![manifest_parse_diagnostic(manifest_path, text, &error.0)],
+            frontend: None,
+        };
+    }
     let mut sink = DiagnosticSink::new();
     let result = frontend::run_frontend_ide_with_overlay(path, overlays, &mut sink);
+    let mut diagnostics = sink.diagnostics().to_vec();
+    if let Some(frontend) = &result {
+        diagnostics.extend(capability_requirement_diagnostics(frontend));
+    }
     Analysis {
-        diagnostics: sink.diagnostics().to_vec(),
+        diagnostics,
         frontend: result,
     }
+}
+
+fn capability_requirement_diagnostics(frontend: &frontend::FrontendResult) -> Vec<ZirkDiagnostic> {
+    let Some(project) = frontend.project.as_ref() else {
+        return Vec::new();
+    };
+    if project.manifest.kind != zirk_cli::project::ProjectKind::Application {
+        return Vec::new();
+    }
+
+    let mut reported = std::collections::HashSet::<(FileId, &'static str, bool)>::new();
+    let mut diagnostics = Vec::new();
+    for (span, capability_name) in &frontend.checked.protected_api_effects {
+        let Some(capability) = zirk_cli::project::Capability::parse(capability_name) else {
+            continue;
+        };
+        let source = frontend.sources.file(span.file);
+        let owner = source.identity().map(|identity| identity.package.as_str());
+        let (manifest_name, declares_capability, application_source) = match owner {
+            Some("local") | None => (
+                project.manifest.name.clone(),
+                project.manifest.requires.contains(&capability),
+                true,
+            ),
+            Some(package) if package.starts_with("std.") => continue,
+            Some(package) => {
+                let Some(root) = frontend.module_roots.packages.get(package) else {
+                    continue;
+                };
+                let Ok(manifest) = zirk_cli::project::read_manifest(&root.join(".zkinit")) else {
+                    continue;
+                };
+                (
+                    package.to_owned(),
+                    manifest.requires.contains(&capability),
+                    false,
+                )
+            }
+        };
+        if declares_capability
+            || !reported.insert((span.file, capability.as_str(), application_source))
+        {
+            continue;
+        }
+
+        let message = if application_source {
+            format!(
+                "application code calls an API requiring `{}`; add it to `{}` `.zkinit` requires",
+                capability.as_str(),
+                manifest_name
+            )
+        } else {
+            format!(
+                "dependency `{manifest_name}` calls an API requiring `{}`; declare it in that package's `.zkinit`",
+                capability.as_str()
+            )
+        };
+        let help = if application_source {
+            format!(
+                "add `{}` to the application's `requires` block",
+                capability.as_str()
+            )
+        } else {
+            "the consuming project will not edit a dependency manifest".into()
+        };
+        diagnostics.push(
+            ZirkDiagnostic::warning(
+                zirk_diagnostics::Code::new(if application_source { "W0521" } else { "W0522" }),
+                message,
+            )
+            .at(frontend.sources.location(*span))
+            .with_snippet(frontend.sources.snippet(*span))
+            .with_help(help),
+        );
+    }
+    diagnostics
+}
+
+fn manifest_parse_diagnostic(path: &Path, text: &str, message: &str) -> ZirkDiagnostic {
+    let (line, column) = message
+        .rsplit_once(" at ")
+        .and_then(|(_, location)| location.split_once(':'))
+        .and_then(|(line, column)| {
+            Some((line.parse::<usize>().ok()?, column.parse::<usize>().ok()?))
+        })
+        .unwrap_or((1, 1));
+    let mut start = 0usize;
+    for current_line in text.split_inclusive('\n').take(line.saturating_sub(1)) {
+        start += current_line.len();
+    }
+    let line_text = text
+        .split_inclusive('\n')
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim_end_matches('\n');
+    let column_offset = line_text
+        .char_indices()
+        .nth(column.saturating_sub(1))
+        .map(|(offset, _)| offset)
+        .unwrap_or(line_text.len());
+    let start = (start + column_offset).min(text.len()) as u32;
+    let end = text[start as usize..]
+        .chars()
+        .next()
+        .map(|character| start + character.len_utf8() as u32)
+        .unwrap_or(start);
+    let mut sources = SourceMap::new();
+    let file = sources.add(SourceFile::new(path.to_string_lossy(), text));
+    let span = Span::in_file(file, start, end);
+    ZirkDiagnostic::error(zirk_cli::codes::INVALID_PROJECT, message)
+        .at(sources.location(span))
+        .with_snippet(sources.snippet(span))
 }
 
 fn workspace_root(path: &Path) -> std::path::PathBuf {
@@ -399,6 +525,273 @@ fn versioned_type_quickfix(
         is_preferred: Some(true),
         ..CodeAction::default()
     })
+}
+
+fn versioned_requirement_quickfix(
+    manifest_uri: &Url,
+    version: i32,
+    manifest_text: &str,
+    diagnostic: &Diagnostic,
+) -> Option<CodeAction> {
+    if diagnostic.source.as_deref() != Some("zirk")
+        || diagnostic.code.as_ref() != Some(&NumberOrString::String("W0521".into()))
+    {
+        return None;
+    }
+    let capability_name = diagnostic
+        .message
+        .split_once("requiring `")?
+        .1
+        .split('`')
+        .next()?;
+    let capability = zirk_cli::project::Capability::parse(capability_name)?;
+    let mut manifest = zirk_cli::project::parse_manifest(manifest_text).ok()?;
+    if !manifest.requires.insert(capability) {
+        return None;
+    }
+    let file = SourceFile::new(manifest_uri.to_string(), manifest_text);
+    let (end_line, end_character) = file.line_column_utf16(u32::MAX);
+    Some(CodeAction {
+        title: format!("Add `{}` to application requires", capability.as_str()),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diagnostic.clone()]),
+        edit: Some(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: manifest_uri.clone(),
+                    version: Some(version),
+                },
+                edits: vec![OneOf::Left(TextEdit {
+                    range: Range::new(Position::new(0, 0), Position::new(end_line, end_character)),
+                    new_text: zirk_cli::project::format_manifest(&manifest),
+                })],
+            }])),
+            ..WorkspaceEdit::default()
+        }),
+        is_preferred: Some(true),
+        ..CodeAction::default()
+    })
+}
+
+fn versioned_manifest_field_quickfix(
+    uri: &Url,
+    version: i32,
+    source: &zirk_diagnostics::SourceFile,
+    diagnostic: &Diagnostic,
+) -> Option<CodeAction> {
+    if diagnostic.source.as_deref() != Some("zirk")
+        || diagnostic.code.as_ref()
+            != Some(&NumberOrString::String(
+                zirk_cli::codes::INVALID_PROJECT.as_str().into(),
+            ))
+    {
+        return None;
+    }
+    let field = if diagnostic.message.contains("`project.name` is required") {
+        Some(("name", quote_manifest_value(&manifest_project_name(uri))))
+    } else if diagnostic.message.contains("`project.version` is required") {
+        Some(("version", "\"0.1.0\"".to_owned()))
+    } else if diagnostic.message.contains("`project.type` is required") {
+        let kind = if source.text().contains("root:") && !source.text().contains("entry:") {
+            "package"
+        } else {
+            "application"
+        };
+        Some(("type", kind.to_owned()))
+    } else if diagnostic
+        .message
+        .contains("manifest is missing `project { ... }`")
+    {
+        None
+    } else {
+        return None;
+    };
+
+    let mut text = source.text().to_owned();
+    if let Some((field, value)) = field {
+        text = insert_project_field(&text, field, &value)?;
+    } else {
+        let name = quote_manifest_value(&manifest_project_name(uri));
+        let block = format!(
+            "project {{\n    name: {name};\n    version: \"0.1.0\";\n    type: application;\n}}\n"
+        );
+        if !text.trim().is_empty() {
+            text = format!("{}\n\n{block}", text.trim_end());
+        } else {
+            text = block;
+        }
+    }
+    let manifest = zirk_cli::project::parse_manifest(&text).ok()?;
+    let canonical = zirk_cli::project::format_manifest(&manifest);
+    let file = SourceFile::new(uri.to_string(), source.text());
+    let (end_line, end_character) = file.line_column_utf16(u32::MAX);
+    Some(CodeAction {
+        title: "Add the required project field".into(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diagnostic.clone()]),
+        edit: Some(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                text_document: OptionalVersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: Some(version),
+                },
+                edits: vec![OneOf::Left(TextEdit {
+                    range: Range::new(Position::new(0, 0), Position::new(end_line, end_character)),
+                    new_text: canonical,
+                })],
+            }])),
+            ..WorkspaceEdit::default()
+        }),
+        is_preferred: Some(true),
+        ..CodeAction::default()
+    })
+}
+
+fn insert_project_field(source: &str, field: &str, value: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut open = None;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' => {
+                cursor += 1;
+                while cursor < bytes.len() {
+                    if bytes[cursor] == b'\\' {
+                        cursor = (cursor + 2).min(bytes.len());
+                    } else if bytes[cursor] == b'"' {
+                        cursor += 1;
+                        break;
+                    } else {
+                        cursor += 1;
+                    }
+                }
+            }
+            b'#' => {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'p' if source[cursor..].starts_with("project") => {
+                let after = cursor + "project".len();
+                let before_ok = cursor == 0 || !is_manifest_word_byte(bytes[cursor - 1]);
+                let after_ok = bytes
+                    .get(after)
+                    .is_none_or(|byte| !is_manifest_word_byte(*byte));
+                if !before_ok || !after_ok {
+                    cursor = after;
+                    continue;
+                }
+                let mut candidate = after;
+                while bytes.get(candidate).is_some_and(u8::is_ascii_whitespace) {
+                    candidate += 1;
+                }
+                if bytes.get(candidate) == Some(&b'{') {
+                    open = Some(candidate);
+                    break;
+                }
+                cursor = after;
+            }
+            _ => cursor += 1,
+        }
+    }
+    let open = open?;
+    let mut depth = 0usize;
+    let mut cursor = open;
+    let mut close = None;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'"' => {
+                cursor += 1;
+                while cursor < bytes.len() {
+                    if bytes[cursor] == b'\\' {
+                        cursor = (cursor + 2).min(bytes.len());
+                    } else if bytes[cursor] == b'"' {
+                        cursor += 1;
+                        break;
+                    } else {
+                        cursor += 1;
+                    }
+                }
+            }
+            b'#' => {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                    cursor += 1;
+                }
+            }
+            b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    close = Some(cursor);
+                    break;
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    let close = close?;
+    let line_start = source[..close].rfind('\n').map_or(0, |index| index + 1);
+    let before_close = &source[line_start..close];
+    let insertion = if before_close.trim().is_empty() {
+        format!("    {field}: {value};\n")
+    } else {
+        format!("\n    {field}: {value};\n")
+    };
+    let mut updated = source.to_owned();
+    updated.insert_str(close, &insertion);
+    Some(updated)
+}
+
+fn manifest_project_name(uri: &Url) -> String {
+    let base = uri
+        .to_file_path()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut result = String::new();
+    let mut separator = false;
+    for character in base.chars() {
+        if character.is_ascii_alphanumeric() {
+            result.push(character);
+            separator = false;
+        } else if !result.is_empty() && !separator {
+            result.push('-');
+            separator = true;
+        }
+    }
+    let result = result.trim_matches('-');
+    if result.is_empty() {
+        "zirk-project".into()
+    } else {
+        result.into()
+    }
+}
+
+fn quote_manifest_value(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"zirk-project\"".into())
+}
+
+fn is_manifest_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn ranges_intersect(left: Range, right: Range) -> bool {
@@ -2325,6 +2718,36 @@ impl LanguageServer for Backend {
         let Some(analysis) = document.analysis.as_ref() else {
             return Ok(None);
         };
+        if let Some(manifest_path) = uri.to_file_path().ok()
+            && manifest_path
+                .file_name()
+                .is_some_and(|name| name == ".zkinit")
+        {
+            let source = SourceFile::new(uri.to_string(), document.text.clone());
+            let mut actions = Vec::new();
+            for requested in &params.context.diagnostics {
+                if !ranges_intersect(params.range, requested.range) {
+                    continue;
+                }
+                let is_current = analysis.diagnostics.iter().any(|diagnostic| {
+                    let (path, current) = to_lsp_diagnostic(diagnostic);
+                    path.as_deref() == Some(manifest_path.to_string_lossy().as_ref())
+                        && current.code == requested.code
+                        && current.range == requested.range
+                        && current.message == requested.message
+                        && current.source == requested.source
+                });
+                if !is_current {
+                    continue;
+                }
+                if let Some(action) =
+                    versioned_manifest_field_quickfix(uri, document.version, &source, requested)
+                {
+                    actions.push(CodeActionOrCommand::CodeAction(action));
+                }
+            }
+            return Ok(Some(actions));
+        }
         let Some(frontend) = analysis.frontend.as_ref() else {
             return Ok(Some(Vec::new()));
         };
@@ -2351,6 +2774,20 @@ impl LanguageServer for Backend {
                 continue;
             }
             if let Some(action) = versioned_type_quickfix(uri, document.version, source, requested)
+            {
+                actions.push(CodeActionOrCommand::CodeAction(action));
+            }
+            if requested.code.as_ref() == Some(&NumberOrString::String("W0521".into()))
+                && let Some(project) = frontend.project.as_ref()
+                && project.manifest.kind == zirk_cli::project::ProjectKind::Application
+                && let Ok(manifest_uri) = Url::from_file_path(project.root.join(".zkinit"))
+                && let Some(manifest_document) = state.documents.get(&manifest_uri)
+                && let Some(action) = versioned_requirement_quickfix(
+                    &manifest_uri,
+                    manifest_document.version,
+                    &manifest_document.text,
+                    requested,
+                )
             {
                 actions.push(CodeActionOrCommand::CodeAction(action));
             }
@@ -3015,6 +3452,156 @@ mod tests {
     }
 
     const EXAMPLE: &str = "import { stdout } from std.io;\n\nfn square(n: Int32) {\n    return n * n;\n}\n\nfn main() {\n    stdout.println(square(7));\n}\n";
+
+    #[test]
+    fn unsaved_manifest_overlay_changes_project_global_inference() {
+        let root = scratch("zkinit-global-overlay");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let manifest = root.join(".zkinit");
+        let entry = root.join("src/main.zrk");
+        fs::write(
+            &manifest,
+            "project { name: \"overlay\"; version: \"0.1.0\"; type: application; }\nglobals { counter: Int32; }\n",
+        )
+        .unwrap();
+        fs::write(
+            &entry,
+            "fn read(): Void { mut value: String = Global.get(\"counter\"); _ = value; }\n",
+        )
+        .unwrap();
+        let edited_manifest = "project { name: \"overlay\"; version: \"0.1.0\"; type: application; }\nglobals { counter: String; }\n";
+        let overlays = HashMap::from([(manifest.clone(), edited_manifest.to_string())]);
+
+        let analysis = analyze_with_overlays(&root, &overlays);
+
+        let frontend = analysis
+            .frontend
+            .as_ref()
+            .expect("overlay project analyzed");
+        assert_eq!(
+            frontend.project.as_ref().unwrap().manifest.globals["counter"].type_name,
+            "String"
+        );
+        assert!(
+            frontend
+                .checked
+                .project_global_calls
+                .values()
+                .any(|call| call.name == "counter" && call.ty == zirk_sema::Type::STRING)
+        );
+        assert!(
+            !analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_unsaved_manifest_reports_a_field_location() {
+        let root = scratch("zkinit-diagnostic");
+        let manifest = root.join(".zkinit");
+        let text = "project {\n    name: \"app\";\n    version: 1;\n    type: application;\n}\n";
+        let analysis = analyze(&manifest, text);
+
+        let diagnostic = analysis
+            .diagnostics
+            .first()
+            .expect("manifest error reported");
+        let location = diagnostic
+            .location
+            .as_ref()
+            .expect("field location retained");
+        assert_eq!(location.line, 3);
+        assert!(location.file.ends_with(".zkinit"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_application_requirement_has_a_versioned_manifest_quickfix() {
+        let root = scratch("zkinit-requirement-action");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join(".zkinit"),
+            "project { name: \"app\"; version: \"0.1.0\"; type: application; }\n",
+        )
+        .unwrap();
+        let entry = root.join("src/main.zrk");
+        let text = "import { Env } from std.environment;\nfn main(): Void { mut mode = Env.get(\"APP_MODE\"); _ = mode; }\n";
+        fs::write(&entry, text).unwrap();
+
+        let analysis = analyze(&entry, text);
+        let diagnostic = analysis
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code.as_str() == "W0521")
+            .expect("missing direct capability is diagnosed");
+        assert!(diagnostic.message.contains("environment.read"));
+        let (_, lsp_diagnostic) = to_lsp_diagnostic(diagnostic);
+        let manifest_uri = Url::from_file_path(root.join(".zkinit")).unwrap();
+        let action = versioned_requirement_quickfix(
+            &manifest_uri,
+            23,
+            &fs::read_to_string(root.join(".zkinit")).unwrap(),
+            &lsp_diagnostic,
+        )
+        .expect("application requirement quickfix");
+        let Some(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Edits(documents)),
+            ..
+        }) = action.edit
+        else {
+            panic!("quickfix uses versioned document changes")
+        };
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].text_document.uri, manifest_uri);
+        assert_eq!(documents[0].text_document.version, Some(23));
+        let Some(OneOf::Left(edit)) = documents[0].edits.first() else {
+            panic!("quickfix replaces the canonical manifest text")
+        };
+        let updated = zirk_cli::project::parse_manifest(&edit.new_text).unwrap();
+        assert!(
+            updated
+                .requires
+                .contains(&zirk_cli::project::Capability::EnvironmentRead)
+        );
+        assert!(updated.authors.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_manifest_fields_have_versioned_canonical_quickfixes() {
+        let root = scratch("zkinit-field-action");
+        let manifest_path = root.join(".zkinit");
+        let uri = Url::from_file_path(&manifest_path).unwrap();
+        let text = "project { version: \"0.1.0\"; type: application; }\n";
+        let analysis = analyze(&manifest_path, text);
+        let diagnostic = analysis
+            .diagnostics
+            .first()
+            .expect("missing required project field is diagnosed");
+        assert!(diagnostic.message.contains("project.name"));
+        let (_, lsp_diagnostic) = to_lsp_diagnostic(diagnostic);
+        let source = SourceFile::new(uri.to_string(), text);
+        let action = versioned_manifest_field_quickfix(&uri, 11, &source, &lsp_diagnostic)
+            .expect("field quickfix");
+        let Some(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Edits(documents)),
+            ..
+        }) = action.edit
+        else {
+            panic!("field quickfix uses versioned document changes")
+        };
+        assert_eq!(documents[0].text_document.version, Some(11));
+        let Some(OneOf::Left(edit)) = documents[0].edits.first() else {
+            panic!("field quickfix replaces canonical manifest text")
+        };
+        let parsed = zirk_cli::project::parse_manifest(&edit.new_text).unwrap();
+        assert_eq!(parsed.name, root.file_name().unwrap().to_string_lossy());
+        assert_eq!(parsed.version, "0.1.0");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn workspace_generation_and_overlay_versions_reject_stale_analysis() {
@@ -5752,7 +6339,7 @@ mod tests {
         let manifest_uri = Url::from_file_path(&manifest).unwrap();
         fs::write(
             &manifest,
-            "project \"watch-fixture\"\nkind application\nentry \"missing.zrk\"\n",
+            "project { name: \"watch-fixture\"; version: \"0.1.0\"; type: application; entry: \"missing.zrk\"; }\n",
         )
         .unwrap();
         server
@@ -5788,7 +6375,7 @@ mod tests {
 
         fs::write(
             &manifest,
-            "project \"watch-fixture\"\nkind application\nentry \"main.zrk\"\n",
+            "project { name: \"watch-fixture\"; version: \"0.1.0\"; type: application; entry: \"main.zrk\"; }\n",
         )
         .unwrap();
         let lockfile = root.join("zirk.lock");

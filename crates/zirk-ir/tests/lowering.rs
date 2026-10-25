@@ -1166,8 +1166,7 @@ fn println_always_receives_a_real_stringifiable_value() {
 #[test]
 fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
     let module = compile(
-        "fn work(): Void { }\n\
-         class Marker { construct() { } }\n\
+        "class Marker { construct() { } }\n\
          fn main(): Void {\n\
              mut maybe: Int32? = null;\n\
              mut map: Map<Int32, String> = Map();\n\
@@ -1177,16 +1176,19 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
              mut range = 1..=3:1;\n\
              mut regex = re'a+';\n\
              mut channel: Channel<Int32> = Channel(1);\n\
-             mut job = spawn work();\n\
              mut value: Int32 = 1;\n\
              mut pointer: Pointer<Int32> = unsafe { Pointer.from(value) };\n\
              mut marker = Marker();\n\
              mut pin: Pin<Marker> = Pin(marker);\n\
-             stdout.println(maybe, map, set, range, regex, channel, job, pointer, pin);\n\
+             stdout.println(maybe, map, set, range, regex, channel, pointer, pin);\n\
          }",
     );
     let main = module.function("main").expect("main exists");
-    let kinds = instructions(main);
+    let kinds = module
+        .functions
+        .iter()
+        .flat_map(instructions)
+        .collect::<Vec<_>>();
     let calls = kinds
         .iter()
         .filter_map(|kind| match kind {
@@ -1213,7 +1215,7 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
         kinds.iter().any(|kind| matches!(kind, InstKind::Unwrap(_))) && main.blocks.len() > 1,
         "nullable rendering must branch before unwrapping: {kinds:?}"
     );
-    for text in ["<Channel>", "<Job>", "<Pointer>", "<Pin>"] {
+    for text in ["<Channel>", "<Pointer>", "<Pin>"] {
         assert!(
             module.strings.iter().any(|value| value == text),
             "missing {text}"

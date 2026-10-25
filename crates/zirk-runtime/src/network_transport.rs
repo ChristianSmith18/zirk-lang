@@ -347,6 +347,13 @@ pub struct UdpDatagramSocket {
 }
 
 impl UdpDatagramSocket {
+    /// Refreshes the exact scopes after an operation-boundary approval.
+    /// Existing handles can then use a newly approved destination without
+    /// inheriting unrelated host authority.
+    pub fn replace_grant(&mut self, grant: Arc<EffectiveNetworkGrant>) {
+        self.grant = grant;
+    }
+
     /// Creates an outbound socket on an ephemeral local port and connects it
     /// to one exact approved peer. The ephemeral local bind grants no inbound
     /// authority.

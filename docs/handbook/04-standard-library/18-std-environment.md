@@ -4,12 +4,7 @@
 process environment. `Environment` is the full contract name and `Env` is its
 exact preferred alias. They expose the same static operations.
 
-Environment and network permissions in a package's `.zkinit` declare
-requirements; they do not grant access. `zirk permissions approve` resolves
-the application's locked dependency graph and asks for explicit consent to
-the union of application and package requirements. The approval is bound to
-the dependency manifests and lockfiles, so changing a transitive requirement
-requires approval again.
+Applications and packages declare capability kinds in `requires`; those declarations do not grant access. `Env.get` and secret operations request the concrete environment name when reached. Interactive consent is operation-local and is bound to the locked requester graph; non-interactive runs fail closed.
 
 Name matching follows the host platform: exact and case-sensitive on Unix,
 ordinal and case-insensitive on Windows. Permission checks use the same rule as
@@ -139,20 +134,13 @@ inmut port = Env.get<Int32>(name:);
 
 ## Permissions and non-disclosure
 
-Applications grant exact names or reviewed name patterns in `.zkinit`.
-Libraries declare requirements but cannot grant themselves access. Runtime code
-never prompts or edits the manifest.
-
-After declaring permissions, approve the exact request from the project root:
-
-```sh
-zirk permissions approve .
-```
-
-The command prints the scopes and saves consent only after you type `approve`.
-`zirk run .` uses that signed approval only while the current manifest still
-matches. A missing, changed, or invalid approval grants no access.
-Revoke the saved approval with `zirk permissions revoke .`.
+The manifest declares `environment.read`, `environment.list_names`, or
+`secrets.read`; it does not contain environment names or a user grant. At first
+use, the runtime identifies the exact name and requester and asks `[y/N]` when
+a terminal is available. Approval saves that name in the user-owned consent
+store. A no-TTY operation is denied without hanging. The `permissions inspect`,
+`diff`, `history`, and `revoke` commands show or remove the saved consent; the
+former blanket `permissions approve` command does not create a grant.
 
 An unauthorized read returns `EnvironmentError.PermissionDenied` without
 revealing whether the requested variable exists. `contains` follows the same
@@ -160,8 +148,8 @@ rule, so it cannot be used as an existence side channel.
 
 `list_names()` returns only names visible under the effective grant, in
 lexicographic order for stable results across platforms. Discovering all
-environment names requires an explicit broad permission and the normal
-high-risk developer approval. It never returns values; temporary process-local
+environment names requires the separate `environment.list_names` capability and explicit
+consent for that operation. It never returns values; temporary process-local
 copies used by `contains()` and `list_names()` are zeroized after inspection.
 This does not erase the operating system's environment storage.
 

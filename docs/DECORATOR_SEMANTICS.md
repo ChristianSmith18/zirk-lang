@@ -145,9 +145,9 @@ fn dec RecoverMissing(default_user: User) {
 
 ## 6. Contract preservation
 
-Wrapping preserves name, visibility, parameters, labels, defaults, variadics, generics, constraints, return type, receiver mutability, override slot, documentation, source mapping, and callable identity. Additional inferred errors and permissions remain visible.
+Wrapping preserves name, visibility, parameters, labels, defaults, variadics, generics, constraints, return type, receiver mutability, override slot, documentation, source mapping, and callable identity. Additional inferred errors and capability requirements remain visible.
 
-Augmentation may add compatible declarations or contracts. It cannot delete or silently rename user declarations, reduce visibility, change an existing public signature, remove errors or permissions, replace a body without provenance, or weaken typing, mutability, ownership, permission, or safety rules.
+Augmentation may add compatible declarations or contracts. It cannot delete or silently rename user declarations, reduce visibility, change an existing public signature, remove errors or capability requirements, replace a body without provenance, or weaken typing, mutability, ownership, capability, or safety rules.
 
 Generated public API appears in documentation, `public.api`, compatibility analysis, language tooling, and source maps.
 
@@ -247,13 +247,22 @@ error[E72xx]: generated method `validate` returns the wrong type
    = required return: Result<Void, ValidationError>
 ```
 
-## 13. Build effects, permissions, and caching
+## 13. Build effects, requirements, and caching
 
-Decorator arguments and expansion use the existing permission model. Privileged operations require an application grant with `during: build` or `both`. A library declares `requires` and cannot grant itself authority; runtime authority does not imply build authority.
+Decorator expansion is checked and validated before generated code can run.
+`.zkinit` has one `requires` list and no `during: build` permission phase.
+Requirements declare possible capability needs; they are not consent to perform
+an external effect. The current public Syntax API does not expose filesystem,
+network, process, or environment operations to decorators. If a future
+compiler-time API performs a protected effect, it must use the same finite
+capability vocabulary and a separately specified explicit operation boundary;
+this specification does not imply ambient build access or a build-time grant.
 
-Every observed value becomes a build input. The fingerprint includes decorator implementation/version, arguments, typed target, configuration, grants, observations, and transitive dependencies. Matching fingerprints reuse validated expansion; changes invalidate affected nodes only.
-
-Permission or requester changes use signed approval before execution. Secrets cannot enter generated public structure, source, IR, diagnostics, logs, manifests, lockfiles, or cache keys.
+Every observed value becomes a build input. The fingerprint includes decorator
+implementation/version, arguments, typed target, configuration, observations,
+and transitive dependencies. Matching fingerprints reuse validated expansion;
+changes invalidate affected nodes only. Secrets cannot enter generated public
+structure, source, IR, diagnostics, logs, manifests, lockfiles, or cache keys.
 
 ## 14. Runtime behavior and framework generation
 

@@ -1,45 +1,45 @@
-# Permission Approval and Audit
+# Permission approval and audit
 
-Manifest declaration is not developer consent. Zirk stores consent outside the
-repository in a signed OS-protected record bound to project name, absolute
-canonical location, user/device, exact scopes/phases, and every requesting
-dependency's version, integrity, and transitive path.
+`requires` declares possible operations. User consent is stored separately in
+the current user's Zirk security directory, outside the repository. A signed
+record binds exact approved resource scopes to the canonical project identity
+and the locked dependency/requester graph. Editing a manifest or installing a
+package cannot create consent. Moving a project, changing its identity, or
+changing the locked requester graph makes the previous record stale.
 
-Moving or renaming a project, widening authority, adding/updating a requester,
-or changing requester integrity/path/phase requires approval. Narrowing does
-not. A library that edits `.zkinit` gains nothing because it cannot produce the
-matching signature. Deleted or corrupt state grants nothing and triggers
-reconstruction or reapproval.
-
-## Incremental fast path
-
-Authority-bearing commands compare signed project-location, manifest,
-permission, lockfile, requester-subgraph and approval fingerprints. An exact
-match continues without another prompt or full scan. A change recomputes only
-affected dependency-graph segments.
-
-## Interactive approval
-
-The CLI displays the grant, phase, call path, requester, dependency path and
-manifest diff, then offers allow once, approve this exact set, or deny. Accepted
-changes use the `.zkinit` parser and formatter. Dynamic targets require a
-developer-chosen pattern. An `all` grant shows a critical warning and requires
-typing the project name; Enter or generic `--yes` cannot approve it.
-
-CI uses a protected explicit policy and fails noninteractively on widening.
-Deployed applications never prompt or modify their source.
+## Inspecting consent
 
 ```text
-zirk permissions show
-zirk permissions diff
-zirk permissions approve
-zirk permissions revoke
-zirk permissions history
+zirk permissions inspect .
+zirk permissions diff .
+zirk permissions history .
+zirk permissions revoke .
 ```
 
-History shows project name/location, requester, scope, phase, approver and time
-without secrets. Revocation applies before the next privileged execution.
+`inspect` shows direct and transitive requirements, requesters, dependency
+paths, and currently saved exact resources. `diff` compares the requirement
+tree with signed consent. `history` verifies signed approval/revocation events
+and shows requester, resource, actor, and timestamp. `revoke` removes the
+project's approval record; a later operation must request or receive consent
+again. `zirk permissions approve` no longer creates a project-wide grant; it
+reports that consent is requested for the exact resource when code reaches the
+operation.
+
+## First use
+
+At an unapproved protected operation, an interactive terminal displays the
+project, operation, capability, concrete resource, requesting package, and
+dependency path, then asks for `y` or `n`. `y` persists only that exact scope
+and permits the current operation. `n` stores no consent and denies that
+operation. A non-interactive run denies the operation immediately and does not
+hang or infer approval.
+
+The approval record is user-owned, private to the operating-system user, and
+authenticated with a local signing key. Scope changes and requester graph
+changes invalidate the affected approval. The signed history is append-only
+for audit purposes; failure to write a history event does not undo a grant
+that was already durably saved.
 
 ---
 
-**Previous:** [← Reproducible Builds](13-reproducible-builds.md) · **Next:** [Standard Library →](../04-standard-library/README.md)
+**Previous:** [← Reproducible builds](13-reproducible-builds.md) · **Next:** [Standard library](../04-standard-library/README.md)

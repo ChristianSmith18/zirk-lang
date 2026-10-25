@@ -33,6 +33,16 @@ packaging, developer tooling, decorators, hardening, and eventual
 self-hosting. Every feature requires one owning phase, end-to-end tests,
 diagnostics, and a documentation/status update.
 
+Phase 6 has delivered a scoped project-system slice: typed `.zkinit`,
+application `entry` and package `root`, top-level entry execution without an
+implicit source `fn main`, globals, logical-name dependencies, unified
+`requires` declarations, exact runtime consent for exposed network and
+environment APIs, `.zkinit` editor support, and `zirk init` with interactive
+and `-y` defaults. Registry/Git acquisition, package publication, and
+filesystem/process APIs remain incomplete. The [feature status](../11-reference/12-feature-status.md)
+and [current limitations](07-current-limitations.md) pages define the current
+boundary.
+
 Future features require an explicit specification change and compatibility
 analysis. Excluded 1.x ideas are not automatically roadmap commitments, and a
 completed documentation design is not an implementation-complete claim.

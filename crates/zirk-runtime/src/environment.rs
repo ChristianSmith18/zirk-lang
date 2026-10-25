@@ -208,19 +208,15 @@ fn with_effective_grant_for_names<T>(
 }
 
 fn ensure_process_grant() {
-    let mut guard = grant_lock()
+    let scopes = crate::permissions::current_scopes();
+    *grant_lock()
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if guard.is_none()
-        && let Some(verified) = crate::permissions::verified_grant()
-    {
-        let scopes = verified.scopes();
-        *guard = Some(EffectiveEnvironmentGrant::from_verified_scopes(
-            scopes.environment_read.iter().cloned(),
-            scopes.environment_secrets.iter().cloned(),
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(EffectiveEnvironmentGrant::from_verified_scopes(
+            scopes.environment_read,
+            scopes.environment_secrets,
             scopes.environment_list_names,
         ));
-    }
 }
 
 /// Stable result shape shared with generated code for environment reads.
@@ -295,7 +291,18 @@ pub unsafe extern "C" fn zirk_environment_contains(
         };
         return;
     };
-    let result = with_effective_grant(|grant| contains(unsafe { name.as_str() }, false, grant));
+    let text = unsafe { name.as_str() };
+    if !crate::permissions::request_resource("environment.read", text) {
+        unsafe {
+            *out = EnvironmentReadOut {
+                kind: 1,
+                error: error_discriminant(EnvironmentValueError::PermissionDenied),
+                payload: std::ptr::null_mut(),
+            }
+        };
+        return;
+    }
+    let result = with_effective_grant(|grant| contains(text, false, grant));
     let outcome = match result {
         Ok(value) => EnvironmentReadOut {
             kind: 0,
@@ -326,6 +333,21 @@ unsafe fn environment_get(name: *const c_void, out: *mut EnvironmentReadOut, sec
         return;
     };
     let text = unsafe { name.as_str() };
+    let capability = if secret {
+        "secrets.read"
+    } else {
+        "environment.read"
+    };
+    if !crate::permissions::request_resource(capability, text) {
+        unsafe {
+            *out = EnvironmentReadOut {
+                kind: 1,
+                error: error_discriminant(EnvironmentValueError::PermissionDenied),
+                payload: std::ptr::null_mut(),
+            }
+        };
+        return;
+    }
     let result = with_effective_grant(|grant| get(text, secret, grant));
     let outcome = match result {
         Ok(value) => {
@@ -357,6 +379,16 @@ unsafe fn environment_get(name: *const c_void, out: *mut EnvironmentReadOut, sec
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_environment_list_names(out: *mut EnvironmentReadOut) {
     if out.is_null() {
+        return;
+    }
+    if !crate::permissions::request_resource("environment.list_names", "all environment names") {
+        unsafe {
+            *out = EnvironmentReadOut {
+                kind: 1,
+                error: error_discriminant(EnvironmentValueError::PermissionDenied),
+                payload: std::ptr::null_mut(),
+            }
+        };
         return;
     }
     let result = with_effective_grant_for_names(list_names);
@@ -403,8 +435,21 @@ pub unsafe extern "C" fn zirk_environment_list_names(out: *mut EnvironmentReadOu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zirk_runtime_core::permission_grant::PermissionScopes;
 
     static GRANT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn install_runtime_permission_scope(capability: &str, resource: &str) {
+        let mut scopes = PermissionScopes::default();
+        match capability {
+            "environment.read" => {
+                scopes.environment_read.insert(resource.to_owned());
+            }
+            "environment.list_names" => scopes.environment_list_names = true,
+            _ => panic!("unsupported test capability {capability}"),
+        }
+        crate::permissions::replace_current_scopes_for_test(scopes);
+    }
 
     #[test]
     fn windows_lookup_zero_results_preserve_missing_empty_and_platform_errors() {
@@ -504,7 +549,10 @@ mod tests {
 
     #[test]
     fn native_leaf_fails_closed_before_host_lookup_without_a_grant() {
-        let _guard = GRANT_TEST_LOCK.lock().unwrap();
+        let _guard = GRANT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::permissions::replace_current_scopes_for_test(PermissionScopes::default());
         revoke_effective_grant();
         let name = crate::string::alloc_owned("ZIRK_TEST_ENVIRONMENT_UNGRANTED");
         let mut out = EnvironmentReadOut {
@@ -558,11 +606,17 @@ mod tests {
 
     #[test]
     fn contains_ffi_returns_only_the_boolean_for_authorized_names() {
-        let _guard = GRANT_TEST_LOCK.lock().unwrap();
+        let _guard = GRANT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let present = std::env::vars_os()
             .find_map(|(name, _)| name.into_string().ok())
             .expect("the test runner supplies a UTF-8 environment entry");
         let absent = format!("ZIRK_TEST_ABSENT_{}", std::process::id());
+        let mut runtime_scopes = PermissionScopes::default();
+        runtime_scopes.environment_read.insert(present.clone());
+        runtime_scopes.environment_read.insert(absent.clone());
+        crate::permissions::replace_current_scopes_for_test(runtime_scopes);
         install_effective_grant(EffectiveEnvironmentGrant::from_verified_scopes(
             [present.clone(), absent.clone()],
             std::iter::empty(),
@@ -585,6 +639,7 @@ mod tests {
         });
         assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
         revoke_effective_grant();
+        crate::permissions::replace_current_scopes_for_test(PermissionScopes::default());
     }
 
     #[test]
@@ -621,10 +676,13 @@ mod tests {
 
     #[test]
     fn list_names_ffi_builds_a_gc_tracked_zirk_list() {
-        let _guard = GRANT_TEST_LOCK.lock().unwrap();
+        let _guard = GRANT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (name, _) = std::env::vars_os()
             .find_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .expect("the test runner supplies a UTF-8 environment entry");
+        install_runtime_permission_scope("environment.list_names", "all environment names");
         install_effective_grant(EffectiveEnvironmentGrant::from_verified_scopes(
             [name.clone()],
             std::iter::empty(),
@@ -638,14 +696,29 @@ mod tests {
             };
             unsafe { zirk_environment_list_names(&mut out) };
             assert_eq!(out.kind, 0);
-            assert_eq!(unsafe { crate::list::zirk_rt_list_length(out.payload) }, 1);
-            let slot = unsafe { crate::list::zirk_rt_list_element(out.payload, 0, 8) };
-            let name_handle = unsafe { *(slot as *const *mut c_void) };
-            let actual = unsafe { crate::string::borrow(name_handle) }.unwrap();
-            assert_eq!(unsafe { actual.as_str() }, name);
+            let length = unsafe { crate::list::zirk_rt_list_length(out.payload) };
+            assert!(length > 0);
+            let mut found_expected_name = false;
+            for index in 0..length {
+                let slot = unsafe {
+                    crate::list::zirk_rt_list_element(
+                        out.payload,
+                        i64::try_from(index).expect("environment list index fits in i64"),
+                        8,
+                    )
+                };
+                let name_handle = unsafe { *(slot as *const *mut c_void) };
+                let actual = unsafe { crate::string::borrow(name_handle) }.unwrap();
+                let actual = unsafe { actual.as_str() };
+                assert!(!actual.contains('='));
+                assert!(!actual.starts_with("ZIRK_RUNTIME_"));
+                found_expected_name |= actual == name;
+            }
+            assert!(found_expected_name);
             0
         });
         assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
         revoke_effective_grant();
+        crate::permissions::replace_current_scopes_for_test(PermissionScopes::default());
     }
 }

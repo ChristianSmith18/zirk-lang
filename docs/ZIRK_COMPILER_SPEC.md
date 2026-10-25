@@ -54,7 +54,7 @@ The public API allows:
 
 It does not allow mutating internal memory, fabricating invalid nodes, bypassing
 the type checker, or reaching the filesystem, network or processes without
-an application `permissions` grant whose operation is marked `during: build`.
+a `requires` declaration for the capability; build-time consent phases are not part of the manifest.
 
 Transformations are re-parsed, re-resolved, re-typed and re-validated. The
 compiler preserves traceability between original and generated code for
@@ -232,7 +232,7 @@ Minimum commands:
 
 ```text
 zirk new <name>       create a new project
-zirk init             initialize Zirk in an existing directory
+zirk init [-y]        initialize a canonical .zkinit interactively or with defaults
 zirk run [source]     compile incrementally and run
 zirk build [source]   produce artifacts
 zirk check            analyze without generating code

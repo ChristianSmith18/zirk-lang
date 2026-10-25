@@ -27,7 +27,7 @@ R`, and closed-domain `match` is exhaustive with no pattern guards.
 
 ## Effects belong to the project
 
-Filesystem, network, process, environment, and compile-time access are declared capabilities. A library declares requirements; the final application grants permissions. Native resources also have explicit cleanup contracts rather than depending on nondeterministic object finalization.
+Applications and libraries declare capabilities in one finite `requires` list. At runtime, users approve exact resources when currently protected network, environment, or secret operations are reached. Filesystem and process APIs are not exposed yet. Native resources also have explicit cleanup contracts rather than depending on nondeterministic object finalization.
 
 ## Recommended route
 

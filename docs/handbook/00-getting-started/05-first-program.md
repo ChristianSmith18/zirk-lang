@@ -4,11 +4,13 @@ This chapter builds the smallest complete Zirk application and explains every fi
 
 ## Create the project
 
-The normative CLI creates a project directory with `zirk new`:
+Create the project directory and initialize its manifest:
 
 ```console
-zirk new hello-zirk
+mkdir hello-zirk
 cd hello-zirk
+zirk init -y
+mkdir -p src
 ```
 
 A minimal application has this shape:
@@ -22,7 +24,7 @@ hello-zirk/
 └── test/
 ```
 
-`.zkinit` describes the project. `zirk.lock` records an exact dependency resolution and hashes; it is produced and maintained by dependency commands rather than edited as application source. `src/main.zrk` contains the entry function.
+`.zkinit` describes the project. `zirk.lock` records an exact dependency resolution and hashes; it is produced and maintained by dependency commands rather than edited as application source. `src/main.zrk` is the selected entry file. `zirk init -y` writes the manifest but does not create source files.
 
 ## Describe the application
 
@@ -37,7 +39,7 @@ project {
 }
 ```
 
-Only applications define the final entry point and grant runtime permissions. Libraries expose an API and declare requirements; they do not decide what the consuming application may access.
+Applications select an entry file and declare possible capabilities with `requires`. Packages expose an API and declare their own requirements; the user's exact resource consent is requested at runtime.
 
 ## Write the entry point
 
@@ -46,12 +48,10 @@ Use the standard output API in `src/main.zrk`:
 ```zirk
 import { stdout } from std.io;
 
-fn main(): Void {
-    stdout.println("Hello from Zirk");
-}
+stdout.println("Hello from Zirk");
 ```
 
-The import is explicit: `stdout` is not automatically global. `main` takes no arguments and returns `Void`, which corresponds to a successful process exit. Programs that need command-line arguments obtain them from the process APIs rather than receiving a mandatory parameter.
+The import is explicit: `stdout` is not automatically global. The selected file executes its top-level statements in order; no source-level `fn main` is required. A function named `main` is ordinary code and runs only when called.
 
 ## Check, run, and build
 
@@ -86,10 +86,8 @@ fn greeting(name: String): String {
     return "Hello, {name}";
 }
 
-fn main(): Void {
-    inmut name = "Zirk programmer";
-    stdout.println(greeting(name));
-}
+inmut name = "Zirk programmer";
+stdout.println(greeting(name));
 ```
 
 The compiler infers `name` as `String`, while the function's public contract states its parameter and return type. `inmut` prevents rebinding `name`; use `mut` only when later reassignment is part of the design.

@@ -76,7 +76,7 @@ behavior belong in packages built on this module.
 > peers. A client may be shared by tasks in the same
 > approved executor and project/manifest identity. HTTP/1.1 requests use a
 > cooperative FIFO queue; HTTP/2 allows up to eight simultaneous streams on
-> one connection. Every request checks its exact network grant. `close()` waits
+> one connection. Every request checks its exact network consent. `close()` waits
 > for admitted operations. If cancellation interrupts `close()` before the
 > drain completes, the client remains open and may be closed again. Executor
 > shutdown closes any remaining client handles. HTTPS uses
@@ -109,7 +109,7 @@ behavior belong in packages built on this module.
 > values. `HTTPRequest` exposes parsed `method()`, `target()`, `body()`, and
 > `header_values(name)`; request-header lookup preserves repeated values in
 > wire order. `HTTPServer.bind(endpoint)` returns a listener after the exact
-> listen-grant check and maps TCP failures to `HTTPError`. The native preview's
+> listen-consent check and maps TCP failures to `HTTPError`. The native preview's
 > `HTTPServer.serve_once(stream, handler)`
 > handles one accepted TCP stream; `HTTPServer.serve_next(listener, handler)`
 > accepts and serves one connection, while
@@ -246,11 +246,11 @@ behavior belong in packages built on this module.
 > `HTTP.get_following(url, max_redirects = 5)` follows at most 20 hops and only
 > 301, 302, 303, 307,
 > and 308 responses, resolves one `Location` header per hop, rejects malformed
-> or ambiguous locations, and rechecks the exact network grant through each
+> or ambiguous locations, and rechecks the exact network consent through each
 > ordinary `HTTP.get` call. Both it and `HTTPClient.get_following` use iterative
 > loops, so the 20-hop maximum does not grow the Zirk task stack. Its
 > approved-project E2E covers a relative redirect,
-> a cross-origin grant denial, and a redirect loop limit on macOS.
+> a cross-origin consent denial, and a redirect loop limit on macOS.
 > `HTTPClient.request_following_with_history` and
 > `request_body_following_with_history` return `HTTPRedirectResult`, which
 > keeps the final `HTTPResponse` and a bounded list of followed hops. Each hop
@@ -460,7 +460,7 @@ match Env.get_secret("API_TOKEN") {
 }
 ```
 
-The sink requires HTTPS and the exact `network.connect.origins` grant for the
+The sink requires HTTPS and the exact `network.connect capability` grant for the
 request URL. It rejects an existing field with the same name, never converts
 the secret to a Zirk `String`, and does not follow redirects.
 
@@ -772,7 +772,7 @@ with `HTTPRedirectPolicy.SameOrigin` or `Follow` on
 `HTTPClient.request_following` for byte buffers, or `request_body_following`
 for any `HTTPBody` variant. The default policy is `Never`; the hop limit
 defaults to five and is capped at twenty. Each hop resolves exactly one
-`Location`, rechecks the exact network grant, and rejects loops. `SameOrigin`
+`Location`, rechecks the exact network consent, and rejects loops. `SameOrigin`
 returns a cross-origin redirect response without following it. Cross-origin
 requests remove known credential headers and preserve ordinary headers. A
 `303` changes the method to GET, except HEAD, and drops the body and its content
@@ -1288,9 +1288,9 @@ Use `HTTPServer.serve_tls_websocket_once` for an accepted `TLSStream`. When
 TLS negotiates HTTP/2, it accepts RFC 8441 extended CONNECT; otherwise it uses
 the HTTP/1.1 upgrade contract. A client sends extended CONNECT only after the
 server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`. Bind and accept still
-require the corresponding `network.listen.addresses` grant.
+require the exact endpoint consent under `network.listen`.
 
-The client requires an approved `network.connect.origins` grant, just like
+The client requires saved consent for its exact destination under `network.connect`, just like
 other HTTP clients. Its message type preserves the distinction between text,
 binary, Ping, Pong, Close, and end of stream:
 
@@ -1377,7 +1377,7 @@ the application-selected close code and UTF-8 reason, sends the close frame,
 and waits for the peer's close response within the close timeout.
 
 `connect_http3(url, origin, subprotocols)` forces RFC 9220 WebSocket over
-HTTP/3. It requires an `https` URL, the same exact-origin network grant as
+HTTP/3. It requires an `https` URL, the same exact-origin network consent as
 other HTTP clients, TLS 1.3, and the runtime's optional `http3` feature. The
 runtime validates the negotiated subprotocol and keeps the QUIC/H3 driver alive
 for the WebSocket session. A runtime loopback peer verifies the extended
@@ -1481,10 +1481,11 @@ against a live remote origin.
 
 ## Security and permissions
 
-Client operations require `network.connect.origins`; server binds require
-`network.listen.addresses`. Package requirements are collected from the
-application's locked dependency graph and require explicit application
-approval; package declarations never grant authority. Every redirect, DNS result, reconnect, proxy hop,
+Applications and packages declare `network.connect` and/or `network.listen` in
+`requires`. A declaration is not consent: the runtime checks the concrete
+origin or bind endpoint at each operation and prompts for exact user approval
+when needed. Package provenance comes from the locked dependency graph;
+packages never grant authority. Every redirect, DNS result, reconnect, proxy hop,
 TLS server name, and WebSocket destination is validated before its external
 effect. URL user information, authorization, cookies, proxy credentials, and
 security tokens are redacted from diagnostics. Core header values mark

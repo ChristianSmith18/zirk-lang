@@ -7,7 +7,7 @@ Core declarations and control words include `fn`, `gen`, `yield`, `class`,
 `throw`, `throws`, `unsafe`, `commit`, `task`, `await`, `select`, `parallel`, `thread`, `abstract`,
 `implements`, `extends`, `override`, `final`, `inner`, `from`, `as`, `is`, `static`, `super`,
 `public`, `private`, and `protected`. Manifest control includes
-`requires`, `permissions`, and `during`. `scope`, `shield`, `after`,
+`requires`. The old `permissions`, `compile_permissions`, and `during` manifest forms are removed. `scope`, `shield`, `after`,
 `cancelled`, and `default` are contextual words in the applicable task/select
 forms rather than general reserved values.
 

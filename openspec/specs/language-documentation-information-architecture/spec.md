@@ -96,11 +96,11 @@ Unlinked planned entries that duplicate published units SHALL be removed or conv
 - **THEN** SUMMARY does not retain a second unlinked placeholder for the same material
 
 ### Requirement: Canonical ownership includes failures resources and authority
-The documentation source map SHALL place accepted error/resource/permission semantics after the master and consolidated contributor checkpoint, assign normative ownership across language/runtime/stdlib/compiler specifications, and classify template and old phase answers as historical when conflicting.
+The documentation source map SHALL place accepted error/resource/permission semantics after the master and consolidated contributor checkpoint, assign normative ownership across language/runtime/stdlib/compiler specifications, and classify template and old phase answers as historical when conflicting. Current project permission documentation SHALL describe one `requires` block and operation-local consent without a second `permissions` block or build/runtime phase split.
 
 #### Scenario: Agent resolves permission conflict
-- **WHEN** an agent finds `compile_permissions` in an older document and `permissions` with `during` in the current checkpoint
-- **THEN** the source map directs the agent to use the current two-block model
+- **WHEN** an agent finds legacy `compile_permissions`, `permissions`, or `during` forms in an older document
+- **THEN** the source map directs the agent to the current single `requires` model and exact operation-local consent
 
 ### Requirement: Navigation exposes the complete implementation path
 The handbook summary, reference indexes, glossary, feature status, and contributor reading order SHALL link error, resource, permission, environment/secret, CLI approval, and security chapters without duplicate placeholders.

@@ -489,6 +489,8 @@ impl<'a> Parser<'a> {
         let mut functions = Vec::new();
         let mut type_aliases = Vec::new();
         let mut externs = Vec::new();
+        let mut body = Vec::new();
+        let mut executable_started = false;
 
         while !self.at_eof() {
             if self.check_keyword(Keyword::Package) {
@@ -496,6 +498,16 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.check_keyword(Keyword::Import) {
+                if executable_started {
+                    let span = self.peek_span();
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "static imports must precede file-scope statements",
+                        "this file has already begun executing statements",
+                        Some("move the import above the first executable statement".into()),
+                    );
+                }
                 if let Some(i) = self.parse_import() {
                     imports.push(i);
                 }
@@ -503,6 +515,18 @@ impl<'a> Parser<'a> {
             }
 
             if self.check_keyword(Keyword::Use) {
+                if executable_started {
+                    let span = self.peek_span();
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "static imports must precede file-scope statements",
+                        "this file has already begun executing statements",
+                        Some(
+                            "move the use declaration above the first executable statement".into(),
+                        ),
+                    );
+                }
                 if let Some(u) = self.parse_use() {
                     uses.push(u);
                 }
@@ -666,6 +690,21 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if let Some(statement) = self.parse_stmt() {
+                if matches!(statement, Stmt::Return(_)) {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        statement.span(),
+                        "`return` is not allowed at file scope",
+                        "a project entry runs the file body to completion",
+                        Some("use a function return inside a declared function".into()),
+                    );
+                }
+                executable_started = true;
+                body.push(statement);
+                continue;
+            }
+
             let span = shared_at.unwrap_or_else(|| self.peek_span());
             let found = self.peek().description();
             let (cause, help) = if shared_at.is_some() {
@@ -676,7 +715,7 @@ impl<'a> Parser<'a> {
             } else {
                 (
                     format!("found {found} at the top level of the file"),
-                    "a file contains `import`, `use`, `enum`, `class`, `contract`, `trait` and `fn` declarations",
+                    "a file contains static declarations followed by executable statements",
                 )
             };
             self.error(
@@ -705,6 +744,7 @@ impl<'a> Parser<'a> {
             functions,
             type_aliases,
             externs,
+            body,
             span: start.to(end),
         }
     }

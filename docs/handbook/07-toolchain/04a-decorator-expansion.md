@@ -79,16 +79,15 @@ decorator's public contract explicitly changes them. Added throwable, Result,
 resource, permission or cancellation behavior becomes visible in checked
 metadata and diagnostics.
 
-## Build effects and permissions
+## Build effects and capability requirements
 
-Pure inspection/generation requires no external authority. Filesystem,
-environment, network, process or other build effects require library `requires`,
-application `permissions`, the `during: build` phase, and signed developer
-approval. A decorator cannot edit `.zkinit`, approve itself, or inherit runtime
-authority merely because the application has it.
+The current Syntax API exposes no protected host operations to decorator code.
+`.zkinit` has one `requires` list and no build/runtime permission phases. If a
+future compiler service performs a protected effect, it must define a concrete
+operation boundary and consent behavior before exposing that service.
 
-Observed inputs enter the expansion fingerprint. Permission denial occurs before
-the effect and does not leave a partially committed augmentation.
+Observed inputs enter the expansion fingerprint. Generated source returns
+through normal validation.
 
 ## Bounded rounds and cycles
 

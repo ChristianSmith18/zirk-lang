@@ -95,23 +95,49 @@ An ordinary local cannot hide another still-visible local or parameter. Lambda
 parameters are the deliberate capture exception: the plain name selects the
 lambda-local binding and `this.name` selects the captured outer value.
 
-Only an `application` may declare globals, and exclusively in the `globals`
-block of `.zkinit`:
+Only an `application` may declare globals in `.zkinit`; packages cannot
+own application state. Keys need not be uppercase. A declaration is either a
+type shorthand or an expanded object:
 
 ```text
 globals {
-    inmut APP_NAME: String = "App";
-    // Scalar Atomic<T> is available where the target supports the width.
-    mut REQUEST_COUNT: Atomic<UInt64> = Atomic(0);
+    retry_limit: UInt32;
+    settings: {
+        type: Settings;
+        from: "src/config.zrk";
+        readonly: true;
+    }
 }
 ```
 
-Each consumer uses `use APP_NAME;`. A mutable global accessed from an
-implemented `parallel` boundary must satisfy that boundary's capture and
-ownership checks. Managed `Thread.run` and `Mutex<T>.with` are available on
-their supported native targets. `RwLock`, `Semaphore`, `Barrier`, and `Once`
-remain unavailable as source APIs. Scalar `Atomic<T>` supports Boolean and
-signed/unsigned integers through 64 bits when the target provides that width.
+Expanded entries require `type`; `default`, custom-type `from`, and
+`readonly` are optional. `from` is a project-relative source file. `readonly`
+defaults to `false`; `true` prevents `Global.set` but not `Global.get`. When no
+explicit default is supplied, built-ins use their normal type default. Custom
+objects use constructor parameter defaults, falling back to each parameter
+type's default. A custom type or default that cannot be resolved is diagnosed
+before execution.
+
+The compiler infers a global's type from its literal manifest key:
+
+```zirk
+inmut settings = Global.get("settings"); // Settings
+Global.set("retry_limit", 4);           // checked as UInt32
+mut changes = Global.watch("retry_limit");
+```
+
+An explicit generic argument cannot override the declared type. Unknown or
+dynamic keys are rejected where compile-time key resolution is required.
+`Global.set` replaces a snapshot, not a mutable alias. Equal values do not
+advance revisions or emit events. `Global.watch` captures an atomic initial
+snapshot, emits no initial event, and returns each actual change with
+`previous`, `current`, and `revision`. Delivery is ordered and bounded;
+subscriptions close explicitly or with their owning scope, and a slow observer
+receives a lag error and can recover from a fresh snapshot.
+
+Global initialization occurs after project/dependency validation and before
+imported modules and application entry statements. A failed initializer
+prevents those bodies from running.
 
 ## 3. Type system
 
@@ -645,23 +671,45 @@ After `import { stdout } from std.io`, `println("hello")` resolves to
 module, not just `std`; an unimported module, including `stdout`, is never
 made available merely by writing its name.
 
-`.zkinit` is a declarative DSL, not executable code. Its project identity,
-kind (`application` or `package`), entry, source roots and dependencies are
-resolved before source bodies. `zirk.lock`, when dependencies are declared,
-pins their source, version, hash and package-root entry. Registry, Git, local
-and vendored acquisition are transport details; source code always imports the
-logical package name. It also contains `build_targets`, `globals`,
-`permissions`, `requires` and dependencies according to project type. Libraries request authority with `requires`; applications grant
-it with `permissions`. Each operation uses `during: build`, `runtime` or `both`;
-there is no separate `compile_permissions` block. It contains no global imports and no
-arbitrary compiler/runtime configuration.
+`.zkinit` is a typed declarative DSL, not executable code. Its `project`
+object requires `name`, semantic `version`, and `type` (`application` or
+`package`), with optional `authors`, `description`, and SPDX `license`.
+Applications select `entry` (default `src/main.zrk`); packages select `root`
+(default `src/package.zrk`). Repeated `source "path";` declarations choose
+project-relative source roots, defaulting to `src`. Applications may list
+`build_targets`; explicit CLI `--target` takes precedence, then the manifest
+list, then host detection. `zirk run` always selects the host target.
 
-Permission needs propagate through calls and callable metadata without
-appearing in `Fn` syntax. Source declaration is not consent: commands require a
-signed external approval bound to project name, canonical location and exact
-requester fingerprints. Moves, renames, widening and requester updates require
-reapproval; unchanged fingerprints use an incremental fast path. Deployed
-programs never prompt and dynamic denial returns typed `PermissionDeniedError`.
+The manifest may also contain `dependencies`, `dev_dependencies`, `globals`,
+and the single `requires` block. Dependencies use a stable logical package
+name and either a version shorthand or expanded `from` locator. Source imports
+always use the logical package name. `zirk.lock` pins exact versions, source,
+revision/integrity, and package root. Development dependencies are excluded
+from normal builds and consumers.
+
+`requires` is one finite list of capability identifiers shared by applications
+and packages. `permissions`, `compile_permissions`, and `during` are removed
+syntax. Package needs propagate through the locked graph with package identity
+and dependency-path provenance. A requirement describes possible behavior but
+is not consent. Exact resource approval lives in a signed user-owned store and
+is checked at the protected operation. Missing consent does not stop startup:
+handled `Result` errors stay local, ordinary value contexts project failure to
+`null`, denied effects warn, and no-TTY execution fails closed.
+
+`zirk init` asks for project type, identity, entry/root, optional metadata,
+source roots, and application targets, showing the default for each answer.
+Enter accepts a default; blank optional answers are omitted. `zirk init -y`
+creates the application defaults without a TTY. Existing `.zkinit` files are
+never overwritten.
+
+Project entry files execute their top-level statements sequentially; no
+source-level `fn main` is required. An explicit `zirk run <path>` chooses a
+file for that invocation while retaining containing-project dependencies,
+lockfile, globals, and requirements. Pathless `zirk run` uses the project's
+configured/default application entry. The compiler checks the full static
+import graph before runtime effects. Imported modules initialize once,
+depth-first in source import order, before their importer and the selected
+entry. Import declarations precede executable file-scope statements.
 
 ## 11. Conversion and casts
 
@@ -716,8 +764,7 @@ resolved through `fn dec` lookup or decorator expansion, so the `#` and `@`
 surfaces do not collide.
 
 Decorators use an immutable validated Syntax API. Expansion is hygienic,
-bounded, source-mapped, deterministic and incrementally fingerprinted. External
-effects require approved `during: build` authority. Decorators are erased after
+bounded, source-mapped, deterministic and incrementally fingerprinted. The manifest has no separate build-time permission phase; the current Syntax API does not expose external host effects to decorators. Decorators are erased after
 expansion: there is no `runtime fn dec`, automatic annotation retention, or
 general `Reflection.decorators(...)`. Frameworks explicitly generate ordinary
 typed descriptors and registries. General `comptime {}` remains excluded. The

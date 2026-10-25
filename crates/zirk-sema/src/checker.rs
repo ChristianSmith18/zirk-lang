@@ -18,13 +18,80 @@ use crate::types::{
     GenericInstance, IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo,
     VariantMapping, describe, is_ffi_safe, pending_type,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
 const BORROWED_VIEW_ESCAPE_CODE: Code = Code::new("E0485");
+
+fn capability_for_standard_binding(binding: &str) -> Option<&'static str> {
+    match binding {
+        "std.environment.Environment.get" | "std.environment.Environment.contains_authorized" => {
+            Some("environment.read")
+        }
+        "std.environment.Environment.get_int32"
+        | "std.environment.Environment.get_float64"
+        | "std.environment.Environment.require"
+        | "std.environment.Environment.contains" => Some("environment.read"),
+        "std.environment.Environment.get_secret"
+        | "std.environment.Environment.get_secret_value" => Some("secrets.read"),
+        "std.environment.Environment.list_names" => Some("environment.list_names"),
+        "std.net.tcp.connect"
+        | "std.net.tcp.upgrade_tls"
+        | "std.net.tls.connect"
+        | "std.net.tls.connect_with_trust_roots"
+        | "std.net.tls.connect_with_alpn"
+        | "std.net.tls.connect_with_client_identity"
+        | "std.net.dns.resolve"
+        | "std.http.get"
+        | "std.http.get_cached"
+        | "std.http.request"
+        | "std.http.request_cached"
+        | "std.http.request_secret"
+        | "std.http.head"
+        | "std.http.query"
+        | "std.http.query_with_content_type"
+        | "std.http.post"
+        | "std.http.post_json"
+        | "std.http.post_bytes"
+        | "std.http.request_stream"
+        | "std.http.request_stream_result"
+        | "std.http.request_stream_named_result"
+        | "std.http.get_stream"
+        | "std.http.client_request"
+        | "std.http.client_request_stream"
+        | "std.http.websocket.connect"
+        | "std.http.websocket.connect_http3"
+        | "std.http.websocket.connect_http3_with_trust_roots"
+        | "std.http.websocket.connect_with_trust_roots" => Some("network.connect"),
+        "std.net.tcp.listen"
+        | "std.net.tls.listen"
+        | "std.net.tls.listen_with_client_auth"
+        | "std.net.tls.listen_http"
+        | "std.http.server.serve_once"
+        | "std.http.server.serve_tls_once"
+        | "std.http.server.serve_tls_requests"
+        | "std.http.server.websocket_serve_once"
+        | "std.http.server.websocket_serve_tls_once" => Some("network.listen"),
+        "std.http.server.serve_http3" | "std.http.server.websocket_serve_http3_once" => {
+            Some("network.udp.listen")
+        }
+        "std.net.udp.connect"
+        | "std.net.udp.send"
+        | "std.net.udp.send_to"
+        | "std.net.udp.send_broadcast"
+        | "std.net.udp.send_multicast"
+        | "std.net.udp.join_multicast" => Some("network.udp.send"),
+        "std.net.udp.bind" => Some("network.udp.listen"),
+        "std.net.local.connect" => Some("network.local.connect"),
+        "std.net.local.bind" => Some("network.local.listen"),
+        "std.net.interfaces.snapshot" => Some("network.inspect_interfaces"),
+        other if other.starts_with("std.http.server_") => Some("network.listen"),
+        _ => None,
+    }
+}
 
 fn is_standard_io_source(name: &str) -> bool {
     let name = name.replace('\\', "/");
@@ -77,6 +144,73 @@ pub struct GenericCallInfo {
     pub substitutions: HashMap<u32, Type>,
 }
 
+/// One application global passed from the validated `.zkinit` project model
+/// into semantic analysis. Keeping the manifest boundary as names here lets
+/// the checker resolve custom types only after the complete source graph has
+/// registered its declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGlobalSpec {
+    pub name: String,
+    pub type_name: String,
+    /// Absolute source path selected by `.zkinit`'s optional `from` field.
+    /// Its file scope is the visibility context for resolving the type name.
+    pub type_source: Option<String>,
+    pub readonly: bool,
+    pub has_explicit_default: bool,
+    pub default_function: Option<String>,
+    pub span: Option<Span>,
+}
+
+/// A project global whose manifest type name has been resolved by the checker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGlobalInfo {
+    pub ty: Type,
+    pub readonly: bool,
+    /// Whether values of this type can be copied deeply without preserving
+    /// mutable aliases. Global get/set are unavailable otherwise.
+    pub snapshot_cloneable: bool,
+    pub has_explicit_default: bool,
+    /// Synthetic function checked against the manifest type for an explicit
+    /// default expression. Runtime startup will call this once per global.
+    pub default_function: Option<String>,
+    /// The unique written constructor selected for implicit custom default
+    /// construction. `None` means a built-in type default or an implicit
+    /// zero-argument class constructor.
+    pub default_constructor: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectGlobalOperation {
+    Get,
+    Set,
+    Watch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectGlobalCallInfo {
+    pub name: String,
+    pub operation: ProjectGlobalOperation,
+    pub ty: Type,
+    pub subscription_type: Option<Type>,
+    pub snapshot_type: Option<Type>,
+    pub change_type: Option<Type>,
+    pub change_channel_type: Option<Type>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProjectGlobalSubscriptionOperation {
+    Snapshot,
+    Next,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectGlobalSubscriptionCallInfo {
+    pub operation: ProjectGlobalSubscriptionOperation,
+    pub ty: Type,
+    pub result_type: Type,
+}
+
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
@@ -84,6 +218,13 @@ pub struct CheckedProgram {
     /// are valid only for this checked snapshot.
     pub semantic_index: SemanticIndex,
     pub functions: HashMap<String, Signature>,
+    /// Application globals from `.zkinit`, resolved against the complete
+    /// project's declarations before any function body is type-checked.
+    pub project_globals: HashMap<String, ProjectGlobalInfo>,
+    /// Compiler-resolved `Global` calls, keyed by source call span for IR.
+    pub project_global_calls: HashMap<Span, ProjectGlobalCallInfo>,
+    /// Compiler-resolved methods on the manifest-backed subscription type.
+    pub project_global_subscription_calls: HashMap<Span, ProjectGlobalSubscriptionCallInfo>,
     /// Conservative suspension effect for each checked top-level function,
     /// keyed by the function-name span. An incomplete summary always has
     /// `may_suspend == true`; consumers must never treat it as non-suspending.
@@ -139,6 +280,16 @@ pub struct CheckedProgram {
     pub standard_network_calls: HashMap<Span, String>,
     /// Compiler-owned `std.http` calls resolved from bundled declarations.
     pub standard_http_calls: HashMap<Span, String>,
+    /// Finite runtime capability attached to each compiler-resolved protected
+    /// standard API call. This uses source spans and canonical API bindings,
+    /// never short-name matching.
+    pub protected_api_effects: HashMap<Span, String>,
+    /// Package that owns each user call site which reaches a protected API.
+    /// Standard-library implementation frames are omitted so the nearest
+    /// application or dependency call site remains the runtime requester.
+    pub protected_api_requesters: HashMap<Span, String>,
+    /// Transitive capability effects for functions, methods, and closures.
+    pub callable_capability_effects: HashMap<Span, BTreeSet<String>>,
     /// Compiler-owned `std.json` conversions resolved from bundled declarations.
     pub standard_json_calls: HashMap<Span, String>,
     /// Concrete type-parameter substitutions inferred for direct generic
@@ -985,6 +1136,17 @@ pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) 
     Checker::new(sources, sink).run(program)
 }
 
+/// Checks a project source graph with the application globals declared by its
+/// `.zkinit`. Standalone source checking continues to use [`check`].
+pub fn check_with_globals(
+    sources: &SourceMap,
+    program: &Program,
+    globals: &[ProjectGlobalSpec],
+    sink: &mut DiagnosticSink,
+) -> CheckedProgram {
+    Checker::with_project_globals(sources, sink, globals).run(program)
+}
+
 /// Names types for diagnostics, given the checker's tables.
 struct Names<'t> {
     enums: &'t [EnumType],
@@ -1213,6 +1375,10 @@ impl TypeNames for Names<'_> {
 struct Checker<'a> {
     sources: &'a SourceMap,
     sink: &'a mut DiagnosticSink,
+    project_global_specs: Vec<ProjectGlobalSpec>,
+    project_globals: HashMap<String, ProjectGlobalInfo>,
+    project_global_calls: HashMap<Span, ProjectGlobalCallInfo>,
+    project_global_subscription_calls: HashMap<Span, ProjectGlobalSubscriptionCallInfo>,
     scopes: Scopes,
     resolved_semantic_references: Vec<UnresolvedSemanticReference>,
     semantic_owners: HashMap<Span, Span>,
@@ -1220,6 +1386,8 @@ struct Checker<'a> {
     functions: HashMap<String, Signature>,
     current_function: Option<Span>,
     direct_function_calls: HashMap<Span, HashSet<Span>>,
+    capability_function_calls: HashMap<Span, HashSet<Span>>,
+    direct_function_call_sites: HashMap<Span, Span>,
     local_suspend_seeds: HashMap<Span, EffectSummary>,
     callable_spans: HashSet<Span>,
     parallel_calls: Vec<(Span, Option<Span>)>,
@@ -1279,6 +1447,9 @@ struct Checker<'a> {
     standard_network_calls: HashMap<Span, String>,
     standard_http_calls: HashMap<Span, String>,
     standard_json_calls: HashMap<Span, String>,
+    protected_api_effects: HashMap<Span, String>,
+    protected_api_requesters: HashMap<Span, String>,
+    protected_effect_seeds: HashMap<Span, BTreeSet<String>>,
     /// See [`CheckedProgram::generic_call_substitutions`].
     generic_call_substitutions: HashMap<Span, GenericCallInfo>,
     /// Bare names opened by more than one imported module. They deliberately
@@ -1707,9 +1878,21 @@ pub struct NativeChannels {
 
 impl<'a> Checker<'a> {
     fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
+        Self::with_project_globals(sources, sink, &[])
+    }
+
+    fn with_project_globals(
+        sources: &'a SourceMap,
+        sink: &'a mut DiagnosticSink,
+        project_global_specs: &[ProjectGlobalSpec],
+    ) -> Self {
         let mut checker = Self {
             sources,
             sink,
+            project_global_specs: project_global_specs.to_vec(),
+            project_globals: HashMap::new(),
+            project_global_calls: HashMap::new(),
+            project_global_subscription_calls: HashMap::new(),
             scopes: Scopes::new(),
             resolved_semantic_references: Vec::new(),
             semantic_owners: HashMap::new(),
@@ -1718,6 +1901,8 @@ impl<'a> Checker<'a> {
             functions: HashMap::new(),
             current_function: None,
             direct_function_calls: HashMap::new(),
+            capability_function_calls: HashMap::new(),
+            direct_function_call_sites: HashMap::new(),
             local_suspend_seeds: HashMap::new(),
             callable_spans: HashSet::new(),
             parallel_calls: Vec::new(),
@@ -1758,6 +1943,9 @@ impl<'a> Checker<'a> {
             standard_network_calls: HashMap::new(),
             standard_http_calls: HashMap::new(),
             standard_json_calls: HashMap::new(),
+            protected_api_effects: HashMap::new(),
+            protected_api_requesters: HashMap::new(),
+            protected_effect_seeds: HashMap::new(),
             generic_call_substitutions: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
@@ -2027,9 +2215,36 @@ impl<'a> Checker<'a> {
     /// leaves. These effects seed the same transitive summaries as source
     /// calls, so a wrapper such as `HTTP.get` cannot hide network suspension
     /// from callback restrictions (`Mutex.with`, `Parallel.each`, cleanup).
-    fn mark_standard_library_binding_effect(&mut self, binding: &str) {
+    fn mark_standard_library_binding_effect(&mut self, binding: &str, span: Span) {
+        if let Some(capability) = capability_for_standard_binding(binding) {
+            self.protected_api_effects
+                .insert(span, capability.to_owned());
+            let requester = self.sources.file(span.file).identity().map(|identity| {
+                if identity.package.starts_with("std.") {
+                    None
+                } else {
+                    Some(identity.package.clone())
+                }
+            });
+            if let Some(Some(requester)) = requester {
+                self.protected_api_requesters.insert(span, requester);
+            } else if self.sources.file(span.file).identity().is_none() {
+                self.protected_api_requesters.insert(span, "local".into());
+            }
+            if let Some(function) = self.current_function {
+                self.protected_effect_seeds
+                    .entry(function)
+                    .or_default()
+                    .insert(capability.to_owned());
+            }
+        }
         match binding {
             "std.environment.Environment.get"
+            | "std.environment.Environment.get_int32"
+            | "std.environment.Environment.get_float64"
+            | "std.environment.Environment.require"
+            | "std.environment.Environment.contains"
+            | "std.environment.Environment.get_secret"
             | "std.environment.Environment.get_secret_value"
             | "std.environment.Environment.contains_authorized"
             | "std.environment.Environment.list_names"
@@ -2162,11 +2377,16 @@ impl<'a> Checker<'a> {
     }
 
     fn record_direct_function_call(&mut self, target: Span, call_span: Span) {
+        self.direct_function_call_sites.insert(call_span, target);
         if self.parallel_depth > 0 {
             self.parallel_calls.push((call_span, Some(target)));
         }
         if let Some(caller) = self.current_function {
             self.direct_function_calls
+                .entry(caller)
+                .or_default()
+                .insert(target);
+            self.capability_function_calls
                 .entry(caller)
                 .or_default()
                 .insert(target);
@@ -2245,6 +2465,68 @@ impl<'a> Checker<'a> {
             }
         }
         summaries
+    }
+
+    fn build_capability_summaries(&self, program: &Program) -> HashMap<Span, BTreeSet<String>> {
+        fn class_method_spans(class: &zirk_ast::ClassDecl, spans: &mut Vec<Span>) {
+            spans.extend(
+                class
+                    .methods
+                    .iter()
+                    .filter(|method| method.body.is_some())
+                    .map(|method| method.span),
+            );
+            for nested in &class.nested {
+                class_method_spans(nested, spans);
+            }
+        }
+
+        let mut methods = Vec::new();
+        for class in &program.classes {
+            class_method_spans(class, &mut methods);
+        }
+        let callables: HashSet<Span> = program
+            .functions
+            .iter()
+            .map(|function| function.name.span)
+            .chain(methods)
+            .chain(self.callable_spans.iter().copied())
+            .collect();
+        let mut summaries: HashMap<Span, BTreeSet<String>> = callables
+            .iter()
+            .map(|span| {
+                (
+                    *span,
+                    self.protected_effect_seeds
+                        .get(span)
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        // Iterate to a fixed point so recursive wrappers and methods retain
+        // the protected API effects of every statically resolved callee.
+        loop {
+            let previous = summaries.clone();
+            for caller in &callables {
+                let mut effects = previous.get(caller).cloned().unwrap_or_default();
+                for target in self
+                    .capability_function_calls
+                    .get(caller)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(callee) = previous.get(target) {
+                        effects.extend(callee.iter().cloned());
+                    }
+                }
+                summaries.insert(*caller, effects);
+            }
+            if summaries == previous {
+                return summaries;
+            }
+        }
     }
 
     /// Renders a type for a diagnostic.
@@ -2337,6 +2619,7 @@ impl<'a> Checker<'a> {
         self.resolve_bases(program);
         self.resolve_class_type_param_constraints(program);
         self.declare_members(program);
+        self.resolve_project_globals(program.span);
         self.check_generic_class_lowering(program);
         // Conformance resolves before any function signature or body is
         // checked — a `throws` clause names the adopter, and a body checked
@@ -2384,12 +2667,6 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // A `package` root is compiled as a reusable API surface. It has no
-        // executable entrypoint; applications remain subject to `main`.
-        if program.package.is_none() {
-            self.check_entrypoint(program);
-        }
-
         self.scopes.push();
         for c in Self::class_decls_flat(program) {
             self.check_class(c);
@@ -2408,6 +2685,26 @@ impl<'a> Checker<'a> {
         self.scopes.pop();
 
         let suspend_summaries = self.build_suspend_summaries(program);
+        let callable_capability_effects = self.build_capability_summaries(program);
+        for (call_span, target) in &self.direct_function_call_sites {
+            if !callable_capability_effects
+                .get(target)
+                .is_some_and(|effects| !effects.is_empty())
+            {
+                continue;
+            }
+            let Some(identity) = self.sources.file(call_span.file).identity() else {
+                self.protected_api_requesters
+                    .entry(*call_span)
+                    .or_insert_with(|| "local".into());
+                continue;
+            };
+            if !identity.package.starts_with("std.") {
+                self.protected_api_requesters
+                    .entry(*call_span)
+                    .or_insert_with(|| identity.package.clone());
+            }
+        }
         self.validate_parallel_call_effects(&suspend_summaries);
         self.validate_protected_cleanup_effects(&suspend_summaries);
         self.validate_thread_run_effects(&suspend_summaries);
@@ -2418,6 +2715,9 @@ impl<'a> Checker<'a> {
         CheckedProgram {
             semantic_index,
             functions: self.functions,
+            project_globals: self.project_globals,
+            project_global_calls: self.project_global_calls,
+            project_global_subscription_calls: self.project_global_subscription_calls,
             suspend_summaries,
             standard_stream_source_modules: self.standard_stream_source_modules,
             native_stringifiable: self.native_stringifiable,
@@ -2452,6 +2752,9 @@ impl<'a> Checker<'a> {
             standard_environment_calls: self.standard_environment_calls,
             standard_network_calls: self.standard_network_calls,
             standard_http_calls: self.standard_http_calls,
+            protected_api_effects: self.protected_api_effects,
+            protected_api_requesters: self.protected_api_requesters,
+            callable_capability_effects,
             standard_json_calls: self.standard_json_calls,
             generic_call_substitutions: self.generic_call_substitutions,
             type_params: self.type_params,
@@ -2491,6 +2794,203 @@ impl<'a> Checker<'a> {
                 transferable_resource: self.native_transferable,
             },
         }
+    }
+
+    /// Resolves the manifest's global names only after all source-level type
+    /// declarations and aliases are available, and before function bodies are
+    /// checked. The resulting table is shared by every file in the merged
+    /// project program.
+    fn resolve_project_globals(&mut self, fallback_span: Span) {
+        for global in self.project_global_specs.clone() {
+            let source_span = global.type_source.as_ref().and_then(|source| {
+                self.sources
+                    .files()
+                    .find(|(_, file)| file.name() == source)
+                    .map(|(_, file)| file.span(0, 0))
+            });
+            let span = source_span.or(global.span).unwrap_or(fallback_span);
+            let reference = TypeRef::new(global.type_name.clone(), span);
+            let ty = self.resolve_type(&reference);
+            if ty.is_unknown() {
+                continue;
+            }
+            if ty == Type::VOID {
+                self.error(
+                    codes::VOID_VARIABLE,
+                    span,
+                    format!("global `{}` cannot have type `Void`", global.name),
+                    "a project global must store a value",
+                    Some("declare a concrete value type".into()),
+                );
+                continue;
+            }
+            let default_constructor = if global.has_explicit_default || ty.has_default() {
+                None
+            } else {
+                match self.project_global_default_constructor(ty, &mut HashSet::new()) {
+                    Ok(constructor) => constructor,
+                    Err(reason) => {
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            span,
+                            format!("global `{}` has no deterministic default", global.name),
+                            reason,
+                            Some("provide an explicit `default` for this global".into()),
+                        );
+                        continue;
+                    }
+                }
+            };
+            let snapshot_cloneable = self.is_clone_type(ty, &mut Vec::new());
+            self.project_globals.insert(
+                global.name,
+                ProjectGlobalInfo {
+                    ty,
+                    readonly: global.readonly,
+                    snapshot_cloneable,
+                    has_explicit_default: global.has_explicit_default,
+                    default_function: global.default_function,
+                    default_constructor,
+                },
+            );
+        }
+        if !self.project_globals.is_empty() {
+            // These declarations are compiler-provided types for the
+            // manifest-backed Global API, rather than names users must
+            // import from a source module. Make their public type names
+            // available in every source file of the checked project so
+            // functions can return or accept a subscription explicitly.
+            const GLOBAL_API_TYPES: [&str; 4] = [
+                "GlobalSnapshot",
+                "GlobalChange",
+                "GlobalWatchError",
+                "GlobalSubscription",
+            ];
+            for (file, source) in self.sources.files() {
+                if source.name() == "std.global/types.zrk" {
+                    continue;
+                }
+                let imported = self.imported.entry(file).or_default();
+                for name in GLOBAL_API_TYPES {
+                    imported
+                        .entry(name.to_string())
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+        }
+    }
+
+    /// Selects the one constructor that can be default-constructed, recursively
+    /// deriving each omitted parameter from that parameter's type. The return
+    /// value is its constructor index; an empty constructor list denotes the
+    /// language's implicit zero-argument constructor.
+    fn project_global_default_constructor(
+        &mut self,
+        ty: Type,
+        active: &mut HashSet<(u32, Vec<Type>)>,
+    ) -> Result<Option<usize>, String> {
+        if ty.has_default() {
+            return Ok(None);
+        }
+        let (class_id, arguments) = match ty.base {
+            Base::Class(id) => (id, Vec::new()),
+            Base::Instance(instance_id) => {
+                let instance = self
+                    .generic_instances
+                    .get(instance_id as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "the global's generic type instance is unavailable".to_string()
+                    })?;
+                (instance.class, instance.args)
+            }
+            _ => {
+                return Err(format!(
+                    "type `{}` has no built-in default or eligible class constructor",
+                    self.name(ty)
+                ));
+            }
+        };
+        let key = (class_id, arguments.clone());
+        if !active.insert(key.clone()) {
+            return Err(format!(
+                "default construction of `{}` recursively depends on itself",
+                self.classes
+                    .get(class_id as usize)
+                    .map(|class| class.name.as_str())
+                    .unwrap_or("<unknown class>")
+            ));
+        }
+        let Some(class) = self.classes.get(class_id as usize).cloned() else {
+            active.remove(&key);
+            return Err("the global's class declaration is unavailable".into());
+        };
+        if class.kind != ClassKind::Class {
+            active.remove(&key);
+            return Err(format!(
+                "`{}` is not a concrete class that can be default-constructed",
+                class.name
+            ));
+        }
+        let substitutions = class
+            .type_params
+            .iter()
+            .copied()
+            .zip(arguments.iter().copied())
+            .collect::<Vec<_>>();
+
+        let result = if class.constructors.is_empty() {
+            for field in class.fields.iter().filter(|field| !field.is_static) {
+                if field.default.is_some() {
+                    continue;
+                }
+                let field_ty = self.substitute_type(field.ty, &substitutions);
+                self.project_global_default_constructor(field_ty, active)
+                    .map_err(|_| {
+                        format!(
+                            "field `{}.{}` has no default value of type `{}`",
+                            class.name,
+                            field.name,
+                            self.name(field_ty)
+                        )
+                    })?;
+            }
+            Ok(None)
+        } else {
+            let mut eligible = Vec::new();
+            for (index, constructor) in class.constructors.iter().enumerate() {
+                let mut can_construct = true;
+                for parameter in constructor {
+                    if parameter.has_default || parameter.optional {
+                        continue;
+                    }
+                    let parameter_ty = self.substitute_type(parameter.ty, &substitutions);
+                    if self
+                        .project_global_default_constructor(parameter_ty, active)
+                        .is_err()
+                    {
+                        can_construct = false;
+                        break;
+                    }
+                }
+                if can_construct {
+                    eligible.push(index);
+                }
+            }
+            match eligible.as_slice() {
+                [index] => Ok(Some(*index)),
+                [] => Err(format!(
+                    "no constructor of `{}` has parameters with derivable defaults",
+                    class.name
+                )),
+                _ => Err(format!(
+                    "more than one constructor of `{}` can be default-constructed",
+                    class.name
+                )),
+            }
+        };
+        active.remove(&key);
+        result
     }
 
     /// The `zirk check --types` map: one entry per declaration name —
@@ -6260,6 +6760,130 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn project_global_subscription_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        instance_id: u32,
+    ) -> Option<Type> {
+        if self.project_globals.is_empty() {
+            return None;
+        }
+        let instance = self.generic_instances.get(instance_id as usize)?.clone();
+        if self.classes.get(instance.class as usize)?.name != "GlobalSubscription" {
+            return None;
+        }
+
+        let operation = match field.name.name.as_str() {
+            "snapshot" => ProjectGlobalSubscriptionOperation::Snapshot,
+            "next" => ProjectGlobalSubscriptionOperation::Next,
+            "close" => ProjectGlobalSubscriptionOperation::Close,
+            _ => return None,
+        };
+        if instance.args.len() != 1 {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "invalid `GlobalSubscription<T>` type",
+                "the built-in subscription type must have exactly one value type argument",
+                None,
+            );
+            return Some(Type::UNKNOWN);
+        }
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!(
+                    "`GlobalSubscription.{}` takes no arguments",
+                    field.name.name
+                ),
+                format!("received {} argument(s)", expr.args.len()),
+                None,
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+
+        let value_type = instance.args[0];
+        let return_type = match operation {
+            ProjectGlobalSubscriptionOperation::Snapshot => {
+                let Some(class) = self.class_id("GlobalSnapshot") else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalSnapshot<T>` type is unavailable",
+                        "the project frontend did not load the global snapshot API type",
+                        None,
+                    );
+                    return Some(Type::UNKNOWN);
+                };
+                let id = self.intern_instance(GenericInstance {
+                    class,
+                    args: vec![value_type],
+                });
+                Type::of(Base::Instance(id))
+            }
+            ProjectGlobalSubscriptionOperation::Next => {
+                let Some(change_class) = self.class_id("GlobalChange") else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalChange<T>` type is unavailable",
+                        "the project frontend did not load the global change API type",
+                        None,
+                    );
+                    return Some(Type::UNKNOWN);
+                };
+                let change = Type::of(Base::Instance(self.intern_instance(GenericInstance {
+                    class: change_class,
+                    args: vec![value_type],
+                })))
+                .as_nullable();
+                let Some(error_enum) = self
+                    .enums
+                    .iter()
+                    .position(|item| item.name == "GlobalWatchError")
+                else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalWatchError` type is unavailable",
+                        "the project frontend did not load the global watch error API type",
+                        None,
+                    );
+                    return Some(Type::UNKNOWN);
+                };
+                let Some(result_enum) = self.native_result else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "the built-in `Result` type is unavailable",
+                        "the compiler did not register its native Result enum",
+                        None,
+                    );
+                    return Some(Type::UNKNOWN);
+                };
+                let result = self.intern_enum_instance(GenericEnumInstance {
+                    enum_id: result_enum,
+                    args: vec![change, Type::of(Base::Enum(error_enum as u32))],
+                });
+                Type::of(Base::EnumInstance(result))
+            }
+            ProjectGlobalSubscriptionOperation::Close => Type::VOID,
+        };
+        self.project_global_subscription_calls.insert(
+            expr.span,
+            ProjectGlobalSubscriptionCallInfo {
+                operation,
+                ty: value_type,
+                result_type: return_type,
+            },
+        );
+        Some(return_type)
+    }
+
     /// Resolves a class name used as a static receiver, including a public
     /// type alias. Type aliases are transparent in type position; preserving
     /// that transparency here also lets preferred standard-library aliases
@@ -8020,37 +8644,6 @@ impl<'a> Checker<'a> {
             })
             .collect::<Vec<_>>()
             .join(", ")
-    }
-
-    /// `ZIRK_RUNTIME_SPEC.md` section 2 requires a `main` entrypoint.
-    fn check_entrypoint(&mut self, program: &Program) {
-        let Some(main) = self.functions.get("main").cloned() else {
-            self.error(
-                codes::MISSING_ENTRYPOINT,
-                self.sources.entry().span(0, 0),
-                "the program has no entrypoint",
-                "no `main` function was found in the file",
-                Some("add `fn main(): Void { }`".into()),
-            );
-            return;
-        };
-
-        if !main.params.is_empty() || main.returns != Type::VOID {
-            let span = program
-                .functions
-                .iter()
-                .find(|f| f.name.name == "main")
-                .map(|f| f.name.span)
-                .unwrap_or(main.span);
-
-            self.error(
-                codes::INVALID_ENTRYPOINT,
-                span,
-                "`main` has the wrong signature",
-                "the entrypoint takes no parameters and returns `Void` in this phase",
-                Some("write `fn main(): Void { ... }`".into()),
-            );
-        }
     }
 
     /// Brings a class's, function's or method's own `<T from A & B>` into
@@ -9872,7 +10465,7 @@ impl<'a> Checker<'a> {
             .unwrap_or_default();
         let outer_pending = std::mem::take(&mut self.pending_throws);
         let outer_main_scope = self.in_main_scope;
-        self.in_main_scope = f.name.name == "main";
+        self.in_main_scope = f.name.name == zirk_ast::GENERATED_ENTRYPOINT;
 
         // A function body cannot see the locals of another: the barrier is what
         // makes a name from outside a capture rather than a plain read.
@@ -12145,6 +12738,59 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the watch runtime can decide replacement equality for `ty`.
+    /// This mirrors the equality operations that lowering can execute without
+    /// falling back to object identity: primitive values, payload-free enums,
+    /// tuples of supported values, and classes with `_equals`.
+    fn project_global_equality_supported(&self, ty: Type) -> bool {
+        if ty.nullable {
+            return false;
+        }
+        match ty.base {
+            Base::Int(_)
+            | Base::Float(_)
+            | Base::Decimal
+            | Base::Boolean
+            | Base::String
+            | Base::Char
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::DateTime => true,
+            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|item| {
+                item.variants
+                    .iter()
+                    .all(|variant| variant.associated.is_empty())
+            }),
+            Base::EnumInstance(id) => {
+                self.enum_instances
+                    .get(id as usize)
+                    .is_some_and(|instance| {
+                        self.enums[instance.enum_id as usize]
+                            .variants
+                            .iter()
+                            .all(|variant| variant.associated.is_empty())
+                    })
+            }
+            Base::Class(id) => self.classes[id as usize].method("_equals").is_some(),
+            Base::Instance(id) => self
+                .generic_instances
+                .get(id as usize)
+                .is_some_and(|instance| {
+                    self.classes[instance.class as usize]
+                        .method("_equals")
+                        .is_some()
+                }),
+            Base::Tuple(id) => self.tuple_types.get(id as usize).is_some_and(|tuple| {
+                tuple
+                    .elements
+                    .iter()
+                    .all(|element| self.project_global_equality_supported(*element))
+            }),
+            _ => false,
+        }
+    }
+
     /// Whether class `id` derives `Clone` (design D1): every field of its
     /// declared shape (inherited fields included, since [`ClassType::fields`]
     /// already flattens the hierarchy) is itself `Clone`, and it does not
@@ -13653,6 +14299,12 @@ impl<'a> Checker<'a> {
         self.pending_throws = outer_pending;
         let captures = self.finish_capture_scope(enclosing_depth);
         self.current_function = enclosing_function;
+        if let Some(parent) = enclosing_function {
+            self.capability_function_calls
+                .entry(parent)
+                .or_default()
+                .insert(expr.span);
+        }
         self.check_capture_boundary(expr.span, "`spawn`", &captures);
         let closure_captures_checked = matches!(
             &expr.body,
@@ -14303,6 +14955,9 @@ impl<'a> Checker<'a> {
             && self.scopes.lookup(&ident.name).is_none()
         {
             self.record_semantic_reference(ident.span, signature.span, ReferenceRole::Read);
+            // A named function passed through a value or callback still
+            // carries its protected effects into the enclosing callable.
+            self.record_direct_function_call(signature.span, ident.span);
             let id = self.intern_fn_type(FnType {
                 params: signature.param_types(),
                 returns: signature.returns,
@@ -18477,6 +19132,12 @@ impl<'a> Checker<'a> {
 
         self.current_function = enclosing_function;
         self.lambda_depth -= 1;
+        if let Some(parent) = enclosing_function {
+            self.capability_function_calls
+                .entry(parent)
+                .or_default()
+                .insert(expr.span);
+        }
         self.lambdas.insert(
             expr.span,
             LambdaInfo {
@@ -18895,6 +19556,13 @@ impl<'a> Checker<'a> {
         // `Pin<T>` dereferences automatically for method access (roadmap
         // Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
+
+        if let Base::Instance(instance) = object.base
+            && let Some(result) =
+                self.project_global_subscription_method_call(expr, field, instance)
+        {
+            return result;
+        }
 
         if let Base::Job(id) = object.base {
             let result = self.job_types[id as usize];
@@ -22475,6 +23143,252 @@ impl<'a> Checker<'a> {
         Type::VOID
     }
 
+    fn check_project_global_call(&mut self, expr: &CallExpr, field: &FieldExpr) -> Type {
+        let (operation, expected_count) = match field.name.name.as_str() {
+            "get" => (ProjectGlobalOperation::Get, 1),
+            "set" => (ProjectGlobalOperation::Set, 2),
+            "watch" => (ProjectGlobalOperation::Watch, 1),
+            _ => unreachable!("caller gates project-global operation names"),
+        };
+        if expr.args.len() != expected_count
+            || expr
+                .args
+                .iter()
+                .any(|arg| arg.name.is_some() || arg.is_spread)
+        {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!(
+                    "`Global.{}` takes {expected_count} positional argument(s)",
+                    field.name.name
+                ),
+                format!("received {} argument(s)", expr.args.len()),
+                Some(
+                    "pass the literal global name first, followed by a replacement value for `set`"
+                        .into(),
+                ),
+            );
+            for argument in &expr.args {
+                self.check_expr(&argument.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        let key_argument = &expr.args[0];
+        let key = match &key_argument.value {
+            Expr::Str(literal) => {
+                self.check_expr(&key_argument.value);
+                Some(literal.value.clone())
+            }
+            other => {
+                let actual = self.check_expr(other);
+                self.expect_assignable(
+                    Type::STRING,
+                    actual,
+                    other.span(),
+                    "the project-global key",
+                );
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    other.span(),
+                    format!(
+                        "`Global.{}` requires a literal manifest key",
+                        field.name.name
+                    ),
+                    "a dynamic key cannot be checked against the application's `.zkinit` table",
+                    Some("pass a quoted key declared in `.zkinit`".into()),
+                );
+                None
+            }
+        };
+        let Some(key) = key else {
+            if operation == ProjectGlobalOperation::Set {
+                self.check_expr(&expr.args[1].value);
+            }
+            return Type::UNKNOWN;
+        };
+        let Some(global) = self.project_globals.get(&key).cloned() else {
+            self.error(
+                codes::UNDECLARED_NAME,
+                key_argument.value.span(),
+                format!("project global `{key}` is not declared"),
+                "`Global` keys are resolved from the current application's `.zkinit` file",
+                Some("declare this name under the application's `globals` block".into()),
+            );
+            if operation == ProjectGlobalOperation::Set {
+                self.check_expr(&expr.args[1].value);
+            }
+            return Type::UNKNOWN;
+        };
+
+        for type_argument in &expr.type_args {
+            let requested = self.resolve_type(type_argument);
+            if !requested.is_unknown() && requested != global.ty {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    type_argument.span,
+                    format!(
+                        "`Global.{}` cannot override the manifest type",
+                        field.name.name
+                    ),
+                    format!(
+                        "`.zkinit` declares `{key}` as `{}`, not `{}`",
+                        self.name(global.ty),
+                        self.name(requested)
+                    ),
+                    Some(
+                        "omit the explicit type argument and let the manifest determine it".into(),
+                    ),
+                );
+            }
+        }
+
+        let mut subscription_type = None;
+        let mut snapshot_type = None;
+        let mut change_type = None;
+        let mut change_channel_type = None;
+        let result_type = match operation {
+            ProjectGlobalOperation::Get => global.ty,
+            ProjectGlobalOperation::Set => {
+                let value = &expr.args[1].value;
+                let actual = self.check_expr(value);
+                self.expect_assignable(
+                    global.ty,
+                    actual,
+                    value.span(),
+                    "the global replacement value",
+                );
+                if global.readonly {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("project global `{key}` is read-only"),
+                        "`readonly: true` prevents replacement through `Global.set`",
+                        Some(
+                            "remove `readonly` from this global declaration to allow updates"
+                                .into(),
+                        ),
+                    );
+                }
+                Type::VOID
+            }
+            ProjectGlobalOperation::Watch => {
+                let Some(class) = self.class_id("GlobalSubscription") else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalSubscription<T>` type is unavailable",
+                        "the project frontend did not load the global subscription API type",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                };
+                if self.classes[class as usize].type_params.len() != 1 {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        "invalid `GlobalSubscription` declaration",
+                        "the built-in subscription type must declare exactly one value type parameter",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                }
+                if !global.snapshot_cloneable {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("project global `{key}` cannot be watched as an immutable snapshot"),
+                        format!(
+                            "`Global.watch` needs `{}` to support structural cloning for snapshot and change values",
+                            self.name(global.ty)
+                        ),
+                        Some("use a value type whose fields support `Clone`".into()),
+                    );
+                }
+                if !self.project_global_equality_supported(global.ty) {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("project global `{key}` does not support watch equality"),
+                        format!(
+                            "`{}` has no equality operation that the global watch runtime can evaluate",
+                            self.name(global.ty)
+                        ),
+                        Some(
+                            "use a supported value type or implement `_equals` on the class".into(),
+                        ),
+                    );
+                }
+                let instance = self.intern_instance(GenericInstance {
+                    class,
+                    args: vec![global.ty],
+                });
+                subscription_type = Some(Type::of(Base::Instance(instance)));
+                let Some(snapshot_class) = self.class_id("GlobalSnapshot") else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalSnapshot<T>` type is unavailable",
+                        "the project frontend did not load the global snapshot API type",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                };
+                let snapshot_instance = self.intern_instance(GenericInstance {
+                    class: snapshot_class,
+                    args: vec![global.ty],
+                });
+                snapshot_type = Some(Type::of(Base::Instance(snapshot_instance)));
+                let Some(change_class) = self.class_id("GlobalChange") else {
+                    self.error(
+                        codes::PENDING_FEATURE,
+                        expr.span,
+                        "`GlobalChange<T>` type is unavailable",
+                        "the project frontend did not load the global change API type",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                };
+                let change_instance = self.intern_instance(GenericInstance {
+                    class: change_class,
+                    args: vec![global.ty],
+                });
+                let changed = Type::of(Base::Instance(change_instance));
+                change_type = Some(changed);
+                let channel = self.intern_channel_type(changed);
+                change_channel_type = Some(Type::of(Base::Channel(channel)));
+                Type::of(Base::Instance(instance))
+            }
+        };
+        if operation != ProjectGlobalOperation::Watch && !global.snapshot_cloneable {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("project global `{key}` cannot be used as an immutable snapshot"),
+                format!(
+                    "`Global.{}` needs `{}` to support structural cloning so reads and replacements cannot share mutable aliases",
+                    field.name.name,
+                    self.name(global.ty)
+                ),
+                Some("use a value type whose fields support `Clone`".into()),
+            );
+        }
+        self.project_global_calls.insert(
+            expr.span,
+            ProjectGlobalCallInfo {
+                name: key,
+                operation,
+                ty: global.ty,
+                subscription_type,
+                snapshot_type,
+                change_type,
+                change_channel_type,
+            },
+        );
+        result_type
+    }
+
     #[allow(clippy::nonminimal_bool)]
     fn check_call(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
         if let Expr::Field(field) = &*expr.callee {
@@ -22482,6 +23396,14 @@ impl<'a> Checker<'a> {
             // the member. Keep a Result receiver intact; only the resulting
             // call expression is eligible for contextual projection.
             self.preserve_result_exprs.insert(field.object.span());
+        }
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(namespace) = &*field.object
+            && namespace.name == "Global"
+            && self.is_builtin_namespace_unshadowed("Global")
+            && matches!(field.name.name.as_str(), "get" | "set" | "watch")
+        {
+            return self.check_project_global_call(expr, field);
         }
         if let Expr::Field(field) = &*expr.callee
             && field.name.name == "ready"
@@ -22651,7 +23573,15 @@ impl<'a> Checker<'a> {
         // `module.member(args)` resolves through the published member set
         // recorded by imports. Ordinary call checking then owns signature and
         // visibility rules.
-        if let Expr::Field(field) = &*expr.callee
+        let static_class_receiver = match &*expr.callee {
+            Expr::Field(field) => match &*field.object {
+                Expr::Path(base) => self.static_class_id(&base.name, base.span).is_some(),
+                _ => false,
+            },
+            _ => false,
+        };
+        if !static_class_receiver
+            && let Expr::Field(field) = &*expr.callee
             && let Some(name) = self.imported_module_member(field)
         {
             let redirected = CallExpr {
@@ -23302,26 +24232,30 @@ impl<'a> Checker<'a> {
                             method.name,
                             self.name(method.returns)
                         );
-                        let binding = if matches!(
-                            method.name.as_str(),
-                            "get_secret_value" | "contains_authorized" | "get_string_native"
-                        ) {
-                            crate::stdlib::compiler_binding_for_environment_member(
-                                "environment",
-                                &method.name,
-                            )
-                        } else {
+                        let binding = crate::stdlib::compiler_binding_for_environment_member(
+                            "environment",
+                            &method.name,
+                        )
+                        .or_else(|| {
                             crate::stdlib::compiler_binding(
                                 "std.environment",
                                 "environment",
                                 &method.name,
                                 &signature,
                             )
-                        };
+                        });
                         if let Some(binding) = binding {
-                            self.mark_standard_library_binding_effect(binding);
-                            self.standard_environment_calls
-                                .insert(expr.span, binding.into());
+                            self.mark_standard_library_binding_effect(binding, expr.span);
+                            if matches!(
+                                method.name.as_str(),
+                                "get_string_native"
+                                    | "get_secret_value"
+                                    | "contains_authorized"
+                                    | "list_names"
+                            ) {
+                                self.standard_environment_calls
+                                    .insert(expr.span, binding.into());
+                            }
                         }
                     }
                     let network_module = self
@@ -23334,7 +24268,7 @@ impl<'a> Checker<'a> {
                     if let Some(binding) = network_module.as_deref().and_then(|module| {
                         crate::stdlib::compiler_binding_for_network_member(module, &method.name)
                     }) {
-                        self.mark_standard_library_binding_effect(binding);
+                        self.mark_standard_library_binding_effect(binding, expr.span);
                         self.standard_network_calls
                             .insert(expr.span, binding.into());
                     }
@@ -23350,7 +24284,7 @@ impl<'a> Checker<'a> {
                             crate::stdlib::compiler_binding_for_http_member(&method.name)
                         }
                     {
-                        self.mark_standard_library_binding_effect(binding);
+                        self.mark_standard_library_binding_effect(binding, expr.span);
                         self.standard_http_calls.insert(expr.span, binding.into());
                     }
                     let is_bundled_json = self

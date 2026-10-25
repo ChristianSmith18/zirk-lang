@@ -200,6 +200,12 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::MutexAcquire { .. }
             | InstKind::MutexWithCall { .. }
             | InstKind::MutexNew { .. }
+            | InstKind::ProjectGlobalInit { .. }
+            | InstKind::ProjectGlobalGet { .. }
+            | InstKind::ProjectGlobalSet { .. }
+            | InstKind::ProjectGlobalWatchSubscribe { .. }
+            | InstKind::ProjectGlobalWatchNext { .. }
+            | InstKind::ProjectGlobalWatchClose { .. }
             | InstKind::ThreadRun { .. }
             | InstKind::SafepointPoll
             | InstKind::Alloc(_)
@@ -1544,6 +1550,281 @@ fn verify_instruction(
             }
             if inst.result.is_none() {
                 report(format!("{position}: MutexNew must produce runtime status"));
+            }
+        }
+        InstKind::ProjectGlobalInit { global, value_slot } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ProjectGlobalInit",
+                report,
+            );
+            match module.project_globals.get(*global as usize) {
+                Some(layout) => match function.slot(*value_slot) {
+                    Some(slot) if slot.ty == layout.payload => {
+                        if layout.payload.is_managed_reference(module)
+                            && !function.gc_roots.contains(value_slot)
+                        {
+                            report(format!(
+                                "{position}: ProjectGlobalInit staging slot must be a GC root"
+                            ));
+                        }
+                    }
+                    Some(slot) => report(format!(
+                        "{position}: ProjectGlobalInit staging slot has {}, expected {}",
+                        slot.ty.as_str(),
+                        layout.payload.as_str()
+                    )),
+                    None => report(format!(
+                        "{position}: ProjectGlobalInit staging slot {value_slot:?} does not exist"
+                    )),
+                },
+                None => report(format!(
+                    "{position}: ProjectGlobalInit references missing project global {global}"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: ProjectGlobalInit must produce runtime status"
+                ));
+            }
+        }
+        InstKind::ProjectGlobalGet { global, out } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ProjectGlobalGet",
+                report,
+            );
+            match module.project_globals.get(*global as usize) {
+                Some(layout) => match function.slot(*out) {
+                    Some(slot) if slot.ty == layout.payload => {
+                        if layout.payload.is_managed_reference(module)
+                            && !function.gc_roots.contains(out)
+                        {
+                            report(format!(
+                                "{position}: ProjectGlobalGet output slot must be a GC root"
+                            ));
+                        }
+                    }
+                    Some(slot) => report(format!(
+                        "{position}: ProjectGlobalGet output slot has {}, expected {}",
+                        slot.ty.as_str(),
+                        layout.payload.as_str()
+                    )),
+                    None => report(format!(
+                        "{position}: ProjectGlobalGet output slot {out:?} does not exist"
+                    )),
+                },
+                None => report(format!(
+                    "{position}: ProjectGlobalGet references missing project global {global}"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: ProjectGlobalGet must produce runtime status"
+                ));
+            }
+        }
+        InstKind::ProjectGlobalSet {
+            global,
+            value,
+            event,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ProjectGlobalSet",
+                report,
+            );
+            match module.project_globals.get(*global as usize) {
+                Some(layout) => {
+                    if layout.readonly {
+                        report(format!(
+                            "{position}: ProjectGlobalSet cannot write read-only global `{}`",
+                            layout.name
+                        ));
+                    }
+                    if type_of(value) != Some(layout.payload) {
+                        report(format!(
+                            "{position}: ProjectGlobalSet value does not match {}",
+                            layout.payload.as_str()
+                        ));
+                    }
+                    match (layout.watch_change, event) {
+                        (Some(IrType::Object(change_id)), Some(event)) => {
+                            let object = &module.objects[change_id as usize];
+                            match function.slot(event.object_slot) {
+                                Some(slot) if slot.ty == IrType::Object(change_id) => {
+                                    if !function.gc_roots.contains(&event.object_slot) {
+                                        report(format!(
+                                            "{position}: ProjectGlobalSet watch event slot must be a GC root"
+                                        ));
+                                    }
+                                }
+                                Some(slot) => report(format!(
+                                    "{position}: ProjectGlobalSet watch event slot has {}, expected {}",
+                                    slot.ty.as_str(),
+                                    IrType::Object(change_id).as_str()
+                                )),
+                                None => report(format!(
+                                    "{position}: ProjectGlobalSet watch event slot {:?} does not exist",
+                                    event.object_slot
+                                )),
+                            }
+                            for (index, expected, field_name) in [
+                                (event.previous_field, layout.payload, "previous"),
+                                (event.current_field, layout.payload, "current"),
+                                (event.revision_field, IrType::Int(IntWidth::U64), "revision"),
+                            ] {
+                                if object.fields.get(index as usize).map(|field| field.ty)
+                                    != Some(expected)
+                                {
+                                    report(format!(
+                                        "{position}: ProjectGlobalSet watch {field_name} field does not match its declared layout"
+                                    ));
+                                }
+                            }
+                        }
+                        (None, None) => {}
+                        (Some(_), None) => report(format!(
+                            "{position}: ProjectGlobalSet is missing its watched event object"
+                        )),
+                        (None, Some(_)) => report(format!(
+                            "{position}: ProjectGlobalSet has an event for an unwatched global"
+                        )),
+                        (Some(other), Some(_)) => report(format!(
+                            "{position}: ProjectGlobalSet watch event type is {}, expected object",
+                            other.as_str()
+                        )),
+                    }
+                }
+                None => report(format!(
+                    "{position}: ProjectGlobalSet references missing project global {global}"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: ProjectGlobalSet must produce runtime status"
+                ));
+            }
+        }
+        InstKind::ProjectGlobalWatchSubscribe {
+            global,
+            channel,
+            snapshot_out,
+            token_out,
+            revision_out,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ProjectGlobalWatchSubscribe",
+                report,
+            );
+            if !matches!(type_of(channel), Some(IrType::Channel(_))) {
+                report(format!(
+                    "{position}: ProjectGlobalWatchSubscribe channel is not a Channel"
+                ));
+            }
+            match module.project_globals.get(*global as usize) {
+                Some(layout) => match function.slot(*snapshot_out) {
+                    Some(slot) if slot.ty == layout.payload => {
+                        if layout.payload.is_managed_reference(module)
+                            && !function.gc_roots.contains(snapshot_out)
+                        {
+                            report(format!(
+                                "{position}: ProjectGlobalWatchSubscribe snapshot slot must be a GC root"
+                            ));
+                        }
+                    }
+                    Some(slot) => report(format!(
+                        "{position}: ProjectGlobalWatchSubscribe snapshot slot has {}, expected {}",
+                        slot.ty.as_str(),
+                        layout.payload.as_str()
+                    )),
+                    None => report(format!(
+                        "{position}: ProjectGlobalWatchSubscribe snapshot slot {snapshot_out:?} does not exist"
+                    )),
+                },
+                None => report(format!(
+                    "{position}: ProjectGlobalWatchSubscribe references missing project global {global}"
+                )),
+            }
+            for (slot_id, label) in [(*token_out, "token"), (*revision_out, "revision")] {
+                match function.slot(slot_id) {
+                    Some(slot) if slot.ty == IrType::Int(IntWidth::U64) => {}
+                    Some(slot) => report(format!(
+                        "{position}: ProjectGlobalWatchSubscribe {label} slot has {}, expected U64",
+                        slot.ty.as_str()
+                    )),
+                    None => report(format!(
+                        "{position}: ProjectGlobalWatchSubscribe {label} slot {slot_id:?} does not exist"
+                    )),
+                }
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: ProjectGlobalWatchSubscribe must produce runtime status"
+                ));
+            }
+        }
+        InstKind::ProjectGlobalWatchNext { token, out } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "ProjectGlobalWatchNext",
+                report,
+            );
+            if type_of(token) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: ProjectGlobalWatchNext token must be U64"
+                ));
+            }
+            match function.slot(*out) {
+                Some(slot) if matches!(slot.ty, IrType::Object(_)) => {
+                    if !function.gc_roots.contains(out) {
+                        report(format!(
+                            "{position}: ProjectGlobalWatchNext output slot must be a GC root"
+                        ));
+                    }
+                }
+                Some(slot) => report(format!(
+                    "{position}: ProjectGlobalWatchNext output slot has {}, expected object reference",
+                    slot.ty.as_str()
+                )),
+                None => report(format!(
+                    "{position}: ProjectGlobalWatchNext output slot {out:?} does not exist"
+                )),
+            }
+            if inst.result.is_none() {
+                report(format!(
+                    "{position}: ProjectGlobalWatchNext must produce runtime status"
+                ));
+            }
+        }
+        InstKind::ProjectGlobalWatchClose { token } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "ProjectGlobalWatchClose",
+                report,
+            );
+            if type_of(token) != Some(IrType::Int(IntWidth::U64)) {
+                report(format!(
+                    "{position}: ProjectGlobalWatchClose token must be U64"
+                ));
+            }
+            if inst.result.is_some() {
+                report(format!(
+                    "{position}: ProjectGlobalWatchClose must not produce a value"
+                ));
             }
         }
         InstKind::SafepointPoll => expect(inst.ty, IrType::Void, position, "SafepointPoll", report),
@@ -7945,6 +8226,11 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             mutex, callback, ..
         } => vec![*mutex, *callback],
         InstKind::MutexNew { payload, .. } => vec![*payload],
+        InstKind::ProjectGlobalSet { value, .. } => vec![*value],
+        InstKind::ProjectGlobalWatchSubscribe { channel, .. } => vec![*channel],
+        InstKind::ProjectGlobalWatchNext { token, .. }
+        | InstKind::ProjectGlobalWatchClose { token } => vec![*token],
+        InstKind::ProjectGlobalInit { .. } | InstKind::ProjectGlobalGet { .. } => Vec::new(),
         InstKind::ConstInt(_)
         | InstKind::ConstBool(_)
         | InstKind::ConstString(_)

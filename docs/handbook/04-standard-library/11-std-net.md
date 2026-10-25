@@ -41,7 +41,7 @@ permissions.
 > `Resource<TCPResourceError>` scope cleanup. Streams support exact
 > `tcp://host:port` connect grants, bounded read/write operations, and
 > `TCPStream.peer_address()` for the numeric remote endpoint. Listeners
-> support numeric-IP bind under a separate exact `network.listen` address grant
+> support numeric-IP bind under a separate exact `network.listen` consent
 > and accept connections into streams owned by the accepting task. These `Resource<E>` handles are task-owned and cannot be captured across a `Thread.run` boundary; the checker rejects TCP and TLS resource captures with `E0482`, while runtime operations independently enforce the owner task. String
 > endpoint entry points remain available. `std.net::address.IPAddress` parses
 > canonical IPv4/IPv6 literals without DNS or scoped IPv6 zones, and
@@ -51,7 +51,7 @@ permissions.
 > TCP origin. `HostPortAddress.parse(host, port)` now creates a canonical
 > outbound host/port authority, including IDNA normalization and bracketed
 > IPv6 formatting, without resolving DNS. `TCPStream.connect_to_host` checks
-> the exact canonical origin grant before resolving the host. The bundled
+> existing consent for the canonical origin before resolving the host. The bundled
 > `std.net::udp`, `std.net::local`, and `std.net::interfaces` modules expose
 > bounded datagrams, local byte streams, and permission-gated interface
 > snapshots. The `std.net::dns` module exposes
@@ -68,12 +68,12 @@ trust roots by default. `TLSStream.connect_with_trust_roots(endpoint,
 roots_der, allow_tls12)` accepts an explicit non-empty set of DER root
 certificates; malformed roots are rejected and the aggregate trust store is
 bounded. TLS 1.2 is enabled only when `allow_tls12` is `true`. Both connection
-forms validate the certificate chain, host name, and SNI and require an exact
-network permission grant. Streams expose bounded reads, backpressured writes,
+forms validate the certificate chain, host name, and SNI and require matching
+operation-local consent for the concrete network resource. Streams expose bounded reads, backpressured writes,
 explicit close-notify shutdown, and task-owned resource cleanup. `TLSListener.bind`
 accepts a numeric `tcp://` endpoint, an explicit DER certificate chain and
-private key, and the TLS 1.2 opt-in. Binding requires a separate exact
-`network.listen.addresses` grant; accepted TLS streams belong to the accepting
+private key, and the TLS 1.2 opt-in. Binding requires consent for its exact address and port under
+`network.listen`; accepted TLS streams belong to the accepting
 task. `TLSStream.peer_address()` returns the numeric remote address.
 `TLSStream.connect_with_options(endpoint, roots_der, allow_tls12, protocols)`
 combines ALPN with an explicit trust store and TLS 1.2 opt-in; an empty trust
@@ -81,7 +81,7 @@ store uses system roots. `TLSStream.negotiated_alpn()` returns the selected
 protocol or `null` when the peer selected none. `TCPStream.upgrade_tls(endpoint,
 roots_der, allow_tls12, protocols)` transfers its already-connected socket to
 an authenticated `TLSStream`; it does not open another TCP connection. The
-caller must hold both the exact `tcp://` grant used to connect and the matching
+caller must hold both saved consent for the `tcp://` destination and the matching
 `https://` grant for the TLS origin and peer. Invalid configuration or denied
 authority leaves the TCP stream available. Once the TLS handshake begins, the
 TCP handle is consumed, and a failed or cancelled handshake closes that socket.
@@ -170,7 +170,7 @@ never retained. A runtime loopback regression seeds a cached host name with a
 private listener address and confirms the transport rejects it before the
 listener receives a connection; it passes on macOS ARM64, Linux ARM64, and
 Linux x86_64 Docker emulation. Connect candidates with a nonzero IPv6 interface
-scope ID are rejected because an origin grant does not identify a local
+scope ID are rejected because remote-origin consent does not identify a local
 network interface. IPv4-mapped IPv6 answers follow the policy for their
 embedded IPv4 address, so mapped private and documentation addresses remain
 blocked.
@@ -179,7 +179,7 @@ blocked.
 origin that exactly matches an approved network connect scope before the host
 resolver runs. The runtime bounds the answer set and rejects forbidden
 hostname addresses before returning any result. A later connect independently
-rechecks the effective grant and each resolved address. Timeouts, resolver
+rechecks saved consent and each resolved address. Timeouts, resolver
 failures, denied origins, and disallowed address sets remain typed errors.
 
 ## TCP clients
@@ -188,7 +188,7 @@ failures, denied origins, and disallowed address sets remain typed errors.
 `TCPStream.connect_to` accepts a validated IP `SocketAddress`, while
 `TCPStream.connect_to_host` accepts a `HostPortAddress`. Each form suspends the
 current cooperative task while connecting; host-name connections check the
-exact origin grant before DNS and validate every resolved address.
+exact origin consent before DNS and validate every resolved address.
 
 ```zirk
 import { HostPortAddress } from std.net::address;
@@ -314,7 +314,7 @@ An unconnected socket uses `send_to` and `receive_from`; a connected UDP socket
 uses `send` and `receive` while retaining datagram semantics. Broadcast and
 multicast participation require explicit options and matching permissions.
 Datagram size, queue depth, and multicast membership are bounded resources.
-Broadcast and multicast require their separate manifest grants. `UDPError`
+Broadcast and multicast require separate exact-resource consent. `UDPError`
 reports denied destinations, timeouts, cancellation, capacity, and transport
 failures; `UDPResourceError` is returned by close and membership operations.
 
@@ -332,7 +332,7 @@ allow_tls12)`: it advertises `h2` and `http/1.1` through ALPN so
 `HTTPServer.serve_tls` or `HTTPRouter.serve_tls` can select the negotiated
 protocol. `HTTPServer.bind_tls` is the HTTP-facing convenience constructor for
 the same listener setup. Both listener constructors validate the explicit
-identity and check the exact `network.listen.addresses` grant before binding.
+identity and request/check exact consent under `network.listen` before binding.
 TLS 1.2 remains opt-in through the `allow_tls12` argument.
 
 ```zirk
@@ -441,46 +441,37 @@ Raw sockets, packet capture, Ethernet frames, DHCP, BGP, VPN construction, Tor,
 QUIC, and general kernel-network administration are not part of the current
 `std.net` preview.
 
-## Permissions
+## Capability requirements and consent
 
-Network authority distinguishes outbound and inbound scope:
+`.zkinit` uses one finite `requires` list for both applications and packages:
 
-```zirk
-permissions {
-    network {
-        connect: { origins: ["https://example.com:443"]; during: runtime; }
-        listen: { addresses: ["127.0.0.1:8080"]; during: runtime; }
-        udp_send: { destinations: ["udp://192.0.2.9:5353"]; during: runtime; }
-        udp_listen: { addresses: ["127.0.0.1:5353"]; during: runtime; }
-        local_connect: { endpoints: ["unix:///tmp/zirk.sock"]; during: runtime; }
-        local_listen: { endpoints: ["unix:///tmp/zirk.sock"]; during: runtime; }
-        inspect_interfaces: { enabled: true; during: runtime; }
-    }
+```text
+requires {
+    network.connect;
+    network.listen;
+    network.udp.send;
+    network.udp.listen;
+    network.local.connect;
+    network.local.listen;
+    network.inspect_interfaces;
 }
 ```
 
-`connect.origins` authorizes protocols, host names, and ports. It does not by
-itself authorize an arbitrary resolved address: resolved IPs, redirects,
-reconnects, proxy targets, and TLS server names are validated against the
-effective grant at every boundary. Raw TCP-only connections use a canonical
-`tcp://host:port` origin so a TCP grant cannot be confused with an HTTP or TLS
-origin. `listen.addresses` separately authorizes
-local bind addresses and ports. UDP broadcast/multicast, local sockets, custom
-resolvers, and interface inspection use explicit scopes rather than inheriting
-broad outbound authority.
+These entries declare which network operations may be attempted. They do not
+store host/port scopes or consent. At the protected operation, the runtime
+checks the exact origin, address and port, UDP destination, local endpoint, or
+interface request. An interactive first use displays that resource and its
+requester and accepts `y/n`; no-TTY execution denies the operation immediately.
 
-`udp_send` and `udp_listen` are separate. `local_connect` and `local_listen`
-are separate exact endpoint grants. `inspect_interfaces` grants only the
-metadata snapshot capability; it does not grant network traffic or binding.
+`network.connect` and `network.listen` are independent. DNS answers, redirects,
+reconnects and proxy origins are checked at their connection boundaries. A
+listener configured dynamically asks for its concrete bind address and port;
+port `0` is scoped to an ephemeral bind on the selected address. UDP send/listen,
+local connect/listen, and interface inspection remain separate capabilities.
 
-Package `.zkinit` files declare required scopes; they do not grant them. The
-application approval command collects requirements across the locked dependency
-graph and requests consent for their union with application scopes. Missing
-authority produces the operation-specific permission error before the external
-effect occurs. Errors are reported through each operation's enum, including
-`DNSError`, `TCPError`, `TLSError`, `UDPError`, `LocalError`, and
-`NetworkInterfaceError`. Runtime library code never prompts or edits
-`.zkinit`; trusted tooling owns consent.
+The currently enforced native network APIs include HTTP, TCP, UDP, local
+sockets, and interface snapshots. Exact consent is stored outside the project
+in a signed user-owned record. See [permission approval and audit](../03-projects/14-permission-approval-and-audit.md).
 
 ## Errors, limits, and portability
 

@@ -23,10 +23,8 @@ project {
     entry: "src/main.zrk";
 }
 
-permissions {
-    filesystem {
-        read: { paths: ["./input/**"]; during: runtime; }
-    }
+requires {
+    filesystem.read;
 }
 ```
 
@@ -53,11 +51,9 @@ fn run(arguments: List<String>): Result<Void, CliError> {
     }
 }
 
-fn main(): Void {
-    match run(System.arguments) {
-        Ok(_) => {}
-        Error(error) => stderr.println(error);
-    }
+match run(System.arguments) {
+    Ok(_) => {}
+    Error(error) => stderr.println(error);
 }
 ```
 
@@ -66,7 +62,7 @@ the read limit prevents an untrusted file from allocating without bound.
 
 ## Verify
 
-Open the file with `match with`, count Unicode text deliberately, print the result through `std.io`, and grant only read access to the selected scope. Add `.spec.zrk` tests for parsing and an E2E test for exit code and output.
+Open the file with `match with`, count Unicode text deliberately, print the result through `std.io`, and declare `filesystem.read`; exact path consent will be checked at the file operation once compiler-owned filesystem APIs are delivered. Add `.spec.zrk` tests for parsing and an E2E test for exit code and output.
 
 ```console
 zirk check

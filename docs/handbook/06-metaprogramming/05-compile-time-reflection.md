@@ -4,7 +4,7 @@ Decorators inspect typed declarations through the target-specific Syntax API; th
 
 A generic decorator expands once against its declaration and constraints, then specializes normally. Explicitly generated decorator applications enter a bounded later round; generated declarations are not decorated implicitly. Structural cycle detection and resource limits stop recursive expansion.
 
-Expansion is incrementally cached by decorator implementation/version, arguments, typed target, configuration, grants, observed build inputs, and transitive dependencies. Unchanged fingerprints reuse validated output. External inspection requires matching application permission with `during: build` or `both`.
+Expansion is incrementally cached by decorator implementation/version, arguments, typed target, configuration, observed inputs, and transitive dependencies. Unchanged fingerprints reuse validated output. The current Syntax API exposes no protected host effects to decorators; `.zkinit` has no separate build permission phase.
 
 ---
 

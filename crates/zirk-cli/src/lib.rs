@@ -10,7 +10,10 @@ pub mod approvals;
 pub mod codes;
 pub mod format;
 pub mod frontend;
+pub mod initializer;
+mod manifest_parser;
 pub mod modules;
+pub mod packages;
 pub mod project;
 
 #[cfg(feature = "backend")]

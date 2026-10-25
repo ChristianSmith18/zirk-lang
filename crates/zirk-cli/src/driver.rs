@@ -405,11 +405,29 @@ pub fn run_with_runtime_grant(
     token: Option<&str>,
     json_diagnostics: bool,
 ) -> Result<i32, Box<Diagnostic>> {
+    run_with_runtime_permissions(executable, token, json_diagnostics, None)
+}
+
+/// Runs with the authenticated grant and project identity issued by the
+/// launcher. All inherited Zirk runtime metadata is removed before the
+/// trusted values are installed.
+pub fn run_with_runtime_permissions(
+    executable: &Path,
+    token: Option<&str>,
+    json_diagnostics: bool,
+    runtime_environment: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<i32, Box<Diagnostic>> {
     let mut command = Command::new(executable);
-    command.env_remove("ZIRK_RUNTIME_PERMISSION_GRANT");
-    command.env_remove("ZIRK_RUNTIME_DIAGNOSTIC_JSON");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("ZIRK_RUNTIME_") {
+            command.env_remove(key);
+        }
+    }
     if let Some(token) = token {
         command.env("ZIRK_RUNTIME_PERMISSION_GRANT", token);
+    }
+    if let Some(runtime_environment) = runtime_environment {
+        command.envs(runtime_environment);
     }
     if json_diagnostics {
         command.env("ZIRK_RUNTIME_DIAGNOSTIC_JSON", "1");

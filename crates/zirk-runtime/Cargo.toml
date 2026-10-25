@@ -44,6 +44,9 @@ http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 [dev-dependencies]
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom.workspace = true
+
 # Stackful-coroutine stack switching for `task`/`await` (ADR-017). Only pulled
 # in on the targets it covers and that run the executor (ADR-004 addendum);
 # every other host uses the thread-backed fallback in `src/context.rs`. This

@@ -1,0 +1,6 @@
+// `main` is an ordinary function. The entry file calls it explicitly below.
+import { stdout } from std.io;
+fn main() {
+    stdout.println("");
+    return 0;
+}

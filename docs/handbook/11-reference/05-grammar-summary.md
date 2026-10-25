@@ -24,8 +24,7 @@ or spawn concurrent work.
 Failure syntax includes `throws T | U`, `throw expression`, exact `throw;`
 inside catch, `try`, guard-free `catch Type(binding)` patterns, and `finally`.
 Resources use `match acquisition with binding`, including grouped acquisition.
-Manifests use library `requires`, application `permissions`, and operation
-`during: build | runtime | both`.
+Applications and packages declare capabilities in one finite `requires` block. The removed `permissions`, `compile_permissions`, and `during` forms are diagnosed during migration/validation.
 
 Ranges use `start..end`, `start..=end`, `start..end:step` or
 `start..=end:step`; non-literal bounds and steps use `{...}`. Range construction

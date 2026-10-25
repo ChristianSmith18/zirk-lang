@@ -1,19 +1,18 @@
 # Projects
 
-`.zkinit` defines whether a project is an application or library and declares entry points, capabilities, targets, dependencies, and build contracts. `zirk.lock` records exact resolved versions and hashes.
+`.zkinit` defines whether a project is an application or package and declares
+entry/root selection, targets, dependencies, globals, and capability
+requirements. `zirk.lock` records exact package selections and source identity.
 
-Libraries request authority with `requires`; applications grant it with
-`permissions`, including build/runtime phase. Source declaration is not
-consent: signed approval is tied to the project name and canonical location and
-to exact requesting dependencies, then checked incrementally before privileged
-code executes.
+Applications and packages use one `requires` block. A library requests a
+capability but does not grant it. User consent is separate and applies to the
+concrete resource at the protected operation boundary. The runtime retains
+requester and dependency-path provenance for each request.
 
-For the current native `std.net` and `std.environment` preview, the line-oriented
-`.zkinit` loader uses `permissions` blocks in both application and package
-manifests. In a package, that block is a requirement only: the application
-approval command resolves the locked dependency graph, requests consent for the
-combined scopes, and binds the grant to dependency manifests and lockfiles.
+`zirk init` creates a canonical `.zkinit` interactively or with `zirk init -y`
+for the documented defaults. See the project chapters for configuration,
+initialization, [migration](15-migrating-zkinit.md), and current runtime limitations.
 
 ---
 
-**Previous:** [← Circular Dependencies](../02-handbook/19-modules/07-circular-dependencies.md) · **Next:** [ Project Layout](01-project-layout.md)
+**Previous:** [← Circular Dependencies](../02-handbook/19-modules/07-circular-dependencies.md) · **Next:** [Project Layout](01-project-layout.md)

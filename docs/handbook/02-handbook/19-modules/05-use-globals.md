@@ -1,18 +1,19 @@
-# `use` and Globals
+# Application globals
 
-Only applications may declare globals, inside `globals` in `.zkinit`. Each source consumer opts in with `use`.
+Only applications declare typed globals in the `.zkinit` `globals` block.
+Source files do not opt into names with `use`; they read and write through the
+compiler-checked `Global` API:
 
 ```zirk
-use APP_NAME;
+inmut settings = Global.get("settings");
+Global.set("retry_limit", 4);
+mut changes = Global.watch("retry_limit");
 ```
 
-`use` does not import code. The compiler rejects mutable reference captures at
-the implemented `parallel` boundary, but this is not a general check for
-unsynchronized mutable-global access. Managed `thread` and the public mutex,
-rwlock, semaphore, barrier, and once APIs remain unavailable; scalar
-`Atomic<T>` is available for supported target widths. Libraries cannot define
-application globals.
+The compiler infers each type from the literal key and the project manifest.
+Packages cannot declare application globals. See the
+[project globals chapter](../../03-projects/06-globals.md).
 
 ---
 
-**Previous:** [← Import Aliases](04-import-aliases.md) · **Next:** [ Public API](06-public-api.md)
+**Previous:** [← Module Initialization](04-module-initialization.md) · **Next:** [Package Imports](06-package-imports.md)

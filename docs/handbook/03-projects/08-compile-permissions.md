@@ -1,27 +1,17 @@
-# Build and Runtime Permission Phases
+# Permission phases removed
 
-Build and runtime authority share the application `permissions` block but stay
-semantically separate through `during`:
+`.zkinit` has one finite `requires` block. There are no `permissions`,
+`compile_permissions`, or `during: build | runtime | both` declarations.
+Compiler-time and runtime consent are not split into separate manifest
+sections.
 
-```zirk
-permissions {
-    filesystem {
-        read: { paths: ["./schemas/**"]; during: build; }
-    }
-}
-```
+When migrating an older project, `zirk migrate --check` previews how legacy
+permission declarations become capability requirements. Applying the
+migration does not create consent or broaden the user's saved approval.
 
-The public Syntax API grants no external authority. Build code, including
-decorators, can access only approved build-phase operations; a runtime grant
-does not imply them. The unified syntax removes duplication without confusing
-developer/CI authority with deployed application authority.
-
-Decorator implementation/version, arguments, typed target, grants and every
-observed external value participate in the expansion fingerprint. Changed
-requesters or observations invalidate affected expansion and may require fresh
-signed approval. Secrets cannot enter generated API, IR, diagnostics or cache
-keys.
+See [Runtime consent](07-runtime-permissions.md) for how a concrete protected
+operation obtains user approval.
 
 ---
 
-**Previous:** [← Application Permissions](07-runtime-permissions.md) · **Next:** [Library Requirements →](09-library-requirements.md)
+**Previous:** [← Runtime consent](07-runtime-permissions.md) · **Next:** [Library requirements](09-library-requirements.md)

@@ -37,9 +37,7 @@ Examples use the `.zrk` source syntax defined by the normative language specific
 ```zirk
 import { stdout } from std.io;
 
-fn main(): Void {
-    stdout.println("Hello from Zirk");
-}
+stdout.println("Hello from Zirk");
 ```
 
 When an example is intentionally invalid, the chapter labels it and explains the expected diagnostic. When syntax is normative but not yet accepted by the current compiler, the chapter labels its implementation status rather than rewriting the language around a temporary compiler limitation.
