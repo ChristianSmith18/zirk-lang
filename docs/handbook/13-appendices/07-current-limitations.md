@@ -30,12 +30,12 @@ Current high-impact delivery limits include:
   directory/link/lock/watch/async filesystem work and process APIs remain
   incomplete. See the
   [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
-  chapters for the tested surface. Filesystem native runtime tests currently
-  pass locally on macOS ARM64 and in a Linux ARM64 Docker container. Linux
-  x86_64 has supplemental Docker-emulation results, and Windows x86_64 has
-  cross-compilation plus Wine execution. Native CI conformance remains pending
-  on all four matrix runners: macOS ARM64, Linux x86_64, Linux ARM64, and
-  Windows x86_64.
+  chapters for the tested surface. Focused native filesystem conformance passes
+  on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 in
+  [CI run 40230912316](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40230912316)
+  at source revision `add179e6`. The workflow is not fully green: native jobs
+  later fail at the repository-wide canonical-format check, and the independent
+  browser Fetch HTTP job fails. Browser filesystem preflight tests pass locally.
 
 - `std.environment`, `std.net`, and `std.http` are bundled native previews;
   the archived first delivery passes full-workspace native CI on macOS ARM64,

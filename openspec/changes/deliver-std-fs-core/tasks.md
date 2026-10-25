@@ -8,7 +8,7 @@
 
 - [x] 2.1 Implement immutable `Path` construction, string conversion, joining, basic components, parent/name, lexical normalization/equality; verify these operations do not access the filesystem or claim authorization/physical identity.
 - [x] 2.2 Implement fallible absolute/canonical path resolution and native path conversion; verify invalid, missing, denied, and non-Unicode conversion outcomes on supported targets.
-- [ ] 2.3 Implement handle-relative effective-path validation for existing and new files on macOS, Linux, and Windows by opening each canonical parent component without following links; verify component and symlink swaps before and after handle acquisition cannot escape the approved scope.
+- [x] 2.3 Implement handle-relative effective-path validation for existing and new files on macOS, Linux, and Windows by opening each canonical parent component without following links; verify component and symlink swaps before and after handle acquisition cannot escape the approved scope.
 - [x] 2.4 Propagate `filesystem.read`, `filesystem.write`, and next-stage `filesystem.metadata` effects through direct, indirect, and higher-order calls; verify requester provenance identifies the application or dependency that requested the operation.
 - [x] 2.5 Wire first-use consent and non-interactive denial to concrete canonical file paths; verify approval stores only the selected scope, rejection has no filesystem side effect, warnings identify requester/resource, and unrelated code continues.
 
@@ -19,7 +19,7 @@
 - [x] 3.3 Implement bounded whole-file `File.read_bytes` and `File.read_text` with a 64 MiB hard ceiling; verify the caller limit and read-time ceiling reject growth without allocating the full oversized file.
 - [x] 3.4 Implement strict UTF-8 defaults and explicitly supported encodings; verify malformed text returns a decoding error and byte reads preserve arbitrary bytes.
 - [x] 3.5 Implement direct `File.write_bytes` and `File.write_text` with documented create/replace semantics; verify new-file and replacement writes, and verify denied writes preserve prior contents.
-- [ ] 3.6 Gate the next stage on first-delivery conformance; verify permission, path-race, resource-lifecycle, typed-error, browser-preflight, and supported-native-target checks all pass before progressive APIs begin.
+- [x] 3.6 Gate the next stage on first-delivery conformance; verify permission, path-race, resource-lifecycle, typed-error, browser-preflight, and supported-native-target checks all pass before progressive APIs begin.
 
 ## 4. Next stage: progressive reads, append, metadata, and atomic replacement
 
@@ -33,7 +33,7 @@
 
 - [x] 5.1 Integrate official filesystem bindings with semantic effects, IR lowering, LLVM code generation, and the native runtime; verify signatures and capability effects remain consistent through direct and indirect calls.
 - [x] 5.2 Add browser capability preflight for every reachable filesystem operation; verify unsupported effects fail before execution and never use ambient or in-memory filesystem behavior.
-- [ ] 5.3 Add focused filesystem unit and public-API conformance to the native CI matrix for macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify equivalent outcomes or explicit typed unsupported behavior on every runner.
+- [x] 5.3 Add focused filesystem unit and public-API conformance to the native CI matrix for macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify equivalent outcomes or explicit typed unsupported behavior on every runner.
 - [x] 5.4 Verify typed failures compose with contextual `Result` projection; verify explicit matching receives permission/decoding/limit errors and ordinary denial does not terminate unrelated program flow.
 
 ## 6. Publish and synchronize the delivered contract
@@ -41,4 +41,4 @@
 - [x] 6.1 Update `docs/ZIRK_STDLIB_SPEC.md`, `std.fs`/`std.path` handbook pages, API indexes, examples, and error/permission/resource links; verify documented signatures and examples match the sources and specs.
 - [x] 6.2 Update `docs/init/ZIRK_FEATURE_STATUS.md`, limitations, and roadmap only after target and security conformance; verify delivered, next-stage, and deferred APIs are clearly separated and target gaps remain explicit.
 - [x] 6.3 Review and commit the complete `zirk-lang` change before website synchronization; verify the commit contains implementation, tests, specs, and documentation evidence.
-- [x] 6.4 Run `./scripts/sync-website-content.sh` from the clean committed source state, review the generated `../zirk-lang-site` diff and status catalog with an explicit audit date, then verify both repositories and report their separate revisions.
+- [ ] 6.4 Run `./scripts/sync-website-content.sh` from the clean committed source state, review the generated `../zirk-lang-site` diff and status catalog with an explicit audit date, then verify both repositories and report their separate revisions.
