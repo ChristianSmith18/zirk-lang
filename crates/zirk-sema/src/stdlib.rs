@@ -479,6 +479,51 @@ pub fn compiler_binding_for_filesystem_member(
         "exists_native" => Some("std.fs.File.exists"),
         "write_bytes_atomic_native" => Some("std.fs.File.write_bytes_atomic"),
         "write_text_atomic_native" => Some("std.fs.File.write_text_atomic"),
+        "read_bytes_async_native" => Some("std.fs.File.read_bytes_async"),
+        "read_text_async_native" => Some("std.fs.File.read_text_async"),
+        "write_bytes_async_native" => Some("std.fs.File.write_bytes_async"),
+        "write_text_async_native" => Some("std.fs.File.write_text_async"),
+        "open_async_native" => Some("std.fs.File.open_async"),
+        "read_bytes_handle_async_native" => Some("std.fs.File.read_async"),
+        "write_handle_async_native" => Some("std.fs.File.write_async"),
+        "read_exact_async_native" => Some("std.fs.File.read_exact_async"),
+        "append_bytes_async_native" => Some("std.fs.File.append_bytes_async"),
+        "append_text_async_native" => Some("std.fs.File.append_text_async"),
+        "append_handle_async_native" => Some("std.fs.File.append_async"),
+        "set_readonly_native" => Some("std.fs.File.set_readonly"),
+        "lock_native" => Some("std.fs.File.lock"),
+        "unlock_native" => Some("std.fs.File.unlock"),
+        "lock_async_native" => Some("std.fs.File.lock_async"),
+        "create_native" => Some("std.fs.Directory.create"),
+        "create_all_native" => Some("std.fs.Directory.create_all"),
+        "entries_open_native" => Some("std.fs.Directory.entries"),
+        "entries_open_async_native" => Some("std.fs.Directory.entries_async"),
+        "entries_next_native" => Some("std.fs.DirectoryEntries.next_entry"),
+        "entries_next_async_native" => Some("std.fs.DirectoryEntries.next_entry_async"),
+        "entries_close_native" => Some("std.fs.DirectoryEntries.close"),
+        "walk_open_native" => Some("std.fs.Directory.walk"),
+        "walk_open_async_native" => Some("std.fs.Directory.walk_async"),
+        "walk_next_native" => Some("std.fs.DirectoryWalker.next_entry"),
+        "walk_next_async_native" => Some("std.fs.DirectoryWalker.next_entry_async"),
+        "walk_close_native" => Some("std.fs.DirectoryWalker.close"),
+        "is_empty_native" => Some("std.fs.Directory.is_empty"),
+        "size_native" => Some("std.fs.Directory.size"),
+        "copy_native" => Some("std.fs.Directory.copy"),
+        "move_native" => Some("std.fs.Directory.move"),
+        "remove_native" => Some("std.fs.Directory.remove"),
+        "remove_all_native" => Some("std.fs.Directory.remove_all"),
+        "watch_native" => Some("std.fs.Directory.watch"),
+        "next_native" => Some("std.fs.FileWatcher.next"),
+        "next_async_native" => Some("std.fs.FileWatcher.next_async"),
+        "watcher_close_native" => Some("std.fs.FileWatcher.close"),
+        "is_link_native" => Some("std.fs.Link.is_link"),
+        "read_target_native" => Some("std.fs.Link.read_target"),
+        "create_link_native" => Some("std.fs.Link.create"),
+        "create_file_native" => Some("std.fs.Temporary.file"),
+        "create_directory_native" => Some("std.fs.Temporary.directory"),
+        "path_native" => Some("std.fs.TemporaryPath.path"),
+        "cleanup_native" => Some("std.fs.TemporaryPath.close"),
+        "release_native" => Some("std.fs.TemporaryPath.release"),
         _ => None,
     }
 }
@@ -592,5 +637,38 @@ mod tests {
             compiler_binding_for_path_member("std.path", "path", "canonicalize_native"),
             Some("std.path.Path.canonicalize")
         );
+    }
+
+    #[test]
+    fn advanced_filesystem_leaves_bind_only_from_the_official_fs_module() {
+        let leaves = [
+            ("create_native", "std.fs.Directory.create"),
+            ("entries_open_native", "std.fs.Directory.entries"),
+            ("walk_open_native", "std.fs.Directory.walk"),
+            ("entries_next_native", "std.fs.DirectoryEntries.next_entry"),
+            ("walk_next_native", "std.fs.DirectoryWalker.next_entry"),
+            ("watch_native", "std.fs.Directory.watch"),
+            ("is_link_native", "std.fs.Link.is_link"),
+            ("read_target_native", "std.fs.Link.read_target"),
+            ("create_link_native", "std.fs.Link.create"),
+            ("set_readonly_native", "std.fs.File.set_readonly"),
+            ("lock_native", "std.fs.File.lock"),
+            ("unlock_native", "std.fs.File.unlock"),
+            ("create_file_native", "std.fs.Temporary.file"),
+            ("cleanup_native", "std.fs.TemporaryPath.close"),
+            ("watcher_close_native", "std.fs.FileWatcher.close"),
+        ];
+        for (name, binding) in leaves {
+            assert_eq!(
+                compiler_binding_for_filesystem_member("std.fs", "fs", name),
+                Some(binding),
+                "incorrect binding for {name}"
+            );
+            assert_eq!(
+                compiler_binding_for_filesystem_member("acme.fs", "fs", name),
+                None,
+                "external module acquired the binding for {name}"
+            );
+        }
     }
 }

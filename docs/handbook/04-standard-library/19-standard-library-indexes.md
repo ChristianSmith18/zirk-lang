@@ -88,7 +88,7 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | `std.io` | `stdin`, `stdout`, `stderr`, `ReadResult<T>` | terminal/stream I/O |
 | `std.terminal` | **Specified, not implemented:** styles, capabilities, cursor/progress/live regions | terminal control |
 | `std.encoding` | **Specified, not implemented:** encoding enum and strict/lossy codecs | none by itself |
-| `std.fs` | Partial delivery: `File`, typed options, bounded reads, direct writes, managed handles, progressive reads, append, metadata, atomic replacement | `filesystem.read`, `filesystem.write`, `filesystem.metadata` |
+| `std.fs` | Delivered core and advanced APIs: `File`, `Directory`, link and temporary resources, locks, watchers, bounded reads/traversal, progressive and async operations, metadata, atomic replacement | `filesystem.read`, `filesystem.write`, `filesystem.metadata`; watch and lock use operation-specific scopes |
 | `std.path` | Partial delivery: immutable `Path`, lexical operations, absolute and canonical queries | `filesystem.read` for absolute paths; `filesystem.metadata` for canonicalization |
 | `std.process` | **Specified, not implemented:** `Process`, `ChildProcess`, `ProcessResult`, pipelines | process; shell separately |
 | `std.text` | **Partial language surface; no importable package:** regex and selected `String`/`Char` operations are delivered; builder, formatting, and Unicode helpers remain specified | none |
@@ -114,7 +114,7 @@ This index lists prominent entry types rather than every helper or enum.
 | Type or object | Owner | Purpose |
 | --- | --- | --- |
 | `ReadResult<T>` | [`std.io`](02-std-io.md) | distinguish `Value`, `End`, and `Error` |
-| `File`, `OpenOptions`, `FileMetadata`, `FileLine`, `FileChunk`, `FileError` | [`std.fs`](03-std-fs.md) | bounded and progressive managed file access |
+| `File`, `OpenOptions`, `FileMetadata`, `FileLine`, `FileChunk`, `FileError`, `Directory`, `DirectoryEntry`, `DirectoryEntries`, `DirectoryWalker`, `FileLock`, `FileWatcher`, `TemporaryPath` | [`std.fs`](03-std-fs.md) | bounded, progressive and asynchronous filesystem operations with managed ownership |
 | `Path`, `PathError` | [`std.path`](04-std-path.md) | lexical values and fallible host path queries |
 | `Process`, `ChildProcess`, `ProcessResult` | [`std.process`](05-std-process.md) | commands and managed child lifetime |
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
@@ -168,14 +168,15 @@ error/resource rules are in [Common API Contracts](01-common-api-contracts.md).
 
 ## Permission index
 
-Importing a module grants nothing. Libraries declare `requires`; applications
-grant `permissions`; signed developer approval remains external to the repo.
+Importing a module grants nothing. Applications and libraries declare
+capability requirements in the single `.zkinit` `requires` list. Developer
+consent for exact runtime resources is stored separately outside the repo.
 
 | Capability | Used by | Scope notes |
 | --- | --- | --- |
 | terminal/input/output | `std.io`, terminal helpers | channel and control capabilities remain explicit |
 | filesystem read/write/metadata | `std.fs`, `std.path` | canonical exact-resource grants; full reads include metadata; metadata-only scopes cannot read contents; browser preflight excludes filesystem effects |
-| filesystem watch | deferred filesystem contracts | native watcher API is not delivered |
+| filesystem metadata | `std.fs::Directory.watch` and metadata APIs | a watcher uses an operation-specific metadata scope for an exact directory or descendants; observation does not grant content reads or mutations; browser preflight excludes filesystem effects |
 | process | `std.process` | executable and allowed argument forms are scoped |
 | shell | explicit shell boundary only | separate high-risk grant; never implied by process |
 | environment | `Env` ordinary reads | exact names/patterns; denial hides existence |
@@ -194,7 +195,8 @@ project-level authorization model.
 
 | Operation family | Scheduler behavior | Cancellation and cleanup |
 | --- | --- | --- |
-| terminal/file/process I/O | follows the behavior documented by that API; the general I/O reactor is not implemented | cancellation cannot preempt a blocking native call |
+| `std.fs` methods ending in `_async` | suspends the current task and uses the shared managed-blocking pool | queued work is cancellable; running non-interruptible calls reach a safe completion point; watcher waits unregister on cancellation |
+| terminal/file/process I/O without `_async` | follows the behavior documented by that API; the general I/O reactor is not implemented | cancellation cannot preempt a blocking native call |
 | blocking operation | runs on the calling thread unless its API documents otherwise | no managed blocking pool or cancellation guarantee is available |
 | `concurrent` scope / `Job<T>` wait | **Delivered:** suspends the current branch or consumes its job result | scope joins or cancels owned branches on exit |
 | channel send/receive/drain | **Delivered:** send/receive suspend under backpressure; drain receives until closed or cancelled | bounded/rendezvous/growable behavior; `select` is unavailable |
@@ -204,7 +206,7 @@ project-level authorization model.
 | DNS/connect/TLS | **Delivered preview:** bounded DNS/TCP/TLS work suspends the owning task and closes task-owned resources; the implemented native subset passes full-workspace CI on all four supported targets | cancellation and transport cleanup follow the APIs documented in `std.net` |
 | HTTP body/pool/server | **Delivered preview:** bounded HTTP/1.1 and TLS HTTP/2 requests, streamed bodies, shared clients, finite listener scopes and cancellation paths are implemented; the implemented native subset passes full-workspace CI on all four supported targets | per-request backpressure and task-owned cleanup; see `std.http` for scope-specific guarantees |
 | timers/sleep | **Delivered:** cooperative timer service | cancellation removes the timer waiter |
-| filesystem watcher/signals | specified module contracts; current task-aware delivery is unavailable | no general watcher/signal event flow is exposed |
+| filesystem watcher | `std.fs::FileWatcher.next_async` suspends the task on supported native targets | bounded queue reports overflow; Windows lock/watch APIs are typed unsupported; browser preflight excludes filesystem effects |
 | test case/fixture | target runner contract | runner-scoped timeout and leak handling are not general guarantees yet |
 
 No API spelled as task-aware implies an `async fn` language feature. The

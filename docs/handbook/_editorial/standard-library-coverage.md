@@ -8,7 +8,7 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 | `std.io` | `02-std-io.md` | streams, formatting, bound methods, EOF algebra, byte/char/line I/O, async behavior | Partial examples; missing complete signatures/errors |
 | `std.terminal` | `02-std-io.md` | styles, capability fallback, cursor, progress and coordinated live regions | Added during author review; missing before task 1.2 |
 | `std.encoding` | `02-std-io.md` and `03-std-fs.md` | strict UTF-8 default, explicit encoding enum/codecs and lossy boundaries | Added during author review; missing before task 1.2 |
-| `std.fs` | `03-std-fs.md` | bounded text/byte reads, direct writes, managed handles, progressive reads, append, metadata, atomic replacement, exact path grants | Core API delivered; directory/link/lock/watcher/async APIs remain deferred |
+| `std.fs` | `03-std-fs.md` | bounded text/byte reads, managed handles, progressive and async file operations, bounded directory traversal/mutation, links, temporary resources, locks, watchers, metadata, atomic replacement, exact path grants | Core and advanced APIs delivered; native Windows execution and browser filesystem support remain unavailable |
 | `std.path` | `04-std-path.md` | lexical components, join, normalization, absolute and canonical queries | Minimum string-backed Path delivered; native non-Unicode paths and extra path helpers remain deferred |
 | `std.process` | `05-std-process.md` | run/spawn, child resource, streams, environment, cwd, timeout, cancellation, shell separation | Partial |
 | `std.text` and native text contracts | `05a-std-text.md` plus type-system handbook | builder, format, safe regex, Unicode String/Char operations | Added and deepened in task 1.3 |
@@ -41,9 +41,10 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 This map becomes complete when every row is either documented to its applicable contract or explicitly records a normative API decision still required. Such a decision blocks the affected chapter rather than inviting an invented API.
 
 Task 1.2 completed the common-contract, `std.io`, `std.terminal`,
-`std.encoding`, and `std.process` rows. `deliver-std-fs-core` now documents the
-implemented filesystem core and separates the deferred APIs. Target execution
-evidence and the remaining index audit are tracked by that change.
+`std.encoding`, and `std.process` rows. `deliver-std-fs-core` documents the
+initial filesystem delivery; `complete-std-fs-advanced` records its advanced
+directory, link, temporary, lock, watcher, and async extension plus target
+evidence and unsupported-platform boundaries.
 
 ---
 

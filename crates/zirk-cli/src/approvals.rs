@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use zirk_runtime_core::permission_grant::{
-    PermissionHistoryAction, PermissionScopes, SignedPermissionGrant, SignedPermissionHistoryEvent,
-    VerifiedPermissionHistoryEvent,
+    FilesystemScopeExtent, PermissionHistoryAction, PermissionScopes, SignedPermissionGrant,
+    SignedPermissionHistoryEvent, VerifiedPermissionHistoryEvent,
 };
 
 use crate::project::{self, ProjectError, ProjectKind, ProjectManifest};
@@ -424,6 +424,20 @@ fn scope_entries(scopes: &PermissionScopes) -> Vec<(String, String)> {
     add("process.execute", &scopes.process_execute);
     add("process.shell", &scopes.process_shell);
     drop(add);
+    entries.extend(scopes.filesystem_operations.iter().map(|scope| {
+        let extent = match scope.extent {
+            FilesystemScopeExtent::Exact => "exact object",
+            FilesystemScopeExtent::Directory => "directory object only",
+            FilesystemScopeExtent::Descendants => "directory and descendants",
+        };
+        (
+            scope.capability.clone(),
+            format!(
+                "{} [operation={}, extent={extent}, requester={}]",
+                scope.resource, scope.operation, scope.requester
+            ),
+        )
+    }));
     entries.extend(scopes.network_udp_multicast_groups.iter().map(|group| {
         (
             "network.udp.send".to_owned(),
@@ -784,6 +798,7 @@ fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
         filesystem_read: Default::default(),
         filesystem_write: Default::default(),
         filesystem_metadata: Default::default(),
+        filesystem_operations: Default::default(),
         environment_read: manifest.environment_permissions.read_names.clone(),
         environment_secrets: manifest.environment_permissions.secret_names.clone(),
         environment_list_names: manifest.environment_permissions.list_names,
@@ -972,6 +987,17 @@ pub fn print_scopes(scopes: &PermissionScopes) {
     for path in &scopes.filesystem_metadata {
         println!("  filesystem.metadata: {path}");
     }
+    for scope in &scopes.filesystem_operations {
+        let extent = match scope.extent {
+            FilesystemScopeExtent::Exact => "exact object",
+            FilesystemScopeExtent::Directory => "directory object only",
+            FilesystemScopeExtent::Descendants => "directory and descendants",
+        };
+        println!(
+            "  {}: {} (operation: {}; extent: {}; requester: {})",
+            scope.capability, scope.resource, scope.operation, extent, scope.requester
+        );
+    }
     for name in &scopes.environment_read {
         println!("  environment.read: {name}");
     }
@@ -1094,6 +1120,30 @@ fn grant_path(key_path: &Path, project_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_scopes_are_visible_with_extent_and_requester() {
+        let scopes = PermissionScopes {
+            filesystem_operations: [
+                zirk_runtime_core::permission_grant::FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.walk".into(),
+                    requester: "example.parser".into(),
+                    resource: "/tmp/project/data".into(),
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        };
+
+        let entries = scope_entries(&scopes);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "filesystem.read");
+        assert!(entries[0].1.contains("directory.walk"));
+        assert!(entries[0].1.contains("directory and descendants"));
+        assert!(entries[0].1.contains("example.parser"));
+    }
 
     fn write_test_key(path: &Path, key: &[u8]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

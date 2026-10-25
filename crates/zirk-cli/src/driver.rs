@@ -320,10 +320,17 @@ fn system_libraries() -> Vec<String> {
         // HTTPS certificate loading uses rustls-native-certs, whose Security
         // and CoreFoundation references are not carried transitively when
         // Zirk links its runtime archive directly through clang.
-        return ["-framework", "Security", "-framework", "CoreFoundation"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        return [
+            "-framework",
+            "Security",
+            "-framework",
+            "CoreFoundation",
+            "-framework",
+            "CoreServices",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
     }
 
     Vec::new()

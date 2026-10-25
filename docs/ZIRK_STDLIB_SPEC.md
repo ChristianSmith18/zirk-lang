@@ -122,22 +122,25 @@ little-/big-endian UTF-16. Byte reads preserve arbitrary bytes. Direct writes
 create a missing file or replace its full contents. A read/write handle asks
 for each filesystem capability required by the selected options.
 
-The next stage adds progressive `read`, `read_exact`, `read_line`, lazy line and
-chunk iteration, append, metadata/exists, and atomic whole-file replacement.
+Progressive `read`, `read_exact`, `read_line`, lazy line and chunk iteration,
+append, metadata/exists, and atomic whole-file replacement are delivered.
 Chunks are capped at 4 MiB and lines at 1 MiB. `FileMetadata` exposes size,
-file/directory kind, and an optional modification timestamp. Atomic replacement
-uses an exclusive same-directory temporary, syncs it, then renames it; no
-power-loss durability guarantee is made beyond target evidence.
+file/directory kind, and optional platform timestamps. Atomic replacement uses
+an exclusive same-directory temporary, syncs it, then renames it; no power-loss
+durability guarantee is made beyond target evidence. The advanced filesystem
+specification documents bounded directory traversal and mutation, links,
+temporary resources, advisory locks, watchers, and their typed unsupported
+platform results.
 
 The compiler infers `filesystem.read`, `filesystem.write`, and
 `filesystem.metadata` through call graphs. Runtime authorization is
-exact-resource consent for the effective
-canonical path, retains application/dependency provenance, and is checked at
-the operation boundary. Missing consent warns and returns a typed permission
-failure that code can handle; unrelated execution continues. Browser execution
-rejects reachable filesystem effects before running the program. Directory
-operations, links, watchers, locks, async filesystem calls, and broader native
-path representations remain future work.
+exact-resource consent for the effective canonical path, retains
+application/dependency provenance, and is checked at the operation boundary.
+Missing consent warns and returns a typed permission failure that code can
+handle; unrelated execution continues. Blocking operations expose `_async`
+counterparts where documented; these suspend Zirk tasks and share the bounded
+managed-blocking pool. The browser rejects reachable filesystem effects during
+capability preflight. Broader native path representations remain future work.
 
 ## 5. `std.path`
 

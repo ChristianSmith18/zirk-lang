@@ -301,3 +301,25 @@ standard-streams capability.
 - **WHEN** a public `std.io` stream signature or behavior changes
 - **THEN** the standard-streams specification, `ZIRK_STDLIB_SPEC.md`, handbook,
   examples, and status evidence are updated together
+
+### Requirement: Bundled filesystem APIs have one documented status
+
+The bundled `std.fs` and `std.path` packages SHALL be included in the standard
+library inventory. Their status SHALL distinguish the synchronous bounded and
+progressive operations delivered by the core filesystem change from directory,
+link, watcher, lock, and asynchronous operations deferred to a later change.
+Their handbook pages, indexes, examples, and target exclusions SHALL agree
+with the filesystem capability specification.
+
+#### Scenario: Filesystem module delivery is documented
+- **WHEN** `std.fs` or `std.path` is delivered
+- **THEN** the standard-library specification, filesystem capability,
+  handbook pages, indexes, implementation status, and examples describe the
+  same supported operations, permissions, limits, and target exclusions
+
+#### Scenario: Deferred filesystem operations are not reported as delivered
+- **WHEN** standard-library status is published after the core filesystem
+  change
+- **THEN** directory traversal and mutation, links, temporary paths, locks,
+  watchers, and asynchronous filesystem operations remain identified as
+  deferred until their companion change is implemented

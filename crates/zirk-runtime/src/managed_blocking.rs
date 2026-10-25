@@ -188,6 +188,167 @@ pub unsafe fn run_managed_callback(
     status.load(Ordering::Acquire)
 }
 
+/// Outcome when an executor branch waits for an owned native job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedJobError {
+    Cancelled,
+    Panicked,
+    ShuttingDown,
+    NotInTask,
+}
+
+#[derive(Clone)]
+pub struct OwnedJobCancellation(Arc<std::sync::atomic::AtomicBool>);
+
+impl OwnedJobCancellation {
+    /// Whether the waiting Zirk branch requested cancellation while this
+    /// native job was running. Jobs should poll between interruptible steps;
+    /// a syscall already in progress still has to finish safely.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+const OWNED_JOB_QUEUED: u8 = 0;
+const OWNED_JOB_RUNNING: u8 = 1;
+const OWNED_JOB_COMPLETE: u8 = 2;
+const OWNED_JOB_CANCELLED: u8 = 3;
+
+/// Admits an owned native operation to the shared bounded blocking pool and
+/// suspends only the calling Zirk task until its result is ready. `job` must
+/// own all data it uses; it may not retain managed Zirk pointers. A queued job
+/// can be cancelled before dispatch. Once a worker has begun the operation,
+/// the caller joins it before returning so the result and any native resource
+/// are either delivered or dropped safely.
+pub fn run_owned_job<T: Send + 'static>(
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, OwnedJobError> {
+    run_owned_job_cancellable(move |_| job())
+}
+
+pub fn run_owned_job_cancellable<T: Send + 'static>(
+    job: impl FnOnce(OwnedJobCancellation) -> T + Send + 'static,
+) -> Result<T, OwnedJobError> {
+    if !crate::executor::in_executor_task() {
+        return Err(OwnedJobError::NotInTask);
+    }
+    let task = crate::executor::current_task();
+    let state = Arc::new(AtomicU32::new(u32::from(OWNED_JOB_QUEUED)));
+    let cancellation = OwnedJobCancellation(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let job = Arc::new(Mutex::new(Some(job)));
+    let result = Arc::new(Mutex::new(None::<Result<T, ()>>));
+
+    loop {
+        if crate::executor::task_cancel_requested(task) {
+            if state
+                .compare_exchange(
+                    u32::from(OWNED_JOB_QUEUED),
+                    u32::from(OWNED_JOB_CANCELLED),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                cancellation.0.store(true, Ordering::Release);
+                job.lock().unwrap_or_else(|error| error.into_inner()).take();
+                return Err(OwnedJobError::Cancelled);
+            }
+        }
+
+        let epoch = crate::executor::pool_event_epoch();
+        let worker_state = Arc::clone(&state);
+        let worker_cancellation = cancellation.clone();
+        let worker_job = Arc::clone(&job);
+        let worker_result = Arc::clone(&result);
+        let submitted = with_managed_pool(|pool| {
+            pool.try_submit(move || {
+                if worker_state
+                    .compare_exchange(
+                        u32::from(OWNED_JOB_QUEUED),
+                        u32::from(OWNED_JOB_RUNNING),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+                let Some(job) = worker_job
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                else {
+                    *worker_result
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()) = Some(Err(()));
+                    worker_state.store(u32::from(OWNED_JOB_COMPLETE), Ordering::Release);
+                    crate::executor::notify_pool_event();
+                    return;
+                };
+                let outcome =
+                    catch_unwind(AssertUnwindSafe(|| job(worker_cancellation))).map_err(|_| ());
+                *worker_result
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(outcome);
+                worker_state.store(u32::from(OWNED_JOB_COMPLETE), Ordering::Release);
+                crate::executor::notify_pool_event();
+            })
+        });
+
+        match submitted {
+            Ok(()) => break,
+            Err(SubmitError::QueueFull) => {
+                if crate::executor::task_cancel_requested(task) {
+                    continue;
+                }
+                crate::executor::park_current_for_pool_event_if_unchanged(epoch);
+            }
+            Err(SubmitError::ShuttingDown) => return Err(OwnedJobError::ShuttingDown),
+        }
+    }
+
+    loop {
+        match state.load(Ordering::Acquire) as u8 {
+            OWNED_JOB_COMPLETE => {
+                let outcome = result
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                    .expect("completed owned job publishes a result");
+                if crate::executor::task_cancel_requested(task) {
+                    return Err(OwnedJobError::Cancelled);
+                }
+                return outcome.map_err(|()| OwnedJobError::Panicked);
+            }
+            OWNED_JOB_CANCELLED => return Err(OwnedJobError::Cancelled),
+            OWNED_JOB_QUEUED if crate::executor::task_cancel_requested(task) => {
+                if state
+                    .compare_exchange(
+                        u32::from(OWNED_JOB_QUEUED),
+                        u32::from(OWNED_JOB_CANCELLED),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    cancellation.0.store(true, Ordering::Release);
+                    job.lock().unwrap_or_else(|error| error.into_inner()).take();
+                    return Err(OwnedJobError::Cancelled);
+                }
+            }
+            OWNED_JOB_RUNNING if crate::executor::task_cancel_requested(task) => {
+                cancellation.0.store(true, Ordering::Release);
+            }
+            _ => {}
+        }
+        let epoch = crate::executor::pool_event_epoch();
+        if state.load(Ordering::Acquire) == u32::from(OWNED_JOB_COMPLETE) {
+            continue;
+        }
+        crate::executor::park_current_for_pool_event_if_unchanged(epoch);
+    }
+}
+
 /// C ABI used by compiler-generated adapters for source-level `Thread.run`.
 ///
 /// # Safety
@@ -487,6 +648,126 @@ mod tests {
         POOL_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    #[test]
+    fn owned_blocking_job_suspends_only_its_branch_and_returns_owned_result() {
+        let _serial = lock_pool_tests();
+        let sibling_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sibling_state = Arc::clone(&sibling_ran);
+        let outcome = crate::executor::Executor::new().run_with_root(move || {
+            crate::executor::spawn(move || {
+                sibling_state.store(true, Ordering::Release);
+                0
+            });
+            let result = run_owned_job(|| {
+                thread::sleep(Duration::from_millis(25));
+                String::from("owned-result")
+            });
+            assert_eq!(result, Ok(String::from("owned-result")));
+            assert!(sibling_ran.load(Ordering::Acquire));
+            0
+        });
+        assert!(matches!(outcome, crate::task::TaskOutcome::Value(0)));
+        shutdown_managed_pool();
+    }
+
+    #[test]
+    fn owned_blocking_job_joins_running_work_before_reporting_cancellation() {
+        let _serial = lock_pool_tests();
+        let outcome = crate::executor::Executor::new().run_with_root(|| {
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker_state = Arc::clone(&completed);
+            let result_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for DropProbe {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let dropped_state = Arc::clone(&result_dropped);
+            let parent = crate::executor::current_task();
+            crate::executor::spawn(move || {
+                crate::executor::cancel_current(parent);
+                0
+            });
+            let result = run_owned_job(move || {
+                thread::sleep(Duration::from_millis(25));
+                worker_state.store(true, Ordering::Release);
+                DropProbe(dropped_state)
+            });
+            assert!(matches!(result, Err(OwnedJobError::Cancelled)));
+            assert!(completed.load(Ordering::Acquire));
+            assert!(result_dropped.load(Ordering::Acquire));
+            0
+        });
+        assert!(matches!(
+            outcome,
+            crate::task::TaskOutcome::Panicked(payload)
+                if payload.is::<crate::executor::Cancelled>()
+        ));
+        shutdown_managed_pool();
+    }
+
+    #[test]
+    fn owned_blocking_job_is_removed_when_cancelled_before_dispatch() {
+        let _serial = lock_pool_tests();
+        let job_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let job_ran_after = Arc::clone(&job_ran);
+        let outcome = crate::executor::Executor::new().run_with_root(move || {
+            let workers = with_managed_pool(ManagedBlockingPool::worker_count);
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+            with_managed_pool(|pool| {
+                for _ in 0..workers {
+                    let started = started_tx.clone();
+                    let release = Arc::clone(&release_rx);
+                    pool.try_submit(move || {
+                        started.send(()).unwrap();
+                        lock(&release).recv().unwrap();
+                    })
+                    .expect("fill every worker without exceeding the shared queue");
+                }
+            });
+            for _ in 0..workers {
+                started_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("each pool worker is occupied before queueing the cancellable job");
+            }
+
+            let parent = crate::executor::current_task();
+            crate::executor::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while with_managed_pool(ManagedBlockingPool::queued) == 0 {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "owned job was not queued behind occupied workers"
+                    );
+                    crate::executor::yield_now();
+                }
+                crate::executor::cancel_current(parent);
+                0
+            });
+
+            let job_ran_in_worker = Arc::clone(&job_ran);
+            assert_eq!(
+                run_owned_job(move || job_ran_in_worker.store(true, Ordering::Release)),
+                Err(OwnedJobError::Cancelled)
+            );
+            for _ in 0..workers {
+                release_tx.send(()).unwrap();
+            }
+            0
+        });
+        assert!(matches!(
+            outcome,
+            crate::task::TaskOutcome::Panicked(payload)
+                if payload.is::<crate::executor::Cancelled>()
+        ));
+        shutdown_managed_pool();
+        assert!(!job_ran_after.load(Ordering::Acquire));
+        assert_eq!(ACTIVE_POOL_WORKERS.load(Ordering::Acquire), 0);
     }
 
     unsafe extern "C-unwind" fn write_managed_result(

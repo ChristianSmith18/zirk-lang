@@ -13,12 +13,32 @@ share enum FileError {
     EndOfStream,
     Unsupported,
     Io,
+    WouldBlock,
+    CrossDevice,
+    NotEmpty,
+    Cancelled,
 }
 
 share enum Encoding { Utf8, Latin1, Utf16Le, Utf16Be }
 
 share enum FileLine { Line(text: String), End, Error(error: FileError) }
 share enum FileChunk { Data(bytes: Array<Byte>), Error(error: FileError) }
+share enum DirectoryEntryKind { File, Directory, Symlink, Other }
+share enum DirectoryEntry {
+    Item(path: String, kind: DirectoryEntryKind),
+    End,
+    Error(error: FileError),
+}
+share enum LinkKind { File, Directory }
+share enum FileWatchEvent {
+    Created(path: String),
+    Modified(path: String),
+    Removed(path: String),
+    Renamed(path: String),
+    Overflow,
+    Closed,
+    Error(error: FileError),
+}
 
 share class FileResourceError implements Error {
     private inmut reason: FileError;
@@ -105,9 +125,19 @@ share class FileMetadata {
     size(): UInt64 { return this.values[0]; }
     is_file(): Boolean { return this.values[1] != 0; }
     is_directory(): Boolean { return this.values[2] != 0; }
+    is_symlink(): Boolean { return this.values[5] != 0; }
+    is_readonly(): Boolean { return this.values[6] != 0; }
     modified_unix_ms(): UInt64? {
         if this.values[4] == 0 { return null; }
         return this.values[3];
+    }
+    accessed_unix_ms(): UInt64? {
+        if this.values[8] == 0 { return null; }
+        return this.values[7];
+    }
+    created_unix_ms(): UInt64? {
+        if this.values[10] == 0 { return null; }
+        return this.values[9];
     }
 }
 
@@ -128,6 +158,18 @@ share class File implements Resource<FileResourceError> {
         return File.read_text_native(path.as_string(), limit, encoding);
     }
 
+    static read_bytes_async(path: Path, limit: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_bytes_async_native(path.as_string(), limit);
+    }
+
+    static read_text_async(
+        path: Path,
+        limit: UInt64,
+        encoding: Encoding = Encoding.Utf8,
+    ): Result<String, FileError> {
+        return File.read_text_async_native(path.as_string(), limit, encoding);
+    }
+
     static write_bytes(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
         return File.write_bytes_native(path.as_string(), bytes);
     }
@@ -140,8 +182,27 @@ share class File implements Resource<FileResourceError> {
         return File.write_text_native(path.as_string(), text, encoding);
     }
 
+    static write_bytes_async(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
+        return File.write_bytes_async_native(path.as_string(), bytes);
+    }
+
+    static write_text_async(
+        path: Path,
+        text: String,
+        encoding: Encoding = Encoding.Utf8,
+    ): Result<Void, FileError> {
+        return File.write_text_async_native(path.as_string(), text, encoding);
+    }
+
     static open(path: Path, options: OpenOptions): Result<File, FileError> {
         return match File.open_native(path.as_string(), options.flags()) {
+            Ok(handle) => File.open_ok(File(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static open_async(path: Path, options: OpenOptions): Result<File, FileError> {
+        return match File.open_async_native(path.as_string(), options.flags()) {
             Ok(handle) => File.open_ok(File(handle));
             Error(error) => Error(error);
         };
@@ -151,8 +212,20 @@ share class File implements Resource<FileResourceError> {
         return File.read_bytes_handle_native(this.handle, max_bytes);
     }
 
+    read_async(max_bytes: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_bytes_handle_async_native(this.handle, max_bytes);
+    }
+
+    write_async(bytes: Array<Byte>): Result<UInt64, FileError> {
+        return File.write_handle_async_native(this.handle, bytes);
+    }
+
     read_exact(count: UInt64): Result<Array<Byte>, FileError> {
         return File.read_exact_native(this.handle, count);
+    }
+
+    read_exact_async(count: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_exact_async_native(this.handle, count);
     }
 
     read_line(): Result<FileLine, FileError> {
@@ -168,6 +241,10 @@ share class File implements Resource<FileResourceError> {
 
     append(bytes: Array<Byte>): Result<Void, FileError> {
         return File.append_handle_native(this.handle, bytes);
+    }
+
+    append_async(bytes: Array<Byte>): Result<Void, FileError> {
+        return File.append_handle_async_native(this.handle, bytes);
     }
 
     metadata(): Result<FileMetadata, FileError> {
@@ -197,12 +274,70 @@ share class File implements Resource<FileResourceError> {
         };
     }
 
+    static set_readonly(path: Path, readonly: Boolean): Result<Void, FileError> {
+        return File.set_readonly_native(path.as_string(), readonly);
+    }
+
+    lock_shared(): Result<FileLock, FileError> {
+        return match File.lock_native(this.handle, false, false) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
+    lock_exclusive(): Result<FileLock, FileError> {
+        return match File.lock_native(this.handle, true, false) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
+    try_lock_shared(): Result<FileLock, FileError> {
+        return match File.lock_native(this.handle, false, true) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
+    try_lock_exclusive(): Result<FileLock, FileError> {
+        return match File.lock_native(this.handle, true, true) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
+    lock_shared_async(): Result<FileLock, FileError> {
+        return match File.lock_async_native(this.handle, false) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
+    lock_exclusive_async(): Result<FileLock, FileError> {
+        return match File.lock_async_native(this.handle, true) {
+            Ok(handle) => File.lock_ok(handle);
+            Error(error) => Error(error);
+        };
+    }
+
     static append_bytes(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
         return File.append_bytes_native(path.as_string(), bytes);
     }
 
     static append_text(path: Path, text: String, encoding: Encoding = Encoding.Utf8): Result<Void, FileError> {
         return File.append_text_native(path.as_string(), text, encoding);
+    }
+
+    static append_bytes_async(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
+        return File.append_bytes_async_native(path.as_string(), bytes);
+    }
+
+    static append_text_async(
+        path: Path,
+        text: String,
+        encoding: Encoding = Encoding.Utf8,
+    ): Result<Void, FileError> {
+        return File.append_text_async_native(path.as_string(), text, encoding);
     }
 
     static write_bytes_atomic(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
@@ -217,6 +352,9 @@ share class File implements Resource<FileResourceError> {
     private static metadata_ok(values: Array<UInt64>): Result<FileMetadata, FileError> {
         return Ok(FileMetadata(values));
     }
+    private static lock_ok(handle: UInt64): Result<FileLock, FileError> {
+        return Ok(FileLock(handle));
+    }
     private static close_ok(): Result<Void, FileResourceError> { return Ok(File.unit()); }
     private static unit(): Void { return; }
     private static close_error(error: FileError): Result<Void, FileResourceError> {
@@ -229,13 +367,28 @@ share class File implements Resource<FileResourceError> {
     private static read_text_native(path: String, limit: UInt64, encoding: Encoding): Result<String, FileError> {
         return Error(FileError.Io);
     }
+    private static read_bytes_async_native(path: String, limit: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static read_text_async_native(path: String, limit: UInt64, encoding: Encoding): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
     private static write_bytes_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
         return Error(FileError.Io);
     }
     private static write_text_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
         return Error(FileError.Io);
     }
+    private static write_bytes_async_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static write_text_async_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
     private static open_native(path: String, flags: UInt32): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static open_async_native(path: String, flags: UInt32): Result<UInt64, FileError> {
         return Error(FileError.Io);
     }
     private static close_native(handle: UInt64): Result<Void, FileError> { return Error(FileError.Closed); }
@@ -243,7 +396,16 @@ share class File implements Resource<FileResourceError> {
     private static read_bytes_handle_native(handle: UInt64, max_bytes: UInt64): Result<Array<Byte>, FileError> {
         return Error(FileError.Io);
     }
+    private static read_bytes_handle_async_native(handle: UInt64, max_bytes: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static write_handle_async_native(handle: UInt64, bytes: Array<Byte>): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
     private static read_exact_native(handle: UInt64, count: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.EndOfStream);
+    }
+    private static read_exact_async_native(handle: UInt64, count: UInt64): Result<Array<Byte>, FileError> {
         return Error(FileError.EndOfStream);
     }
     private static read_line_native(handle: UInt64): Result<FileLine, FileError> {
@@ -258,10 +420,31 @@ share class File implements Resource<FileResourceError> {
     private static append_text_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
         return Error(FileError.Io);
     }
+    private static append_bytes_async_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static append_text_async_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static append_handle_async_native(handle: UInt64, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
     private static metadata_native(handle: UInt64): Result<Array<UInt64>, FileError> {
         return Error(FileError.Io);
     }
     private static metadata_for_native(path: String): Result<Array<UInt64>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static set_readonly_native(path: String, readonly: Boolean): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static lock_native(handle: UInt64, exclusive: Boolean, nonblocking: Boolean): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    static unlock_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static lock_async_native(handle: UInt64, exclusive: Boolean): Result<UInt64, FileError> {
         return Error(FileError.Io);
     }
     private static exists_native(path: String): Result<Boolean, FileError> { return Ok(false); }
@@ -370,4 +553,585 @@ share class FileChunkIterator implements Iterator<FileChunk> {
         };
         return Iteration.Done;
     }
+}
+
+share class Directory {
+    static create(path: Path): Result<Void, FileError> {
+        return Directory.create_native(path.as_string());
+    }
+
+    static create_all(path: Path): Result<Void, FileError> {
+        return Directory.create_all_native(path.as_string());
+    }
+
+    static entries(path: Path): Result<DirectoryEntries, FileError> {
+        return match Directory.entries_open_native(path.as_string()) {
+            Ok(handle) => Directory.entries_ok(DirectoryEntries(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static entries_async(path: Path): Result<DirectoryEntries, FileError> {
+        return match Directory.entries_open_async_native(path.as_string()) {
+            Ok(handle) => Directory.entries_ok(DirectoryEntries(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static walk(
+        path: Path,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<DirectoryWalker, FileError> {
+        return match Directory.walk_open_native(path.as_string(), max_depth, max_entries) {
+            Ok(handle) => Directory.walk_ok(DirectoryWalker(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static walk_async(
+        path: Path,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<DirectoryWalker, FileError> {
+        return match Directory.walk_open_async_native(path.as_string(), max_depth, max_entries) {
+            Ok(handle) => Directory.walk_ok(DirectoryWalker(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static is_empty(path: Path): Result<Boolean, FileError> {
+        return Directory.is_empty_native(path.as_string());
+    }
+
+    static size(
+        path: Path,
+        max_depth: UInt32,
+        max_entries: UInt64,
+        max_bytes: UInt64,
+    ): Result<UInt64, FileError> {
+        return Directory.size_native(path.as_string(), max_depth, max_entries, max_bytes);
+    }
+
+    static copy(
+        source: Path,
+        destination: Path,
+        replace: Boolean,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<Void, FileError> {
+        return Directory.copy_native(
+            source.as_string(), destination.as_string(), replace, max_depth, max_entries,
+        );
+    }
+
+    static move(source: Path, destination: Path, replace: Boolean): Result<Void, FileError> {
+        return Directory.move_native(source.as_string(), destination.as_string(), replace);
+    }
+
+    static remove(path: Path): Result<Void, FileError> {
+        return Directory.remove_native(path.as_string());
+    }
+
+    static remove_all(
+        path: Path,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<Void, FileError> {
+        return Directory.remove_all_native(path.as_string(), max_depth, max_entries);
+    }
+
+    static watch(
+        path: Path,
+        recursive: Boolean = false,
+        queue_capacity: UInt32 = 256 as UInt32,
+    ): Result<FileWatcher, FileError> {
+        return match Directory.watch_native(path.as_string(), recursive, queue_capacity) {
+            Ok(handle) => Directory.watcher_ok(FileWatcher(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    private static entries_ok(value: DirectoryEntries): Result<DirectoryEntries, FileError> {
+        return Ok(value);
+    }
+    private static walk_ok(value: DirectoryWalker): Result<DirectoryWalker, FileError> {
+        return Ok(value);
+    }
+    private static watcher_ok(value: FileWatcher): Result<FileWatcher, FileError> {
+        return Ok(value);
+    }
+
+    private static create_native(path: String): Result<Void, FileError> { return Error(FileError.Io); }
+    private static create_all_native(path: String): Result<Void, FileError> { return Error(FileError.Io); }
+    private static entries_open_native(path: String): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static entries_open_async_native(path: String): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    static entries_next_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    static entries_next_async_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    static entries_close_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static walk_open_native(
+        path: String,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static walk_open_async_native(
+        path: String,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    static walk_next_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    static walk_next_async_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    static walk_close_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static is_empty_native(path: String): Result<Boolean, FileError> {
+        return Error(FileError.Io);
+    }
+    private static size_native(
+        path: String,
+        max_depth: UInt32,
+        max_entries: UInt64,
+        max_bytes: UInt64,
+    ): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static copy_native(
+        source: String,
+        destination: String,
+        replace: Boolean,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static move_native(source: String, destination: String, replace: Boolean): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static remove_native(path: String): Result<Void, FileError> { return Error(FileError.Io); }
+    private static remove_all_native(
+        path: String,
+        max_depth: UInt32,
+        max_entries: UInt64,
+    ): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static watch_native(
+        path: String,
+        recursive: Boolean,
+        queue_capacity: UInt32,
+    ): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+}
+
+share class DirectoryEntries implements Iterable<DirectoryEntry>, Resource<FileResourceError> {
+    private inmut handle: UInt64;
+    private mut closed: Boolean;
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+        this.closed = false;
+    }
+
+    iterator(): Iterator<DirectoryEntry> { return DirectoryEntryIterator(this); }
+
+    next_entry(): DirectoryEntry {
+        if this.closed { return DirectoryEntry.Error(FileError.Closed); }
+        return match Directory.entries_next_native(this.handle) {
+            Error(error) => DirectoryEntry.Error(error);
+            Ok(encoded) => {
+                if encoded.length == 0 {
+                    this.closed = true;
+                    DirectoryEntry.End
+                } else {
+                    DirectoryEntries.decode_entry(encoded)
+                }
+            }
+        };
+    }
+
+    next_entry_async(): DirectoryEntry {
+        if this.closed { return DirectoryEntry.Error(FileError.Closed); }
+        return match Directory.entries_next_async_native(this.handle) {
+            Error(error) => DirectoryEntry.Error(error);
+            Ok(encoded) => {
+                if encoded.length == 0 {
+                    this.closed = true;
+                    DirectoryEntry.End
+                } else {
+                    DirectoryEntries.decode_entry(encoded)
+                }
+            }
+        };
+    }
+
+    close(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(DirectoryEntries.unit()); }
+        this.closed = true;
+        return match Directory.entries_close_native(this.handle) {
+            Ok(_) => Ok(DirectoryEntries.unit());
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    is_closed(): Boolean { return this.closed; }
+
+    static decode_entry(encoded: String): DirectoryEntry {
+        if encoded.length < 2 { return DirectoryEntry.Error(FileError.InvalidPath); }
+        inmut marker = encoded.substring(0, 1);
+        inmut path = encoded.substring(1, encoded.length);
+        return match marker {
+            "f" => DirectoryEntry.Item(path, DirectoryEntryKind.File);
+            "d" => DirectoryEntry.Item(path, DirectoryEntryKind.Directory);
+            "l" => DirectoryEntry.Item(path, DirectoryEntryKind.Symlink);
+            _ => DirectoryEntry.Item(path, DirectoryEntryKind.Other);
+        };
+    }
+
+    private static unit(): Void { return; }
+}
+
+share class DirectoryEntryIterator implements Iterator<DirectoryEntry> {
+    private inmut entries: DirectoryEntries;
+    private mut finished: Boolean;
+
+    private construct(entries: DirectoryEntries) {
+        this.entries = entries;
+        this.finished = false;
+    }
+
+    next(): Iteration<DirectoryEntry> {
+        if this.finished { return Iteration.Done; }
+        inmut entry = this.entries.next_entry();
+        match entry {
+            DirectoryEntry.End => {
+                this.finished = true;
+                return Iteration.Done;
+            }
+            DirectoryEntry.Error(_) => {
+                this.finished = true;
+                return Iteration.Item(entry);
+            }
+            _ => { return Iteration.Item(entry); }
+        };
+        return Iteration.Done;
+    }
+}
+
+share class DirectoryWalker implements Iterable<DirectoryEntry>, Resource<FileResourceError> {
+    private inmut handle: UInt64;
+    private mut closed: Boolean;
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+        this.closed = false;
+    }
+
+    iterator(): Iterator<DirectoryEntry> { return DirectoryWalkIterator(this); }
+
+    next_entry(): DirectoryEntry {
+        if this.closed { return DirectoryEntry.Error(FileError.Closed); }
+        return match Directory.walk_next_native(this.handle) {
+            Error(error) => DirectoryEntry.Error(error);
+            Ok(encoded) => {
+                if encoded.length == 0 {
+                    this.closed = true;
+                    DirectoryEntry.End
+                } else {
+                    DirectoryEntries.decode_entry(encoded)
+                }
+            }
+        };
+    }
+
+    next_entry_async(): DirectoryEntry {
+        if this.closed { return DirectoryEntry.Error(FileError.Closed); }
+        return match Directory.walk_next_async_native(this.handle) {
+            Error(error) => DirectoryEntry.Error(error);
+            Ok(encoded) => {
+                if encoded.length == 0 {
+                    this.closed = true;
+                    DirectoryEntry.End
+                } else {
+                    DirectoryEntries.decode_entry(encoded)
+                }
+            }
+        };
+    }
+
+    close(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(DirectoryWalker.unit()); }
+        this.closed = true;
+        return match Directory.walk_close_native(this.handle) {
+            Ok(_) => Ok(DirectoryWalker.unit());
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    is_closed(): Boolean { return this.closed; }
+
+    private static unit(): Void { return; }
+}
+
+share class DirectoryWalkIterator implements Iterator<DirectoryEntry> {
+    private inmut walker: DirectoryWalker;
+    private mut finished: Boolean;
+
+    private construct(walker: DirectoryWalker) {
+        this.walker = walker;
+        this.finished = false;
+    }
+
+    next(): Iteration<DirectoryEntry> {
+        if this.finished { return Iteration.Done; }
+        inmut entry = this.walker.next_entry();
+        match entry {
+            DirectoryEntry.End => {
+                this.finished = true;
+                return Iteration.Done;
+            }
+            DirectoryEntry.Error(_) => {
+                this.finished = true;
+                return Iteration.Item(entry);
+            }
+            _ => { return Iteration.Item(entry); }
+        };
+        return Iteration.Done;
+    }
+}
+
+share class FileLock implements Resource<FileResourceError> {
+    private inmut handle: UInt64;
+    private mut closed: Boolean;
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+        this.closed = false;
+    }
+
+    close(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(FileLock.unit()); }
+        return match File.unlock_native(this.handle) {
+            Ok(_) => {
+                this.closed = true;
+                FileLock.close_ok();
+            }
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    is_closed(): Boolean { return this.closed; }
+
+    private static close_ok(): Result<Void, FileResourceError> {
+        return Ok(FileLock.unit());
+    }
+    private static unit(): Void { return; }
+}
+
+share class Link {
+    static is_link(path: Path): Result<Boolean, FileError> {
+        return Link.is_link_native(path.as_string());
+    }
+
+    static read_target(path: Path): Result<Path, FileError> {
+        return match Link.read_target_native(path.as_string()) {
+            Ok(target) => Link.target_ok(Path(target));
+            Error(error) => Error(error);
+        };
+    }
+
+    static create(target: Path, destination: Path, kind: LinkKind): Result<Void, FileError> {
+        return Link.create_link_native(target.as_string(), destination.as_string(), kind);
+    }
+
+    private static target_ok(value: Path): Result<Path, FileError> { return Ok(value); }
+
+    private static is_link_native(path: String): Result<Boolean, FileError> {
+        return Error(FileError.Io);
+    }
+    private static read_target_native(path: String): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    private static create_link_native(target: String, destination: String, kind: LinkKind): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+}
+
+share class Temporary {
+    static file(parent: Path): Result<TemporaryPath, FileError> {
+        return match Temporary.create_file_native(parent.as_string()) {
+            Ok(handle) => Temporary.file_ok(TemporaryPath(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    static directory(parent: Path): Result<TemporaryPath, FileError> {
+        return match Temporary.create_directory_native(parent.as_string()) {
+            Ok(handle) => Temporary.file_ok(TemporaryPath(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    private static file_ok(value: TemporaryPath): Result<TemporaryPath, FileError> {
+        return Ok(value);
+    }
+    private static create_file_native(parent: String): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static create_directory_native(parent: String): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    static path_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    static cleanup_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    static release_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+}
+
+share class TemporaryPath implements Resource<FileResourceError> {
+    private inmut handle: UInt64;
+    private mut closed: Boolean;
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+        this.closed = false;
+    }
+
+    path(): Result<Path, FileError> {
+        return match Temporary.path_native(this.handle) {
+            Ok(path) => TemporaryPath.path_ok(Path(path));
+            Error(error) => Error(error);
+        };
+    }
+
+    release(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(TemporaryPath.unit()); }
+        return match Temporary.release_native(this.handle) {
+            Ok(_) => {
+                this.closed = true;
+                TemporaryPath.closed_ok();
+            }
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    close(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(TemporaryPath.unit()); }
+        return match Temporary.cleanup_native(this.handle) {
+            Ok(_) => {
+                this.closed = true;
+                TemporaryPath.closed_ok();
+            }
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    is_closed(): Boolean { return this.closed; }
+
+    private static closed_ok(): Result<Void, FileResourceError> {
+        return Ok(TemporaryPath.unit());
+    }
+    private static path_ok(value: Path): Result<Path, FileError> { return Ok(value); }
+    private static unit(): Void { return; }
+}
+
+share class FileWatcher implements Resource<FileResourceError> {
+    private inmut handle: UInt64;
+    private mut closed: Boolean;
+
+    private construct(handle: UInt64) {
+        this.handle = handle;
+        this.closed = false;
+    }
+
+    next(): Result<FileWatchEvent, FileError> {
+        if this.closed { return Error(FileError.Closed); }
+        return match FileWatcher.next_native(this.handle) {
+            Ok(encoded) => FileWatcher.decode_event(encoded);
+            Error(error) => Error(error);
+        };
+    }
+
+    next_async(): Result<FileWatchEvent, FileError> {
+        if this.closed { return Error(FileError.Closed); }
+        return match FileWatcher.next_async_native(this.handle) {
+            Ok(encoded) => FileWatcher.decode_event(encoded);
+            Error(error) => Error(error);
+        };
+    }
+
+    close(): Result<Void, FileResourceError> {
+        if this.closed { return Ok(FileWatcher.unit()); }
+        this.closed = true;
+        return match FileWatcher.watcher_close_native(this.handle) {
+            Ok(_) => Ok(FileWatcher.unit());
+            Error(error) => Error(FileResourceError(error));
+        };
+    }
+
+    is_closed(): Boolean { return this.closed; }
+
+    private static decode_event(encoded: String): Result<FileWatchEvent, FileError> {
+        if encoded.length == 0 { return Error(FileError.InvalidPath); }
+        inmut marker = encoded.substring(0, 1);
+        inmut path = encoded.substring(1, encoded.length);
+        return match marker {
+            "c" => Ok(FileWatchEvent.Created(path));
+            "m" => Ok(FileWatchEvent.Modified(path));
+            "d" => Ok(FileWatchEvent.Removed(path));
+            "r" => Ok(FileWatchEvent.Renamed(path));
+            "o" => Ok(FileWatchEvent.Overflow);
+            "x" => Ok(FileWatchEvent.Closed);
+            "A" => Ok(FileWatchEvent.Error(FileError.InvalidPath));
+            "B" => Ok(FileWatchEvent.Error(FileError.InvalidOptions));
+            "C" => Ok(FileWatchEvent.Error(FileError.NotFound));
+            "D" => Ok(FileWatchEvent.Error(FileError.PermissionDenied));
+            "E" => Ok(FileWatchEvent.Error(FileError.AlreadyExists));
+            "F" => Ok(FileWatchEvent.Error(FileError.WrongType));
+            "G" => Ok(FileWatchEvent.Error(FileError.Closed));
+            "H" => Ok(FileWatchEvent.Error(FileError.Decoding));
+            "I" => Ok(FileWatchEvent.Error(FileError.Limit));
+            "J" => Ok(FileWatchEvent.Error(FileError.EndOfStream));
+            "K" => Ok(FileWatchEvent.Error(FileError.Unsupported));
+            "L" => Ok(FileWatchEvent.Error(FileError.Io));
+            "M" => Ok(FileWatchEvent.Error(FileError.WouldBlock));
+            "N" => Ok(FileWatchEvent.Error(FileError.CrossDevice));
+            "O" => Ok(FileWatchEvent.Error(FileError.NotEmpty));
+            "P" => Ok(FileWatchEvent.Error(FileError.Cancelled));
+            _ => Error(FileError.InvalidPath);
+        };
+    }
+
+    private static next_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    private static next_async_native(handle: UInt64): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    private static watcher_close_native(handle: UInt64): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static unit(): Void { return; }
 }

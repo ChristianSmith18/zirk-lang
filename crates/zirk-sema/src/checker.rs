@@ -94,20 +94,56 @@ fn capabilities_for_standard_binding(binding: &str) -> &'static [&'static str] {
         | "std.fs.File.read_text"
         | "std.fs.File.read_bytes_handle"
         | "std.fs.File.read_exact"
-        | "std.fs.File.read_line" => &["filesystem.read"],
-        "std.fs.File.metadata" | "std.fs.File.metadata_for" | "std.fs.File.exists" => {
-            &["filesystem.metadata"]
-        }
+        | "std.fs.File.read_line"
+        | "std.fs.File.read_bytes_async"
+        | "std.fs.File.read_text_async"
+        | "std.fs.File.read_async"
+        | "std.fs.File.read_exact_async"
+        | "std.fs.Directory.entries"
+        | "std.fs.Directory.entries_async"
+        | "std.fs.Directory.walk"
+        | "std.fs.Directory.walk_async"
+        | "std.fs.Directory.is_empty" => &["filesystem.read"],
+        "std.fs.File.metadata"
+        | "std.fs.File.metadata_for"
+        | "std.fs.File.exists"
+        | "std.fs.Directory.size"
+        | "std.fs.Link.is_link"
+        | "std.fs.Link.read_target"
+        | "std.fs.FileWatcher.next"
+        | "std.fs.FileWatcher.next_async" => &["filesystem.metadata"],
         "std.fs.File.write_bytes"
         | "std.fs.File.write_text"
+        | "std.fs.File.write_bytes_async"
+        | "std.fs.File.write_text_async"
+        | "std.fs.File.write_async"
         | "std.fs.File.append_bytes"
         | "std.fs.File.append_text"
         | "std.fs.File.append_handle"
+        | "std.fs.File.append_bytes_async"
+        | "std.fs.File.append_text_async"
+        | "std.fs.File.append_async"
         | "std.fs.File.write_bytes_atomic"
-        | "std.fs.File.write_text_atomic" => &["filesystem.write"],
+        | "std.fs.File.write_text_atomic"
+        | "std.fs.Directory.create"
+        | "std.fs.Directory.create_all"
+        | "std.fs.Directory.remove"
+        | "std.fs.Directory.remove_all"
+        | "std.fs.Link.create"
+        | "std.fs.Temporary.file"
+        | "std.fs.Temporary.directory"
+        | "std.fs.TemporaryPath.close"
+        | "std.fs.File.set_readonly" => &["filesystem.write"],
+        "std.fs.Directory.copy" | "std.fs.Directory.move" => {
+            &["filesystem.read", "filesystem.write"]
+        }
+        "std.fs.File.lock" | "std.fs.File.lock_async" | "std.fs.File.unlock" => {
+            &["filesystem.read", "filesystem.write"]
+        }
+        "std.fs.Directory.watch" => &["filesystem.read", "filesystem.metadata"],
         // The selected mode is runtime data; the native boundary checks only
         // the read/write effects requested by this OpenOptions value.
-        "std.fs.File.open" => &["filesystem.read", "filesystem.write"],
+        "std.fs.File.open" | "std.fs.File.open_async" => &["filesystem.read", "filesystem.write"],
         other if other.starts_with("std.http.server_") => &["network.listen"],
         _ => &[],
     }
@@ -2306,7 +2342,25 @@ impl<'a> Checker<'a> {
             | "std.fs.File.write_bytes_atomic"
             | "std.fs.File.write_text_atomic"
             | "std.net.tcp.listen" => self.mark_may_block(),
-            "std.net.udp.connect" | "std.net.udp.bind" => self.mark_may_suspend(),
+            "std.fs.File.read_bytes_async"
+            | "std.fs.File.read_text_async"
+            | "std.fs.File.write_bytes_async"
+            | "std.fs.File.write_text_async"
+            | "std.fs.File.open_async"
+            | "std.fs.File.read_async"
+            | "std.fs.File.write_async"
+            | "std.fs.File.read_exact_async"
+            | "std.fs.File.append_bytes_async"
+            | "std.fs.File.append_text_async"
+            | "std.fs.File.append_async"
+            | "std.fs.File.lock_async"
+            | "std.fs.Directory.entries_async"
+            | "std.fs.DirectoryEntries.next_entry_async"
+            | "std.fs.Directory.walk_async"
+            | "std.fs.DirectoryWalker.next_entry_async"
+            | "std.fs.FileWatcher.next_async"
+            | "std.net.udp.connect"
+            | "std.net.udp.bind" => self.mark_may_suspend(),
             "std.net.udp.send"
             | "std.net.udp.send_to"
             | "std.net.udp.send_broadcast"

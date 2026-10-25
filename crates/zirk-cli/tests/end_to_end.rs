@@ -12412,6 +12412,2022 @@ fn main(): Void {
 }
 
 #[test]
+fn bundled_std_fs_directory_listing_uses_its_own_nonrecursive_scope() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_directory_scope");
+    let home = workspace("std_fs_directory_scope_home");
+    std::fs::create_dir_all(project.join("src/data")).unwrap();
+    let entry = project.join("src/data/one.txt");
+    std::fs::write(&entry, "item").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.directory.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, DirectoryEntry, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.entries(Path.of("src/data")) with entries {
+        Ok(entries) => {
+            match entries.next_entry() {
+                DirectoryEntry.Item(path, _) => stdout.println(path);
+                _ => stdout.println("missing-entry");
+            }
+            _ = entries.close();
+        }
+        Error(error) => stdout.println(error.to_string());
+    }
+    match Directory.entries(Path.of("src/missing")) {
+        Error(error) => match error {
+            FileError.NotFound => stdout.println("missing");
+            _ => stdout.println("missing-wrong-error");
+        };
+        Ok(_) => stdout.println("missing-was-found");
+    }
+    match Directory.entries(Path.of("src/data/one.txt")) {
+        Error(error) => match error {
+            FileError.WrongType => stdout.println("wrong-type");
+            _ => stdout.println("wrong-type-wrong-error");
+        };
+        Ok(_) => stdout.println("file-was-a-directory");
+    }
+    match Directory.entries(Path.of("src/denied")) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("denied");
+            _ => stdout.println("denied-wrong-error");
+        };
+        Ok(_) => stdout.println("denied-was-authorized");
+    }
+    match Directory.walk(Path.of("src/data"), 4 as UInt32, 100) {
+        Ok(_) => stdout.println("walk-was-authorized");
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("walk-denied");
+            _ => stdout.println(error.to_string());
+        };
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let resource = project
+        .canonicalize()
+        .unwrap()
+        .join("src/data")
+        .to_string_lossy()
+        .into_owned();
+    let missing_resource = project
+        .canonicalize()
+        .unwrap()
+        .join("src/missing")
+        .to_string_lossy()
+        .into_owned();
+    let file_resource = entry.canonicalize().unwrap().to_string_lossy().into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.entries".into(),
+                    requester: "local".into(),
+                    resource: resource.clone(),
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.entries".into(),
+                    requester: "local".into(),
+                    resource: missing_resource,
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.entries".into(),
+                    requester: "local".into(),
+                    resource: file_resource,
+                    extent: FilesystemScopeExtent::Directory,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run directory permission fixture");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        format!(
+            "{}\nmissing\nwrong-type\ndenied\nwalk-denied\n",
+            entry.canonicalize().unwrap().display()
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_walk_is_bounded_and_does_not_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_walk_scope");
+    let home = workspace("std_fs_walk_scope_home");
+    let root = project.join("src/data");
+    let nested = root.join("nested");
+    let outside = project.join("outside");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(nested.join("inside.txt"), "inside").unwrap();
+    std::fs::write(outside.join("secret.txt"), "outside").unwrap();
+    symlink(&outside, root.join("external-link")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.walk.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, DirectoryEntry } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.walk(Path.of("src/data"), 8 as UInt32, 16) with walker {
+        Ok(walker) => {
+            for entry in walker {
+                match entry {
+                    DirectoryEntry.Item(path, _) => stdout.println(path);
+                    DirectoryEntry.Error(_) => stdout.println("walk-error");
+                    _ => {}
+                }
+            }
+            _ = walker.close();
+        }
+        Error(_) => stdout.println("walk-open-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_root = root.canonicalize().unwrap();
+    let resource = canonical_root.to_string_lossy().into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.read".into(),
+                operation: "directory.walk".into(),
+                requester: "local".into(),
+                resource,
+                extent: FilesystemScopeExtent::Descendants,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run bounded directory walker");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let mut paths = String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            canonical_root
+                .join("external-link")
+                .to_string_lossy()
+                .into_owned(),
+            canonical_root.join("nested").to_string_lossy().into_owned(),
+            canonical_root
+                .join("nested/inside.txt")
+                .to_string_lossy()
+                .into_owned(),
+        ]
+        .into_iter()
+        .collect::<Vec<_>>(),
+        "the walk must report the symlink itself without traversing its target"
+    );
+}
+
+#[test]
+fn bundled_std_fs_create_all_and_recursive_size_enforce_scopes_and_bounds() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_create_size");
+    let home = workspace("std_fs_create_size_home");
+    let data = project.join("src/data");
+    std::fs::create_dir_all(data.join("nested")).unwrap();
+    std::fs::write(data.join("top.txt"), "12").unwrap();
+    std::fs::write(data.join("nested/inside.txt"), "abc").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.size.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, DirectoryEntry, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.create_all(Path.of("src/generated/deep")) {
+        Ok(_) => stdout.println("created");
+        Error(_) => stdout.println("create-error");
+    }
+    match Directory.size(Path.of("src/data"), 8 as UInt32, 16, 64) {
+        Ok(size) => stdout.println(size);
+        Error(_) => stdout.println("size-error");
+    }
+    match Directory.is_empty(Path.of("src/data")) {
+        Ok(empty) => stdout.println(empty);
+        Error(_) => stdout.println("data-empty-error");
+    }
+    match Directory.is_empty(Path.of("src/generated/deep")) {
+        Ok(empty) => stdout.println(empty);
+        Error(_) => stdout.println("generated-empty-error");
+    }
+    match Directory.size(Path.of("src/data"), 0 as UInt32, 16, 64) {
+        Error(error) => match error {
+            FileError.Limit => stdout.println("depth-limited");
+            _ => stdout.println("depth-limit-wrong-error");
+        };
+        Ok(_) => stdout.println("depth-limit-missed");
+    }
+    match Directory.size(Path.of("src/data"), 8 as UInt32, 1, 64) {
+        Error(error) => match error {
+            FileError.Limit => stdout.println("entries-limited");
+            _ => stdout.println("entry-limit-wrong-error");
+        };
+        Ok(_) => stdout.println("entry-limit-missed");
+    }
+    match Directory.size(Path.of("src/data"), 8 as UInt32, 16, 4) {
+        Error(error) => match error {
+            FileError.Limit => stdout.println("bytes-limited");
+            _ => stdout.println("byte-limit-wrong-error");
+        };
+        Ok(_) => stdout.println("byte-limit-missed");
+    }
+    match Directory.walk(Path.of("src/data"), 8 as UInt32, 1) {
+        Ok(walker) => {
+            _ = walker.next_entry();
+            match walker.next_entry() {
+                DirectoryEntry.Error(error) => match error {
+                    FileError.Limit => stdout.println("walk-entry-limited");
+                    _ => stdout.println("walk-entry-wrong-error");
+                };
+                _ => stdout.println("walk-entry-limit-missed");
+            }
+            _ = walker.close();
+        }
+        Error(_) => stdout.println("walk-open-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let source_scope = project
+        .canonicalize()
+        .unwrap()
+        .join("src")
+        .to_string_lossy()
+        .into_owned();
+    let data_scope = data.canonicalize().unwrap().to_string_lossy().into_owned();
+    let generated_scope = project
+        .canonicalize()
+        .unwrap()
+        .join("src/generated/deep")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.create_all".into(),
+                    requester: "local".into(),
+                    resource: source_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.metadata".into(),
+                    operation: "directory.size".into(),
+                    requester: "local".into(),
+                    resource: data_scope.clone(),
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.is_empty".into(),
+                    requester: "local".into(),
+                    resource: data_scope.clone(),
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.is_empty".into(),
+                    requester: "local".into(),
+                    resource: generated_scope,
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.walk".into(),
+                    requester: "local".into(),
+                    resource: data_scope.clone(),
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run bounded directory operations");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "created\n5\nfalse\ntrue\ndepth-limited\nentries-limited\nbytes-limited\nwalk-entry-limited\n"
+    );
+    assert!(project.join("src/generated/deep").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_recursive_removal_requires_bounds_and_does_not_follow_links() {
+    use std::os::unix::fs::symlink;
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_remove_scope");
+    let home = workspace("std_fs_remove_scope_home");
+    let root = project.join("src/data");
+    let keep = project.join("src/keep");
+    let outside = project.join("outside");
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    std::fs::create_dir_all(&keep).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(root.join("remove.txt"), "remove").unwrap();
+    std::fs::write(root.join("nested/inside.txt"), "remove").unwrap();
+    std::fs::write(keep.join("keep.txt"), "keep").unwrap();
+    std::fs::write(outside.join("secret.txt"), "keep outside").unwrap();
+    symlink(&outside, root.join("external-link")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.remove.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.remove(Path.of("src/data/remove.txt")) {
+        Ok(_) => stdout.println("file-removed");
+        Error(_) => stdout.println("file-remove-error");
+    }
+    match Directory.remove_all(Path.of("src/keep"), 8 as UInt32, 0) {
+        Error(error) => match error {
+            FileError.Limit => stdout.println("zero-bound-rejected");
+            _ => stdout.println("zero-bound-wrong-error");
+        };
+        Ok(_) => stdout.println("zero-bound-accepted");
+    }
+    match Directory.remove_all(Path.of("src/data"), 8 as UInt32, 16) {
+        Ok(_) => stdout.println("tree-removed");
+        Error(_) => stdout.println("tree-remove-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let file_scope = root
+        .canonicalize()
+        .unwrap()
+        .join("remove.txt")
+        .to_string_lossy()
+        .into_owned();
+    let tree_scope = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.remove".into(),
+                    requester: "local".into(),
+                    resource: file_scope,
+                    extent: FilesystemScopeExtent::Exact,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.remove_all".into(),
+                    requester: "local".into(),
+                    resource: tree_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run bounded recursive removal");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "file-removed\nzero-bound-rejected\ntree-removed\n"
+    );
+    assert!(!root.exists());
+    assert_eq!(
+        std::fs::read_to_string(keep.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("secret.txt")).unwrap(),
+        "keep outside"
+    );
+}
+
+#[test]
+fn bundled_std_fs_copy_checks_source_and_destination_scopes_separately() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_copy_scopes");
+    let home = workspace("std_fs_copy_scopes_home");
+    let source = project.join("src/source");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("nested/item.txt"), "copied-data").unwrap();
+    std::fs::create_dir_all(project.join("src/replaced/old")).unwrap();
+    std::fs::write(project.join("src/replaced/old/item.txt"), "old-data").unwrap();
+    std::fs::write(project.join("src/private.txt"), "private-data").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.copy.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.copy(Path.of("src/source"), Path.of("src/copied"), false, 8 as UInt32, 16) {
+        Ok(_) => stdout.println("copied");
+        Error(error) => stdout.println(error.to_string());
+    }
+    match Directory.copy(Path.of("src/source"), Path.of("src/copied"), false, 8 as UInt32, 16) {
+        Error(error) => match error {
+            FileError.AlreadyExists => stdout.println("replace-required");
+            _ => stdout.println("existing-wrong-error");
+        };
+        Ok(_) => stdout.println("existing-overwritten");
+    }
+    match Directory.copy(Path.of("src/source"), Path.of("src/replaced"), true, 8 as UInt32, 16) {
+        Ok(_) => stdout.println("replaced");
+        Error(_) => stdout.println("replace-error");
+    }
+    match Directory.copy(Path.of("src/source"), Path.of("src/denied"), false, 8 as UInt32, 16) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("destination-denied");
+            _ => stdout.println("destination-wrong-error");
+        };
+        Ok(_) => stdout.println("destination-was-authorized");
+    }
+    match Directory.copy(Path.of("src/private.txt"), Path.of("src/other"), false, 8 as UInt32, 16) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("source-denied");
+            _ => stdout.println("source-wrong-error");
+        };
+        Ok(_) => stdout.println("source-was-authorized");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_project = project.canonicalize().unwrap();
+    let source_scope = canonical_project
+        .join("src/source")
+        .to_string_lossy()
+        .into_owned();
+    let copied_scope = canonical_project
+        .join("src/copied")
+        .to_string_lossy()
+        .into_owned();
+    let replaced_scope = canonical_project
+        .join("src/replaced")
+        .to_string_lossy()
+        .into_owned();
+    let other_scope = canonical_project
+        .join("src/other")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.copy.source".into(),
+                    requester: "local".into(),
+                    resource: source_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.copy.destination".into(),
+                    requester: "local".into(),
+                    resource: copied_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.copy.destination".into(),
+                    requester: "local".into(),
+                    resource: other_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.copy.destination".into(),
+                    requester: "local".into(),
+                    resource: replaced_scope.clone(),
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.copy.replace".into(),
+                    requester: "local".into(),
+                    resource: replaced_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run bounded directory copy");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "copied\nreplace-required\nreplaced\ndestination-denied\nsource-denied\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/copied/nested/item.txt")).unwrap(),
+        "copied-data"
+    );
+    assert!(!project.join("src/replaced/old").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/replaced/nested/item.txt")).unwrap(),
+        "copied-data"
+    );
+    assert!(!project.join("src/denied").exists());
+    assert!(!project.join("src/other").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_recursive_size_and_copy_report_links_without_following_them() {
+    use std::os::unix::fs::symlink;
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_copy_symlink");
+    let home = workspace("std_fs_copy_symlink_home");
+    let source = project.join("src/source");
+    let outside = project.join("outside");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let target = outside.join("large-target.txt");
+    std::fs::write(&target, vec![b'x'; 256]).unwrap();
+    let link = source.join("external-link");
+    symlink(&target, &link).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.copy.symlink.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.size(Path.of("src/source"), 8 as UInt32, 16, 1024) {
+        Ok(size) => stdout.println(size);
+        Error(_) => stdout.println("size-error");
+    }
+    match Directory.copy(Path.of("src/source"), Path.of("src/copied"), false, 8 as UInt32, 16) {
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("link-copy-unsupported");
+            _ => stdout.println("copy-wrong-error");
+        };
+        Ok(_) => stdout.println("link-was-copied");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_project = project.canonicalize().unwrap();
+    let source_scope = source
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let copied_scope = canonical_project
+        .join("src/copied")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.metadata".into(),
+                    operation: "directory.size".into(),
+                    requester: "local".into(),
+                    resource: source_scope.clone(),
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.copy.source".into(),
+                    requester: "local".into(),
+                    resource: source_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "directory.copy.destination".into(),
+                    requester: "local".into(),
+                    resource: copied_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run link-safe size and copy");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let symlink_size = std::fs::symlink_metadata(&link).unwrap().len();
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        format!("{symlink_size}\nlink-copy-unsupported\n"),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), vec![b'x'; 256]);
+    assert!(project.join("src/copied").is_dir());
+    assert!(!project.join("src/copied/external-link").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_links_inspect_targets_without_opening_them_and_scope_creation() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_link_api");
+    let home = workspace("std_fs_link_api_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("outside")).unwrap();
+    let target = project.join("outside/secret.txt");
+    std::fs::write(&target, "do not read through the link").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.link.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.metadata; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { FileError, Link, LinkKind } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Link.create(Path.of("../outside/secret.txt"), Path.of("src/link"), LinkKind.File) {
+        Ok(_) => {}
+        Error(_) => stdout.println("create-error");
+    }
+    match Link.is_link(Path.of("src/link")) {
+        Ok(value) => stdout.println(value);
+        Error(_) => stdout.println("inspect-error");
+    }
+    match Link.read_target(Path.of("src/link")) {
+        Ok(path) => stdout.println(path.as_string());
+        Error(_) => stdout.println("target-error");
+    }
+    match Link.create(Path.of("../outside/secret.txt"), Path.of("src/denied-link"), LinkKind.File) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("denied");
+            _ => stdout.println("denied-wrong-error");
+        };
+        Ok(_) => stdout.println("denied-create-succeeded");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_project = project.canonicalize().unwrap();
+    let link_scope = canonical_project
+        .join("src/link")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "link.create.destination".into(),
+                    requester: "local".into(),
+                    resource: link_scope.clone(),
+                    extent: FilesystemScopeExtent::Exact,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.metadata".into(),
+                    operation: "link.is_link".into(),
+                    requester: "local".into(),
+                    resource: link_scope.clone(),
+                    extent: FilesystemScopeExtent::Exact,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.metadata".into(),
+                    operation: "link.read_target".into(),
+                    requester: "local".into(),
+                    resource: link_scope,
+                    extent: FilesystemScopeExtent::Exact,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run symbolic link operations");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "true\n../outside/secret.txt\ndenied\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "do not read through the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(project.join("src/link"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!project.join("src/denied-link").exists());
+}
+
+#[test]
+fn bundled_std_fs_temporary_resources_are_unique_scoped_and_owned() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_temporary");
+    let home = workspace("std_fs_temporary_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.temporary.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Temporary } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Temporary.file(Path.of("src")) {
+        Ok(temp) => {
+            match temp.path() {
+                Ok(path) => stdout.println(path.as_string());
+                Error(_) => stdout.println("file-path-error");
+            }
+            match temp.close() {
+                Ok(_) => stdout.println("file-closed");
+                Error(_) => stdout.println("file-cleanup-error");
+            }
+        }
+        Error(_) => stdout.println("file-create-error");
+    }
+    match Temporary.file(Path.of("src")) {
+        Ok(temp) => {
+            match temp.path() {
+                Ok(path) => stdout.println(path.as_string());
+                Error(_) => stdout.println("second-file-path-error");
+            }
+            match temp.close() {
+                Ok(_) => stdout.println("file-closed");
+                Error(_) => stdout.println("second-file-cleanup-error");
+            }
+        }
+        Error(_) => stdout.println("second-file-create-error");
+    }
+    match Temporary.directory(Path.of("src")) {
+        Ok(temp) => {
+            match temp.path() {
+                Ok(path) => stdout.println(path.as_string());
+                Error(_) => stdout.println("directory-path-error");
+            }
+            match temp.close() {
+                Ok(_) => stdout.println("directory-closed");
+                Error(_) => stdout.println("directory-cleanup-error");
+            }
+        }
+        Error(_) => stdout.println("directory-create-error");
+    }
+    match Temporary.file(Path.of("src")) {
+        Ok(temp) => {
+            match temp.path() {
+                Ok(path) => stdout.println(path.as_string());
+                Error(_) => stdout.println("released-file-path-error");
+            }
+            match temp.release() {
+                Ok(_) => stdout.println("released");
+                Error(_) => stdout.println("release-error");
+            }
+        }
+        Error(_) => stdout.println("released-file-create-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let parent_scope = project
+        .canonicalize()
+        .unwrap()
+        .join("src")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "temporary.file".into(),
+                    requester: "local".into(),
+                    resource: parent_scope.clone(),
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "temporary.directory".into(),
+                    requester: "local".into(),
+                    resource: parent_scope,
+                    extent: FilesystemScopeExtent::Directory,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run owned temporary resources");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let lines = normalize(&String::from_utf8_lossy(&run.stdout))
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines.len(),
+        8,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let paths = [&lines[0], &lines[2], &lines[4], &lines[6]];
+    assert!(paths.iter().all(|path| {
+        path.starts_with(
+            project
+                .canonicalize()
+                .unwrap()
+                .join("src")
+                .to_str()
+                .unwrap(),
+        )
+    }));
+    assert_eq!(
+        paths.iter().collect::<std::collections::HashSet<_>>().len(),
+        4
+    );
+    assert_eq!(
+        [&lines[1], &lines[3], &lines[5], &lines[7]],
+        ["file-closed", "file-closed", "directory-closed", "released"]
+    );
+    for path in &paths[..3] {
+        assert!(!std::path::Path::new(path).exists());
+    }
+    assert!(std::path::Path::new(paths[3]).is_file());
+    std::fs::remove_file(paths[3]).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_directory_watcher_reports_scoped_create_and_closes() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_watcher");
+    let home = workspace("std_fs_watcher_home");
+    let root = project.join("src/data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.watcher.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, File, FileError, FileWatchEvent } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn ignore(): Void { return; }
+
+fn main(): Void {
+    match Directory.watch(Path.of("src/data"), false, 8) with watcher {
+        Error(error) => stdout.println("watch-open:" + error.to_string());
+        Ok(watcher) => {
+            match File.write_text(Path.of("src/data/new.txt"), "one") {
+                Error(_) => stdout.println("write-error");
+                Ok(_) => {
+                    mut seen = false;
+                    mut attempts = 0;
+                    while attempts < 100 && !seen {
+                        match watcher.next() {
+                            Ok(event) => match event {
+                                FileWatchEvent.Created(_) => { seen = true; ignore(); }
+                                FileWatchEvent.Modified(_) => ignore();
+                                FileWatchEvent.Removed(_) => ignore();
+                                FileWatchEvent.Renamed(_) => ignore();
+                                FileWatchEvent.Overflow => ignore();
+                                FileWatchEvent.Closed => ignore();
+                                FileWatchEvent.Error(_) => ignore();
+                            };
+                            Error(error) => match error {
+                                FileError.WouldBlock => Timer.sleep(10ms);
+                                _ => {
+                                    stdout.println("watch-next-error");
+                                    attempts = 100;
+                                    ignore();
+                                }
+                            };
+                        }
+                        attempts += 1;
+                    }
+                    if seen { stdout.println("created"); }
+                    else { stdout.println("watch-timeout"); }
+                }
+            }
+            _ = watcher.close();
+            match watcher.next() {
+                Error(error) => match error {
+                    FileError.Closed => stdout.println("closed");
+                    _ => stdout.println("close-state-error");
+                };
+                Ok(_) => stdout.println("close-state-error");
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_root = root.canonicalize().unwrap();
+    let file = canonical_root.join("new.txt");
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_write: [file.to_string_lossy().into_owned()].into(),
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.metadata".into(),
+                operation: "directory.watch".into(),
+                requester: "local".into(),
+                resource: canonical_root.to_string_lossy().into_owned(),
+                extent: FilesystemScopeExtent::Directory,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run scoped directory watcher");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "created\nclosed\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "one");
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_denied_watcher_does_not_consume_resources() {
+    let project = workspace("std_fs_watcher_denied");
+    let home = workspace("std_fs_watcher_denied_home");
+    let root = project.join("src/data");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.watcher.denied.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    for _ in 0..40 {
+        match Directory.watch(Path.of("src/data"), false, 8) with watcher {
+            Error(error) => match error {
+                FileError.PermissionDenied => stdout.println("denied");
+                _ => stdout.println("wrong-error:" + error.to_string());
+            };
+            Ok(watcher) => {
+                stdout.println("unexpected-open");
+                _ = watcher.close();
+            }
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    seed_exact_test_consent_with_scopes(&project, &home, Default::default());
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run denied watcher requests");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "denied\n".repeat(40)
+    );
+}
+
+#[test]
+fn bundled_std_fs_async_file_and_directory_operations_return_typed_results() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_async_operations");
+    let home = workspace("std_fs_async_operations_home");
+    std::fs::create_dir_all(project.join("src/data")).unwrap();
+    let input = project.join("src/data/input.txt");
+    let output = project.join("src/data/output.txt");
+    std::fs::write(&input, "source-data").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.async.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, DirectoryEntry, File, FileError, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match File.read_text_async(Path.of("src/data/input.txt"), 64) {
+        Ok(text) => stdout.println("read:" + text);
+        Error(_) => stdout.println("read-error");
+    };
+    match File.write_text_async(Path.of("src/data/output.txt"), "async") {
+        Ok(_) => stdout.println("write-ok");
+        Error(_) => stdout.println("write-error");
+    };
+    match File.append_text_async(Path.of("src/data/output.txt"), "-append") {
+        Ok(_) => stdout.println("append-ok");
+        Error(_) => stdout.println("append-error");
+    };
+    match File.open_async(Path.of("src/data/input.txt"), OpenOptions.read_only()) with file {
+        Ok(file) => {
+            match file.read_async(2) {
+                Ok(bytes) => { stdout.println("read-handle"); stdout.println(bytes.length); }
+                Error(_) => stdout.println("read-handle-error");
+            };
+            match file.read_exact_async(2) {
+                Ok(bytes) => { stdout.println("read-exact"); stdout.println(bytes.length); }
+                Error(_) => stdout.println("read-exact-error");
+            };
+            _ = file.close();
+        }
+        Error(_) => stdout.println("open-error");
+    };
+    match File.open_async(Path.of("src/data/output.txt"), OpenOptions.read_and_write()) with file {
+        Ok(file) => {
+            match file.write_async([65 as Byte, 66 as Byte]) {
+                Ok(count) => { stdout.println("write-handle"); stdout.println(count); }
+                Error(_) => stdout.println("write-handle-error");
+            };
+            match file.read_async(1) {
+                Ok(bytes) => { stdout.println("read-after-write"); stdout.println(bytes.length); }
+                Error(_) => stdout.println("read-after-write-error");
+            };
+            match file.lock_exclusive_async() with locked {
+                Ok(locked) => {
+                    stdout.println("lock-async-ok");
+                    _ = locked.close();
+                }
+                Error(_) => stdout.println("lock-async-error");
+            };
+            _ = file.close();
+        }
+        Error(_) => stdout.println("write-open-error");
+    };
+    match File.read_text_async(Path.of("src/data/output.txt"), 64) {
+        Ok(text) => stdout.println("final:" + text);
+        Error(_) => stdout.println("final-read-error");
+    };
+    match Directory.entries_async(Path.of("src/data")) with entries {
+        Ok(entries) => {
+            match entries.next_entry_async() {
+                DirectoryEntry.Item(_, _) => stdout.println("entry");
+                DirectoryEntry.End => stdout.println("entry-end");
+                DirectoryEntry.Error(_) => stdout.println("entry-error");
+            };
+            _ = entries.close();
+        }
+        Error(_) => stdout.println("entries-open-error");
+    };
+    match Directory.walk_async(Path.of("src/data"), 4, 10) with walker {
+        Ok(walker) => {
+            match walker.next_entry_async() {
+                DirectoryEntry.Item(_, _) => stdout.println("walk-item");
+                DirectoryEntry.End => stdout.println("walk-end");
+                DirectoryEntry.Error(_) => stdout.println("walk-error");
+            };
+            _ = walker.close();
+        }
+        Error(_) => stdout.println("walk-open-error");
+    };
+}
+"#,
+    )
+    .unwrap();
+
+    let input_scope = input.canonicalize().unwrap().to_string_lossy().into_owned();
+    let output_scope = output
+        .canonicalize()
+        .unwrap_or(output.clone())
+        .to_string_lossy()
+        .into_owned();
+    let data_scope = project
+        .canonicalize()
+        .unwrap()
+        .join("src/data")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_read: [input_scope.clone(), output_scope.clone()].into(),
+            filesystem_write: [output_scope.clone()].into(),
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.entries".into(),
+                    requester: "local".into(),
+                    resource: data_scope.clone(),
+                    extent: FilesystemScopeExtent::Directory,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "directory.walk".into(),
+                    requester: "local".into(),
+                    resource: data_scope,
+                    extent: FilesystemScopeExtent::Descendants,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "file.lock.exclusive".into(),
+                    requester: "local".into(),
+                    resource: output_scope.clone(),
+                    extent: FilesystemScopeExtent::Exact,
+                },
+            ]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run async filesystem operations");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "read:source-data\nwrite-ok\nappend-ok\nread-handle\n2\nread-exact\n2\nwrite-handle\n2\nread-after-write\n1\nlock-async-ok\nfinal:ABync-append\nentry\nwalk-item\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_async_lock_contention_does_not_block_sibling_filesystem_work() {
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_async_lock_contention");
+    let home = workspace("std_fs_async_lock_contention_home");
+    let root = project.join("src/data");
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("locked.txt");
+    let progress = root.join("progress.txt");
+    std::fs::write(&target, "locked").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.async-lock-contention.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut::strict branches: List<Int32> = [0, 1];
+    mut results = Concurrent.each(
+        branches,
+        (branch: Int32): String => {
+            if branch == 0 {
+                mut outcome = "open-error";
+                match File.open_async(Path.of("src/data/locked.txt"), OpenOptions.read_and_write()) with file {
+                    Error(_) => { }
+                    Ok(file) => {
+                        match file.lock_exclusive_async() with locked {
+                            Error(_) => { outcome = "lock-error"; }
+                            Ok(locked) => {
+                                outcome = "lock-released";
+                                _ = locked.close();
+                            }
+                        }
+                        _ = file.close();
+                    }
+                }
+                return outcome;
+            } else {
+                Timer.sleep(30ms);
+                mut outcome = "writer-error";
+                match File.write_text_async(Path.of("src/data/progress.txt"), "sibling") {
+                    Ok(_) => { outcome = "writer-done"; }
+                    Error(_) => { }
+                }
+                return outcome;
+            }
+            "unexpected"
+        },
+        2,
+    );
+    stdout.println(results[0]);
+    stdout.println(results[1]);
+}
+"#,
+    )
+    .unwrap();
+
+    let lock_resource = target
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let progress_resource = progress.to_string_lossy().into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_read: [lock_resource.clone()].into(),
+            filesystem_write: [lock_resource.clone(), progress_resource.clone()].into(),
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.write".into(),
+                operation: "file.lock.exclusive".into(),
+                requester: "local".into(),
+                resource: lock_resource,
+                extent: FilesystemScopeExtent::Exact,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let host_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&target)
+        .unwrap();
+    let lock_result = unsafe { libc::flock(host_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(lock_result, 0, "acquire the external contention lock");
+
+    let mut command = TestCommand::new(compiler());
+    command
+        .args(["run", "."])
+        .current_dir(&project)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_test_home(&mut command, &home);
+    let mut child = command
+        .spawn()
+        .expect("start async lock contention fixture");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !progress.exists() && Instant::now() < deadline {
+        if let Some(status) = child.try_wait().expect("poll Zirk process") {
+            let output = child
+                .wait_with_output()
+                .expect("collect early child output");
+            panic!(
+                "Zirk exited before sibling write (status {status}); stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let sibling_progressed_while_locked = progress.exists();
+
+    let unlock_result = unsafe { libc::flock(host_lock.as_raw_fd(), libc::LOCK_UN) };
+    assert_eq!(unlock_result, 0, "release the external contention lock");
+    drop(host_lock);
+
+    let output = child.wait_with_output().expect("collect async lock output");
+    assert!(
+        sibling_progressed_while_locked,
+        "the sibling async write should finish while the host still holds the lock; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "lock-released\nwriter-done\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_async_watcher_suspends_one_concurrent_branch() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_async_watcher");
+    let home = workspace("std_fs_async_watcher_home");
+    let root = project.join("src/data");
+    std::fs::create_dir_all(&root).unwrap();
+    let event_path = root.join("async-event.txt");
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.async-watcher.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, File } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn ignore(): Void { return; }
+
+fn main(): Void {
+    inmut::strict branches: List<Int32> = [0, 1, 2];
+    mut results = Concurrent.each(
+        branches,
+        (branch: Int32): String => {
+            if branch == 0 {
+                mut outcome = "watch-open-error";
+                match Directory.watch(Path.of("src/data"), false, 8) with watcher {
+                    Error(_) => { }
+                    Ok(watcher) => {
+                        match watcher.next_async() {
+                            Ok(_) => { outcome = "watcher-event"; ignore(); }
+                            Error(_) => { outcome = "watcher-error"; ignore(); }
+                        };
+                        _ = watcher.close();
+                    }
+                };
+                return outcome;
+            } else {
+                if branch == 1 {
+                    Timer.sleep(40ms);
+                    return match File.write_text_async(Path.of("src/data/async-event.txt"), "event") {
+                        Ok(_) => "writer-done";
+                        Error(_) => "writer-error";
+                    };
+                } else {
+                    return match File.read_text_async(Path.of("src/data/missing.txt"), 64) {
+                        Ok(_) => "unexpected-read";
+                        Error(_) => "read-error";
+                    };
+                }
+            }
+            "unexpected"
+        },
+        2,
+    );
+    stdout.println(results[0]);
+    stdout.println(results[1]);
+    stdout.println(results[2]);
+}
+"#,
+    )
+    .unwrap();
+
+    let root_scope = root.canonicalize().unwrap().to_string_lossy().into_owned();
+    let event_scope = event_path.to_string_lossy().into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_read: [root.join("missing.txt").to_string_lossy().into_owned()].into(),
+            filesystem_write: [event_scope].into(),
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.metadata".into(),
+                operation: "directory.watch".into(),
+                requester: "local".into(),
+                resource: root_scope,
+                extent: FilesystemScopeExtent::Directory,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run async watcher branches");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "watcher-event\nwriter-done\nread-error\n"
+    );
+    assert_eq!(std::fs::read_to_string(event_path).unwrap(), "event");
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_recursive_watcher_ignores_symlink_target_events() {
+    use std::os::unix::fs::symlink;
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_recursive_watcher");
+    let home = workspace("std_fs_recursive_watcher_home");
+    let root = project.join("src/data");
+    let nested = root.join("nested");
+    let outside = project.join("outside");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    symlink(&outside, root.join("escape")).unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.recursive-watcher.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; filesystem.metadata; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, File, FileError, FileWatchEvent } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn ignore(): Void { return; }
+
+fn main(): Void {
+    match Directory.watch(Path.of("src/data"), true, 32) with watcher {
+        Error(error) => stdout.println("watch-open:" + error.to_string());
+        Ok(watcher) => {
+            match File.write_text(Path.of("src/data/nested/inside.txt"), "inside") {
+                Error(_) => stdout.println("inside-write-error");
+                Ok(_) => {
+                    mut seen = false;
+                    mut attempts = 0;
+                    while attempts < 100 && !seen {
+                        match watcher.next() {
+                            Ok(event) => match event {
+                                FileWatchEvent.Created(_) => { seen = true; ignore(); }
+                                FileWatchEvent.Modified(_) => ignore();
+                                FileWatchEvent.Removed(_) => ignore();
+                                FileWatchEvent.Renamed(_) => ignore();
+                                FileWatchEvent.Overflow => ignore();
+                                FileWatchEvent.Closed => ignore();
+                                FileWatchEvent.Error(_) => ignore();
+                            };
+                            Error(error) => match error {
+                                FileError.WouldBlock => Timer.sleep(10ms);
+                                _ => { attempts = 100; ignore(); }
+                            };
+                        }
+                        attempts += 1;
+                    }
+                    if seen { stdout.println("nested-event"); }
+                    else { stdout.println("nested-missing"); }
+                }
+            }
+            for _ in 0..40 {
+                match watcher.next() {
+                    Ok(_) => ignore();
+                    Error(_) => Timer.sleep(5ms);
+                }
+            }
+            match File.write_text(Path.of("src/data/escape/secret.txt"), "outside") {
+                Error(_) => stdout.println("outside-write-error");
+                Ok(_) => {
+                    mut leaked = false;
+                    mut attempts = 0;
+                    while attempts < 100 && !leaked {
+                        match watcher.next() {
+                            Ok(_) => { leaked = true; ignore(); }
+                            Error(error) => match error {
+                                FileError.WouldBlock => Timer.sleep(10ms);
+                                _ => { attempts = 100; ignore(); }
+                            };
+                        }
+                        attempts += 1;
+                    }
+                    if leaked { stdout.println("external-event-leaked"); }
+                    else { stdout.println("external-event-contained"); }
+                }
+            }
+            _ = watcher.close();
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical_root = root.canonicalize().unwrap();
+    let canonical_outside = outside.canonicalize().unwrap();
+    let inside_file = canonical_root.join("nested/inside.txt");
+    let external_file = canonical_outside.join("secret.txt");
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_write: [
+                inside_file.to_string_lossy().into_owned(),
+                external_file.to_string_lossy().into_owned(),
+            ]
+            .into(),
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.metadata".into(),
+                operation: "directory.watch".into(),
+                requester: "local".into(),
+                resource: canonical_root.to_string_lossy().into_owned(),
+                extent: FilesystemScopeExtent::Descendants,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run recursive directory watcher");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "nested-event\nexternal-event-contained\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(external_file).unwrap(), "outside");
+}
+
+#[cfg(unix)]
+#[test]
+fn bundled_std_fs_advisory_locks_are_scoped_nonblocking_and_released() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_lock");
+    let home = workspace("std_fs_lock_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let target = project.join("src/locked.txt");
+    std::fs::write(&target, "lock target").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.lock.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File, FileError, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match File.open(Path.of("src/locked.txt"), OpenOptions.read_and_write()) {
+        Ok(first) => {
+            match File.open(Path.of("src/locked.txt"), OpenOptions.read_and_write()) {
+                Ok(second) => {
+                    match first.lock_shared() {
+                        Ok(shared) => {
+                            stdout.println("shared");
+                            match second.try_lock_exclusive() {
+                                Error(error) => match error {
+                                    FileError.WouldBlock => stdout.println("would-block");
+                                    _ => stdout.println("try-wrong-error");
+                                };
+                                Ok(_) => stdout.println("exclusive-did-not-block");
+                            }
+                            _ = shared.close();
+                            match second.try_lock_exclusive() {
+                                Ok(exclusive) => {
+                                    stdout.println("exclusive-after-release");
+                                    _ = exclusive.close();
+                                }
+                                Error(_) => stdout.println("exclusive-after-release-failed");
+                            }
+                        }
+                        Error(_) => stdout.println("shared-lock-failed");
+                    }
+                    _ = first.close();
+                    _ = second.close();
+                }
+                Error(_) => stdout.println("second-open-failed");
+            }
+        }
+        Error(_) => stdout.println("first-open-failed");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let resource = target
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [
+                FilesystemOperationScope {
+                    capability: "filesystem.read".into(),
+                    operation: "file.lock.shared".into(),
+                    requester: "local".into(),
+                    resource: resource.clone(),
+                    extent: FilesystemScopeExtent::Exact,
+                },
+                FilesystemOperationScope {
+                    capability: "filesystem.write".into(),
+                    operation: "file.lock.exclusive".into(),
+                    requester: "local".into(),
+                    resource: resource.clone(),
+                    extent: FilesystemScopeExtent::Exact,
+                },
+            ]
+            .into(),
+            filesystem_read: [resource.clone()].into(),
+            filesystem_write: [resource].into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run managed advisory locks");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "shared\nwould-block\nexclusive-after-release\n"
+    );
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "lock target");
+}
+
+#[test]
+fn bundled_std_fs_move_checks_both_paths_and_replacement_intent() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_move_scopes");
+    let home = workspace("std_fs_move_scopes_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/source.txt"), "move-me").unwrap();
+    std::fs::write(project.join("src/collision.txt"), "keep-me").unwrap();
+    std::fs::write(project.join("src/replacement.txt"), "new-value").unwrap();
+    std::fs::write(project.join("src/replaced.txt"), "old-value").unwrap();
+    std::fs::write(project.join("src/denied.txt"), "denied-move").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.move.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.move(Path.of("src/source.txt"), Path.of("src/moved.txt"), false) {
+        Ok(_) => stdout.println("moved");
+        Error(error) => stdout.println(error.to_string());
+    }
+    match Directory.move(Path.of("src/moved.txt"), Path.of("src/collision.txt"), false) {
+        Error(error) => match error {
+            FileError.AlreadyExists => stdout.println("collision-preserved");
+            _ => stdout.println("collision-wrong-error");
+        };
+        Ok(_) => stdout.println("collision-overwritten");
+    }
+    match Directory.move(Path.of("src/replacement.txt"), Path.of("src/replaced.txt"), true) {
+        Ok(_) => stdout.println("replaced");
+        Error(_) => stdout.println("replace-error");
+    }
+    match Directory.move(Path.of("src/denied.txt"), Path.of("src/denied-destination.txt"), false) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("destination-denied");
+            _ => stdout.println("destination-wrong-error");
+        };
+        Ok(_) => stdout.println("destination-was-authorized");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let root = project.canonicalize().unwrap().join("src");
+    let scope = |name: &str| root.join(name).to_string_lossy().into_owned();
+    let mut scopes = Vec::new();
+    for name in [
+        "source.txt",
+        "moved.txt",
+        "collision.txt",
+        "replacement.txt",
+        "replaced.txt",
+        "denied.txt",
+    ] {
+        scopes.push(FilesystemOperationScope {
+            capability: "filesystem.write".into(),
+            operation: if name == "moved.txt" || name == "collision.txt" || name == "replaced.txt" {
+                "directory.move.destination".into()
+            } else {
+                "directory.move.source".into()
+            },
+            requester: "local".into(),
+            resource: scope(name),
+            extent: FilesystemScopeExtent::Exact,
+        });
+    }
+    scopes.push(FilesystemOperationScope {
+        capability: "filesystem.write".into(),
+        operation: "directory.move.source".into(),
+        requester: "local".into(),
+        resource: scope("moved.txt"),
+        extent: FilesystemScopeExtent::Exact,
+    });
+    scopes.push(FilesystemOperationScope {
+        capability: "filesystem.write".into(),
+        operation: "directory.move.replace".into(),
+        requester: "local".into(),
+        resource: scope("replaced.txt"),
+        extent: FilesystemScopeExtent::Exact,
+    });
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: scopes.into_iter().collect(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run scoped directory moves");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "moved\ncollision-preserved\nreplaced\ndestination-denied\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(!project.join("src/source.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/moved.txt")).unwrap(),
+        "move-me"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/collision.txt")).unwrap(),
+        "keep-me"
+    );
+    assert!(!project.join("src/replacement.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(project.join("src/replaced.txt")).unwrap(),
+        "new-value"
+    );
+    assert!(project.join("src/denied.txt").exists());
+    assert!(!project.join("src/denied-destination.txt").exists());
+}
+
+#[test]
 fn bundled_std_fs_denial_is_catchable_and_preserves_existing_contents() {
     let project = workspace("std_fs_denied");
     let home = workspace("std_fs_denied_home");
@@ -12595,4 +14611,90 @@ fn main(): Void {
         "attempted but denied filesystem.read for {}",
         input.canonicalize().unwrap().display()
     )));
+}
+
+#[test]
+fn bundled_std_fs_metadata_snapshot_and_readonly_mutation_use_separate_authority() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_readonly_metadata");
+    let home = workspace("std_fs_readonly_metadata_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let target = project.join("src/target.txt");
+    std::fs::write(&target, "content").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.readonly.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.metadata; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match File.metadata_for(Path.of("src/target.txt")) {
+        Ok(metadata) => stdout.println(metadata.is_file().to_string());
+        Error(_) => stdout.println("metadata-error");
+    }
+    match File.set_readonly(Path.of("src/target.txt"), true) {
+        Ok(_) => stdout.println("readonly-set");
+        Error(_) => stdout.println("readonly-set-error");
+    }
+    match File.metadata_for(Path.of("src/target.txt")) {
+        Ok(metadata) => stdout.println(metadata.is_readonly().to_string());
+        Error(_) => stdout.println("readonly-metadata-error");
+    }
+    match File.set_readonly(Path.of("src/target.txt"), false) {
+        Ok(_) => stdout.println("readonly-cleared");
+        Error(_) => stdout.println("readonly-clear-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let resource = target
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.write".into(),
+                operation: "file.set_readonly".into(),
+                requester: "local".into(),
+                resource: resource.clone(),
+                extent: FilesystemScopeExtent::Exact,
+            }]
+            .into(),
+            filesystem_metadata: [resource].into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command
+        .output()
+        .expect("run scoped metadata and readonly changes");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "true\nreadonly-set\ntrue\nreadonly-cleared\n"
+    );
+    assert!(!std::fs::metadata(target).unwrap().permissions().readonly());
 }

@@ -19,7 +19,7 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `deliver-std-fs-core`, **2026-10-25**.
+Last reviewed for `complete-std-fs-advanced`, **2026-10-25**.
 
 ## Browser-hosted interpreter tooling
 
@@ -86,7 +86,7 @@ native backend is delivered.
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
 | `if`/`else` | yes | yes | yes | yes | yes | yes | — |
 | `std.io` standard streams | yes | yes | yes | yes | yes | yes | Source-defined `stdin`, `stdout`, and `stderr`; synchronous native/interpreter input, destination-labelled output, and browser stdin preflight. Async and terminal controls remain deferred. |
-| `std.path` and `std.fs` core | yes | yes | yes | yes | yes | yes | `deliver-std-fs-core`: lexical `Path`, exact-authorized absolute/canonical queries, bounded whole-file reads, direct writes, managed `File.open` (256 handles), progressive reads/lines/chunks, append, metadata/exists, atomic replacement, and typed errors. Focused native filesystem conformance passes on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 in [CI run 40230912316](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40230912316), source revision `add179e6`; the run executes 16 runtime filesystem tests on Unix targets, 14 on Windows, and three public API E2E tests per target. Exact-resource consent/denial and browser filesystem preflight pass. The overall CI run remains red after the focused step because of the repository-wide canonical-format check and the independent browser Fetch HTTP job. Directory/link/watch/lock/async operations and native non-Unicode paths remain deferred. |
+| `std.path` and `std.fs` | yes | yes | yes | yes | yes | yes | `deliver-std-fs-core` plus `complete-std-fs-advanced`: lexical paths, bounded file operations, managed resources, progressive and async reads/writes, bounded directories, links, temporary resources, locks, watchers, metadata, atomic replacement, and exact-resource permissions. Focused runtime filesystem tests pass on macOS ARM64 and in Linux ARM64 and emulated Linux x86_64 containers. Windows x86_64 runtime cross-checks pass for GNU and MSVC, including MSVC test-target compilation; native Windows execution remains unverified. Browser preflight rejects filesystem effects before execution. Native non-Unicode paths remain outside the documented surface. |
 
 ## Phase 2 — Core language surface
 
@@ -304,8 +304,13 @@ passed the complete native CI matrix. Evidence gathered on macOS ARM64:
   `cargo deny check all` and `cargo audit` passed for the current lockfile.
 - `cargo check -p zirk-runtime --features http3 --target
   x86_64-pc-windows-msvc` could not run on this Mac because the Windows C
-  compiler/SDK is unavailable (`assert.h` was not found). This is not Windows
-  build evidence; the configured Windows CI runner must provide it.
+  compiler/SDK is unavailable (`assert.h` was not found). A separate
+  `x86_64-pc-windows-gnu` cross-check of `zirk-runtime` passed in a Linux ARM64
+  container. Neither check provides native Windows runtime conformance; the
+  configured Windows CI runner must provide that evidence.
+- `cargo xwin check --target x86_64-pc-windows-msvc -p zirk-runtime --tests`
+  passed, including compilation of Windows-specific typed unsupported tests.
+  This remains compile-only evidence; no Windows binary was executed.
 - CI run 39558631485 failed in the Windows CLI unit suite because two bundled
   standard-package tests compared Windows `\\` path separators with `/`-based
   package-relative names. The loader now normalizes the relative path before

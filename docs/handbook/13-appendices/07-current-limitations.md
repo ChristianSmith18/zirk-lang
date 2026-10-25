@@ -26,9 +26,11 @@ Current high-impact delivery limits include:
   entry selection without a required source `fn main`, dependency/dev-dependency
   graphs, typed application globals, and one `requires` capability list. Runtime
   consent is exact-resource and operation-local. Runtime enforcement covers
-  environment/secrets, networking, and the delivered `std.fs`/`std.path` core;
-  directory/link/lock/watch/async filesystem work and process APIs remain
-  incomplete. See the
+  environment/secrets, networking, and `std.fs`/`std.path`, including bounded
+  directory/link/temp/lock/watch APIs and task-suspending async file/directory
+  operations. Browser execution still rejects filesystem effects; Windows
+  filesystem behavior has compile-only evidence in this change, and process
+  APIs remain unavailable. See the
   [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
   chapters for the tested surface. Focused native filesystem conformance passes
   on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 in

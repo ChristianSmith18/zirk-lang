@@ -28,6 +28,11 @@ pub struct PermissionScopes {
     // signed representation until metadata-only consent is actually saved.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub filesystem_metadata: BTreeSet<String>,
+    /// Operation-specific filesystem approvals added after the exact-path
+    /// core contract. Keeping them separate ensures legacy exact file grants
+    /// cannot silently become directory, watcher, link, or lock authority.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub filesystem_operations: BTreeSet<FilesystemOperationScope>,
     pub environment_read: BTreeSet<String>,
     pub environment_secrets: BTreeSet<String>,
     pub environment_list_names: bool,
@@ -51,6 +56,29 @@ pub struct PermissionScopes {
     pub process_execute: BTreeSet<String>,
     #[serde(default)]
     pub process_shell: BTreeSet<String>,
+}
+
+/// Extent recorded for an operation-specific filesystem approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemScopeExtent {
+    /// A single file or other filesystem object.
+    Exact,
+    /// An operation on the directory object itself, such as listing entries.
+    Directory,
+    /// The named directory and its descendants for one approved operation.
+    Descendants,
+}
+
+/// Authority for a specific filesystem operation, independent of ordinary
+/// exact-path read/write grants.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FilesystemOperationScope {
+    pub capability: String,
+    pub operation: String,
+    pub requester: String,
+    pub resource: String,
+    pub extent: FilesystemScopeExtent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +412,7 @@ mod tests {
             filesystem_read: BTreeSet::new(),
             filesystem_write: BTreeSet::new(),
             filesystem_metadata: BTreeSet::new(),
+            filesystem_operations: BTreeSet::new(),
             environment_read: ["APP_MODE".into()].into(),
             environment_secrets: ["DB_PASSWORD".into()].into(),
             environment_list_names: false,
@@ -410,6 +439,10 @@ mod tests {
         assert!(
             !encoded.contains("filesystem_metadata"),
             "empty metadata scopes preserve the legacy signed representation"
+        );
+        assert!(
+            !encoded.contains("filesystem_operations"),
+            "empty operation scopes preserve the legacy signed representation"
         );
         let verified = SignedPermissionGrant::decode(&encoded)
             .unwrap()
@@ -473,6 +506,33 @@ mod tests {
                 .verify(b"test-key"),
             Err(GrantVerificationError::InvalidMac)
         );
+    }
+
+    #[test]
+    fn operation_scoped_directory_approval_round_trips_with_provenance_and_extent() {
+        let scope = FilesystemOperationScope {
+            capability: "filesystem.read".into(),
+            operation: "directory.walk".into(),
+            requester: "example.parser".into(),
+            resource: "/tmp/project/data".into(),
+            extent: FilesystemScopeExtent::Descendants,
+        };
+        let scopes = PermissionScopes {
+            filesystem_operations: [scope.clone()].into(),
+            ..PermissionScopes::default()
+        };
+        let signed = SignedPermissionGrant::sign(
+            "c".repeat(64),
+            "d".repeat(64),
+            scopes,
+            b"operation-scope-key",
+        )
+        .unwrap();
+        let verified = SignedPermissionGrant::decode(&signed.encode().unwrap())
+            .unwrap()
+            .verify(&"c".repeat(64), &"d".repeat(64), b"operation-scope-key")
+            .unwrap();
+        assert!(verified.scopes().filesystem_operations.contains(&scope));
     }
 
     #[test]

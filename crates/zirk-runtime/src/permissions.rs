@@ -12,8 +12,8 @@ use zirk_runtime_core::network_policy::{
     EffectiveNetworkGrant, NetworkOrigin, NetworkPolicyError, validate_local_endpoint,
 };
 use zirk_runtime_core::permission_grant::{
-    PermissionHistoryAction, PermissionScopes, SignedPermissionGrant, SignedPermissionHistoryEvent,
-    VerifiedPermissionGrant,
+    FilesystemOperationScope, FilesystemScopeExtent, PermissionHistoryAction, PermissionScopes,
+    SignedPermissionGrant, SignedPermissionHistoryEvent, VerifiedPermissionGrant,
 };
 
 const RUNTIME_GRANT_ENV: &str = "ZIRK_RUNTIME_PERMISSION_GRANT";
@@ -59,6 +59,25 @@ pub extern "C" fn zirk_rt_permission_requester_clear() {
 
 fn active_requester() -> String {
     ACTIVE_REQUESTER.with(|current| current.borrow().clone())
+}
+
+pub(crate) fn capture_active_requester() -> String {
+    active_requester()
+}
+
+pub(crate) fn with_active_requester<R>(requester: String, operation: impl FnOnce() -> R) -> R {
+    struct RestoreRequester(String);
+
+    impl Drop for RestoreRequester {
+        fn drop(&mut self) {
+            ACTIVE_REQUESTER.with(|current| *current.borrow_mut() = self.0.clone());
+        }
+    }
+
+    let previous =
+        ACTIVE_REQUESTER.with(|current| std::mem::replace(&mut *current.borrow_mut(), requester));
+    let _restore = RestoreRequester(previous);
+    operation()
 }
 
 #[cfg(test)]
@@ -232,6 +251,150 @@ pub fn request_resource(capability: &str, resource: &str) -> bool {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = updated;
     }
     true
+}
+
+/// Requests one operation-specific filesystem scope. These approvals are
+/// stored independently from the legacy exact-file sets, so an exact file
+/// grant never widens to a directory, subtree, link, lock, or watcher action.
+pub fn request_filesystem_operation(
+    capability: &str,
+    resource: &str,
+    operation: &str,
+    extent: FilesystemScopeExtent,
+) -> bool {
+    let requester_identity = active_requester();
+    let requester_identity = if requester_identity.is_empty() {
+        "local".to_owned()
+    } else {
+        requester_identity
+    };
+    if !matches!(
+        capability,
+        "filesystem.read" | "filesystem.write" | "filesystem.metadata"
+    ) || operation.is_empty()
+        || operation.len() > 64
+        || !operation
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || !is_canonical_resource(capability, resource)
+    {
+        let requester = requester_text();
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+
+    let requested = FilesystemOperationScope {
+        capability: capability.to_owned(),
+        operation: operation.to_owned(),
+        requester: requester_identity,
+        resource: resource.to_owned(),
+        extent,
+    };
+    let current = current_scopes();
+    if filesystem_operation_scope_contains(&current, &requested) {
+        return true;
+    }
+
+    let _prompt = PROMPT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current = current_scopes();
+    if filesystem_operation_scope_contains(&current, &requested) {
+        return true;
+    }
+    let requester = requester_text();
+    if !io::stdin().is_terminal() {
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+
+    eprint!(
+        "Zirk permission request\n  Project: {}\n  Operation: {}\n  Capability: {}\n  Resource: {}\n  Extent: {}\n  Requested by: {}\nAllow this scoped operation? [y/N] ",
+        std::env::var("ZIRK_RUNTIME_PROJECT_NAME").unwrap_or_else(|_| "standalone program".into()),
+        operation,
+        capability,
+        resource,
+        filesystem_extent_label(extent),
+        requester
+    );
+    if io::stderr().flush().is_err() {
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_err()
+        || !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    {
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+
+    let mut updated = current;
+    updated.filesystem_operations.insert(requested);
+    if should_add_direct_requirement() {
+        if !add_manifest_requirement(capability) {
+            warn_scoped_denial(capability, resource, operation, extent, &requester);
+            return false;
+        }
+    } else if !ensure_manifest_exists() {
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+    if persist_scopes(&updated).is_err() {
+        warn_scoped_denial(capability, resource, operation, extent, &requester);
+        return false;
+    }
+    let history_resource = format!(
+        "{resource} [operation={operation}, extent={}]",
+        filesystem_extent_label(extent)
+    );
+    if append_approval_history(
+        PermissionHistoryAction::Approved,
+        capability,
+        &history_resource,
+        &requester,
+    )
+    .is_err()
+    {
+        eprintln!("zirk warning: permission was saved but its history event could not be recorded");
+    }
+    if let Some(live) = LIVE_SCOPES.get() {
+        *live
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = updated;
+    }
+    true
+}
+
+fn filesystem_operation_scope_contains(
+    scopes: &PermissionScopes,
+    requested: &FilesystemOperationScope,
+) -> bool {
+    scopes.filesystem_operations.iter().any(|saved| {
+        if saved.capability != requested.capability
+            || saved.operation != requested.operation
+            || saved.requester != requested.requester
+        {
+            return false;
+        }
+        match saved.extent {
+            FilesystemScopeExtent::Exact | FilesystemScopeExtent::Directory => {
+                saved.extent == requested.extent && saved.resource == requested.resource
+            }
+            FilesystemScopeExtent::Descendants => {
+                requested.extent == FilesystemScopeExtent::Descendants
+                    && Path::new(&requested.resource).starts_with(Path::new(&saved.resource))
+            }
+        }
+    })
+}
+
+fn filesystem_extent_label(extent: FilesystemScopeExtent) -> &'static str {
+    match extent {
+        FilesystemScopeExtent::Exact => "exact object",
+        FilesystemScopeExtent::Directory => "directory object only",
+        FilesystemScopeExtent::Descendants => "directory and descendants",
+    }
 }
 
 fn scope_contains(scopes: &PermissionScopes, capability: &str, resource: &str) -> bool {
@@ -420,6 +583,26 @@ fn warn_denied(capability: &str, resource: &str, requester: &str) {
     if warned.insert(key) {
         eprintln!(
             "zirk warning: attempted but denied {capability} for {resource} (requested by {requester})"
+        );
+    }
+}
+
+fn warn_scoped_denial(
+    capability: &str,
+    resource: &str,
+    operation: &str,
+    extent: FilesystemScopeExtent,
+    requester: &str,
+) {
+    let key = format!("{capability}\0{resource}\0{operation}\0{extent:?}\0{requester}");
+    let warned = WARNED_DENIALS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    let mut warned = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if warned.insert(key) {
+        eprintln!(
+            "zirk warning: attempted but denied {operation} ({}) under {capability} for {resource} (requested by {requester})",
+            filesystem_extent_label(extent)
         );
     }
 }
@@ -967,6 +1150,98 @@ mod tests {
         };
         assert!(scope_contains(&read_scope, "filesystem.metadata", path));
         assert!(scope_contains(&read_scope, "filesystem.read", path));
+    }
+
+    #[test]
+    fn filesystem_operation_scopes_do_not_widen_exact_grants_or_cross_operations() {
+        let root = "/tmp/zirk-authorized-tree";
+        let legacy = PermissionScopes {
+            filesystem_read: [root.to_owned()].into(),
+            ..PermissionScopes::default()
+        };
+        let listing = FilesystemOperationScope {
+            capability: "filesystem.read".into(),
+            operation: "directory.entries".into(),
+            requester: "local".into(),
+            resource: root.into(),
+            extent: FilesystemScopeExtent::Directory,
+        };
+        assert!(!filesystem_operation_scope_contains(&legacy, &listing));
+
+        let listing_scope = PermissionScopes {
+            filesystem_operations: [listing.clone()].into(),
+            ..PermissionScopes::default()
+        };
+        for other_operation in [
+            FilesystemOperationScope {
+                operation: "directory.walk".into(),
+                extent: FilesystemScopeExtent::Descendants,
+                ..listing.clone()
+            },
+            FilesystemOperationScope {
+                operation: "directory.copy.source".into(),
+                extent: FilesystemScopeExtent::Descendants,
+                ..listing.clone()
+            },
+            FilesystemOperationScope {
+                capability: "filesystem.write".into(),
+                operation: "directory.remove_all".into(),
+                extent: FilesystemScopeExtent::Descendants,
+                ..listing.clone()
+            },
+            FilesystemOperationScope {
+                operation: "link.read_target".into(),
+                extent: FilesystemScopeExtent::Exact,
+                ..listing.clone()
+            },
+            FilesystemOperationScope {
+                operation: "directory.watch".into(),
+                extent: FilesystemScopeExtent::Directory,
+                ..listing.clone()
+            },
+        ] {
+            assert!(
+                !filesystem_operation_scope_contains(&listing_scope, &other_operation),
+                "directory listing must not grant {}",
+                other_operation.operation
+            );
+        }
+
+        let subtree = PermissionScopes {
+            filesystem_operations: [FilesystemOperationScope {
+                capability: "filesystem.read".into(),
+                operation: "directory.walk".into(),
+                requester: "local".into(),
+                resource: root.into(),
+                extent: FilesystemScopeExtent::Descendants,
+            }]
+            .into(),
+            ..PermissionScopes::default()
+        };
+        let child_walk = FilesystemOperationScope {
+            capability: "filesystem.read".into(),
+            operation: "directory.walk".into(),
+            requester: "local".into(),
+            resource: "/tmp/zirk-authorized-tree/nested/item.txt".into(),
+            extent: FilesystemScopeExtent::Descendants,
+        };
+        let sibling_walk = FilesystemOperationScope {
+            resource: "/tmp/zirk-authorized-tree-other/item.txt".into(),
+            ..child_walk.clone()
+        };
+        let delete = FilesystemOperationScope {
+            capability: "filesystem.write".into(),
+            operation: "directory.remove_all".into(),
+            requester: "local".into(),
+            resource: child_walk.resource.clone(),
+            extent: FilesystemScopeExtent::Descendants,
+        };
+        assert!(filesystem_operation_scope_contains(&subtree, &child_walk));
+        assert!(!filesystem_operation_scope_contains(
+            &subtree,
+            &sibling_walk
+        ));
+        assert!(!filesystem_operation_scope_contains(&subtree, &delete));
     }
 
     #[test]

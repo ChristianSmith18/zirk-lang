@@ -1,8 +1,9 @@
 # `std.fs`
 
-`std.fs` provides bounded file reads, direct writes, managed open handles, and
-progressive operations for reading, appending, metadata, and atomic replacement.
-The current package is `std.fs::fs`; paths are values from `std.path::path`.
+`std.fs` provides bounded file reads and writes, managed file and directory
+resources, progressive operations, and advanced directory, link, temporary,
+lock, watcher, and asynchronous APIs. The package remains `std.fs::fs`; paths
+are values from `std.path::path`.
 
 ```zirk
 import { File, OpenOptions, Encoding } from std.fs::fs;
@@ -33,6 +34,39 @@ before execution; it never provides a virtual or ambient filesystem.
 The runtime uses a 256-handle process ceiling. Read, write, or read/write modes
 request their respective capability families; a handle opened for both modes
 checks each operation independently.
+
+## Asynchronous file and directory operations
+
+Methods ending in `_async` suspend the current Zirk task while the host
+operation runs through the runtime's bounded managed-blocking pool. They do not
+occupy the cooperative executor while waiting. The filesystem shares the
+process-wide ceiling of 64 managed workers and a FIFO queue capped at 1,024
+jobs; admission applies cooperative backpressure instead of creating extra
+threads or an unbounded queue.
+
+The API includes `File.read_bytes_async`, `read_text_async`,
+`write_bytes_async`, `write_text_async`, `open_async`, `append_bytes_async`, and
+`append_text_async`; opened files provide `read_async`, `read_exact_async`,
+`write_async`, and `append_async`. `Directory.entries_async` and
+`Directory.walk_async` provide asynchronous open and `next_entry_async`
+operations. Unix targets also provide `lock_shared_async`,
+`lock_exclusive_async`, and `FileWatcher.next_async`. Directory creation, copy,
+move, recursive removal, metadata, link, and temporary operations currently
+have synchronous APIs only.
+
+These methods retain the same typed `Result`, path authorization, and size
+bounds as their synchronous counterparts. Cancellation removes work that has
+not started. A host operation already in progress is joined at its safe
+completion point; cancellation does not imply that a partially completed
+write was rolled back. Async lock waiters recheck operation authority while
+retrying, and watcher wait cancellation unregisters the waiter.
+
+```zirk
+match File.read_text_async(Path.of("input.txt"), 1048576) {
+    Ok(text) => process(text);
+    Error(error) => report(error);
+}
+```
 
 ## Bounded reads and managed files
 
@@ -116,12 +150,42 @@ existing path, wrong type, closed handle, decoding failure, limits, premature
 EOF, unsupported operation, and I/O failure. `FileResourceError` adapts close
 failures to the language `Resource<E>` contract.
 
-The intended native support matrix is macOS ARM64, Linux x86_64, Linux ARM64,
-and Windows x86_64. Current evidence includes native macOS ARM64 runtime tests
-and Windows x86_64 cross-compilation; Windows runtime execution and Linux
-cross-compilation/runtime checks remain unverified. Directory traversal and
-mutation, links, temporary directories, locks, watchers, async file operations,
-and non-Unicode native paths remain future work.
+`FileError.Cancelled` reports that a filesystem operation stopped at a
+cooperative cancellation safe point. `FileWatchEvent` distinguishes create,
+modify, remove, rename, overflow, closure, and a typed `FileError`. Watch events
+are best-effort and may be coalesced by the operating system. The queue holds
+at most 256 events per watcher. Overflow means the consumer must rescan using
+the same approved directory scope; it does not represent a complete history.
+Recursive watches install bounded, non-following watches for each directory.
+Creating a directory, starting with an existing descendant tree, or removing
+or renaming a watched directory can introduce a gap, so the runtime emits
+`Overflow` and the consumer should rescan. Symlink targets are not watched or
+reported as descendants. Watchers are explicitly closeable and limited to 32
+open resources per process and 1,024 watched directories per recursive watcher.
+
+The implementation support matrix is:
+
+| Capability | macOS ARM64 | Linux x86_64 | Linux ARM64 | Windows x86_64 | Browser |
+| --- | --- | --- | --- | --- | --- |
+| Bounded directory operations, links, metadata | Implemented | Implemented | Implemented | Implemented; native runtime not yet verified | Unsupported |
+| Temporary files and directories | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
+| Synchronous advisory file locks | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
+| No-replace directory move | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
+| Directory watchers | Implemented; create/close E2E passed | Implemented; native backend registration checked in emulated x86_64 container | Implemented; native backend registration checked in ARM64 container | `FileError.Unsupported` | Unsupported |
+| Async file and directory iteration | Implemented; E2E covers sibling progress, typed errors, open/read/write/append | Runtime filesystem suite passed in emulated x86_64 container; async CLI E2E not run | Runtime filesystem suite and 20 filesystem CLI E2E tests passed in ARM64 container | GNU cross-check and MSVC target/test compilation passed; native Windows execution unverified | Unsupported |
+| Async advisory-lock and watcher waits | Implemented; contention and watcher E2E passed | Runtime filesystem suite passed in emulated x86_64 container; async wait E2E not run | Runtime filesystem suite and async lock/watcher E2E tests passed in ARM64 container | `FileError.Unsupported`; MSVC target/test compilation passed | Unsupported |
+
+Watcher creation, recursive-symlink containment, denied consent, bounded
+overflow, and close have focused macOS ARM64 tests. Linux ARM64 and emulated
+Linux x86_64 runtime filesystem tests check backend registration and invariants;
+they do not establish native Linux-hardware execution or watcher event delivery.
+Async CLI E2E coverage runs on macOS ARM64 and Linux ARM64. The Linux x86_64
+container passed runtime filesystem tests, but its CLI E2E build did not
+resolve the pinned LLVM toolchain. Windows
+x86_64 `zirk-runtime` cross-compiles for the GNU and MSVC targets, including
+test-target compilation and typed unsupported lock and watcher paths; native
+Windows runtime execution remains unverified. Browser preflight rejects reachable filesystem effects
+before execution and is covered by focused browser tests.
 
 ---
 

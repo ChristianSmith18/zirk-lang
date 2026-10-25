@@ -48,6 +48,7 @@ http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 getrandom.workspace = true
+notify.workspace = true
 
 # Stackful-coroutine stack switching for `task`/`await` (ADR-017). Only pulled
 # in on the targets it covers and that run the executor (ADR-004 addendum);

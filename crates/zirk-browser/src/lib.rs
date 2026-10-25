@@ -1932,6 +1932,28 @@ fn main(): Void {
     }
 
     #[test]
+    fn browser_rejects_async_filesystem_access_before_execution() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: "import { stdout } from std.io;\nimport { File } from std.fs::fs;\nimport { Path } from std.path::path;\nfn main(): Void { stdout.println(\"before\"); _ = File.read_text_async(Path.of(\"secret.txt\"), 64); stdout.println(\"after\"); }".into(),
+            virtual_name: "filesystem-async-editor.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            matches!(
+                response.failure,
+                Some(crate::contract::Failure {
+                    kind: FailureKind::Capability,
+                    ..
+                })
+            ),
+            "{response:?}"
+        );
+        assert!(response.output.is_empty(), "{response:?}");
+    }
+
+    #[test]
     fn run_contract_covers_completion_runtime_capability_and_execution_limits() {
         let normal = run(Request {
             api_version: API_VERSION,

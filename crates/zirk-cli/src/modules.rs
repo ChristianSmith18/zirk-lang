@@ -812,7 +812,7 @@ mod tests {
         let entry = write(
             &dir,
             "main.zrk",
-            "import { File } from std.fs::fs;\nimport { Path } from std.path::path;\nfn read_file(): Void { File.read_text(Path.of(\"input.txt\"), 1024); }\nfn inspect_file(): Void { File.metadata_for(Path.of(\"input.txt\")); }\nfn invoke(callback: Fn(Int32) => Void): Void { callback(1); }\nfn callback_wrapper(): Void { invoke((value: Int32): Void => { File.read_text(Path.of(\"callback.txt\"), 1024); }); }\nfn main(): Void { read_file(); inspect_file(); callback_wrapper(); }\n",
+            "import { File } from std.fs::fs;\nimport { Path } from std.path::path;\nfn read_file(): Void { File.read_text(Path.of(\"input.txt\"), 1024); }\nfn read_file_async(): Void { File.read_text_async(Path.of(\"input.txt\"), 1024); }\nfn inspect_file(): Void { File.metadata_for(Path.of(\"input.txt\")); }\nfn invoke(callback: Fn(Int32) => Void): Void { callback(1); }\nfn callback_wrapper(): Void { invoke((value: Int32): Void => { File.read_text(Path.of(\"callback.txt\"), 1024); }); }\nfn main(): Void { read_file(); read_file_async(); inspect_file(); callback_wrapper(); }\n",
         );
         let mut sink = DiagnosticSink::new();
         let frontend = crate::frontend::run_frontend(&entry, &mut sink).unwrap_or_else(|| {
@@ -844,6 +844,20 @@ mod tests {
                 "capability summary for {function_name}"
             );
         }
+        let async_function = frontend
+            .program
+            .functions
+            .iter()
+            .find(|function| function.name.name == "read_file_async")
+            .expect("async filesystem read declaration");
+        assert!(
+            frontend
+                .checked
+                .suspend_summaries
+                .get(&async_function.name.span)
+                .is_some_and(|effects| effects.may_suspend),
+            "async filesystem effects must be retained in callable summaries"
+        );
         let metadata_function = frontend
             .program
             .functions
