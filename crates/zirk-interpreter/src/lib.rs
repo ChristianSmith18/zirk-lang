@@ -1125,6 +1125,7 @@ fn excluded_feature(kind: &InstKind) -> (String, String) {
         "EnvironmentGet" | "EnvironmentContains" | "EnvironmentListNames" => {
             "process environment access"
         }
+        "FilesystemCall" => "native filesystem access",
         "NetworkDnsResolve" => "native DNS access",
         "NetworkInterfacesSnapshot" => "network interface inspection",
         "NetworkIpAddressParse" => "IP address parsing",
@@ -2621,6 +2622,9 @@ impl<'module> Interpreter<'module> {
             )),
             InstKind::ThreadRun { .. } => Err(ExecutionFault::Internal(
                 "ThreadRun requires the native managed-thread runtime and is unavailable in the interpreter".into(),
+            )),
+            InstKind::FilesystemCall { .. } => Err(ExecutionFault::Internal(
+                "FilesystemCall requires the native filesystem runtime and is unavailable in the interpreter".into(),
             )),
             InstKind::FatalError(message) => Err(ExecutionFault::Runtime {
                 category: "FatalError".into(),
@@ -8212,6 +8216,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::NativeSliceStore { .. }
         | InstKind::ResourceTransfer { .. }
         | InstKind::DependentFrom { .. }
+        | InstKind::FilesystemCall { .. }
         | InstKind::PinObject { .. }
         | InstKind::UnpinObject { .. } => BrowserSupport::Excluded,
         InstKind::ObjectNew
@@ -8227,6 +8232,10 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::ObjectRest { .. }
         | InstKind::JsonStringifyDynamic { .. }
         | InstKind::JsonParseDynamic { .. } => BrowserSupport::RuntimeCore,
+        // New IR operations must be explicitly admitted above before the
+        // browser interpreter can execute them. Unknown operations fail
+        // closed instead of becoming reachable by default.
+        _ => BrowserSupport::Excluded,
     }
 }
 
@@ -8840,6 +8849,50 @@ mod tests {
                 "managed `Atomic<T>` operations"
             );
         }
+    }
+
+    #[test]
+    fn filesystem_calls_are_excluded_before_browser_execution() {
+        let instruction = InstKind::FilesystemCall {
+            binding: "std.fs.File.read_bytes".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(instruction_support(&instruction), BrowserSupport::Excluded);
+        assert_eq!(
+            excluded_feature(&instruction),
+            ("native filesystem access".into(), "FilesystemCall".into())
+        );
+
+        let module = Module {
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::Int(IntWidth::U64),
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![Instruction {
+                        result: Some(ValueId(0)),
+                        kind: instruction,
+                        ty: IrType::Int(IntWidth::U64),
+                        span: Span::empty(7),
+                    }],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(0))))),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let failures = preflight(&module)
+            .expect_err("native filesystem access is unsupported in browser mode");
+        assert!(failures.iter().any(|failure| {
+            failure.code == "ZB002"
+                && failure.span == Some(Span::empty(7))
+                && failure.message.contains("native filesystem access")
+                && failure.message.contains("FilesystemCall")
+        }));
     }
 
     #[test]

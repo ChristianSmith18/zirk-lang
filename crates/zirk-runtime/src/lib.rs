@@ -55,6 +55,8 @@ mod decimal;
 mod duration;
 pub mod environment;
 mod exceptions;
+#[cfg(not(target_arch = "wasm32"))]
+mod filesystem;
 #[cfg(feature = "http3")]
 mod http3_transport;
 pub mod http_api;

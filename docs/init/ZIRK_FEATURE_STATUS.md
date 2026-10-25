@@ -19,7 +19,7 @@ The evidence for each row is the relevant active or archived OpenSpec change, th
 automated tests, or the source file that gates the feature. A row is updated
 only when the same change that changes the code also updates this file.
 
-Last reviewed for `complete-zkinit-project-runtime`, **2026-10-25**.
+Last reviewed for `deliver-std-fs-core`, **2026-10-25**.
 
 ## Browser-hosted interpreter tooling
 
@@ -86,6 +86,7 @@ native backend is delivered.
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
 | `if`/`else` | yes | yes | yes | yes | yes | yes | — |
 | `std.io` standard streams | yes | yes | yes | yes | yes | yes | Source-defined `stdin`, `stdout`, and `stderr`; synchronous native/interpreter input, destination-labelled output, and browser stdin preflight. Async and terminal controls remain deferred. |
+| `std.path` and `std.fs` core | yes | yes | yes | yes | partial | partial | `deliver-std-fs-core`: lexical `Path`, exact-authorized absolute/canonical queries, bounded whole-file reads, direct writes, managed `File.open` (256 handles), progressive reads/lines/chunks, append, metadata/exists, atomic replacement, and typed errors. Native macOS ARM64 runtime tests, Windows x86_64 cross-compilation, exact-resource consent/denial, and browser filesystem preflight pass. Windows runtime execution and Linux x86_64/ARM64 checks remain unverified; Linux cross-compilation is unavailable in this environment because its compiler/sysroot is missing. Directory/link/watch/lock/async operations and native non-Unicode paths remain deferred. |
 
 ## Phase 2 — Core language surface
 
@@ -229,7 +230,7 @@ native backend is delivered.
 | Feature | Lexer | Parsed | Sema | Lowered | Runtime | CLI | Notes |
 |---|---|---|---|---|---|---|---|
 | `.zkinit` / multi-file projects | n/a | yes | yes | yes | yes | partial | `complete-zkinit-project-runtime`: typed manifest, project discovery, application entry/package root, local/vendored graph, lock metadata, top-level initialization, globals, dependencies, migration, and `zirk init` are implemented. Registry/Git acquisition and publication remain partial. |
-| Unified `requires` and first-use consent | n/a | yes | yes | yes | partial | yes | One capability list, provenance tree, signed exact-resource consent, operation-local prompts, no-TTY denial, inspection/diff/history/revoke. Runtime enforcement covers environment/secrets and network APIs; filesystem/process APIs are not exposed yet. |
+| Unified `requires` and first-use consent | n/a | yes | yes | yes | partial | yes | One capability list, provenance tree, signed exact-resource consent, operation-local prompts, no-TTY denial, inspection/diff/history/revoke. Runtime enforcement covers environment/secrets, network, and the delivered filesystem operations; process APIs remain unavailable. |
 | Application globals | n/a | yes | yes | yes | yes | yes | Typed manifest keys, defaults, custom type source, `Global.get`/`set`/`watch`, snapshot replacement, revisioned changes, bounded subscriptions, and readonly checks have focused CLI/runtime coverage. |
 | `zirk init` | n/a | yes | yes | n/a | n/a | yes | Interactive prompts and `-y` defaults atomically create only `.zkinit`; existing manifests are protected. |
 

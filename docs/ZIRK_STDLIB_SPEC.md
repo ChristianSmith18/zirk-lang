@@ -11,7 +11,7 @@ Standard modules are imported without quotes:
 
 ```text
 import { stdout } from std.io;
-import { File } from std.fs;
+import { File } from std.fs::fs;
 println("ready"); // Resolves to `stdout.println`.
 ```
 
@@ -100,71 +100,64 @@ not delivered by this package.
 ## 4. `std.fs`
 
 ```text
-import { File } from std.fs;
+import { File, OpenOptions, Encoding } from std.fs::fs;
+import { Path } from std.path::path;
 
-mut content: String = match File.open("data.txt") with file {
-    Ok(file) => file.read_text();
-    Error(error) => return Error(error);
-};
+mut content = File.read_text(Path.of("data.txt"), 1048576, Encoding.Utf8);
+mut opened = File.open(Path.of("data.txt"), OpenOptions.read_only());
 ```
 
-`File` implements `Resource<FileError>`. `OpenOptions` starts with every flag
-false, rejects an option set with no capability, and provides typed presets such
-as `read_only`, `write_only`, `read_and_write`, `append`, `create`,
-`create_new` and `truncate`. Minimum operations:
+`File` implements `Resource<FileResourceError>` and a successful `match with`
+acquisition closes the handle when its managed scope exits. `OpenOptions` is
+immutable and closed by default: use `none`, `read_only`, `write_only`,
+`read_and_write`, `appending`, or `creating_new`, then refine with `with_*`.
+Opening with no access mode or conflicting create/append/truncate flags returns
+`FileError.InvalidOptions`. The process permits at most 256 open handles.
 
-- `open`, `create` and opening with typed options;
-- `read_text`, `read_bytes`, `read_line`;
-- `write_text`, `write_bytes`, `append`;
-- `flush`, `metadata` and managed idempotent closing;
-- async variants for operations that may wait.
+The first delivery provides lexical `Path` operations, fallible `absolute` and
+`canonicalize`, bounded whole-file `read_bytes`/`read_text` (caller limit and
+64 MiB hard ceiling), direct `write_bytes`/`write_text`, and `File.open`. Reads
+are strict UTF-8 by default; `Encoding` additionally supports Latin-1 and
+little-/big-endian UTF-16. Byte reads preserve arbitrary bytes. Direct writes
+create a missing file or replace its full contents. A read/write handle asks
+for each filesystem capability required by the selected options.
 
-Whole-file reads have size limits; streams/chunks/lines cover large data. Text
-defaults to strict UTF-8 while explicit `Encoding` values cover endian-specific
-UTF-16/UTF-32, ASCII and Latin-1. Direct and atomic writes are distinct. Append
-guarantees apply per call where supported; grouped writes use advisory
-`FileLock`. `flush`, `sync_data` and `sync_all` expose progressively stronger
-and more expensive buffering/durability boundaries.
+The next stage adds progressive `read`, `read_exact`, `read_line`, lazy line and
+chunk iteration, append, metadata/exists, and atomic whole-file replacement.
+Chunks are capped at 4 MiB and lines at 1 MiB. `FileMetadata` exposes size,
+file/directory kind, and an optional modification timestamp. Atomic replacement
+uses an exclusive same-directory temporary, syncs it, then renames it; no
+power-loss durability guarantee is made beyond target evidence.
 
-The module includes complete file/directory manipulation, metadata, links,
-temporary files/directories, shared/exclusive advisory locks and native change
-watchers. Recursive operations do not follow symlinks by default. Watcher
-notification is consumed through the task-aware API described by its module
-contract; watcher delivery is not part of the current compiler surface.
-Overflow is an explicit event requiring a rescan.
-
-Modes do not use magic strings: they are expressed through options/enums. Errors
-distinguish not found, permission denied, already exists, invalid path, wrong
-type, EOF where applicable, and system failure.
-
-The proposed filesystem surface uses separate `filesystem.read` and `filesystem.write` capability requirements and checks canonical resources at the operation boundary. Compiler-owned filesystem APIs are not exposed in this checkout, so these capability identifiers remain reserved and do not grant access.
+The compiler infers `filesystem.read`, `filesystem.write`, and
+`filesystem.metadata` through call graphs. Runtime authorization is
+exact-resource consent for the effective
+canonical path, retains application/dependency provenance, and is checked at
+the operation boundary. Missing consent warns and returns a typed permission
+failure that code can handle; unrelated execution continues. Browser execution
+rejects reachable filesystem effects before running the program. Directory
+operations, links, watchers, locks, async filesystem calls, and broader native
+path representations remain future work.
 
 ## 5. `std.path`
 
 ```text
-import { Path } from std.path;
+import { Path } from std.path::path;
 
 inmut FILE_PATH = Path("./data/file.txt");
 FILE_PATH.parent();
 FILE_PATH.name();
-FILE_PATH.extension();
+FILE_PATH.as_string();
 ```
 
-`Path` is an immutable semantic value, not a `String` or open resource. It
-supports
-`join`, lexical normalization, components, name, extension, parent,
-absolute/canonical through operations that touch the system, and explicit
-conversion to a string.
-
-Lexical equality is distinct from the fallible `same_file` query. Native
-non-Unicode path data is preserved; strict string conversion may fail and lossy
-conversion is explicit. One optimized `Path` type is used rather than a public
-`PathBuf` split. Cross-target generation uses explicit path style and dynamic
-platform behavior comes from `std.system.Platform`.
-
-It must preserve platform rules and avoid unsafe textual concatenation. Building
-or manipulating a path does not touch the filesystem; canonicalizing may, and
-requires permission.
+`Path` is an immutable value backed by Zirk `String`. `join`, `components`,
+`parent`, `name`, lexical `normalize`, and lexical `equals` do not access the
+filesystem. `absolute` and `canonicalize` are fallible host queries; they need
+exact path read authorization. Canonicalization resolves filesystem links,
+while lexical normalization only processes path components. Native paths that
+cannot be represented as a Zirk string return a typed invalid-path failure.
+`Path` currently exposes no public `PathBuf`, `PathStyle`, `same_file`, stem,
+or extension operations.
 
 ## 6. `std.process`
 
@@ -611,7 +604,7 @@ authorized sink boundary. Environment mutation
 is not in the initial API; child configuration belongs to `std.process` and
 tests use isolated runner environments.
 
-Network and environment APIs use exact operation-boundary consent and return typed permission denial. Filesystem and process capability identifiers are reserved because compiler-owned APIs are not exposed in this checkout; future process execution and shell APIs require separate capability identities and runtime enforcement.
+Network, environment, and delivered filesystem APIs use exact operation-boundary consent and return typed permission denial. Process execution and shell APIs remain unavailable and require their own runtime enforcement before use.
 
 `Function(P...) => R` is the long callable type and `Fn(P...) => R` its
 preferred alias. `Clone` means deep logical independence, is required for a

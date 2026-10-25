@@ -341,7 +341,7 @@ fn package_directories(entries: &HashMap<String, PathBuf>) -> HashMap<String, Pa
 /// logical identity is fixed and their trusted host bindings remain governed
 /// by `zirk_sema::stdlib` rather than source syntax.
 fn standard_package_roots() -> HashMap<String, PathBuf> {
-    ["io", "environment", "http", "json", "net"]
+    ["io", "environment", "http", "json", "net", "path", "fs"]
         .into_iter()
         .map(|package| {
             let entry = absolute_normalize(
@@ -390,6 +390,10 @@ fn standard_source(path: &Path) -> Option<&'static str> {
         "net/udp.zrk" => Some(include_str!("../../../stdlib/std/net/udp.zrk")),
         "net/local.zrk" => Some(include_str!("../../../stdlib/std/net/local.zrk")),
         "net/interfaces.zrk" => Some(include_str!("../../../stdlib/std/net/interfaces.zrk")),
+        "path/package.zrk" => Some(include_str!("../../../stdlib/std/path/package.zrk")),
+        "path/path.zrk" => Some(include_str!("../../../stdlib/std/path/path.zrk")),
+        "fs/package.zrk" => Some(include_str!("../../../stdlib/std/fs/package.zrk")),
+        "fs/fs.zrk" => Some(include_str!("../../../stdlib/std/fs/fs.zrk")),
         _ => None,
     }
 }
@@ -750,6 +754,163 @@ mod tests {
         assert!(source.contains("share class NetworkInterfaceAddress"));
         assert!(source.contains("network.inspect.interfaces"));
         assert!(zirk_sema::stdlib::standard_module("std.net::interfaces").is_some());
+    }
+
+    #[test]
+    fn filesystem_and_path_packages_are_bundled_and_resolve_from_official_roots() {
+        let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std");
+        let path_source = standard_source(&absolute_normalize(&std_root.join("path/path.zrk")))
+            .expect("bundled std.path source");
+        let fs_source = standard_source(&absolute_normalize(&std_root.join("fs/fs.zrk")))
+            .expect("bundled std.fs source");
+        assert!(path_source.contains("share class Path"));
+        assert!(fs_source.contains("share class File implements Resource<FileResourceError>"));
+        assert_eq!(standard_package_roots().len(), 7);
+        assert!(zirk_sema::stdlib::standard_module("std.path::path").is_some());
+        assert!(zirk_sema::stdlib::standard_module("std.fs::fs").is_some());
+
+        let dir = scratch("bundled-filesystem-import");
+        let entry = write(
+            &dir,
+            "main.zrk",
+            "import { File, OpenOptions } from std.fs::fs;\nimport { Path } from std.path::path;\nmut result = File.read_text(Path.of(\"input.txt\"), 1024);\n",
+        );
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&entry, &mut sink).expect("the standard packages are resolvable");
+        assert!(
+            !sink.has_errors(),
+            "{}",
+            sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+        assert!(krate.sources.files().any(|(_, source)| {
+            source
+                .identity()
+                .is_some_and(|identity| identity.package == "std.fs")
+        }));
+        assert!(krate.sources.files().any(|(_, source)| {
+            source
+                .identity()
+                .is_some_and(|identity| identity.package == "std.path")
+        }));
+
+        let mut check_sink = DiagnosticSink::new();
+        assert!(
+            crate::frontend::run_frontend(&entry, &mut check_sink).is_some(),
+            "{}",
+            check_sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+        assert!(
+            !check_sink.has_errors(),
+            "{}",
+            check_sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+    }
+
+    #[test]
+    fn filesystem_capability_effects_flow_through_direct_indirect_and_callback_calls() {
+        let dir = scratch("filesystem-capability-effects");
+        let entry = write(
+            &dir,
+            "main.zrk",
+            "import { File } from std.fs::fs;\nimport { Path } from std.path::path;\nfn read_file(): Void { File.read_text(Path.of(\"input.txt\"), 1024); }\nfn inspect_file(): Void { File.metadata_for(Path.of(\"input.txt\")); }\nfn invoke(callback: Fn(Int32) => Void): Void { callback(1); }\nfn callback_wrapper(): Void { invoke((value: Int32): Void => { File.read_text(Path.of(\"callback.txt\"), 1024); }); }\nfn main(): Void { read_file(); inspect_file(); callback_wrapper(); }\n",
+        );
+        let mut sink = DiagnosticSink::new();
+        let frontend = crate::frontend::run_frontend(&entry, &mut sink).unwrap_or_else(|| {
+            panic!(
+                "valid filesystem program: {}",
+                sink.render(zirk_diagnostics::RenderStyle::Human)
+            )
+        });
+        assert!(
+            !sink.has_errors(),
+            "{}",
+            sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+
+        let read_effect = std::collections::BTreeSet::from(["filesystem.read".to_owned()]);
+        for function_name in ["read_file", "callback_wrapper"] {
+            let function = frontend
+                .program
+                .functions
+                .iter()
+                .find(|function| function.name.name == function_name)
+                .expect("function declaration");
+            assert_eq!(
+                frontend
+                    .checked
+                    .callable_capability_effects
+                    .get(&function.name.span),
+                Some(&read_effect),
+                "capability summary for {function_name}"
+            );
+        }
+        let metadata_function = frontend
+            .program
+            .functions
+            .iter()
+            .find(|function| function.name.name == "inspect_file")
+            .expect("metadata inspection declaration");
+        let metadata_effect = std::collections::BTreeSet::from(["filesystem.metadata".to_owned()]);
+        assert_eq!(
+            frontend
+                .checked
+                .callable_capability_effects
+                .get(&metadata_function.name.span),
+            Some(&metadata_effect),
+            "metadata operation has its own capability"
+        );
+        let main_function = frontend
+            .program
+            .functions
+            .iter()
+            .find(|function| function.name.name == "main")
+            .expect("main declaration");
+        assert_eq!(
+            frontend
+                .checked
+                .callable_capability_effects
+                .get(&main_function.name.span),
+            Some(&std::collections::BTreeSet::from([
+                "filesystem.metadata".to_owned(),
+                "filesystem.read".to_owned(),
+            ])),
+            "direct and indirect effects are combined"
+        );
+        let native_read = frontend
+            .checked
+            .standard_filesystem_calls
+            .iter()
+            .find_map(|(&span, binding)| (binding == "std.fs.File.read_text").then_some(span))
+            .expect("filesystem read call");
+        assert_eq!(
+            frontend.checked.protected_api_effects.get(&native_read),
+            Some(&"filesystem.read".to_owned())
+        );
+        let native_metadata = frontend
+            .checked
+            .standard_filesystem_calls
+            .iter()
+            .find_map(|(&span, binding)| (binding == "std.fs.File.metadata_for").then_some(span))
+            .expect("filesystem metadata call");
+        assert_eq!(
+            frontend.checked.protected_api_effects.get(&native_metadata),
+            Some(&"filesystem.metadata".to_owned())
+        );
+        let app_requester =
+            frontend
+                .checked
+                .protected_api_requesters
+                .iter()
+                .find_map(|(span, requester)| {
+                    (requester.as_str() == "local"
+                        && frontend
+                            .sources
+                            .file(span.file)
+                            .identity()
+                            .is_some_and(|identity| identity.package == "local"))
+                    .then_some(requester.as_str())
+                });
+        assert_eq!(app_requester, Some("local"));
     }
 
     #[test]

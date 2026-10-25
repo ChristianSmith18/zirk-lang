@@ -401,10 +401,10 @@ declaration to the application `.zkinit`; rejection records no approval and
 changes no manifest. Non-interactive operation fails closed without prompting.
 
 The delivered native permission boundaries cover environment reads/secrets,
-HTTP connect destinations and proxy hops, DNS/redirect checks, TCP/UDP
-listeners and destinations, local endpoints, and interface inspection.
-Filesystem and process capability identifiers are reserved, because
-compiler-owned filesystem/process APIs are not exposed in this checkout.
+exact paths for the delivered `std.fs`/`std.path` operations, HTTP connect
+destinations and proxy hops, DNS/redirect checks, TCP/UDP listeners and
+destinations, local endpoints, and interface inspection. Process capability
+identifiers remain reserved until compiler-owned process APIs are exposed.
 `unsafe` does not bypass permissions or operating-system validations.
 
 The CLI inspects requirements and saved scopes with `permissions inspect` and

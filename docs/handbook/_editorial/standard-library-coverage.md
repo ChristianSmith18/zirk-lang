@@ -8,8 +8,8 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 | `std.io` | `02-std-io.md` | streams, formatting, bound methods, EOF algebra, byte/char/line I/O, async behavior | Partial examples; missing complete signatures/errors |
 | `std.terminal` | `02-std-io.md` | styles, capability fallback, cursor, progress and coordinated live regions | Added during author review; missing before task 1.2 |
 | `std.encoding` | `02-std-io.md` and `03-std-fs.md` | strict UTF-8 default, explicit encoding enum/codecs and lossy boundaries | Added during author review; missing before task 1.2 |
-| `std.fs` | `03-std-fs.md` | typed modes/options, `File` resource lifecycle, text/bytes/lines, metadata, async, scoped paths | Partial; missing API and platform table |
-| `std.path` | `04-std-path.md` | lexical vs system operations, components, join, normalization, canonicalization, platform rules | Outline only |
+| `std.fs` | `03-std-fs.md` | bounded text/byte reads, direct writes, managed handles, progressive reads, append, metadata, atomic replacement, exact path grants | Core API delivered; directory/link/lock/watcher/async APIs remain deferred |
+| `std.path` | `04-std-path.md` | lexical components, join, normalization, absolute and canonical queries | Minimum string-backed Path delivered; native non-Unicode paths and extra path helpers remain deferred |
 | `std.process` | `05-std-process.md` | run/spawn, child resource, streams, environment, cwd, timeout, cancellation, shell separation | Partial |
 | `std.text` and native text contracts | `05a-std-text.md` plus type-system handbook | builder, format, safe regex, Unicode String/Char operations | Added and deepened in task 1.3 |
 | `std.collections` | `06-std-collections.md` plus collections handbook | types, projection copies, mutation, iteration invalidation, views, equality, complexity, allocation | Deepened in task 1.3 |
@@ -41,10 +41,9 @@ This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to i
 This map becomes complete when every row is either documented to its applicable contract or explicitly records a normative API decision still required. Such a decision blocks the affected chapter rather than inviting an invented API.
 
 Task 1.2 completed the common-contract, `std.io`, `std.terminal`,
-`std.encoding`, `std.fs`, `std.path` and `std.process` rows. Their owning pages
-now cover the accepted signatures and semantics, failures, permissions,
-resource/cancellation behavior, limits and platform boundaries. Later tasks
-will add the cross-module indexes and final block audit.
+`std.encoding`, and `std.process` rows. `deliver-std-fs-core` now documents the
+implemented filesystem core and separates the deferred APIs. Target execution
+evidence and the remaining index audit are tracked by that change.
 
 ---
 

@@ -412,6 +412,7 @@ fn scope_entries(scopes: &PermissionScopes) -> Vec<(String, String)> {
     };
     add("filesystem.read", &scopes.filesystem_read);
     add("filesystem.write", &scopes.filesystem_write);
+    add("filesystem.metadata", &scopes.filesystem_metadata);
     add("environment.read", &scopes.environment_read);
     add("secrets.read", &scopes.environment_secrets);
     add("network.connect", &scopes.network_connect);
@@ -782,6 +783,7 @@ fn scopes(manifest: &ProjectManifest) -> PermissionScopes {
     PermissionScopes {
         filesystem_read: Default::default(),
         filesystem_write: Default::default(),
+        filesystem_metadata: Default::default(),
         environment_read: manifest.environment_permissions.read_names.clone(),
         environment_secrets: manifest.environment_permissions.secret_names.clone(),
         environment_list_names: manifest.environment_permissions.list_names,
@@ -966,6 +968,9 @@ pub fn print_scopes(scopes: &PermissionScopes) {
     }
     for path in &scopes.filesystem_write {
         println!("  filesystem.write: {path}");
+    }
+    for path in &scopes.filesystem_metadata {
+        println!("  filesystem.metadata: {path}");
     }
     for name in &scopes.environment_read {
         println!("  environment.read: {name}");

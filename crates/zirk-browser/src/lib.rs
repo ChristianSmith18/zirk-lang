@@ -279,7 +279,10 @@ fn bundled_standard_sources(
             && let Some(package) = path.strip_prefix("std.")
         {
             let package = package.split("::").next().unwrap_or(package);
-            if matches!(package, "environment" | "http" | "json" | "net") {
+            if matches!(
+                package,
+                "environment" | "fs" | "http" | "json" | "net" | "path"
+            ) {
                 required_packages.insert(package.to_string());
             }
         }
@@ -310,6 +313,11 @@ fn bundled_standard_sources(
             )],
         ),
         (
+            "fs",
+            include_str!("../../../stdlib/std/fs/package.zrk"),
+            vec![("fs", include_str!("../../../stdlib/std/fs/fs.zrk"))],
+        ),
+        (
             "http",
             include_str!("../../../stdlib/std/http/package.zrk"),
             vec![("http", include_str!("../../../stdlib/std/http/http.zrk"))],
@@ -337,6 +345,11 @@ fn bundled_standard_sources(
                     include_str!("../../../stdlib/std/net/interfaces.zrk"),
                 ),
             ],
+        ),
+        (
+            "path",
+            include_str!("../../../stdlib/std/path/package.zrk"),
+            vec![("path", include_str!("../../../stdlib/std/path/path.zrk"))],
         ),
     ];
 
@@ -1881,6 +1894,28 @@ fn main(): Void {
             trace: None,
             source: "import { stdin } from std.io;\nfn main(): Void { stdin.read_line(); }".into(),
             virtual_name: "stdin-editor.zrk".into(),
+            limits: None,
+        });
+        assert!(
+            matches!(
+                response.failure,
+                Some(crate::contract::Failure {
+                    kind: FailureKind::Capability,
+                    ..
+                })
+            ),
+            "{response:?}"
+        );
+        assert!(response.output.is_empty());
+    }
+
+    #[test]
+    fn browser_rejects_reachable_filesystem_access_before_execution() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            trace: None,
+            source: "import { stdout } from std.io;\nimport { File } from std.fs::fs;\nimport { Path } from std.path::path;\nfn main(): Void { stdout.println(\"before\"); File.read_text(Path.of(\"secret.txt\"), 64); stdout.println(\"after\"); }".into(),
+            virtual_name: "filesystem-editor.zrk".into(),
             limits: None,
         });
         assert!(

@@ -12220,3 +12220,356 @@ fn bundled_std_net_local_listener_denies_missing_authority_before_path_creation(
         "a denied bind must not create the endpoint path"
     );
 }
+
+#[test]
+fn bundled_std_fs_runs_bounded_reads_writes_lines_chunks_append_and_metadata() {
+    use zirk_runtime_core::permission_grant::PermissionScopes;
+
+    let project = workspace("std_fs_core_roundtrip");
+    let home = workspace("std_fs_core_roundtrip_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let input = project.join("src/input.txt");
+    let output = project.join("src/output.txt");
+    std::fs::write(&input, b"alpha\r\n\r\nbeta\n").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.roundtrip.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File, FileChunk, FileError, FileLine, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Path.of("src/input.txt").absolute() {
+        Ok(path) => stdout.println(path.as_string());
+        Error(_) => stdout.println("absolute-path-error");
+    }
+    match Path.of("src/input.txt").canonicalize() {
+        Ok(path) => stdout.println(path.as_string());
+        Error(_) => stdout.println("canonical-path-error");
+    }
+    match File.read_text(Path.of("src/input.txt"), 128) {
+        Ok(text) => stdout.println(text);
+        Error(_) => stdout.println("text-read-error");
+    }
+    match File.read_bytes(Path.of("src/input.txt"), 128) {
+        Ok(bytes) => stdout.println(bytes.length);
+        Error(_) => stdout.println("byte-read-error");
+    }
+    match File.write_text(Path.of("src/output.txt"), "created") {
+        Ok(_) => stdout.println("write-ok");
+        Error(_) => stdout.println("write-error");
+    }
+    match File.append_text(Path.of("src/output.txt"), "-tail") {
+        Ok(_) => stdout.println("append-ok");
+        Error(_) => stdout.println("append-error");
+    }
+    match File.read_text(Path.of("src/output.txt"), 128) {
+        Ok(text) => stdout.println(text);
+        Error(_) => stdout.println("output-read-error");
+    }
+    match File.open(Path.of("src/input.txt"), OpenOptions.read_only()) with file {
+        Ok(file) => {
+            for line in file.lines() {
+                match line {
+                    FileLine.Line(text) => stdout.println(text);
+                    FileLine.Error(_) => stdout.println("line-error");
+                    _ => {}
+                }
+            }
+            match file.metadata() {
+                Ok(metadata) => stdout.println(metadata.size());
+                Error(_) => stdout.println("handle-metadata-error");
+            }
+        }
+        Error(_) => stdout.println("open-error");
+    }
+    match File.open(Path.of("src/input.txt"), OpenOptions.read_only()) with file {
+        Ok(file) => {
+            match file.read_exact(5) {
+                Ok(bytes) => stdout.println(bytes.length);
+                Error(_) => stdout.println("exact-read-error");
+            }
+            match file.read_exact(20) {
+                Error(error) => match error {
+                    FileError.EndOfStream => stdout.println("short-read");
+                    _ => stdout.println("short-read-wrong-error");
+                };
+                Ok(_) => stdout.println("short-read-succeeded");
+            }
+        }
+        Error(_) => stdout.println("exact-open-error");
+    }
+    match File.open(Path.of("src/input.txt"), OpenOptions.read_only()) with file {
+        Ok(file) => {
+            match file.chunks(4) {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        match chunk {
+                            FileChunk.Data(bytes) => stdout.println(bytes.length);
+                            FileChunk.Error(_) => stdout.println("chunk-error");
+                        }
+                    }
+                }
+                Error(_) => stdout.println("chunks-error");
+            }
+        }
+        Error(_) => stdout.println("chunk-open-error");
+    }
+    match File.open(Path.of("src/input.txt"), OpenOptions.read_only()) with file {
+        Ok(file) => {
+            match file.chunks(4) {
+                Ok(chunks) => {
+                    _ = file.close();
+                    for chunk in chunks {
+                        match chunk {
+                            FileChunk.Error(error) => match error {
+                                FileError.Closed => stdout.println("closed-iterator");
+                                _ => stdout.println("closed-iterator-wrong-error");
+                            };
+                            FileChunk.Data(_) => stdout.println("closed-iterator-read-data");
+                        }
+                    }
+                }
+                Error(_) => stdout.println("closed-chunks-error");
+            }
+        }
+        Error(_) => stdout.println("closed-open-error");
+    }
+    match File.metadata_for(Path.of("src/output.txt")) {
+        Ok(metadata) => stdout.println(metadata.size());
+        Error(_) => stdout.println("path-metadata-error");
+    }
+    match File.exists(Path.of("src/output.txt")) {
+        Ok(exists) => stdout.println(exists);
+        Error(_) => stdout.println("exists-error");
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let input_scope = input.canonicalize().unwrap().to_string_lossy().into_owned();
+    let output_scope = project
+        .canonicalize()
+        .unwrap()
+        .join("src/output.txt")
+        .to_string_lossy()
+        .into_owned();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_read: [input_scope.clone(), output_scope.clone()].into(),
+            filesystem_write: [output_scope].into(),
+            ..PermissionScopes::default()
+        },
+    );
+
+    let run = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run filesystem roundtrip");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        format!(
+            "{input_scope}\n{input_scope}\nalpha\n\nbeta\n\n14\nwrite-ok\nappend-ok\ncreated-tail\nalpha\n\nbeta\n14\n5\nshort-read\n4\n4\n4\n2\nclosed-iterator\n12\ntrue\n"
+        )
+    );
+    assert_eq!(std::fs::read_to_string(output).unwrap(), "created-tail");
+}
+
+#[test]
+fn bundled_std_fs_denial_is_catchable_and_preserves_existing_contents() {
+    let project = workspace("std_fs_denied");
+    let home = workspace("std_fs_denied_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let input = project.join("src/input.txt");
+    let approved_input = project.join("src/approved.txt");
+    std::fs::write(&input, "private input").unwrap();
+    std::fs::write(&approved_input, "approved input").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.denied.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.read; filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match File.read_text(Path.of("src/approved.txt"), 128) {
+        Ok(_) => stdout.println("read-approved");
+        Error(_) => stdout.println("approved-read-error");
+    }
+    match File.read_text(Path.of("src/input.txt"), 128) {
+        Ok(_) => stdout.println("unexpected-read");
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("read-denied");
+            _ => stdout.println("read-wrong-error");
+        };
+    }
+    match File.write_text(Path.of("src/approved.txt"), "replace") {
+        Ok(_) => stdout.println("unexpected-write");
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("write-denied");
+            _ => stdout.println("write-wrong-error");
+        };
+    }
+    stdout.println("continued");
+}
+
+"#,
+    )
+    .unwrap();
+
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        zirk_runtime_core::permission_grant::PermissionScopes {
+            filesystem_read: [approved_input
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
+            .into(),
+            ..Default::default()
+        },
+    );
+
+    let run = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run filesystem calls without consent");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "read-approved\nread-denied\nwrite-denied\ncontinued\n"
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains(&format!(
+        "attempted but denied filesystem.read for {}",
+        input.canonicalize().unwrap().display()
+    )));
+    assert!(stderr.contains(&format!(
+        "attempted but denied filesystem.write for {}",
+        approved_input.canonicalize().unwrap().display()
+    )));
+    assert!(stderr.contains("requested by std.fs.denied.fixture (application)"));
+    assert_eq!(std::fs::read_to_string(input).unwrap(), "private input");
+    assert_eq!(
+        std::fs::read_to_string(approved_input).unwrap(),
+        "approved input"
+    );
+}
+
+#[test]
+fn bundled_std_fs_metadata_consent_does_not_authorize_content_reads() {
+    let project = workspace("std_fs_metadata_only");
+    let home = workspace("std_fs_metadata_only_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let input = project.join("src/input.txt");
+    std::fs::write(&input, "secret contents").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.metadata.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.metadata; filesystem.read; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { File, FileError } from std.fs::fs;
+import { Path } from std.path::path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match File.metadata_for(Path.of("src/input.txt")) {
+        Ok(metadata) => stdout.println(metadata.size());
+        Error(error) => stdout.println(error.to_string());
+    }
+    match File.exists(Path.of("src/missing.txt")) {
+        Ok(exists) => stdout.println(exists.to_string());
+        Error(_) => stdout.println("missing-check-error");
+    }
+    match File.exists(Path.of("src/unapproved.txt")) {
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("exists-denied");
+            _ => stdout.println("wrong-exists-error");
+        };
+        _ => stdout.println("unexpected-exists-result");
+    }
+    match File.read_text(Path.of("src/input.txt"), 128) {
+        Ok(_) => stdout.println("unexpected-content-access");
+        Error(error) => match error {
+            FileError.PermissionDenied => stdout.println("content-denied");
+            _ => stdout.println("wrong-content-error");
+        };
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        zirk_runtime_core::permission_grant::PermissionScopes {
+            filesystem_metadata: [
+                input.canonicalize().unwrap().to_string_lossy().into_owned(),
+                project
+                    .join("src/missing.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+            .into(),
+            ..Default::default()
+        },
+    );
+
+    let run = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&project)
+        .env("HOME", &home)
+        .output()
+        .expect("run filesystem calls with metadata-only consent");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "15\nfalse\nexists-denied\ncontent-denied\n"
+    );
+    assert!(String::from_utf8_lossy(&run.stderr).contains(&format!(
+        "attempted but denied filesystem.metadata for {}",
+        project.join("src/unapproved.txt").display()
+    )));
+    assert!(String::from_utf8_lossy(&run.stderr).contains(&format!(
+        "attempted but denied filesystem.read for {}",
+        input.canonicalize().unwrap().display()
+    )));
+}

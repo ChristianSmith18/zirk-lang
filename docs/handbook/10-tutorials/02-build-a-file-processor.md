@@ -1,61 +1,55 @@
 # Build a File Processor
 
-Build `normalize-users`, which reads a bounded UTF-8 input, validates each line,
-and atomically publishes output only after every line succeeds.
-
-> **Status:** target Zirk 1.x example; grouped resource cleanup and the complete
-> stdlib may be ahead of the current compiler.
+Build `normalize-users`, which reads a bounded UTF-8 input line by line and
+atomically publishes the normalized output after reading succeeds.
 
 ```zirk
-import { File, OpenOptions } from std.fs;
-import { Path } from std.path;
+import { File, FileError, FileLine, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
 
-fn normalize_line(line: String): Result<String, LineError> {
-    mut cleaned = line.trim();
-    if cleaned.length == 0 return Error(LineError.Empty);
-    return Ok(cleaned.lowercase());
-}
-
-fn process(input: Path, output: Path): Result<Void, ProcessFileError> {
+fn process(input: Path, output: Path): Result<Void, FileError> {
     match File.open(input, OpenOptions.read_only()) with source {
         Ok(source) => {
             mut normalized = List<String>();
-            for line in source.lines(encoding: Encoding.Utf8) {
-                match normalize_line(line) {
-                    Ok(value) => normalized.add(value);
-                    Error(error) => return Error(ProcessFileError.Line(error));
+            for item in source.lines() {
+                match item {
+                    FileLine.Line(line) => normalized.add(line.trim().lowercase());
+                    FileLine.Error(error) => return Error(error);
+                    FileLine.End => {}
                 }
             }
-
             return File.write_text_atomic(output, normalized.join("\n"));
         }
-        Error(error) => return Error(ProcessFileError.Input(error));
+        Error(error) => return Error(error);
     }
 }
 ```
 
-The source closes on success, return, error, or cancellation. Atomic output
-prevents a partially transformed destination from looking complete. Production
-code should stream to a temporary sibling when the result cannot fit the
-selected bound, then sync and replace through the same filesystem.
+The whole-file helpers cap reads at 64 MiB. For this line-by-line version,
+`read_line` enforces a 1 MiB line limit and `lines()` is lazy. The managed
+`match with` scope closes the source on normal completion, return, error, and
+cancellation. Atomic replacement creates a same-directory temporary, syncs it,
+then renames it into place; it prevents readers from observing a half-written
+output but does not promise power-loss durability.
 
-Declare read authority for the input and write/create authority for the output
-directory. Canonicalization and symlink policy are enforced by `std.fs`, not by
-manual string checks.
+Declare `filesystem.read` and `filesystem.write` in the project's single
+`requires` list. The first operation asks for exact consent to the concrete
+input or output path; `.zkinit` does not store an unrestricted directory grant.
+Canonicalization and handle-relative identity checks belong to the filesystem
+boundary, not manual string checks.
 
-Test normalization as a pure unit, then E2E-test invalid lines, malformed
-UTF-8, permission denial, size limit, existing destination, flush/sync failure,
-cancellation, and cleanup in a runner-provided temporary directory. Continue
-with [Resources](../02-handbook/16-resources/README.md) and
-[`std.fs`](../04-standard-library/03-std-fs.md).
+Test line normalization separately, then cover malformed UTF-8, permission
+denial, size and line limits, competing create-new calls, replacement failures,
+and resource cleanup. Continue with [Resources](../02-handbook/16-resources/README.md)
+and [`std.fs`](../04-standard-library/03-std-fs.md).
 
 ## Completion contract
 
 - **Prerequisites:** the CLI tutorial, resources, paths, lists, and filesystem
-  permissions.
+  capabilities.
 - **Expected success:** normalized UTF-8 lines atomically replace the output.
-- **Failure recovery:** invalid input or cleanup failure leaves no published
-  partial output and returns a typed error.
+- **Failure recovery:** read/decode/permission failures return a typed error;
+  atomic replacement leaves the previous output until publication succeeds.
 - **Next:** process independent jobs with a [worker pool](03-build-a-concurrent-worker-pool.md).
 
 ---

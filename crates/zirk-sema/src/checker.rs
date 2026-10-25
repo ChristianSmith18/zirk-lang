@@ -26,18 +26,18 @@ use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
 
 const BORROWED_VIEW_ESCAPE_CODE: Code = Code::new("E0485");
 
-fn capability_for_standard_binding(binding: &str) -> Option<&'static str> {
+fn capabilities_for_standard_binding(binding: &str) -> &'static [&'static str] {
     match binding {
         "std.environment.Environment.get" | "std.environment.Environment.contains_authorized" => {
-            Some("environment.read")
+            &["environment.read"]
         }
         "std.environment.Environment.get_int32"
         | "std.environment.Environment.get_float64"
         | "std.environment.Environment.require"
-        | "std.environment.Environment.contains" => Some("environment.read"),
+        | "std.environment.Environment.contains" => &["environment.read"],
         "std.environment.Environment.get_secret"
-        | "std.environment.Environment.get_secret_value" => Some("secrets.read"),
-        "std.environment.Environment.list_names" => Some("environment.list_names"),
+        | "std.environment.Environment.get_secret_value" => &["secrets.read"],
+        "std.environment.Environment.list_names" => &["environment.list_names"],
         "std.net.tcp.connect"
         | "std.net.tcp.upgrade_tls"
         | "std.net.tls.connect"
@@ -65,7 +65,7 @@ fn capability_for_standard_binding(binding: &str) -> Option<&'static str> {
         | "std.http.websocket.connect"
         | "std.http.websocket.connect_http3"
         | "std.http.websocket.connect_http3_with_trust_roots"
-        | "std.http.websocket.connect_with_trust_roots" => Some("network.connect"),
+        | "std.http.websocket.connect_with_trust_roots" => &["network.connect"],
         "std.net.tcp.listen"
         | "std.net.tls.listen"
         | "std.net.tls.listen_with_client_auth"
@@ -74,22 +74,42 @@ fn capability_for_standard_binding(binding: &str) -> Option<&'static str> {
         | "std.http.server.serve_tls_once"
         | "std.http.server.serve_tls_requests"
         | "std.http.server.websocket_serve_once"
-        | "std.http.server.websocket_serve_tls_once" => Some("network.listen"),
+        | "std.http.server.websocket_serve_tls_once" => &["network.listen"],
         "std.http.server.serve_http3" | "std.http.server.websocket_serve_http3_once" => {
-            Some("network.udp.listen")
+            &["network.udp.listen"]
         }
         "std.net.udp.connect"
         | "std.net.udp.send"
         | "std.net.udp.send_to"
         | "std.net.udp.send_broadcast"
         | "std.net.udp.send_multicast"
-        | "std.net.udp.join_multicast" => Some("network.udp.send"),
-        "std.net.udp.bind" => Some("network.udp.listen"),
-        "std.net.local.connect" => Some("network.local.connect"),
-        "std.net.local.bind" => Some("network.local.listen"),
-        "std.net.interfaces.snapshot" => Some("network.inspect_interfaces"),
-        other if other.starts_with("std.http.server_") => Some("network.listen"),
-        _ => None,
+        | "std.net.udp.join_multicast" => &["network.udp.send"],
+        "std.net.udp.bind" => &["network.udp.listen"],
+        "std.net.local.connect" => &["network.local.connect"],
+        "std.net.local.bind" => &["network.local.listen"],
+        "std.net.interfaces.snapshot" => &["network.inspect.interfaces"],
+        "std.path.Path.absolute" => &["filesystem.read"],
+        "std.path.Path.canonicalize" => &["filesystem.metadata"],
+        "std.fs.File.read_bytes"
+        | "std.fs.File.read_text"
+        | "std.fs.File.read_bytes_handle"
+        | "std.fs.File.read_exact"
+        | "std.fs.File.read_line" => &["filesystem.read"],
+        "std.fs.File.metadata" | "std.fs.File.metadata_for" | "std.fs.File.exists" => {
+            &["filesystem.metadata"]
+        }
+        "std.fs.File.write_bytes"
+        | "std.fs.File.write_text"
+        | "std.fs.File.append_bytes"
+        | "std.fs.File.append_text"
+        | "std.fs.File.append_handle"
+        | "std.fs.File.write_bytes_atomic"
+        | "std.fs.File.write_text_atomic" => &["filesystem.write"],
+        // The selected mode is runtime data; the native boundary checks only
+        // the read/write effects requested by this OpenOptions value.
+        "std.fs.File.open" => &["filesystem.read", "filesystem.write"],
+        other if other.starts_with("std.http.server_") => &["network.listen"],
+        _ => &[],
     }
 }
 
@@ -292,6 +312,10 @@ pub struct CheckedProgram {
     pub callable_capability_effects: HashMap<Span, BTreeSet<String>>,
     /// Compiler-owned `std.json` conversions resolved from bundled declarations.
     pub standard_json_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.fs` host calls resolved from the bundled package.
+    pub standard_filesystem_calls: HashMap<Span, String>,
+    /// Compiler-owned `std.path` host calls resolved from the bundled package.
+    pub standard_path_calls: HashMap<Span, String>,
     /// Concrete type-parameter substitutions inferred for direct generic
     /// calls, keyed by call span. IR specialization consumes this metadata so
     /// generic dispatch stays compile-time and never needs runtime reflection.
@@ -1388,6 +1412,10 @@ struct Checker<'a> {
     direct_function_calls: HashMap<Span, HashSet<Span>>,
     capability_function_calls: HashMap<Span, HashSet<Span>>,
     direct_function_call_sites: HashMap<Span, Span>,
+    /// Method metadata keeps the identifier span for diagnostics and editor
+    /// references, while callable summaries are keyed by the full body span.
+    /// Calls must bridge those two identities before entering either graph.
+    callable_span_by_declaration: HashMap<Span, Span>,
     local_suspend_seeds: HashMap<Span, EffectSummary>,
     callable_spans: HashSet<Span>,
     parallel_calls: Vec<(Span, Option<Span>)>,
@@ -1447,6 +1475,8 @@ struct Checker<'a> {
     standard_network_calls: HashMap<Span, String>,
     standard_http_calls: HashMap<Span, String>,
     standard_json_calls: HashMap<Span, String>,
+    standard_filesystem_calls: HashMap<Span, String>,
+    standard_path_calls: HashMap<Span, String>,
     protected_api_effects: HashMap<Span, String>,
     protected_api_requesters: HashMap<Span, String>,
     protected_effect_seeds: HashMap<Span, BTreeSet<String>>,
@@ -1903,6 +1933,7 @@ impl<'a> Checker<'a> {
             direct_function_calls: HashMap::new(),
             capability_function_calls: HashMap::new(),
             direct_function_call_sites: HashMap::new(),
+            callable_span_by_declaration: HashMap::new(),
             local_suspend_seeds: HashMap::new(),
             callable_spans: HashSet::new(),
             parallel_calls: Vec::new(),
@@ -1943,6 +1974,8 @@ impl<'a> Checker<'a> {
             standard_network_calls: HashMap::new(),
             standard_http_calls: HashMap::new(),
             standard_json_calls: HashMap::new(),
+            standard_filesystem_calls: HashMap::new(),
+            standard_path_calls: HashMap::new(),
             protected_api_effects: HashMap::new(),
             protected_api_requesters: HashMap::new(),
             protected_effect_seeds: HashMap::new(),
@@ -2216,9 +2249,10 @@ impl<'a> Checker<'a> {
     /// calls, so a wrapper such as `HTTP.get` cannot hide network suspension
     /// from callback restrictions (`Mutex.with`, `Parallel.each`, cleanup).
     fn mark_standard_library_binding_effect(&mut self, binding: &str, span: Span) {
-        if let Some(capability) = capability_for_standard_binding(binding) {
+        let capabilities = capabilities_for_standard_binding(binding);
+        if !capabilities.is_empty() {
             self.protected_api_effects
-                .insert(span, capability.to_owned());
+                .insert(span, capabilities.join(","));
             let requester = self.sources.file(span.file).identity().map(|identity| {
                 if identity.package.starts_with("std.") {
                     None
@@ -2235,7 +2269,11 @@ impl<'a> Checker<'a> {
                 self.protected_effect_seeds
                     .entry(function)
                     .or_default()
-                    .insert(capability.to_owned());
+                    .extend(
+                        capabilities
+                            .iter()
+                            .map(|capability| (*capability).to_owned()),
+                    );
             }
         }
         match binding {
@@ -2248,6 +2286,25 @@ impl<'a> Checker<'a> {
             | "std.environment.Environment.get_secret_value"
             | "std.environment.Environment.contains_authorized"
             | "std.environment.Environment.list_names"
+            | "std.path.Path.absolute"
+            | "std.path.Path.canonicalize"
+            | "std.fs.File.read_bytes"
+            | "std.fs.File.read_text"
+            | "std.fs.File.write_bytes"
+            | "std.fs.File.write_text"
+            | "std.fs.File.open"
+            | "std.fs.File.close"
+            | "std.fs.File.read_bytes_handle"
+            | "std.fs.File.read_exact"
+            | "std.fs.File.read_line"
+            | "std.fs.File.append_bytes"
+            | "std.fs.File.append_text"
+            | "std.fs.File.append_handle"
+            | "std.fs.File.metadata"
+            | "std.fs.File.metadata_for"
+            | "std.fs.File.exists"
+            | "std.fs.File.write_bytes_atomic"
+            | "std.fs.File.write_text_atomic"
             | "std.net.tcp.listen" => self.mark_may_block(),
             "std.net.udp.connect" | "std.net.udp.bind" => self.mark_may_suspend(),
             "std.net.udp.send"
@@ -2377,6 +2434,11 @@ impl<'a> Checker<'a> {
     }
 
     fn record_direct_function_call(&mut self, target: Span, call_span: Span) {
+        let target = self
+            .callable_span_by_declaration
+            .get(&target)
+            .copied()
+            .unwrap_or(target);
         self.direct_function_call_sites.insert(call_span, target);
         if self.parallel_depth > 0 {
             self.parallel_calls.push((call_span, Some(target)));
@@ -2619,6 +2681,14 @@ impl<'a> Checker<'a> {
         self.resolve_bases(program);
         self.resolve_class_type_param_constraints(program);
         self.declare_members(program);
+        for class in Self::class_decls_flat(program) {
+            for method in &class.methods {
+                if method.body.is_some() {
+                    self.callable_span_by_declaration
+                        .insert(method.name.span, method.span);
+                }
+            }
+        }
         self.resolve_project_globals(program.span);
         self.check_generic_class_lowering(program);
         // Conformance resolves before any function signature or body is
@@ -2756,6 +2826,8 @@ impl<'a> Checker<'a> {
             protected_api_requesters: self.protected_api_requesters,
             callable_capability_effects,
             standard_json_calls: self.standard_json_calls,
+            standard_filesystem_calls: self.standard_filesystem_calls,
+            standard_path_calls: self.standard_path_calls,
             generic_call_substitutions: self.generic_call_substitutions,
             type_params: self.type_params,
             generic_instances: self.generic_instances,
@@ -4063,6 +4135,8 @@ impl<'a> Checker<'a> {
                 "Error" | "Throwable" | "RuntimeError" | "JsonConversionError"
             ))
             || (what == "contract" && used.name == "Resource")
+            || (what == "contract" && matches!(used.name.as_str(), "Iterable" | "Iterator"))
+            || (what == "enum" && used.name == "Iteration")
         {
             return;
         }
@@ -8108,6 +8182,22 @@ impl<'a> Checker<'a> {
         };
 
         self.scopes.push_function();
+        // Method and constructor defaults are checked in the declaration's
+        // scope, just like function defaults, before `this` or parameters are
+        // introduced. The lowerer materializes the default at call sites and
+        // relies on the checked expression metadata (for example enum variant
+        // discriminants) being recorded here.
+        let body_this = self.this_type;
+        self.this_type = None;
+        for param in params {
+            if let Some(default) = &param.default {
+                let info = self.resolve_param(param);
+                let actual = self.check_expr(default);
+                self.expect_assignable(info.ty, actual, default.span(), "the default value");
+            }
+        }
+        self.this_type = body_this;
+
         if bind_this {
             self.declare_local(Binding {
                 name: "this".to_string(),
@@ -24297,6 +24387,32 @@ impl<'a> Checker<'a> {
                             crate::stdlib::compiler_binding_for_json_member(&method.name)
                     {
                         self.standard_json_calls.insert(expr.span, binding.into());
+                    }
+                    let standard_identity = self.sources.file(class.span.file).identity();
+                    let standard_module = standard_identity
+                        .map(|identity| identity.canonical_module_path.rsplit('.').next())
+                        .flatten()
+                        .unwrap_or_default();
+                    if let Some(binding) = standard_identity.and_then(|identity| {
+                        crate::stdlib::compiler_binding_for_filesystem_member(
+                            &identity.package,
+                            standard_module,
+                            &method.name,
+                        )
+                    }) {
+                        self.mark_standard_library_binding_effect(binding, expr.span);
+                        self.standard_filesystem_calls
+                            .insert(expr.span, binding.into());
+                    }
+                    if let Some(binding) = standard_identity.and_then(|identity| {
+                        crate::stdlib::compiler_binding_for_path_member(
+                            &identity.package,
+                            standard_module,
+                            &method.name,
+                        )
+                    }) {
+                        self.mark_standard_library_binding_effect(binding, expr.span);
+                        self.standard_path_calls.insert(expr.span, binding.into());
                     }
                     let from_inside = self.this_type == Some(Type::of(Base::Class(class_id)))
                         || self.current_class_body == Some(class_id);

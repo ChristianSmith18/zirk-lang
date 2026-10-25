@@ -25,11 +25,15 @@ Current high-impact delivery limits include:
 - `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
   entry selection without a required source `fn main`, dependency/dev-dependency
   graphs, typed application globals, and one `requires` capability list. Runtime
-  consent is exact-resource and operation-local. Current enforced protected
-  APIs are environment/secrets and networking; filesystem/process capability
-  IDs remain reserved because compiler-owned APIs are not exposed. See the
+  consent is exact-resource and operation-local. Runtime enforcement covers
+  environment/secrets, networking, and the delivered `std.fs`/`std.path` core;
+  directory/link/lock/watch/async filesystem work and process APIs remain
+  incomplete. See the
   [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
-  chapters for the tested surface.
+  chapters for the tested surface. Filesystem native runtime tests currently
+  cover macOS ARM64; Windows x86_64 has compile-only evidence, and Linux
+  x86_64/ARM64 remain unverified because this environment lacks a Linux
+  compiler/sysroot.
 
 - `std.environment`, `std.net`, and `std.http` are bundled native previews;
   the archived first delivery passes full-workspace native CI on macOS ARM64,

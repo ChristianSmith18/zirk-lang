@@ -5,6 +5,9 @@ protected operation families their code may attempt:
 
 ```text
 requires {
+    filesystem.read;
+    filesystem.write;
+    filesystem.metadata;
     environment.read;
     network.connect;
 }
@@ -17,10 +20,13 @@ capability; it cannot authorize itself or the application. The application
 does not need to copy transitive requirements by hand.
 
 A declaration is not consent. At the protected operation, Zirk checks the
-concrete resource, such as an environment variable name, network origin, or
-listener address and port. Connecting does not grant listening, and read does
-not grant write. A dynamically selected listener requests that exact endpoint;
-port `0` is treated as an ephemeral-bind request for the selected address.
+concrete resource, such as an exact file path, environment variable name,
+network origin, or listener address and port. Connecting does not grant
+listening, and read does not grant write. Metadata inspection has its own
+narrower capability; a read grant also permits metadata inspection at that
+exact path, but metadata consent does not permit reading file contents. A
+dynamically selected listener requests that exact endpoint; port `0` is
+treated as an ephemeral-bind request for the selected address.
 
 If a matching user-owned approval is missing and the CLI has a terminal, Zirk
 shows the project, operation, capability, exact resource, and requesting
@@ -38,12 +44,11 @@ operation was attempted and denied, with its resource and requester, without
 printing secret values. Other program execution continues unless the program
 chooses to stop.
 
-The current native runtime enforces environment/secret and network operations,
-including HTTP destinations, proxy origins, DNS answers, redirects, TCP/UDP
-listeners, UDP destinations, local endpoints, and interface inspection.
-Filesystem and process capability identifiers are reserved in the manifest
-model, but this checkout does not yet expose compiler-owned filesystem or
-process APIs to enforce them.
+The current native runtime enforces environment/secret, network, and delivered
+filesystem operations, including exact path reads/writes, HTTP destinations,
+proxy origins, DNS answers, redirects, TCP/UDP listeners, UDP destinations,
+local endpoints, and interface inspection. Process capability identifiers
+remain reserved until compiler-owned process APIs are delivered.
 
 ---
 

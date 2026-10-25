@@ -1,0 +1,3 @@
+package std.path;
+
+share mod path from "./path";

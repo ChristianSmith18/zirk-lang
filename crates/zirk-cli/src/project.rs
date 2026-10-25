@@ -19,6 +19,7 @@ pub enum ProjectKind {
 pub enum Capability {
     FilesystemRead,
     FilesystemWrite,
+    FilesystemMetadata,
     NetworkConnect,
     NetworkListen,
     NetworkUdpSend,
@@ -38,6 +39,7 @@ impl Capability {
         Some(match value {
             "filesystem.read" => Self::FilesystemRead,
             "filesystem.write" => Self::FilesystemWrite,
+            "filesystem.metadata" => Self::FilesystemMetadata,
             "network.connect" => Self::NetworkConnect,
             "network.listen" => Self::NetworkListen,
             "network.udp.send" => Self::NetworkUdpSend,
@@ -58,6 +60,7 @@ impl Capability {
         match self {
             Self::FilesystemRead => "filesystem.read",
             Self::FilesystemWrite => "filesystem.write",
+            Self::FilesystemMetadata => "filesystem.metadata",
             Self::NetworkConnect => "network.connect",
             Self::NetworkListen => "network.listen",
             Self::NetworkUdpSend => "network.udp.send",

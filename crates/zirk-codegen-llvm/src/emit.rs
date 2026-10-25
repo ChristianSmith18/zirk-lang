@@ -31,6 +31,37 @@ use std::path::Path;
 use zirk_diagnostics::{FileId, SourceMap, Span};
 use zirk_ir as ir;
 
+fn filesystem_operation(binding: &str) -> Option<i32> {
+    Some(match binding {
+        "std.path.Path.join" => 1,
+        "std.path.Path.components" => 2,
+        "std.path.Path.parent" => 3,
+        "std.path.Path.name" => 4,
+        "std.path.Path.normalize" => 9,
+        "std.path.Path.absolute" => 10,
+        "std.path.Path.canonicalize" => 11,
+        "std.fs.File.read_bytes" => 100,
+        "std.fs.File.read_text" => 101,
+        "std.fs.File.write_bytes" => 102,
+        "std.fs.File.write_text" => 103,
+        "std.fs.File.open" => 104,
+        "std.fs.File.close" => 105,
+        "std.fs.File.is_closed" => 106,
+        "std.fs.File.read_bytes_handle" => 107,
+        "std.fs.File.read_exact" => 108,
+        "std.fs.File.read_line" => 109,
+        "std.fs.File.append_bytes" => 110,
+        "std.fs.File.append_text" => 111,
+        "std.fs.File.append_handle" => 112,
+        "std.fs.File.metadata" => 113,
+        "std.fs.File.exists" => 114,
+        "std.fs.File.write_bytes_atomic" => 115,
+        "std.fs.File.write_text_atomic" => 116,
+        "std.fs.File.metadata_for" => 117,
+        _ => return None,
+    })
+}
+
 /// Prefix applied to every Zirk function in the generated code.
 ///
 /// It avoids collisions with C symbols — a Zirk function named `printf` must
@@ -7113,6 +7144,18 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 Some(self.build_tagged_outcome(*enum_id, kind, error, payload, 0, 1))
             }
 
+            ir::InstKind::FilesystemCall { binding, args } => {
+                let operation = filesystem_operation(binding).unwrap_or_else(|| {
+                    panic!("unregistered filesystem compiler binding: {binding}")
+                });
+                let words = args
+                    .iter()
+                    .map(|argument| self.filesystem_argument_word(*argument))
+                    .collect::<Vec<_>>();
+                let (kind, error, scalar, payload) = self.call_filesystem(operation, &words);
+                Some(self.build_filesystem_outcome(instruction.ty, kind, error, scalar, payload))
+            }
+
             ir::InstKind::NetworkTcpConnect { endpoint, enum_id } => {
                 let endpoint = self.operand(*endpoint);
                 let (kind, error, scalar, _) =
@@ -13716,6 +13759,358 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             ],
             false,
         )
+    }
+
+    fn filesystem_argument_word(&mut self, operand: ir::Operand) -> IntValue<'ctx> {
+        let ty = self.value_types[&operand.0];
+        let value = self.operand(operand);
+        match ty {
+            ir::IrType::Nullable(nullable) => {
+                let value = value.into_struct_value();
+                let present = self
+                    .builder
+                    .build_extract_value(value, 0, "fs.arg.present")
+                    .expect("nullable argument presence")
+                    .into_int_value();
+                let inner = self
+                    .builder
+                    .build_extract_value(value, 1, "fs.arg.value")
+                    .expect("nullable argument value");
+                let word = self.filesystem_scalar_word(inner, nullable.inner());
+                self.builder
+                    .build_select(
+                        present,
+                        word,
+                        self.context.i64_type().const_zero(),
+                        "fs.arg.nullable",
+                    )
+                    .expect("pack nullable argument")
+                    .into_int_value()
+            }
+            ir::IrType::Enum(_) => {
+                let tag = self
+                    .builder
+                    .build_extract_value(value.into_struct_value(), 0, "fs.arg.enum.tag")
+                    .expect("enum argument discriminant")
+                    .into_int_value();
+                self.builder
+                    .build_int_z_extend(tag, self.context.i64_type(), "fs.arg.enum.word")
+                    .expect("extend enum discriminant")
+            }
+            other => self.filesystem_scalar_word(value, other),
+        }
+    }
+
+    fn filesystem_scalar_word(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: ir::IrType,
+    ) -> IntValue<'ctx> {
+        let target = self.context.i64_type();
+        match value {
+            BasicValueEnum::PointerValue(pointer) => self
+                .builder
+                .build_ptr_to_int(pointer, target, "fs.arg.pointer")
+                .expect("pack filesystem pointer argument"),
+            BasicValueEnum::IntValue(integer) => {
+                let width = integer.get_type().get_bit_width();
+                if width == 64 {
+                    integer
+                } else if width > 64 {
+                    self.builder
+                        .build_int_truncate(integer, target, "fs.arg.truncate")
+                        .expect("truncate filesystem scalar")
+                } else if self.is_signed(ty) {
+                    self.builder
+                        .build_int_s_extend(integer, target, "fs.arg.sign_extend")
+                        .expect("sign extend filesystem scalar")
+                } else {
+                    self.builder
+                        .build_int_z_extend(integer, target, "fs.arg.zero_extend")
+                        .expect("zero extend filesystem scalar")
+                }
+            }
+            _ => panic!("unsupported std.fs/std.path argument type: {}", ty.as_str()),
+        }
+    }
+
+    fn call_filesystem(
+        &mut self,
+        operation: i32,
+        words: &[IntValue<'ctx>],
+    ) -> (
+        IntValue<'ctx>,
+        IntValue<'ctx>,
+        IntValue<'ctx>,
+        PointerValue<'ctx>,
+    ) {
+        let args_pointer = if words.is_empty() {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        } else {
+            let array_type = self.context.i64_type().array_type(words.len() as u32);
+            let slot = self
+                .builder
+                .build_alloca(array_type, "fs.args")
+                .expect("filesystem argument array");
+            for (index, word) in words.iter().enumerate() {
+                let element = unsafe {
+                    self.builder.build_gep(
+                        array_type,
+                        slot,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_int(index as u64, false),
+                        ],
+                        "fs.arg.slot",
+                    )
+                }
+                .expect("filesystem argument slot");
+                self.builder
+                    .build_store(element, *word)
+                    .expect("store filesystem argument");
+            }
+            slot
+        };
+        let operation = self.context.i32_type().const_int(operation as u64, false);
+        let count = self.context.i64_type().const_int(words.len() as u64, false);
+        self.call_network_out(
+            self.runtime.filesystem_call,
+            &[operation.into(), args_pointer.into(), count.into()],
+        )
+    }
+
+    fn build_filesystem_outcome(
+        &mut self,
+        result_type: ir::IrType,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        scalar: IntValue<'ctx>,
+        payload: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        match result_type {
+            ir::IrType::Enum(enum_id) => {
+                let layout = self.module.enums[enum_id as usize].clone();
+                let value_type = layout.fields[layout.variants[0][0] as usize].ty;
+                match value_type {
+                    ir::IrType::Void => self.build_void_tagged_outcome(enum_id, kind, error),
+                    ir::IrType::Int(ir::IntWidth::U64) => {
+                        self.build_u64_tagged_outcome(enum_id, kind, error, scalar)
+                    }
+                    ir::IrType::Boolean => {
+                        self.build_filesystem_boolean_result(enum_id, kind, error, scalar)
+                    }
+                    ir::IrType::Nullable(ir::Nullable::String) => self
+                        .build_nullable_string_tagged_outcome(enum_id, kind, error, payload, 0, 1),
+                    ir::IrType::Enum(inner_id)
+                        if self.module.enums[inner_id as usize].name == "FileLine" =>
+                    {
+                        self.build_file_line_result(enum_id, inner_id, kind, error, payload)
+                    }
+                    ir::IrType::String | ir::IrType::Array(_) | ir::IrType::List(_) => {
+                        self.build_tagged_outcome(enum_id, kind, error, payload, 0, 1)
+                    }
+                    other => panic!("unsupported filesystem Result payload: {}", other.as_str()),
+                }
+            }
+            ir::IrType::Boolean => self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    scalar,
+                    self.context.i64_type().const_zero(),
+                    "fs.boolean",
+                )
+                .expect("convert filesystem boolean")
+                .into(),
+            ir::IrType::String | ir::IrType::List(_) | ir::IrType::Array(_) => payload.into(),
+            ir::IrType::Nullable(ir::Nullable::String) => {
+                let nullable_type = self
+                    .llvm_type(result_type)
+                    .expect("nullable filesystem string type")
+                    .into_struct_type();
+                let present = self
+                    .builder
+                    .build_is_not_null(payload, "fs.nullable.present")
+                    .expect("check nullable filesystem string");
+                let value = self
+                    .builder
+                    .build_insert_value(
+                        nullable_type.get_undef(),
+                        present,
+                        0,
+                        "fs.nullable.presence",
+                    )
+                    .expect("insert nullable presence")
+                    .into_struct_value();
+                self.builder
+                    .build_insert_value(value, payload, 1, "fs.nullable.value")
+                    .expect("insert nullable payload")
+                    .as_basic_value_enum()
+            }
+            other => panic!("unsupported direct filesystem result: {}", other.as_str()),
+        }
+    }
+
+    fn build_filesystem_boolean_result(
+        &mut self,
+        enum_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        scalar: IntValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let layout = self.module.enums[enum_id as usize].clone();
+        let struct_type = enum_struct(
+            self.context,
+            &layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let boolean = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                scalar,
+                self.context.i64_type().const_zero(),
+                "fs.boolean.value",
+            )
+            .expect("convert filesystem boolean");
+        let tag = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                kind,
+                self.context.i32_type().const_int(1, false),
+                "fs.boolean.error_tag",
+            )
+            .expect("select filesystem result tag");
+        let outer_tag = self
+            .builder
+            .build_select(
+                tag,
+                self.context.i32_type().const_int(1, false),
+                self.context.i32_type().const_zero(),
+                "fs.boolean.result_tag",
+            )
+            .expect("select filesystem result tag")
+            .into_int_value();
+        let mut built = self
+            .builder
+            .build_insert_value(
+                struct_type.const_zero(),
+                outer_tag,
+                0,
+                "fs.boolean.result.kind",
+            )
+            .expect("insert filesystem result tag")
+            .into_struct_value();
+        let value_field = layout.variants[0][0] + ENUM_HEADER_FIELDS;
+        built = self
+            .builder
+            .build_insert_value(built, boolean, value_field, "fs.boolean.result.value")
+            .expect("insert filesystem boolean value")
+            .into_struct_value();
+        let error_field = layout.variants[1][0] + ENUM_HEADER_FIELDS;
+        built = self
+            .builder
+            .build_insert_value(built, error, error_field, "fs.boolean.result.error")
+            .expect("insert filesystem boolean error")
+            .into_struct_value();
+        built.into()
+    }
+
+    fn build_file_line_result(
+        &mut self,
+        result_id: u32,
+        line_id: u32,
+        kind: IntValue<'ctx>,
+        error: IntValue<'ctx>,
+        payload: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let line_layout = self.module.enums[line_id as usize].clone();
+        let line_type = enum_struct(
+            self.context,
+            &line_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let is_end = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                kind,
+                self.context.i32_type().const_int(2, false),
+                "fs.line.eof",
+            )
+            .expect("check filesystem EOF");
+        let line_tag = self
+            .builder
+            .build_select(
+                is_end,
+                self.context.i32_type().const_int(1, false),
+                self.context.i32_type().const_zero(),
+                "fs.line.tag",
+            )
+            .expect("select FileLine variant")
+            .into_int_value();
+        let mut line = self
+            .builder
+            .build_insert_value(line_type.const_zero(), line_tag, 0, "fs.line.value.tag")
+            .expect("insert FileLine tag")
+            .into_struct_value();
+        let text_field = line_layout.variants[0][0] + ENUM_HEADER_FIELDS;
+        line = self
+            .builder
+            .build_insert_value(line, payload, text_field, "fs.line.text")
+            .expect("insert FileLine text")
+            .into_struct_value();
+
+        let result_layout = self.module.enums[result_id as usize].clone();
+        let result_type = enum_struct(
+            self.context,
+            &result_layout,
+            &self.module.closures,
+            &self.module.values,
+            &self.module.enums,
+        );
+        let failed = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                kind,
+                self.context.i32_type().const_int(1, false),
+                "fs.line.failed",
+            )
+            .expect("check filesystem line error");
+        let tag = self
+            .builder
+            .build_select(
+                failed,
+                self.context.i32_type().const_int(1, false),
+                self.context.i32_type().const_zero(),
+                "fs.line.result.tag",
+            )
+            .expect("select filesystem result variant")
+            .into_int_value();
+        let mut result = self
+            .builder
+            .build_insert_value(result_type.const_zero(), tag, 0, "fs.line.result.kind")
+            .expect("insert Result tag")
+            .into_struct_value();
+        let value_field = result_layout.variants[0][0] + ENUM_HEADER_FIELDS;
+        result = self
+            .builder
+            .build_insert_value(result, line, value_field, "fs.line.result.value")
+            .expect("insert FileLine result")
+            .into_struct_value();
+        let error_field = result_layout.variants[1][0] + ENUM_HEADER_FIELDS;
+        result = self
+            .builder
+            .build_insert_value(result, error, error_field, "fs.line.result.error")
+            .expect("insert FileError result")
+            .into_struct_value();
+        result.into()
     }
 
     /// Calls a `stdin.read_*` native operation through its out-parameter

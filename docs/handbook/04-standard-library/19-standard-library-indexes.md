@@ -88,8 +88,8 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | `std.io` | `stdin`, `stdout`, `stderr`, `ReadResult<T>` | terminal/stream I/O |
 | `std.terminal` | **Specified, not implemented:** styles, capabilities, cursor/progress/live regions | terminal control |
 | `std.encoding` | **Specified, not implemented:** encoding enum and strict/lossy codecs | none by itself |
-| `std.fs` | **Specified, not implemented:** `File`, options, metadata, directory and watcher operations | filesystem |
-| `std.path` | **Specified, not implemented:** `Path`, `PathStyle`, lexical/system path operations | only system queries |
+| `std.fs` | Partial delivery: `File`, typed options, bounded reads, direct writes, managed handles, progressive reads, append, metadata, atomic replacement | `filesystem.read`, `filesystem.write`, `filesystem.metadata` |
+| `std.path` | Partial delivery: immutable `Path`, lexical operations, absolute and canonical queries | `filesystem.read` for absolute paths; `filesystem.metadata` for canonicalization |
 | `std.process` | **Specified, not implemented:** `Process`, `ChildProcess`, `ProcessResult`, pipelines | process; shell separately |
 | `std.text` | **Partial language surface; no importable package:** regex and selected `String`/`Char` operations are delivered; builder, formatting, and Unicode helpers remain specified | none |
 | `std.collections` | **Partial language surface; no importable package:** `Array`, `List`, `Range`, and limited `Map`/`Set` operations are delivered; queues and broader generic contracts remain specified | none |
@@ -114,8 +114,8 @@ This index lists prominent entry types rather than every helper or enum.
 | Type or object | Owner | Purpose |
 | --- | --- | --- |
 | `ReadResult<T>` | [`std.io`](02-std-io.md) | distinguish `Value`, `End`, and `Error` |
-| `File`, `OpenOptions`, `FileMetadata` | [`std.fs`](03-std-fs.md) | managed file access and inspection |
-| `Path`, `PathStyle` | [`std.path`](04-std-path.md) | typed lexical and system paths |
+| `File`, `OpenOptions`, `FileMetadata`, `FileLine`, `FileChunk`, `FileError` | [`std.fs`](03-std-fs.md) | bounded and progressive managed file access |
+| `Path`, `PathError` | [`std.path`](04-std-path.md) | lexical values and fallible host path queries |
 | `Process`, `ChildProcess`, `ProcessResult` | [`std.process`](05-std-process.md) | commands and managed child lifetime |
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
 | collection families | [`std.collections`](06-std-collections.md) | owned/reference collections and iterators |
@@ -174,7 +174,8 @@ grant `permissions`; signed developer approval remains external to the repo.
 | Capability | Used by | Scope notes |
 | --- | --- | --- |
 | terminal/input/output | `std.io`, terminal helpers | channel and control capabilities remain explicit |
-| filesystem read/write/watch | `std.fs`, snapshots, persisted cookies/keys | canonical path and symlink escape are checked |
+| filesystem read/write/metadata | `std.fs`, `std.path` | canonical exact-resource grants; full reads include metadata; metadata-only scopes cannot read contents; browser preflight excludes filesystem effects |
+| filesystem watch | deferred filesystem contracts | native watcher API is not delivered |
 | process | `std.process` | executable and allowed argument forms are scoped |
 | shell | explicit shell boundary only | separate high-risk grant; never implied by process |
 | environment | `Env` ordinary reads | exact names/patterns; denial hides existence |

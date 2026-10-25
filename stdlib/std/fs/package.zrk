@@ -1,0 +1,3 @@
+package std.fs;
+
+share mod fs from "./fs";

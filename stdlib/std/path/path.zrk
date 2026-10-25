@@ -1,0 +1,57 @@
+// Path is a value. Lexical operations are intentionally separate from the
+// fallible, permission-checked host queries at the bottom of this type.
+share class Path {
+    private inmut value: String;
+
+    construct(value: String) { this.value = value; }
+
+    static of(value: String): Path { return Path(value); }
+
+    as_string(): String { return this.value; }
+
+    join(segment: String): Path {
+        return Path(Path.join_native(this.value, segment));
+    }
+
+    components(): List<String> { return Path.components_native(this.value); }
+
+    parent(): Path? {
+        return match Path.parent_native(this.value) {
+            null => null;
+            value => Path(value);
+        };
+    }
+
+    name(): String? { return Path.name_native(this.value); }
+
+    normalize(): Path { return Path(Path.normalize_native(this.value)); }
+
+    absolute(): Result<Path, PathError> {
+        return match Path.absolute_native(this.value) {
+            Ok(value) => Path.absolute_ok(Path(value));
+            Error(error) => Error(error);
+        };
+    }
+
+    canonicalize(): Result<Path, PathError> {
+        return match Path.canonicalize_native(this.value) {
+            Ok(value) => Path.canonicalize_ok(Path(value));
+            Error(error) => Error(error);
+        };
+    }
+
+    equals(other: Path): Boolean { return this.normalize().value == other.normalize().value; }
+
+    private static join_native(base: String, segment: String): String { return base; }
+    private static components_native(value: String): List<String> { return []; }
+    private static parent_native(value: String): String? { return null; }
+    private static name_native(value: String): String? { return null; }
+    private static normalize_native(value: String): String { return value; }
+    private static absolute_native(value: String): Result<String, PathError> { return Error(PathError.Io); }
+    private static canonicalize_native(value: String): Result<String, PathError> { return Error(PathError.Io); }
+
+    private static absolute_ok(value: Path): Result<Path, PathError> { return Ok(value); }
+    private static canonicalize_ok(value: Path): Result<Path, PathError> { return Ok(value); }
+}
+
+share enum PathError { InvalidPath, PermissionDenied, NotFound, Unsupported, Io }

@@ -269,8 +269,9 @@ requester graph. At first use, an interactive runtime identifies the operation,
 resource, and requester and accepts `y/n`; non-interactive execution denies an
 unapproved operation locally. Manifest migration never creates consent.
 
-Current enforcement covers network and environment/secret APIs. Filesystem and
-process capability identifiers remain reserved until compiler-owned APIs exist.
+Current enforcement covers network, environment/secret, and the delivered
+`std.fs`/`std.path` APIs. Process capability identifiers remain reserved until
+compiler-owned process APIs exist.
 For current details, see the live specifications linked at the top of this
 historical snapshot.
 

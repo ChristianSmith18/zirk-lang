@@ -450,7 +450,7 @@ for target-specific validation and limitations.
 - Applications select `entry`; packages select importable `root`. The selected file executes top-level statements, so source `fn main` is not required.
 - Exact user consent is stored outside the repository and checked at each protected operation; no permission phase or application `permissions` block exists.
 - CLI includes `zirk init` prompts and `zirk init -y`, project-aware `run`, dependency resolution/migration, and consent inspection/revocation.
-- Local/vendored package graphs and the current native network/environment APIs are implemented. Registry/Git acquisition, package publication, and filesystem/process permission APIs remain open.
+- Local/vendored package graphs and the current native network/environment APIs are implemented. `deliver-std-fs-core` adds exact-resource permissions and the bounded native filesystem core; registry/Git acquisition, package publication, and process permission APIs remain open.
 
 **Output:** real multi-file projects, with a manifest and cross-compilation.
 

@@ -100,6 +100,22 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
             package: "std.net",
             module: "interfaces",
         }),
+        "std.path" => Some(StandardModule {
+            package: "std.path",
+            module: "path",
+        }),
+        "std.path::path" => Some(StandardModule {
+            package: "std.path",
+            module: "path",
+        }),
+        "std.fs" => Some(StandardModule {
+            package: "std.fs",
+            module: "fs",
+        }),
+        "std.fs::fs" => Some(StandardModule {
+            package: "std.fs",
+            module: "fs",
+        }),
         _ => None,
     }
 }
@@ -431,6 +447,65 @@ pub fn compiler_binding_for_json_member(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Private filesystem implementation leaves, bindable only from declarations
+/// whose source identity is the compiler-bundled `std.fs` package. Callers
+/// must establish that identity before consulting this closed name map; a
+/// project package that declares a class named `File` cannot acquire a host
+/// filesystem operation by matching one of these method names.
+pub fn compiler_binding_for_filesystem_member(
+    package: &str,
+    module: &str,
+    name: &str,
+) -> Option<&'static str> {
+    if package != "std.fs" || module != "fs" {
+        return None;
+    }
+    match name {
+        "read_bytes_native" => Some("std.fs.File.read_bytes"),
+        "read_text_native" => Some("std.fs.File.read_text"),
+        "write_bytes_native" => Some("std.fs.File.write_bytes"),
+        "write_text_native" => Some("std.fs.File.write_text"),
+        "open_native" => Some("std.fs.File.open"),
+        "close_native" => Some("std.fs.File.close"),
+        "is_closed_native" => Some("std.fs.File.is_closed"),
+        "read_bytes_handle_native" => Some("std.fs.File.read_bytes_handle"),
+        "read_exact_native" => Some("std.fs.File.read_exact"),
+        "read_line_native" => Some("std.fs.File.read_line"),
+        "append_bytes_native" => Some("std.fs.File.append_bytes"),
+        "append_text_native" => Some("std.fs.File.append_text"),
+        "append_handle_native" => Some("std.fs.File.append_handle"),
+        "metadata_native" => Some("std.fs.File.metadata"),
+        "metadata_for_native" => Some("std.fs.File.metadata_for"),
+        "exists_native" => Some("std.fs.File.exists"),
+        "write_bytes_atomic_native" => Some("std.fs.File.write_bytes_atomic"),
+        "write_text_atomic_native" => Some("std.fs.File.write_text_atomic"),
+        _ => None,
+    }
+}
+
+/// Private path operations available only to declarations in the bundled
+/// `std.path` package. Lexical operations have no permission effect; the
+/// checker adds one only to the host-query leaves.
+pub fn compiler_binding_for_path_member(
+    package: &str,
+    module: &str,
+    name: &str,
+) -> Option<&'static str> {
+    if package != "std.path" || module != "path" {
+        return None;
+    }
+    match name {
+        "join_native" => Some("std.path.Path.join"),
+        "components_native" => Some("std.path.Path.components"),
+        "parent_native" => Some("std.path.Path.parent"),
+        "name_native" => Some("std.path.Path.name"),
+        "normalize_native" => Some("std.path.Path.normalize"),
+        "absolute_native" => Some("std.path.Path.absolute"),
+        "canonicalize_native" => Some("std.path.Path.canonicalize"),
+        _ => None,
+    }
+}
+
 /// Private reusable-client implementation leaves. These names are bindable
 /// only from the compiler-bundled `std.http` source module.
 pub fn compiler_binding_for_http_client_member(name: &str) -> Option<&'static str> {
@@ -464,6 +539,8 @@ mod tests {
         }));
         assert_eq!(standard_module("std.io::stdin").unwrap().module, "stdin");
         assert_eq!(standard_module("std.http").unwrap().module, "http");
+        assert_eq!(standard_module("std.path::path").unwrap().module, "path");
+        assert_eq!(standard_module("std.fs").unwrap().package, "std.fs");
         assert!(standard_module("std.unknown").is_none());
     }
 
@@ -495,6 +572,25 @@ mod tests {
                 "fn println(text: String): Void"
             )
             .is_none()
+        );
+        assert_eq!(
+            compiler_binding_for_filesystem_member("std.fs", "fs", "read_bytes_native"),
+            Some("std.fs.File.read_bytes")
+        );
+        assert_eq!(
+            compiler_binding_for_filesystem_member("acme.fs", "fs", "read_bytes_native"),
+            None
+        );
+        assert!(
+            compiler_binding_for_filesystem_member("std.fs", "fs", "delete_everything").is_none()
+        );
+        assert_eq!(
+            compiler_binding_for_path_member("acme.path", "path", "canonicalize_native"),
+            None
+        );
+        assert_eq!(
+            compiler_binding_for_path_member("std.path", "path", "canonicalize_native"),
+            Some("std.path.Path.canonicalize")
         );
     }
 }

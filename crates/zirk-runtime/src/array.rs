@@ -333,6 +333,29 @@ pub(crate) fn alloc_byte_array(bytes: &[u8]) -> *mut c_void {
     object
 }
 
+/// Builds a managed `Array<UInt64>` for immutable filesystem metadata
+/// snapshots. `UInt64` values occupy one machine word and carry no GC edges.
+pub(crate) fn alloc_u64_array(values: &[u64]) -> *mut c_void {
+    let object = unsafe {
+        zirk_rt_array_new(
+            values.len(),
+            std::mem::size_of::<u64>(),
+            std::mem::align_of::<u64>(),
+            false,
+        )
+    };
+    if !values.is_empty() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr().cast::<u8>(),
+                (object as *mut u8).add(DATA_OFFSET),
+                values.len().saturating_mul(std::mem::size_of::<u64>()),
+            );
+        }
+    }
+    object
+}
+
 /// Copies an `Array<Byte>` into runtime-owned storage for a host protocol
 /// boundary. The caller must keep the managed array rooted for the duration
 /// of this call.

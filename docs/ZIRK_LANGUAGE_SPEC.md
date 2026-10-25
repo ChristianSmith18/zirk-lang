@@ -307,10 +307,10 @@ match event {
 branch ends, including error, exception, `return` or cancellation:
 
 ```text
-mut first_line: String = match File.open("data.txt") with file {
-    Ok(file) => file.read_line();
-    Error(error) => "";
-};
+match acquire_resource() with resource {
+    Ok(resource) => process(resource);
+    Error(error) => report(error);
+}
 ```
 
 The resource is closed before the value is delivered and cannot escape directly

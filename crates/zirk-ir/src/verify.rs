@@ -229,6 +229,7 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::EnvironmentGet { .. }
             | InstKind::EnvironmentContains { .. }
             | InstKind::EnvironmentListNames { .. }
+            | InstKind::FilesystemCall { .. }
             | InstKind::NetworkTcpConnect { .. }
             | InstKind::NetworkDnsResolve { .. }
             | InstKind::NetworkInterfacesSnapshot { .. }
@@ -3007,6 +3008,19 @@ fn verify_instruction(
                 "EnvironmentListNames",
                 report,
             );
+        }
+
+        InstKind::FilesystemCall { binding, args } => {
+            if binding.is_empty() || args.len() > 8 {
+                report(format!(
+                    "{position}: FilesystemCall must name a registered operation and have at most eight arguments"
+                ));
+            }
+            if inst.ty == IrType::Void {
+                report(format!(
+                    "{position}: FilesystemCall must produce a typed result"
+                ));
+            }
         }
 
         InstKind::NetworkTcpConnect { endpoint, enum_id }
@@ -8377,6 +8391,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::EnvironmentGet { name, .. } | InstKind::EnvironmentContains { name, .. } => {
             vec![*name]
         }
+        InstKind::FilesystemCall { args, .. } => args.clone(),
         InstKind::NetworkTcpConnect { endpoint, .. }
         | InstKind::NetworkDnsResolve { endpoint, .. }
         | InstKind::NetworkTlsConnect { endpoint, .. }

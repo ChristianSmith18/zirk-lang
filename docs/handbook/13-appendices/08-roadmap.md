@@ -38,8 +38,10 @@ application `entry` and package `root`, top-level entry execution without an
 implicit source `fn main`, globals, logical-name dependencies, unified
 `requires` declarations, exact runtime consent for exposed network and
 environment APIs, `.zkinit` editor support, and `zirk init` with interactive
-and `-y` defaults. Registry/Git acquisition, package publication, and
-filesystem/process APIs remain incomplete. The [feature status](../11-reference/12-feature-status.md)
+and `-y` defaults. `deliver-std-fs-core` adds `Path`, bounded reads, writes,
+managed files, exact path consent, and the progressive file operations in its
+next stage. Directory/link/lock/watch/async filesystem work, process APIs,
+registry/Git acquisition, and package publication remain incomplete. The [feature status](../11-reference/12-feature-status.md)
 and [current limitations](07-current-limitations.md) pages define the current
 boundary.
 

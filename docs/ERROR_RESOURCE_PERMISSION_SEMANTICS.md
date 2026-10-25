@@ -141,7 +141,10 @@ Acquisition is separate and normally returns `Result<Resource,OpenError>`.
 normal completion, return, exception, cancellation, break, or continue.
 
 ```zirk
-match File.open("users.json") with file {
+import { File, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+
+match File.open(Path.of("users.json"), OpenOptions.read_only()) with file {
     Ok(file) => process(file.read_all());
     Error(error) => report(error);
 }
@@ -203,6 +206,7 @@ the canonical manifest.
 requires {
     filesystem.read;
     filesystem.write;
+    filesystem.metadata;
     network.connect;
     network.listen;
     network.udp.send;
@@ -238,15 +242,16 @@ continues unless user code stops it.
 Connect and listen authority are separate. Environment reads and secret reads
 are separate. Each request uses a canonical concrete resource, not a broad
 implicit grant. Runtime-enforced operations include environment names and
-secrets, HTTP destination and configured proxy origins, DNS answers, redirects,
-TCP and UDP listener endpoints, UDP destinations, broadcast/multicast scopes,
-local socket endpoints, and interface inspection. OS-assigned port `0` is
-checked as an ephemeral bind request for the requested address.
+secrets, exact filesystem paths, HTTP destination and configured proxy origins,
+DNS answers, redirects, TCP and UDP listener endpoints, UDP destinations,
+broadcast/multicast scopes, local socket endpoints, and interface inspection.
+OS-assigned port `0` is checked as an ephemeral bind request for the requested
+address.
 
-The manifest accepts the finite filesystem and process identifiers, but this
-checkout does not yet expose compiler-owned filesystem or process APIs to
-normalize and enforce those capabilities. They remain reserved and do not
-create access. Native/FFI capabilities remain outside this initial vocabulary.
+The manifest accepts the finite filesystem and process identifiers. The
+compiler-owned `std.fs`/`std.path` subset enforces exact path consent; process
+APIs remain unavailable and their identifiers do not create access. Native/FFI
+capabilities remain outside this initial vocabulary.
 
 ## 7. User-owned consent
 

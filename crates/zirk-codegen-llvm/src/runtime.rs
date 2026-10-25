@@ -238,6 +238,10 @@ pub mod symbols {
     pub const ENVIRONMENT_CONTAINS: &str = "zirk_environment_contains";
     /// `zirk_environment_list_names(out)`.
     pub const ENVIRONMENT_LIST_NAMES: &str = "zirk_environment_list_names";
+    /// Closed `std.fs`/`std.path` operation dispatcher. Its arguments are
+    /// compiler-packed machine words and its output is the stable
+    /// `(kind, error, scalar, payload)` record.
+    pub const FILESYSTEM_CALL: &str = "zirk_fs_call";
     pub const NETWORK_TCP_CONNECT: &str = "zirk_network_tcp_connect";
     pub const NETWORK_UDP_CONNECT: &str = "zirk_network_udp_connect";
     pub const NETWORK_UDP_BIND: &str = "zirk_network_udp_bind";
@@ -735,6 +739,7 @@ pub struct Runtime<'ctx> {
     pub permission_requester_clear: FunctionValue<'ctx>,
     pub environment_contains: FunctionValue<'ctx>,
     pub environment_list_names: FunctionValue<'ctx>,
+    pub filesystem_call: FunctionValue<'ctx>,
     pub network_tcp_connect: FunctionValue<'ctx>,
     pub network_udp_connect: FunctionValue<'ctx>,
     pub network_udp_bind: FunctionValue<'ctx>,
@@ -1593,6 +1598,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     let environment_list_names = module.add_function(
         symbols::ENVIRONMENT_LIST_NAMES,
         void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let filesystem_call = module.add_function(
+        symbols::FILESYSTEM_CALL,
+        void.fn_type(&[i32.into(), ptr.into(), i64.into(), ptr.into()], false),
         external,
     );
     let network_tcp_connect = module.add_function(
@@ -3291,6 +3301,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         permission_requester_clear,
         environment_contains,
         environment_list_names,
+        filesystem_call,
         network_tcp_connect,
         network_udp_connect,
         network_udp_bind,

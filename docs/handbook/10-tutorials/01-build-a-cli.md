@@ -31,8 +31,8 @@ requires {
 ## Program
 
 ```zirk
-import { File } from std.fs;
-import { Path } from std.path;
+import { File } from std.fs::fs;
+import { Path } from std.path::path;
 import { System } from std.system;
 import { stderr, stdout } from std.io;
 
@@ -41,8 +41,8 @@ fn run(arguments: List<String>): Result<Void, CliError> {
         return Error(CliError.Usage("word-count <path>"));
     }
 
-    mut path = Path(arguments[0]);
-    match File.read_text(path, limit: 8MiB) {
+    mut path = Path.of(arguments[0]);
+    match File.read_text(path, 8388608) {
         Ok(text) => {
             stdout.println(text.length);
             return Ok();
@@ -62,7 +62,7 @@ the read limit prevents an untrusted file from allocating without bound.
 
 ## Verify
 
-Open the file with `match with`, count Unicode text deliberately, print the result through `std.io`, and declare `filesystem.read`; exact path consent will be checked at the file operation once compiler-owned filesystem APIs are delivered. Add `.spec.zrk` tests for parsing and an E2E test for exit code and output.
+Open the file with `match with` when progressive reading is needed, count Unicode text deliberately, print through `std.io`, and declare `filesystem.read`; first use asks for consent to that exact path. Add `.spec.zrk` tests for parsing and an E2E test for exit code and output.
 
 ```console
 zirk check

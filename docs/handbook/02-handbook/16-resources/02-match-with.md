@@ -3,10 +3,13 @@
 `match with` handles acquisition and scopes the acquired resource.
 
 ```zirk
-inmut line = match File.open("data.txt") with file {
+import { File, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+
+match File.open(Path.of("data.txt"), OpenOptions.read_only()) with file {
     Ok(file) => file.read_line();
-    Error(error) => "";
-};
+    Error(error) => report(error);
+}
 ```
 
 The file closes before the expression delivers its value. Closure occurs on

@@ -9321,6 +9321,36 @@ impl<'a> FunctionLowering<'a> {
                         _ => unreachable!("closed environment binding registry"),
                     };
                 }
+                if let Some(binding) = self
+                    .checked
+                    .standard_filesystem_calls
+                    .get(&e.span)
+                    .or_else(|| self.checked.standard_path_calls.get(&e.span))
+                {
+                    let semantic = self
+                        .checked
+                        .result_projections
+                        .get(&e.span)
+                        .copied()
+                        .unwrap_or(self.checked.expr_types[&e.span]);
+                    let returns = self.ir_type(semantic);
+                    let argument_types = e
+                        .args
+                        .iter()
+                        .map(|argument| {
+                            self.ir_type(self.checked.expr_types[&argument.value.span()])
+                        })
+                        .collect::<Vec<_>>();
+                    let args = self.lower_held_args(&e.args, &argument_types);
+                    return self.emit(
+                        InstKind::FilesystemCall {
+                            binding: binding.clone(),
+                            args,
+                        },
+                        returns,
+                        span,
+                    );
+                }
                 if let Some(binding) = self.checked.standard_network_calls.get(&e.span) {
                     let semantic = self.checked.expr_types[&e.span];
                     let returns = self.ir_type(semantic);

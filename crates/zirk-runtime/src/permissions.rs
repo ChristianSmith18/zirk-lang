@@ -203,7 +203,12 @@ pub fn request_resource(capability: &str, resource: &str) -> bool {
 
     let mut updated = current;
     add_scope(&mut updated, capability, resource);
-    if should_add_direct_requirement() && !add_manifest_requirement(capability) {
+    if should_add_direct_requirement() {
+        if !add_manifest_requirement(capability) {
+            warn_denied(capability, resource, &requester);
+            return false;
+        }
+    } else if !ensure_manifest_exists() {
         warn_denied(capability, resource, &requester);
         return false;
     }
@@ -233,6 +238,12 @@ fn scope_contains(scopes: &PermissionScopes, capability: &str, resource: &str) -
     match capability {
         "filesystem.read" => scopes.filesystem_read.contains(resource),
         "filesystem.write" => scopes.filesystem_write.contains(resource),
+        // Full read access includes the less powerful metadata view, while a
+        // metadata-only grant never authorizes reading file contents.
+        "filesystem.metadata" => {
+            scopes.filesystem_metadata.contains(resource)
+                || scopes.filesystem_read.contains(resource)
+        }
         "network.connect" => scopes.network_connect.contains(resource),
         "network.listen" => scopes.network_listen.contains(resource),
         "network.udp.send" => {
@@ -287,9 +298,20 @@ fn is_canonical_resource(capability: &str, resource: &str) -> bool {
         "network.inspect_interfaces" => resource == "network interfaces",
         "environment.read" | "secrets.read" => validate_name(resource).is_ok(),
         "environment.list_names" => resource == "all environment names",
-        // These identifiers remain reserved until Zirk exposes compiler-owned
-        // filesystem/process APIs with their own canonical host boundaries.
-        "filesystem.read" | "filesystem.write" | "process.execute" | "process.shell" => false,
+        "filesystem.read" | "filesystem.write" | "filesystem.metadata" => {
+            let path = Path::new(resource);
+            path.is_absolute()
+                && !resource.is_empty()
+                && !resource.contains('\0')
+                && path.components().all(|component| {
+                    !matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+                && path.to_str() == Some(resource)
+        }
+        "process.execute" | "process.shell" => false,
         _ => false,
     }
 }
@@ -302,6 +324,7 @@ fn operation_description(capability: &str) -> &'static str {
     match capability {
         "filesystem.read" => "read a file",
         "filesystem.write" => "write a file",
+        "filesystem.metadata" => "inspect file metadata",
         "network.connect" => "connect to a network service",
         "network.listen" => "listen for TCP connections",
         "network.udp.send" => "send a UDP datagram",
@@ -336,6 +359,7 @@ fn add_scope(scopes: &mut PermissionScopes, capability: &str, resource: &str) {
     let target = match capability {
         "filesystem.read" => &mut scopes.filesystem_read,
         "filesystem.write" => &mut scopes.filesystem_write,
+        "filesystem.metadata" => &mut scopes.filesystem_metadata,
         "network.connect" => &mut scopes.network_connect,
         "network.listen" => &mut scopes.network_listen,
         "network.udp.send" => &mut scopes.network_udp_destinations,
@@ -430,6 +454,29 @@ fn add_manifest_requirement(capability: &str) -> bool {
         None => return false,
     };
     atomic_replace(path, updated.as_bytes()).is_ok()
+}
+
+fn ensure_manifest_exists() -> bool {
+    let (Ok(path), Ok(template)) = (
+        std::env::var("ZIRK_RUNTIME_MANIFEST"),
+        std::env::var("ZIRK_RUNTIME_MANIFEST_TEMPLATE"),
+    ) else {
+        return false;
+    };
+    ensure_manifest_exists_at(Path::new(&path), &template)
+}
+
+fn ensure_manifest_exists_at(path: &Path, template: &str) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if atomic_create(path, template.as_bytes()).is_ok() {
+                return true;
+            }
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+        }
+        Err(_) => false,
+    }
 }
 
 fn manifest_has_requirement(source: &str, capability: &str) -> bool {
@@ -728,6 +775,7 @@ fn atomic_replace(path: &Path, contents: &[u8]) -> Result<(), ()> {
         ".zirk-approval-{}-{counter}.tmp",
         std::process::id()
     ));
+    #[cfg(unix)]
     let existing_permissions = std::fs::symlink_metadata(path)
         .ok()
         .filter(|metadata| metadata.file_type().is_file())
@@ -846,6 +894,7 @@ mod tests {
         for (capability, description) in [
             ("filesystem.read", "read a file"),
             ("filesystem.write", "write a file"),
+            ("filesystem.metadata", "inspect file metadata"),
             ("network.connect", "connect to a network service"),
             ("network.listen", "listen for TCP connections"),
             ("network.udp.send", "send a UDP datagram"),
@@ -890,7 +939,34 @@ mod tests {
         ));
         assert!(is_canonical_resource("environment.read", "APP_MODE"));
         assert!(!is_canonical_resource("environment.read", "BAD=NAME"));
+        assert!(is_canonical_resource(
+            "filesystem.metadata",
+            "/tmp/zirk-metadata-scope.txt"
+        ));
+        assert!(!is_canonical_resource(
+            "filesystem.metadata",
+            "../secret.txt"
+        ));
         assert!(!is_canonical_resource("process.execute", "/usr/bin/tool"));
+    }
+
+    #[test]
+    fn metadata_scope_does_not_grant_content_read_but_read_includes_metadata() {
+        let path = "/tmp/zirk-metadata-scope.txt";
+        let metadata_only = PermissionScopes {
+            filesystem_metadata: [path.to_owned()].into(),
+            ..PermissionScopes::default()
+        };
+        assert!(scope_contains(&metadata_only, "filesystem.metadata", path));
+        assert!(!scope_contains(&metadata_only, "filesystem.read", path));
+        assert!(!scope_contains(&metadata_only, "filesystem.write", path));
+
+        let read_scope = PermissionScopes {
+            filesystem_read: [path.to_owned()].into(),
+            ..PermissionScopes::default()
+        };
+        assert!(scope_contains(&read_scope, "filesystem.metadata", path));
+        assert!(scope_contains(&read_scope, "filesystem.read", path));
     }
 
     #[test]
@@ -1012,6 +1088,27 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), updated);
         assert!(atomic_create(&manifest, b"replacement").is_err());
         assert_eq!(std::fs::read_to_string(&manifest).unwrap(), updated);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dependency_first_use_ensures_a_manifest_without_duplicating_its_requirement() {
+        let root = std::env::temp_dir().join(format!(
+            "zirk-runtime-dependency-manifest-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join(".zkinit");
+        let template = "project {\n    name: \"local.fixture\";\n    version: \"0.1.0\";\n    type: application;\n    entry: \"main.zrk\";\n}\n\nsource \".\";\n";
+
+        assert!(ensure_manifest_exists_at(&manifest, template));
+        let created = std::fs::read_to_string(&manifest).unwrap();
+        assert_eq!(created, template);
+        assert!(!manifest_has_requirement(&created, "filesystem.read"));
+        assert!(ensure_manifest_exists_at(&manifest, "replacement"));
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), template);
 
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1587,6 +1587,14 @@ pub enum InstKind {
     EnvironmentListNames {
         enum_id: u32,
     },
+    /// Compiler-owned, closed `std.fs`/`std.path` host operation. The
+    /// semantic checker records the exact bundled binding and its capability
+    /// effects before lowering; `binding` is therefore an operation key, not
+    /// a user-controlled symbol name.
+    FilesystemCall {
+        binding: String,
+        args: Vec<Operand>,
+    },
     /// `TCPStream.connect_native(endpoint)`: checks the signed exact `tcp`
     /// origin grant before opening a socket and returns an opaque runtime
     /// handle through `Result<UInt64, TCPError>`.

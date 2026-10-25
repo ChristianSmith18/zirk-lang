@@ -1,0 +1,373 @@
+import { Path, PathError } from std.path::path;
+
+share enum FileError {
+    InvalidPath,
+    InvalidOptions,
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    WrongType,
+    Closed,
+    Decoding,
+    Limit,
+    EndOfStream,
+    Unsupported,
+    Io,
+}
+
+share enum Encoding { Utf8, Latin1, Utf16Le, Utf16Be }
+
+share enum FileLine { Line(text: String), End, Error(error: FileError) }
+share enum FileChunk { Data(bytes: Array<Byte>), Error(error: FileError) }
+
+share class FileResourceError implements Error {
+    private inmut reason: FileError;
+
+    construct(reason: FileError) { this.reason = reason; }
+
+    message(): String { return this.reason.to_string(); }
+    code(): String { return "FILE_RESOURCE"; }
+    cause(): Error? { return null; }
+}
+
+share class OpenOptions {
+    private inmut read: Boolean;
+    private inmut write: Boolean;
+    private inmut append_enabled: Boolean;
+    private inmut create: Boolean;
+    private inmut create_new_enabled: Boolean;
+    private inmut truncate: Boolean;
+
+    private construct(
+        read: Boolean,
+        write: Boolean,
+        append_enabled: Boolean,
+        create: Boolean,
+        create_new_enabled: Boolean,
+        truncate: Boolean,
+    ) {
+        this.read = read;
+        this.write = write;
+        this.append_enabled = append_enabled;
+        this.create = create;
+        this.create_new_enabled = create_new_enabled;
+        this.truncate = truncate;
+    }
+
+    static none(): OpenOptions { return OpenOptions(false, false, false, false, false, false); }
+    static read_only(): OpenOptions { return OpenOptions(true, false, false, false, false, false); }
+    static write_only(): OpenOptions { return OpenOptions(false, true, false, false, false, false); }
+    static read_and_write(): OpenOptions { return OpenOptions(true, true, false, false, false, false); }
+    static appending(): OpenOptions { return OpenOptions(false, true, true, true, false, false); }
+    static creating_new(): OpenOptions { return OpenOptions(false, true, false, false, true, false); }
+
+    with_read(value: Boolean): OpenOptions {
+        return OpenOptions(value, this.write, this.append_enabled, this.create, this.create_new_enabled, this.truncate);
+    }
+
+    with_write(value: Boolean): OpenOptions {
+        return OpenOptions(this.read, value, this.append_enabled, this.create, this.create_new_enabled, this.truncate);
+    }
+
+    with_append(value: Boolean): OpenOptions {
+        return OpenOptions(this.read, true, value, this.create, this.create_new_enabled, this.truncate);
+    }
+
+    with_create(value: Boolean): OpenOptions {
+        return OpenOptions(this.read, this.write, this.append_enabled, value, this.create_new_enabled, this.truncate);
+    }
+
+    with_create_new(value: Boolean): OpenOptions {
+        return OpenOptions(this.read, this.write, this.append_enabled, this.create, value, this.truncate);
+    }
+
+    with_truncate(value: Boolean): OpenOptions {
+        return OpenOptions(this.read, this.write, this.append_enabled, this.create, this.create_new_enabled, value);
+    }
+
+    flags(): UInt32 {
+        mut value: UInt32 = 0;
+        if this.read { value += 1; }
+        if this.write { value += 2; }
+        if this.append_enabled { value += 4; }
+        if this.create { value += 8; }
+        if this.create_new_enabled { value += 16; }
+        if this.truncate { value += 32; }
+        return value;
+    }
+}
+
+share class FileMetadata {
+    private inmut values: Array<UInt64>;
+
+    private construct(values: Array<UInt64>) { this.values = values; }
+
+    size(): UInt64 { return this.values[0]; }
+    is_file(): Boolean { return this.values[1] != 0; }
+    is_directory(): Boolean { return this.values[2] != 0; }
+    modified_unix_ms(): UInt64? {
+        if this.values[4] == 0 { return null; }
+        return this.values[3];
+    }
+}
+
+share class File implements Resource<FileResourceError> {
+    private inmut handle: UInt64;
+
+    private construct(handle: UInt64) { this.handle = handle; }
+
+    static read_bytes(path: Path, limit: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_bytes_native(path.as_string(), limit);
+    }
+
+    static read_text(
+        path: Path,
+        limit: UInt64,
+        encoding: Encoding = Encoding.Utf8,
+    ): Result<String, FileError> {
+        return File.read_text_native(path.as_string(), limit, encoding);
+    }
+
+    static write_bytes(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
+        return File.write_bytes_native(path.as_string(), bytes);
+    }
+
+    static write_text(
+        path: Path,
+        text: String,
+        encoding: Encoding = Encoding.Utf8,
+    ): Result<Void, FileError> {
+        return File.write_text_native(path.as_string(), text, encoding);
+    }
+
+    static open(path: Path, options: OpenOptions): Result<File, FileError> {
+        return match File.open_native(path.as_string(), options.flags()) {
+            Ok(handle) => File.open_ok(File(handle));
+            Error(error) => Error(error);
+        };
+    }
+
+    read(max_bytes: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_bytes_handle_native(this.handle, max_bytes);
+    }
+
+    read_exact(count: UInt64): Result<Array<Byte>, FileError> {
+        return File.read_exact_native(this.handle, count);
+    }
+
+    read_line(): Result<FileLine, FileError> {
+        return File.read_line_native(this.handle);
+    }
+
+    lines(): FileLines { return FileLines(this); }
+
+    chunks(size: UInt64): Result<FileChunks, FileError> {
+        if size == 0 || size > 4194304 { return Error(FileError.Limit); }
+        return Ok(FileChunks(this, size));
+    }
+
+    append(bytes: Array<Byte>): Result<Void, FileError> {
+        return File.append_handle_native(this.handle, bytes);
+    }
+
+    metadata(): Result<FileMetadata, FileError> {
+        return match File.metadata_native(this.handle) {
+            Ok(values) => File.metadata_ok(values);
+            Error(error) => Error(error);
+        };
+    }
+
+    close(): Result<Void, FileResourceError> {
+        return match File.close_native(this.handle) {
+            Ok(_) => File.close_ok();
+            Error(error) => File.close_error(error);
+        };
+    }
+
+    is_closed(): Boolean { return File.is_closed_native(this.handle); }
+
+    static exists(path: Path): Result<Boolean, FileError> {
+        return File.exists_native(path.as_string());
+    }
+
+    static metadata_for(path: Path): Result<FileMetadata, FileError> {
+        return match File.metadata_for_native(path.as_string()) {
+            Ok(values) => File.metadata_ok(values);
+            Error(error) => Error(error);
+        };
+    }
+
+    static append_bytes(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
+        return File.append_bytes_native(path.as_string(), bytes);
+    }
+
+    static append_text(path: Path, text: String, encoding: Encoding = Encoding.Utf8): Result<Void, FileError> {
+        return File.append_text_native(path.as_string(), text, encoding);
+    }
+
+    static write_bytes_atomic(path: Path, bytes: Array<Byte>): Result<Void, FileError> {
+        return File.write_bytes_atomic_native(path.as_string(), bytes);
+    }
+
+    static write_text_atomic(path: Path, text: String): Result<Void, FileError> {
+        return File.write_text_atomic_native(path.as_string(), text);
+    }
+
+    private static open_ok(value: File): Result<File, FileError> { return Ok(value); }
+    private static metadata_ok(values: Array<UInt64>): Result<FileMetadata, FileError> {
+        return Ok(FileMetadata(values));
+    }
+    private static close_ok(): Result<Void, FileResourceError> { return Ok(File.unit()); }
+    private static unit(): Void { return; }
+    private static close_error(error: FileError): Result<Void, FileResourceError> {
+        return Error(FileResourceError(error));
+    }
+
+    private static read_bytes_native(path: String, limit: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static read_text_native(path: String, limit: UInt64, encoding: Encoding): Result<String, FileError> {
+        return Error(FileError.Io);
+    }
+    private static write_bytes_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static write_text_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static open_native(path: String, flags: UInt32): Result<UInt64, FileError> {
+        return Error(FileError.Io);
+    }
+    private static close_native(handle: UInt64): Result<Void, FileError> { return Error(FileError.Closed); }
+    private static is_closed_native(handle: UInt64): Boolean { return true; }
+    private static read_bytes_handle_native(handle: UInt64, max_bytes: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static read_exact_native(handle: UInt64, count: UInt64): Result<Array<Byte>, FileError> {
+        return Error(FileError.EndOfStream);
+    }
+    private static read_line_native(handle: UInt64): Result<FileLine, FileError> {
+        return Error(FileError.Io);
+    }
+    private static append_bytes_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static append_handle_native(handle: UInt64, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static append_text_native(path: String, text: String, encoding: Encoding): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static metadata_native(handle: UInt64): Result<Array<UInt64>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static metadata_for_native(path: String): Result<Array<UInt64>, FileError> {
+        return Error(FileError.Io);
+    }
+    private static exists_native(path: String): Result<Boolean, FileError> { return Ok(false); }
+    private static write_bytes_atomic_native(path: String, bytes: Array<Byte>): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+    private static write_text_atomic_native(path: String, text: String): Result<Void, FileError> {
+        return Error(FileError.Io);
+    }
+}
+
+share class FileLines implements Iterable<FileLine> {
+    private inmut file: File;
+
+    private construct(file: File) { this.file = file; }
+
+    iterator(): Iterator<FileLine> {
+        return FileLineIterator(this.file);
+    }
+}
+
+share class FileLineIterator implements Iterator<FileLine> {
+    private inmut file: File;
+    private mut finished: Boolean;
+
+    private construct(file: File) {
+        this.file = file;
+        this.finished = false;
+    }
+
+    next(): Iteration<FileLine> {
+        if this.finished { return Iteration.Done; }
+        if this.file.is_closed() {
+            this.finished = true;
+            return Iteration.Item(FileLine.Error(FileError.Closed));
+        }
+        match this.file.read_line() {
+            Error(error) => {
+                this.finished = true;
+                return Iteration.Item(FileLine.Error(error));
+            }
+            Ok(line) => {
+                match line {
+                    FileLine.End => {
+                        this.finished = true;
+                        return Iteration.Done;
+                    }
+                    FileLine.Line(text) => {
+                        return Iteration.Item(FileLine.Line(text));
+                    }
+                    FileLine.Error(error) => {
+                        this.finished = true;
+                        return Iteration.Item(FileLine.Error(error));
+                    }
+                }
+            }
+        };
+        return Iteration.Done;
+    }
+}
+
+share class FileChunks implements Iterable<FileChunk> {
+    private inmut file: File;
+    private inmut size: UInt64;
+
+    private construct(file: File, size: UInt64) {
+        this.file = file;
+        this.size = size;
+    }
+
+    iterator(): Iterator<FileChunk> {
+        return FileChunkIterator(this.file, this.size);
+    }
+}
+
+share class FileChunkIterator implements Iterator<FileChunk> {
+    private inmut file: File;
+    private inmut size: UInt64;
+    private mut finished: Boolean;
+
+    private construct(file: File, size: UInt64) {
+        this.file = file;
+        this.size = size;
+        this.finished = false;
+    }
+
+    next(): Iteration<FileChunk> {
+        if this.finished { return Iteration.Done; }
+        if this.file.is_closed() {
+            this.finished = true;
+            return Iteration.Item(FileChunk.Error(FileError.Closed));
+        }
+        match this.file.read(this.size) {
+            Error(error) => {
+                this.finished = true;
+                return Iteration.Item(FileChunk.Error(error));
+            }
+            Ok(bytes) => {
+                if bytes.length == 0 {
+                    this.finished = true;
+                    return Iteration.Done;
+                } else {
+                    return Iteration.Item(FileChunk.Data(bytes));
+                }
+            }
+        };
+        return Iteration.Done;
+    }
+}

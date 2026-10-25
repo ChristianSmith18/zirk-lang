@@ -11,8 +11,12 @@ Sharing mutable referenced state across concurrent contexts requires
 synchronization.
 
 ```zirk
-match with File.open("data.txt") as file {
-    line => stdout.println(line),
+import { File, OpenOptions } from std.fs::fs;
+import { Path } from std.path::path;
+
+match File.open(Path.of("data.txt"), OpenOptions.read_only()) with file {
+    Ok(file) => { file.read_line(); }
+    Error(error) => report(error);
 }
 // the file is closed; no handle may escape
 ```

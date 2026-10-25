@@ -24,6 +24,10 @@ pub struct PermissionScopes {
     pub filesystem_read: BTreeSet<String>,
     #[serde(default)]
     pub filesystem_write: BTreeSet<String>,
+    // Empty scopes are omitted so existing schema-v4 grants keep the same
+    // signed representation until metadata-only consent is actually saved.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub filesystem_metadata: BTreeSet<String>,
     pub environment_read: BTreeSet<String>,
     pub environment_secrets: BTreeSet<String>,
     pub environment_list_names: bool,
@@ -379,6 +383,7 @@ mod tests {
         PermissionScopes {
             filesystem_read: BTreeSet::new(),
             filesystem_write: BTreeSet::new(),
+            filesystem_metadata: BTreeSet::new(),
             environment_read: ["APP_MODE".into()].into(),
             environment_secrets: ["DB_PASSWORD".into()].into(),
             environment_list_names: false,
@@ -402,6 +407,10 @@ mod tests {
             SignedPermissionGrant::sign("a".repeat(64), "b".repeat(64), scopes(), b"test-key")
                 .unwrap();
         let encoded = signed.encode().unwrap();
+        assert!(
+            !encoded.contains("filesystem_metadata"),
+            "empty metadata scopes preserve the legacy signed representation"
+        );
         let verified = SignedPermissionGrant::decode(&encoded)
             .unwrap()
             .verify(b"test-key")
@@ -424,6 +433,39 @@ mod tests {
                 .unwrap();
         let mut value = serde_json::to_value(signed).unwrap();
         value["scopes"]["environment_list_names"] = serde_json::Value::Bool(true);
+        let tampered = serde_json::to_string(&value).unwrap();
+        assert_eq!(
+            SignedPermissionGrant::decode(&tampered)
+                .unwrap()
+                .verify(b"test-key"),
+            Err(GrantVerificationError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn metadata_only_scope_round_trips_as_signed_authority() {
+        let scopes = PermissionScopes {
+            filesystem_metadata: ["/tmp/metadata-only.txt".to_owned()].into(),
+            ..scopes()
+        };
+        let signed = SignedPermissionGrant::sign(
+            "a".repeat(64),
+            "b".repeat(64),
+            scopes.clone(),
+            b"test-key",
+        )
+        .unwrap();
+        let encoded = signed.encode().unwrap();
+        assert!(encoded.contains("filesystem_metadata"));
+        let verified = SignedPermissionGrant::decode(&encoded)
+            .unwrap()
+            .verify(b"test-key")
+            .unwrap();
+        assert_eq!(verified.scopes(), &scopes);
+
+        let mut value = serde_json::to_value(signed).unwrap();
+        value["scopes"]["filesystem_metadata"][0] =
+            serde_json::Value::String("/tmp/other.txt".to_owned());
         let tampered = serde_json::to_string(&value).unwrap();
         assert_eq!(
             SignedPermissionGrant::decode(&tampered)

@@ -1,68 +1,59 @@
 # `std.path`
 
-`Path` is an immutable value describing a platform path. It is neither a raw
-`String` nor an open filesystem resource, and it may represent a target that
-does not yet exist.
+`Path` is an immutable value for platform paths. The current package is
+`std.path::path`.
 
 ```zirk
-import { Path, PathStyle } from std.path;
+import { Path } from std.path::path;
 
-inmut base = Path("project");
+inmut base = Path.of("project");
 inmut source = base.join("src").join("main.zrk");
-// base remains "project".
+inmut parent = source.parent();
 ```
 
-Zirk exposes one optimized immutable `Path` rather than a public `Path`/
-`PathBuf` split. Reassignment of a `mut` variable replaces the value; path
-members do not mutate internal segments.
+`Path` stores a Zirk `String`; it is not an open resource and does not prove
+that its target exists. Construction with `Path.of` and `as_string` are value
+conversions. The API deliberately keeps lexical operations separate from host
+queries that need filesystem authority.
 
 ## Lexical operations
 
-Construction, `join`, `components`, `parent`, `name`, `stem`, `extension`,
-`with_name`, `with_extension` and lexical `normalize` do not access the
-filesystem and require no filesystem permission.
+`join`, `components`, `parent`, `name`, `normalize`, and `equals` operate on
+path spelling only. They do not inspect files, resolve links, or request
+permission. `normalize` removes redundant `.` segments and resolves `..`
+lexically where possible. `equals` compares normalized lexical paths; it does
+not establish that two path values identify the same file.
 
-`normalize()` removes redundant separators and resolves lexical `.`/`..`
-segments without following links or proving existence. It must not be confused
-with authorization or canonicalization.
+Joining an absolute segment follows the host `PathBuf` behavior and can replace
+the base. When user input must stay under a trusted directory, validate the
+resolved path at the privileged filesystem operation; string checks and
+lexical normalization alone are not a security boundary.
 
-## Filesystem-aware resolution
+## Filesystem-aware queries
 
-`absolute()` resolves a relative path against an explicit or current working
-directory. `canonicalize()` consults the filesystem, resolves links and returns
-a real normalized location; it can fail and requires read authority for the
-traversed scope.
+`absolute()` resolves a relative path against the process working directory
+and returns an absolute normalized spelling. `canonicalize()` consults the
+filesystem, resolves existing links, and returns the canonical location.
+Both return `Result<Path, PathError>`. `absolute()` requests exact
+`filesystem.read` authorization for the resulting path; `canonicalize()` uses
+`filesystem.metadata`, which can resolve the physical path without authorizing
+content reads. A full read grant also satisfies metadata inspection. Empty,
+NUL-containing, missing, denied, unsupported, and other host failures are
+represented by `PathError`.
 
 ```zirk
-match path.canonicalize() {
-    Ok(real_path) => use(real_path),
-    Error(error) => report(error),
+match source.canonicalize() {
+    Ok(real_path) => use(real_path);
+    Error(error) => report(error);
 }
 ```
 
-Path equality is lexical after the type's defined normalization rules. It does
-not claim that two spellings identify one filesystem object. Use
-`Path.same_file(left, right)` for that fallible filesystem query.
-
-## Native representation and Unicode
-
-`Path` preserves native non-Unicode path data where the platform permits it.
-`to_string()` is fallible; `to_string_lossy()` explicitly accepts replacement.
-Filesystem operations consume `Path` directly, so ordinary programs do not
-need a lossy conversion.
-
-The default parser follows the current target's rules. Tools generating paths
-for another target use explicit `PathStyle.Unix` or `PathStyle.Windows`.
-Dynamic decisions use `std.system.Platform` (`os`, `arch`, `family`, separators
-and executable/library extensions) instead of ad-hoc environment inspection.
-
-## Security boundary
-
-Textual normalization is not a permission check. Privileged operations resolve
-and validate the effective path using symlink-aware, race-resistant filesystem
-mechanisms. User input should be joined beneath an authorized base and passed to
-the filesystem API as `Path`, never concatenated into a string.
+These queries use host path semantics on macOS, Linux, and Windows. `Path` is
+currently string-backed, so a native path that cannot be represented as valid
+Zirk text fails conversion rather than being silently rewritten. The API does
+not yet expose `PathBuf`, `PathStyle`, `same_file`, `stem`, or extension
+operations.
 
 ---
 
-**Previous:** [← std.fs](03-std-fs.md) · **Next:** [ std.process](05-std-process.md)
+**Previous:** [← std.fs](03-std-fs.md) · **Next:** [std.process →](05-std-process.md)
