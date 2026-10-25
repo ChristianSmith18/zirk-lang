@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
+use cap_fs_ext::DirExt as _;
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
@@ -276,21 +277,86 @@ fn resolve_path(path: &str, allow_missing: bool) -> Result<ResolvedPath, FsError
         .ok_or(FsError::InvalidPath)?
         .to_os_string();
     let expected_parent = std::fs::metadata(parent_path).map_err(map_io)?;
-    let parent = Dir::open_ambient_dir(parent_path, ambient_authority()).map_err(map_io)?;
-    let actual_parent = parent.dir_metadata().map_err(map_io)?;
-    if !same_metadata_snapshot(&expected_parent, &actual_parent) {
-        return Err(FsError::InvalidPath);
-    }
-    #[cfg(windows)]
-    if !windows_handle_matches_path(&parent, parent_path)? {
-        return Err(FsError::InvalidPath);
-    }
+    let parent = open_verified_parent(parent_path, &expected_parent)?;
     Ok(ResolvedPath {
         canonical,
         parent,
         name,
         metadata,
     })
+}
+
+fn open_verified_parent(
+    parent_path: &HostPath,
+    expected: &std::fs::Metadata,
+) -> Result<Dir, FsError> {
+    let parent = open_directory_chain(parent_path)?;
+    #[cfg(unix)]
+    if !same_metadata_snapshot(expected, &parent.dir_metadata().map_err(map_io)?) {
+        return Err(FsError::InvalidPath);
+    }
+    #[cfg(windows)]
+    {
+        let _ = expected;
+        if !windows_handle_matches_path(&parent, parent_path)? {
+            return Err(FsError::InvalidPath);
+        }
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn open_directory_chain(path: &HostPath) -> Result<Dir, FsError> {
+    if !path.is_absolute() {
+        return Err(FsError::InvalidPath);
+    }
+    let mut current =
+        Dir::open_ambient_dir(HostPath::new("/"), ambient_authority()).map_err(map_io)?;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                // Open exactly one component at a time without following a
+                // symlink. Keeping each resulting Dir open pins the validated
+                // parent while the next component is resolved relative to it.
+                current = current.open_dir_nofollow(name).map_err(map_io)?;
+            }
+            Component::ParentDir | Component::Prefix(_) => return Err(FsError::InvalidPath),
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(windows)]
+fn open_directory_chain(path: &HostPath) -> Result<Dir, FsError> {
+    if !path.is_absolute() {
+        return Err(FsError::InvalidPath);
+    }
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return Err(FsError::InvalidPath);
+    };
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err(FsError::InvalidPath);
+    }
+    let mut root_path = PathBuf::from(prefix.as_os_str());
+    root_path.push(std::path::MAIN_SEPARATOR_STR);
+    let mut current = Dir::open_ambient_dir(&root_path, ambient_authority()).map_err(map_io)?;
+    for component in components {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                current = current.open_dir_nofollow(name).map_err(map_io)?;
+            }
+            Component::ParentDir | Component::Prefix(_) => return Err(FsError::InvalidPath),
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory_chain(_path: &HostPath) -> Result<Dir, FsError> {
+    Err(FsError::Unsupported)
 }
 
 fn path_text(path: &HostPath) -> Result<String, FsError> {
@@ -301,36 +367,23 @@ fn path_scope(path: &HostPath) -> Result<String, FsError> {
     path_text(path)
 }
 
+#[cfg(unix)]
 fn same_metadata_snapshot(left: &std::fs::Metadata, right: &cap_std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use cap_std::fs::MetadataExt as CapMetadataExt;
-        use std::os::unix::fs::MetadataExt as StdMetadataExt;
-        left.dev() == right.dev() && left.ino() == right.ino()
-    }
-    #[cfg(windows)]
-    {
-        use cap_std::fs::MetadataExt as CapMetadataExt;
-        use std::os::windows::fs::MetadataExt as StdMetadataExt;
-        left.file_attributes() == right.file_attributes()
-            && left.file_size() == right.file_size()
-            && left.creation_time() == right.creation_time()
-            && left.last_write_time() == right.last_write_time()
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        left.len() == right.len() && left.modified().ok() == right.modified().ok()
-    }
+    use cap_std::fs::MetadataExt as CapMetadataExt;
+    use std::os::unix::fs::MetadataExt as StdMetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
 }
 
 #[cfg(windows)]
-fn windows_handle_matches_path(directory: &Dir, expected: &HostPath) -> Result<bool, FsError> {
-    use std::os::windows::io::AsRawHandle;
+fn windows_handle_matches_path<T>(handle_owner: &T, expected: &HostPath) -> Result<bool, FsError>
+where
+    T: std::os::windows::io::AsRawHandle,
+{
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
     };
 
-    let handle = directory.as_raw_handle().cast();
+    let handle = handle_owner.as_raw_handle().cast();
     let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_DOS;
     let mut capacity = 256usize;
     loop {
@@ -345,8 +398,7 @@ fn windows_handle_matches_path(directory: &Dir, expected: &HostPath) -> Result<b
             buffer.truncate(written);
             let actual = String::from_utf16(&buffer).map_err(|_| FsError::InvalidPath)?;
             let expected = expected.to_str().ok_or(FsError::InvalidPath)?;
-            return Ok(normalize_windows_path(&actual)
-                .eq_ignore_ascii_case(&normalize_windows_path(expected)));
+            return Ok(normalize_windows_path(&actual) == normalize_windows_path(expected));
         }
         capacity = written.checked_add(1).ok_or(FsError::InvalidPath)?;
         if capacity > 32768 {
@@ -375,6 +427,7 @@ fn verify_opened_identity(
     resolved: &ResolvedPath,
 ) -> Result<(), FsError> {
     let actual = file.metadata().map_err(map_io)?;
+    #[cfg(unix)]
     if let Some(expected) = &resolved.metadata {
         if !same_metadata_snapshot(expected, &actual) {
             return Err(FsError::InvalidPath);
@@ -382,6 +435,12 @@ fn verify_opened_identity(
     } else if resolved.parent.symlink_metadata(&resolved.name).is_err() {
         return Err(FsError::InvalidPath);
     }
+    #[cfg(windows)]
+    if !windows_handle_matches_path(file, &resolved.canonical)? {
+        return Err(FsError::InvalidPath);
+    }
+    #[cfg(not(any(unix, windows)))]
+    return Err(FsError::Unsupported);
     if !actual.is_file() {
         return Err(FsError::WrongType);
     }
@@ -557,6 +616,24 @@ fn read_bounded(file: &mut cap_std::fs::File, requested: u64) -> Result<Vec<u8>,
     Ok(output)
 }
 
+fn read_open_file(
+    open: &mut OpenFile,
+    max_bytes: u64,
+    authorize_operation: impl FnOnce(&str, &str) -> Result<(), FsError>,
+) -> Result<Vec<u8>, FsError> {
+    if max_bytes > MAX_CHUNK_BYTES {
+        return Err(FsError::Limit);
+    }
+    if !open.read {
+        return Err(FsError::InvalidOptions);
+    }
+    authorize_operation("filesystem.read", &open.path)?;
+    let mut bytes = vec![0; usize::try_from(max_bytes).map_err(|_| FsError::Limit)?];
+    let read = open.file.read(&mut bytes).map_err(map_io)?;
+    bytes.truncate(read);
+    Ok(bytes)
+}
+
 fn make_metadata_array(metadata: &cap_std::fs::Metadata) -> *mut c_void {
     let modified = metadata
         .modified()
@@ -599,6 +676,7 @@ fn metadata_in_resolved(resolved: &ResolvedPath) -> Result<cap_std::fs::Metadata
         .parent
         .symlink_metadata(&resolved.name)
         .map_err(map_io)?;
+    #[cfg(unix)]
     if let Some(expected) = &resolved.metadata
         && !same_metadata_snapshot(expected, &actual)
     {
@@ -904,20 +982,11 @@ unsafe fn execute(operation: i32, args: &[i64]) -> Result<FilesystemOut, FsError
         FILE_READ_HANDLE => {
             let handle = argument_u64(args, 0)?;
             let max_bytes = argument_u64(args, 1)?;
-            if max_bytes > MAX_CHUNK_BYTES {
-                return Err(FsError::Limit);
-            }
             let mut files = files()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let open = files.get_mut(&handle).ok_or(FsError::Closed)?;
-            if !open.read {
-                return Err(FsError::InvalidOptions);
-            }
-            authorize("filesystem.metadata", &open.path)?;
-            let mut bytes = vec![0; usize::try_from(max_bytes).map_err(|_| FsError::Limit)?];
-            let read = open.file.read(&mut bytes).map_err(map_io)?;
-            bytes.truncate(read);
+            let bytes = read_open_file(open, max_bytes, authorize)?;
             Ok(output_bytes(&bytes))
         }
         FILE_READ_EXACT => {
@@ -1224,6 +1293,178 @@ mod tests {
         assert_eq!(fs::read(&outside).unwrap(), b"keep me safe");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_symlinked_parent_after_resolution_does_not_redirect_the_open() {
+        use std::os::unix::fs::symlink;
+
+        let directory = scratch("parent-symlink-race");
+        let approved = directory.join("approved");
+        let outside = directory.join("outside");
+        let link = directory.join("link");
+        fs::create_dir(&approved).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let approved_file = approved.join("target");
+        let outside_file = outside.join("target");
+        fs::write(&approved_file, b"approved").unwrap();
+        fs::write(&outside_file, b"attacker").unwrap();
+        symlink(&approved, &link).unwrap();
+
+        let resolved = resolve_path(link.join("target").to_str().unwrap(), false).unwrap();
+        fs::remove_file(&link).unwrap();
+        symlink(&outside, &link).unwrap();
+
+        let mut file = open_resolved(&resolved, true, false, false, false).unwrap();
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"approved");
+        assert_eq!(fs::read(&outside_file).unwrap(), b"attacker");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_parent_component_between_stat_and_open_is_rejected() {
+        let directory = scratch("parent-component-race");
+        let parent = directory.join("parent");
+        let replacement = directory.join("replacement");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        fs::write(parent.join("inside"), b"approved").unwrap();
+        fs::write(replacement.join("inside"), b"attacker").unwrap();
+
+        let canonical_parent = fs::canonicalize(&parent).unwrap();
+        let expected = fs::metadata(&canonical_parent).unwrap();
+        let moved = directory.join("original-parent");
+        fs::rename(&parent, &moved).unwrap();
+        fs::rename(&replacement, &parent).unwrap();
+
+        assert!(matches!(
+            open_verified_parent(&canonical_parent, &expected),
+            Err(FsError::InvalidPath)
+        ));
+        assert_eq!(fs::read(parent.join("inside")).unwrap(), b"attacker");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_directory_chain_never_follows_a_replaced_component_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = scratch("component-symlink-race");
+        let parent = directory.join("parent");
+        let outside = directory.join("outside");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let canonical_parent = fs::canonicalize(&parent).unwrap();
+        let expected = fs::metadata(&canonical_parent).unwrap();
+        let moved = directory.join("original-parent");
+        fs::rename(&parent, &moved).unwrap();
+        symlink(&outside, &canonical_parent).unwrap();
+
+        assert!(open_verified_parent(&canonical_parent, &expected).is_err());
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_parent_handle_validation_rejects_an_out_of_scope_directory() {
+        let directory = scratch("windows-parent-scope");
+        let approved = directory.join("approved");
+        let outside = directory.join("outside");
+        fs::create_dir(&approved).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        let outside_handle = open_directory_chain(&outside).unwrap();
+        assert!(!windows_handle_matches_path(&outside_handle, &approved).unwrap());
+        assert!(windows_handle_matches_path(&outside_handle, &outside).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_directory_chain_rejects_an_intermediate_reparse_point() {
+        use std::os::windows::fs::symlink_dir;
+
+        let directory = scratch("windows-reparse-component");
+        let target = directory.join("target");
+        let link = directory.join("link");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(target.join("child")).unwrap();
+        if let Err(error) = symlink_dir(&target, &link) {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                eprintln!(
+                    "skipping reparse traversal check: symbolic-link privilege is unavailable"
+                );
+                return;
+            }
+            panic!("failed to create test directory link: {error}");
+        }
+
+        assert!(open_directory_chain(&link.join("child")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_file_reparse_replacement_never_opens_its_target() {
+        use std::os::windows::fs::symlink_file;
+
+        let directory = scratch("windows-file-reparse-race");
+        let victim = directory.join("victim");
+        let outside = directory.join("outside");
+        fs::write(&victim, b"approved").unwrap();
+        fs::write(&outside, b"keep me safe").unwrap();
+
+        let resolved = resolve_path(victim.to_str().unwrap(), false).unwrap();
+        fs::remove_file(&victim).unwrap();
+        if let Err(error) = symlink_file(&outside, &victim) {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                eprintln!("skipping file reparse check: symbolic-link privilege is unavailable");
+                return;
+            }
+            panic!("failed to create test file link: {error}");
+        }
+
+        assert!(matches!(
+            open_resolved(&resolved, true, false, false, false),
+            Err(FsError::InvalidPath | FsError::NotFound)
+        ));
+        assert_eq!(fs::read(&outside).unwrap(), b"keep me safe");
+    }
+
+    #[test]
+    fn an_open_parent_handle_is_not_redirected_by_later_component_replacement() {
+        let directory = scratch("pinned-parent-race");
+        let parent = directory.join("parent");
+        let replacement = directory.join("replacement");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&replacement).unwrap();
+        let original_file = parent.join("target");
+        let replacement_file = replacement.join("target");
+        fs::write(&original_file, b"approved").unwrap();
+        fs::write(&replacement_file, b"attacker").unwrap();
+
+        let resolved = resolve_path(original_file.to_str().unwrap(), false).unwrap();
+        let moved = directory.join("moved-parent");
+        #[cfg(windows)]
+        {
+            // cap-std intentionally opens Windows directories without
+            // FILE_SHARE_DELETE, so the pinned capability prevents replacing
+            // this path component while the operation is in flight.
+            assert!(fs::rename(&parent, &moved).is_err());
+        }
+        #[cfg(not(windows))]
+        {
+            fs::rename(&parent, &moved).unwrap();
+            fs::rename(&replacement, &parent).unwrap();
+        }
+
+        let mut file = open_resolved(&resolved, true, false, false, false).unwrap();
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"approved");
+        #[cfg(not(windows))]
+        assert_eq!(fs::read(parent.join("target")).unwrap(), b"attacker");
+    }
+
     #[test]
     fn bounded_read_checks_growth_while_consuming() {
         let directory = scratch("bounded-read");
@@ -1234,6 +1475,45 @@ mod tests {
         assert_eq!(read_bounded(&mut file, 5).unwrap(), b"12345");
         file.rewind().unwrap();
         assert_eq!(read_bounded(&mut file, 4), Err(FsError::Limit));
+    }
+
+    #[test]
+    fn partial_handle_reads_require_content_permission_not_metadata_permission() {
+        let directory = scratch("metadata-does-not-read-handle");
+        let path = directory.join("source");
+        fs::write(&path, b"secret").unwrap();
+        let file = cap_std::fs::File::from_std(fs::File::open(&path).unwrap());
+        let mut open = OpenFile {
+            file,
+            path: path.to_str().unwrap().to_owned(),
+            read: true,
+            write: false,
+            append: false,
+        };
+        let mut requested = String::new();
+
+        let result = read_open_file(&mut open, 4, |capability, _| {
+            requested = capability.to_owned();
+            if capability == "filesystem.metadata" {
+                Ok(())
+            } else {
+                Err(FsError::PermissionDenied)
+            }
+        });
+
+        assert_eq!(requested, "filesystem.read");
+        assert_eq!(result, Err(FsError::PermissionDenied));
+        assert_eq!(
+            read_open_file(&mut open, 4, |capability, _| {
+                if capability == "filesystem.read" {
+                    Ok(())
+                } else {
+                    Err(FsError::PermissionDenied)
+                }
+            })
+            .unwrap(),
+            b"secr"
+        );
     }
 
     #[test]

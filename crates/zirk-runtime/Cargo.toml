@@ -45,6 +45,7 @@ http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 [dev-dependencies]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cap-fs-ext.workspace = true
 cap-std.workspace = true
 getrandom.workspace = true
 

@@ -281,6 +281,13 @@ jobs:
           $resolvedLinker = (Get-Command link.exe).Source
           if ($resolvedLinker -ne $msvcLinker) { throw "Expected MSVC linker '$msvcLinker', resolved '$resolvedLinker'" }
 
+      - name: Native filesystem conformance
+        if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '')
+        shell: bash
+        run: |
+          cargo test -p zirk-runtime --lib filesystem::tests -- --test-threads=1 --nocapture
+          cargo test -p zirk-cli --test end_to_end bundled_std_fs_ -- --test-threads=1 --nocapture
+
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
       # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
       # intensiva. Ejecutar en serie es la unica garantia real; el costo es

@@ -175,6 +175,21 @@ Every filesystem operation that inspects or changes host state SHALL check the c
 - **WHEN** an input path resolves through a symbolic link outside its authorized scope
 - **THEN** the runtime denies the operation before reading or changing the target
 
+#### Scenario: An intermediate component is replaced with a symlink after resolution
+- **WHEN** an attacker replaces a canonical parent-path component with a symlink or reparse point between resolution and use
+- **THEN** component-by-component no-follow directory opening rejects the path
+- **AND** no operation reaches the symlink target
+
+#### Scenario: The final file is replaced with a symlink after resolution
+- **WHEN** an attacker replaces the resolved file entry with a symlink or reparse point before the runtime opens it
+- **THEN** the runtime rejects the final target before reading or changing its contents
+- **AND** the symlink target remains unchanged
+
+#### Scenario: A validated parent is replaced after its handle is opened
+- **WHEN** an attacker renames or replaces a parent-path component after the runtime has opened that directory handle
+- **THEN** subsequent traversal and file operations remain relative to the validated handle or fail
+- **AND** the replacement path cannot redirect the operation
+
 #### Scenario: Non-interactive access lacks consent
 - **WHEN** an unapproved filesystem operation runs without an interactive terminal
 - **THEN** it returns typed permission denial and emits a useful warning without blocking

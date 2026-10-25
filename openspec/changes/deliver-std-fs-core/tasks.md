@@ -8,7 +8,7 @@
 
 - [x] 2.1 Implement immutable `Path` construction, string conversion, joining, basic components, parent/name, lexical normalization/equality; verify these operations do not access the filesystem or claim authorization/physical identity.
 - [x] 2.2 Implement fallible absolute/canonical path resolution and native path conversion; verify invalid, missing, denied, and non-Unicode conversion outcomes on supported targets.
-- [ ] 2.3 Implement handle-relative effective-path validation for existing and new files on macOS, Linux, and Windows; verify a component or symlink swapped between resolution and use cannot escape the approved scope.
+- [ ] 2.3 Implement handle-relative effective-path validation for existing and new files on macOS, Linux, and Windows by opening each canonical parent component without following links; verify component and symlink swaps before and after handle acquisition cannot escape the approved scope.
 - [x] 2.4 Propagate `filesystem.read`, `filesystem.write`, and next-stage `filesystem.metadata` effects through direct, indirect, and higher-order calls; verify requester provenance identifies the application or dependency that requested the operation.
 - [x] 2.5 Wire first-use consent and non-interactive denial to concrete canonical file paths; verify approval stores only the selected scope, rejection has no filesystem side effect, warnings identify requester/resource, and unrelated code continues.
 
@@ -33,7 +33,7 @@
 
 - [x] 5.1 Integrate official filesystem bindings with semantic effects, IR lowering, LLVM code generation, and the native runtime; verify signatures and capability effects remain consistent through direct and indirect calls.
 - [x] 5.2 Add browser capability preflight for every reachable filesystem operation; verify unsupported effects fail before execution and never use ambient or in-memory filesystem behavior.
-- [ ] 5.3 Add target-specific native conformance for macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify equivalent public outcomes or explicit typed unsupported behavior.
+- [ ] 5.3 Add focused filesystem unit and public-API conformance to the native CI matrix for macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify equivalent outcomes or explicit typed unsupported behavior on every runner.
 - [x] 5.4 Verify typed failures compose with contextual `Result` projection; verify explicit matching receives permission/decoding/limit errors and ordinary denial does not terminate unrelated program flow.
 
 ## 6. Publish and synchronize the delivered contract
