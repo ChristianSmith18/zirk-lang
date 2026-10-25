@@ -205,44 +205,8 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      # Make the GC/managed-thread regressions an explicit Windows signal.
-      # The full workspace suite below also runs them, but this focused step
-      # makes failures attributable and visible before the broader test run.
-      - name: GC y managed threads (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter == '' && inputs.runtime_test_filter == ''
-        shell: bash
-        run: |
-          cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test gc_worker_root_stress -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test gc_mutex_abi -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test managed_callback_shutdown_lifetime -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test cancel_shutdown_gc_stress -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test collector_concurrency_stress -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --lib blocked_native_mutator_keeps_stable_roots_visible_to_collection -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --lib collection_preserves_object_rooted_by_registered_native_thread -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --lib unregister_waits_until_collection_stops_scanning_its_roots -- --test-threads=1 --nocapture
-          cargo test -p zirk-runtime --test optimization_bench mixed_task_and_registered_worker_waiters_keep_fifo_order -- --test-threads=1 --nocapture
-
-      - name: Formato canónico
-        shell: bash
-        run: ./scripts/check-format.sh
-
-      - name: Enable focused native crash dumps (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter != ''
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $dumpDirectory = Join-Path $env:RUNNER_TEMP 'zirk-native-dumps'
-          New-Item -ItemType Directory -Force -Path $dumpDirectory | Out-Null
-          $registryPath = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
-          New-Item -Path $registryPath -Force | Out-Null
-          New-ItemProperty -Path $registryPath -Name DumpFolder -Value $dumpDirectory -PropertyType ExpandString -Force | Out-Null
-          New-ItemProperty -Path $registryPath -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
-          New-ItemProperty -Path $registryPath -Name DumpCount -Value 3 -PropertyType DWord -Force | Out-Null
-
       # A permission-isolation E2E clears the child process environment. Restore
-      # the native linker/SDK variables explicitly so clang can still link the
-      # generated executable inside that intentionally isolated process.
+      # the native linker/SDK variables before running conformance on Windows.
       - name: Prepare the MSVC linker environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -284,6 +248,41 @@ jobs:
         run: |
           cargo test -p zirk-runtime --lib filesystem::tests -- --test-threads=1 --nocapture
           cargo test -p zirk-cli --test end_to_end bundled_std_fs_ -- --test-threads=1 --nocapture
+
+      # Make the GC/managed-thread regressions an explicit Windows signal.
+      # The full workspace suite below also runs them, but this focused step
+      # makes failures attributable and visible before the broader test run.
+      - name: GC y managed threads (Windows)
+        if: runner.os == 'Windows' && inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        shell: bash
+        run: |
+          cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test gc_worker_root_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test gc_mutex_abi -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test managed_callback_shutdown_lifetime -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test cancel_shutdown_gc_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test collector_concurrency_stress -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib blocked_native_mutator_keeps_stable_roots_visible_to_collection -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib collection_preserves_object_rooted_by_registered_native_thread -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --lib unregister_waits_until_collection_stops_scanning_its_roots -- --test-threads=1 --nocapture
+          cargo test -p zirk-runtime --test optimization_bench mixed_task_and_registered_worker_waiters_keep_fifo_order -- --test-threads=1 --nocapture
+
+      - name: Formato canónico
+        shell: bash
+        run: ./scripts/check-format.sh
+
+      - name: Enable focused native crash dumps (Windows)
+        if: runner.os == 'Windows' && inputs.test_filter != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dumpDirectory = Join-Path $env:RUNNER_TEMP 'zirk-native-dumps'
+          New-Item -ItemType Directory -Force -Path $dumpDirectory | Out-Null
+          $registryPath = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $registryPath -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpFolder -Value $dumpDirectory -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $registryPath -Name DumpCount -Value 3 -PropertyType DWord -Force | Out-Null
 
       # Run this after native conformance so unrelated workspace lint failures
       # cannot suppress the filesystem security/API evidence on a platform.
