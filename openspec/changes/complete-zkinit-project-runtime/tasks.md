@@ -98,7 +98,7 @@ Start this section only after 8.1–8.4 pass. Update documentation from the veri
 - [x] 9.2 Add migration guidance for old `permissions`/phase syntax, package `entry`, dependency declarations, and `fn main`; verify migration guidance makes clear that converted capabilities are not consent.
 - [x] 9.3 Update Feature Status, Current Limitations, compiler pipeline, handbook roadmap, and `docs/init/ZIRK_ROADMAP.md` only from verified implementation evidence; verify each status claim links to its authoritative source.
 - [x] 9.4 Validate the Zirk documentation, specs, and affected Rust crates; record exact commands and results without claiming untested targets or runtime behavior. See 10.1 for the package-level matrix and its combined-run caveat.
-- [ ] 9.5 Commit the authoritative Zirk implementation/documentation/status snapshot before website synchronization; verify the Zirk working tree is clean at the content revision.
+- [x] 9.5 Commit the authoritative Zirk implementation/documentation/status snapshot before website synchronization; verify the Zirk working tree is clean at the content revision. The primary snapshot is `bd5a4905`; follow-up handbook navigation fixes are included in the content revision before synchronization.
 - [ ] 9.6 Confirm `../zirk-lang-site` is clean, then run `./scripts/sync-website-content.sh`; when status evidence changed, review its status catalog and use an explicit human-reviewed `--audit-date YYYY-MM-DD`.
 - [ ] 9.7 Review the site diff and build/validate both repositories; commit the website synchronization separately and record both repository revisions.
 

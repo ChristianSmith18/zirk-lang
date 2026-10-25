@@ -47,4 +47,4 @@ process APIs to enforce them.
 
 ---
 
-**Previous:** [← Globals](06-globals.md) · **Next:** [Library requirements](09-library-requirements.md)
+**Previous:** [← Globals](06-globals.md) · **Next:** [Permission phases](08-compile-permissions.md)

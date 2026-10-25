@@ -16,4 +16,4 @@ Packages cannot declare application globals. See the
 
 ---
 
-**Previous:** [← Module Initialization](04-module-initialization.md) · **Next:** [Package Imports](06-package-imports.md)
+**Previous:** [← Import Aliases](04-import-aliases.md) · **Next:** [Public Module API](06-public-api.md)
