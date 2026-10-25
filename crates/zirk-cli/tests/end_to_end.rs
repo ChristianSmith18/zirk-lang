@@ -12400,7 +12400,9 @@ fn main(): Void {
         normalize(&String::from_utf8_lossy(&run.stdout)),
         format!(
             "{absolute_input_scope}\n{input_scope}\nalpha\n\nbeta\n\n14\nwrite-ok\nappend-ok\ncreated-tail\nalpha\n\nbeta\n14\n5\nshort-read\n4\n4\n4\n2\nclosed-iterator\n12\ntrue\n"
-        )
+        ),
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(std::fs::read_to_string(output).unwrap(), "created-tail");
 }
@@ -12580,9 +12582,10 @@ fn main(): Void {
         normalize(&String::from_utf8_lossy(&run.stdout)),
         "15\nfalse\nexists-denied\ncontent-denied\n"
     );
+    let unapproved_metadata_scope = project.canonicalize().unwrap().join("src/unapproved.txt");
     assert!(String::from_utf8_lossy(&run.stderr).contains(&format!(
         "attempted but denied filesystem.metadata for {}",
-        project.join("src/unapproved.txt").display()
+        unapproved_metadata_scope.display()
     )));
     assert!(String::from_utf8_lossy(&run.stderr).contains(&format!(
         "attempted but denied filesystem.read for {}",
