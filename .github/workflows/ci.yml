@@ -202,9 +202,6 @@ jobs:
       - name: Formato
         run: cargo fmt --all --check
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
       - name: Build
         run: cargo build --workspace
 
@@ -287,6 +284,11 @@ jobs:
         run: |
           cargo test -p zirk-runtime --lib filesystem::tests -- --test-threads=1 --nocapture
           cargo test -p zirk-cli --test end_to_end bundled_std_fs_ -- --test-threads=1 --nocapture
+
+      # Run this after native conformance so unrelated workspace lint failures
+      # cannot suppress the filesystem security/API evidence on a platform.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
       # proceso que no tolera uso concurrente, y esta suite lo ejerce de forma
