@@ -31,10 +31,11 @@ Current high-impact delivery limits include:
   incomplete. See the
   [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
   chapters for the tested surface. Filesystem native runtime tests currently
-  pass on macOS ARM64 and in a Linux ARM64 Docker container. Linux x86_64 has
-  supplemental Docker-emulation results, and Windows x86_64 has cross-compilation
-  plus Wine execution; native CI conformance is still pending for Linux x86_64
-  and Windows x86_64.
+  pass locally on macOS ARM64 and in a Linux ARM64 Docker container. Linux
+  x86_64 has supplemental Docker-emulation results, and Windows x86_64 has
+  cross-compilation plus Wine execution. Native CI conformance remains pending
+  on all four matrix runners: macOS ARM64, Linux x86_64, Linux ARM64, and
+  Windows x86_64.
 
 - `std.environment`, `std.net`, and `std.http` are bundled native previews;
   the archived first delivery passes full-workspace native CI on macOS ARM64,
