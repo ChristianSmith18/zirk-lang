@@ -12359,6 +12359,7 @@ fn main(): Void {
     )
     .unwrap();
 
+    let absolute_input_scope = input.to_string_lossy().into_owned();
     let input_scope = input.canonicalize().unwrap().to_string_lossy().into_owned();
     let output_scope = project
         .canonicalize()
@@ -12370,7 +12371,16 @@ fn main(): Void {
         &project,
         &home,
         PermissionScopes {
-            filesystem_read: [input_scope.clone(), output_scope.clone()].into(),
+            // `Path.absolute()` authorizes the lexical absolute spelling;
+            // file reads authorize the resolved canonical spelling. On
+            // Windows these can differ because canonical paths use the
+            // extended-length `\\?\` prefix.
+            filesystem_read: [
+                absolute_input_scope.clone(),
+                input_scope.clone(),
+                output_scope.clone(),
+            ]
+            .into(),
             filesystem_write: [output_scope].into(),
             ..PermissionScopes::default()
         },
@@ -12389,7 +12399,7 @@ fn main(): Void {
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
         format!(
-            "{input_scope}\n{input_scope}\nalpha\n\nbeta\n\n14\nwrite-ok\nappend-ok\ncreated-tail\nalpha\n\nbeta\n14\n5\nshort-read\n4\n4\n4\n2\nclosed-iterator\n12\ntrue\n"
+            "{absolute_input_scope}\n{input_scope}\nalpha\n\nbeta\n\n14\nwrite-ok\nappend-ok\ncreated-tail\nalpha\n\nbeta\n14\n5\nshort-read\n4\n4\n4\n2\nclosed-iterator\n12\ntrue\n"
         )
     );
     assert_eq!(std::fs::read_to_string(output).unwrap(), "created-tail");
@@ -12543,6 +12553,8 @@ fn main(): Void {
             filesystem_metadata: [
                 input.canonicalize().unwrap().to_string_lossy().into_owned(),
                 project
+                    .canonicalize()
+                    .unwrap()
                     .join("src/missing.txt")
                     .to_string_lossy()
                     .into_owned(),
