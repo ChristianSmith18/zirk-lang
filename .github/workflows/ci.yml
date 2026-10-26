@@ -339,6 +339,8 @@ jobs:
         run: |
           Write-Host "Running focused end-to-end tests matching: $env:TEST_FILTER"
           cargo test -p zirk-cli --test end_to_end "$env:TEST_FILTER" -- --test-threads=1 --nocapture
+          cargo test -p zirk-codegen-llvm --test emission "$env:TEST_FILTER" -- --test-threads=1 --nocapture
+          cargo test -p zirk-browser
         env:
           TEST_FILTER: ${{ inputs.test_filter }}
           RUST_BACKTRACE: "1"
@@ -349,6 +351,8 @@ jobs:
         run: |
           echo "Running focused end-to-end tests matching: $TEST_FILTER"
           cargo test -p zirk-cli --test end_to_end "$TEST_FILTER" -- --test-threads=1 --nocapture
+          cargo test -p zirk-codegen-llvm --test emission "$TEST_FILTER" -- --test-threads=1 --nocapture
+          cargo test -p zirk-browser
         env:
           TEST_FILTER: ${{ inputs.test_filter }}
           RUST_BACKTRACE: "1"
