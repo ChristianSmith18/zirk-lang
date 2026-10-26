@@ -167,12 +167,12 @@ The implementation support matrix is:
 
 | Capability | macOS ARM64 | Linux x86_64 | Linux ARM64 | Windows x86_64 | Browser |
 | --- | --- | --- | --- | --- | --- |
-| Bounded directory operations, links, metadata | Implemented | Implemented | Implemented | Implemented; 10 focused native filesystem E2Es passed | Unsupported |
+| Bounded directory operations, links, metadata | Implemented | Implemented | Implemented | Implemented; 10 focused native filesystem E2Es passed in [Actions run 40260247485](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40260247485) | Unsupported |
 | Temporary files and directories | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
 | Synchronous advisory file locks | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
 | No-replace directory move | Implemented | Implemented | Implemented | `FileError.Unsupported` | Unsupported |
 | Directory watchers | Implemented; create/close E2E passed | Native Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377): 25 filesystem runtime tests and 20 filesystem CLI E2Es passed | Runtime and watcher E2E passed in ARM64 container | `FileError.Unsupported` | Unsupported |
-| Async file and directory iteration | Implemented; E2E covers sibling progress, typed errors, open/read/write/append | Native Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377): 25 filesystem runtime tests and 20 filesystem CLI E2Es passed | Runtime suite and 20 filesystem CLI E2E tests passed in ARM64 container | Focused native run [40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191): 10 filesystem CLI E2Es (including async iteration) and 12 Windows runtime tests passed | Unsupported |
+| Async file and directory iteration | Implemented; E2E covers sibling progress, typed errors, open/read/write/append | Native Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377): 25 filesystem runtime tests and 20 filesystem CLI E2Es passed | Runtime suite and 20 filesystem CLI E2E tests passed in ARM64 container | Focused native run [40260247485](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40260247485): 10 filesystem CLI E2Es (including async iteration) and 12 Windows runtime tests passed | Unsupported |
 | Async advisory-lock and watcher waits | Implemented; contention and watcher E2E passed | Native Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377): 25 filesystem runtime tests and 20 filesystem CLI E2Es passed | Runtime suite and async lock/watcher E2E tests passed in ARM64 container | `FileError.Unsupported`; MSVC target/test compilation passed | Unsupported |
 
 Watcher creation, recursive-symlink containment, denied consent, bounded
@@ -183,7 +183,7 @@ passed 25 filesystem runtime tests and 20 filesystem CLI E2Es.
 Windows x86_64 `zirk-runtime` cross-compiles for the GNU and MSVC targets,
 including test-target compilation and typed unsupported lock and watcher paths.
 Native focused conformance also passes in [Actions run
-40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191):
+40260247485](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40260247485):
 10 filesystem CLI E2Es and 12 Windows runtime tests, including Windows path
 grant matching, reparse-point checks, and documented unsupported outcomes. The
 full Windows workspace suite was not part of that focused run. Browser

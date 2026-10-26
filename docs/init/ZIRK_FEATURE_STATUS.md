@@ -86,7 +86,7 @@ native backend is delivered.
 | Literals, arithmetic, comparison, logic | yes | yes | yes | yes | yes | yes | Overflow checks in codegen. |
 | `if`/`else` | yes | yes | yes | yes | yes | yes | — |
 | `std.io` standard streams | yes | yes | yes | yes | yes | yes | Source-defined `stdin`, `stdout`, and `stderr`; synchronous native/interpreter input, destination-labelled output, and browser stdin preflight. Async and terminal controls remain deferred. |
-| `std.path` and `std.fs` | yes | yes | yes | yes | yes | yes | `deliver-std-fs-core` plus `complete-std-fs-advanced`: lexical paths, bounded file operations, managed resources, progressive and async reads/writes, bounded directories, links, temporary resources, locks, watchers, metadata, atomic replacement, and exact-resource permissions. macOS ARM64 passes 25 filesystem runtime tests, 10 permissions runtime tests, and 20 filesystem CLI E2Es; Linux ARM64 container runs pass 25 filesystem runtime tests, 10 permissions runtime tests, and 20 filesystem CLI E2Es. Native Linux x86_64 Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377) passes 25 filesystem runtime tests and 20 filesystem CLI E2Es. Focused native Windows x86_64 run [40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191) passes 10 filesystem CLI E2Es and 12 Windows runtime tests; the full Windows workspace suite was not run. Browser preflight rejects filesystem effects before execution. Native non-Unicode paths remain outside the documented surface. |
+| `std.path` and `std.fs` | yes | yes | yes | yes | yes | yes | `deliver-std-fs-core` plus `complete-std-fs-advanced`: lexical paths, bounded file operations, managed resources, progressive and async reads/writes, bounded directories, links, temporary resources, locks, watchers, metadata, atomic replacement, and exact-resource permissions. macOS ARM64 passes 25 filesystem runtime tests, 10 permissions runtime tests, and 20 filesystem CLI E2Es; Linux ARM64 container runs pass 25 filesystem runtime tests, 10 permissions runtime tests, and 20 filesystem CLI E2Es. Native Linux x86_64 Actions run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377) passes 25 filesystem runtime tests and 20 filesystem CLI E2Es. Focused native Windows x86_64 run [40260247485](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40260247485) passes 10 filesystem CLI E2Es and 12 Windows runtime tests; the full Windows workspace suite was not run. Browser preflight rejects filesystem effects before execution. Native non-Unicode paths remain outside the documented surface. |
 
 ## Phase 2 — Core language surface
 
@@ -316,7 +316,7 @@ passed the complete native CI matrix. Evidence gathered on macOS ARM64:
   `/`-based package-relative names. The loader now normalizes the relative path
   before matching; both affected tests pass locally on macOS.
 - Focused native Windows filesystem conformance (2026-10-25): [CI run
-  40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191)
+  40260247485](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40260247485)
   passed all 10 selected filesystem CLI E2Es and all 12 selected `windows_`
   runtime tests. This covers permission path-prefix matching, readonly changes,
   recursive directory replacement, reparse-point protection, and typed
