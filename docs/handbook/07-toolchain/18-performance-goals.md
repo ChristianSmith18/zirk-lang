@@ -19,4 +19,4 @@ cleanup, or changes debug/release behavior is rejected regardless of speed.
 
 ---
 
-**Previous:** [← ABI and IR Compatibility](17-abi-and-ir-compatibility.md) · **Next:** [ Testing](../08-testing/README.md)
+**Previous:** [← ABI and IR Compatibility](17-abi-and-ir-compatibility.md) · **Next:** [Release Notes →](19-release-notes.md)

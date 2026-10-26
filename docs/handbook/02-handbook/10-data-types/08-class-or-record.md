@@ -57,4 +57,4 @@ invalid.
 
 ---
 
-**Previous:** [← Union Types](07-union-types.md) · **Next:** [Collections](../12-collections/README.md)
+**Previous:** [← Union Types](07-union-types.md) · **Next:** [Intersection Types →](09-intersection-types.md)

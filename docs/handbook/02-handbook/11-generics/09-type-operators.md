@@ -76,4 +76,4 @@ The semantic regression suite covers these examples and edge cases with
 
 ---
 
-**Previous:** [← Specialization](06-specialization.md) · **Next:** [Variance, Recursion, and Runtime Identity →](08-variance-recursion-and-runtime.md)
+**Previous:** [← Variance, Recursion, and Runtime Identity](08-variance-recursion-and-runtime.md) · **Next:** [Data Types →](../10-data-types/README.md)

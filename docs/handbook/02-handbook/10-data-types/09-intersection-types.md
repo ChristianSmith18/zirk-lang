@@ -37,4 +37,4 @@ intersection when the same value must meet multiple compatible requirements.
 
 ---
 
-**Previous:** [← Union Types](07-union-types.md) · **Next:** [Class, Contract, or Object? →](08-class-or-record.md)
+**Previous:** [← Class, Contract, or Object?](08-class-or-record.md) · **Next:** [Collections →](../12-collections/README.md)

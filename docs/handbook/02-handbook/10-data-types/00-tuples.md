@@ -82,4 +82,4 @@ match result {
 
 ---
 
-**Previous:** [← Data Types](README.md) · **Next:** [Objects and Contracts →](01-records.md)
+**Previous:** [← Data Types](README.md) · **Next:** [Traditional Enums →](03-traditional-enums.md)

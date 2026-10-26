@@ -13,4 +13,4 @@ This unit explains how to apply those contracts safely in projects.
 
 ---
 
-**Previous:** [← Performance Goals](../07-toolchain/18-performance-goals.md) · **Next:** [ Unit Tests](01-unit-tests.md)
+**Previous:** [← Release Notes](../07-toolchain/19-release-notes.md) · **Next:** [Unit Tests →](01-unit-tests.md)

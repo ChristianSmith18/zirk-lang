@@ -111,4 +111,4 @@ Enums.values(ExitCode);
 
 ---
 
-**Previous:** [← Records](01-records.md) · **Next:** [ Algebraic Enums](04-algebraic-enums.md)
+**Previous:** [← Tuples](00-tuples.md) · **Next:** [Algebraic Enums →](04-algebraic-enums.md)

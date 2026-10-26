@@ -7,7 +7,7 @@ bounds, permissions, cancellation, cleanup, equality, or exception semantics.
 A program cannot rely on debug-only overflow or race behavior.
 
 Versioned changes are summarized in the repository's
-[release notes](../../RELEASE_NOTES.md); current implementation boundaries
+[release notes](19-release-notes.md); current implementation boundaries
 remain in the [feature-status catalog](../../init/ZIRK_FEATURE_STATUS.md).
 
 Debug artifacts retain source maps, local/type metadata, expansion provenance,
@@ -21,4 +21,4 @@ runtime or incompatible instrumentation is diagnosed before linkage.
 
 ---
 
-**Previous:** [← Debugger](12-debugger.md) · **Next:** [ Optimizations](14-optimizations.md)
+**Previous:** [← Debugger](12-debugger.md) · **Next:** [Optimizations →](14-optimizations.md)

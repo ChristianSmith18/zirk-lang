@@ -41,4 +41,4 @@ fn first<T from Clone>(values: List<T>): T { return values[0]; }
 
 ---
 
-**Previous:** [← Monomorphization](07-monomorphization.md) · **Next:** [Data Types →](../10-data-types/README.md)
+**Previous:** [← Monomorphization](07-monomorphization.md) · **Next:** [Generic Type Operators →](09-type-operators.md)

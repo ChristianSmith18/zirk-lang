@@ -10,4 +10,4 @@ requirements, while unions represent alternatives.
 
 ---
 
-**Previous:** [← Variance, Recursion, and Runtime Identity](../11-generics/08-variance-recursion-and-runtime.md) · **Next:** [Tuples →](00-tuples.md)
+**Previous:** [← Generic Type Operators](../11-generics/09-type-operators.md) · **Next:** [Tuples →](00-tuples.md)

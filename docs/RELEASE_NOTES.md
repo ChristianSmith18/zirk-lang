@@ -1,5 +1,7 @@
 # Release Notes
 
+The public handbook version is [Toolchain Release Notes](handbook/07-toolchain/19-release-notes.md).
+
 ## Unreleased
 
 ### Type algebra and narrowing
