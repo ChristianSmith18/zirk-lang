@@ -269,6 +269,7 @@ jobs:
           cargo test -p zirk-runtime --test optimization_bench mixed_task_and_registered_worker_waiters_keep_fifo_order -- --test-threads=1 --nocapture
 
       - name: Formato canónico
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         shell: bash
         run: ./scripts/check-format.sh
 
