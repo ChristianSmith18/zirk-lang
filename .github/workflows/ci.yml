@@ -286,6 +286,10 @@ jobs:
           New-ItemProperty -Path $registryPath -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
           New-ItemProperty -Path $registryPath -Name DumpCount -Value 3 -PropertyType DWord -Force | Out-Null
 
+      - name: Build focused filesystem prerequisites (Windows)
+        if: runner.os == 'Windows' && inputs.test_filter != ''
+        run: cargo build -p zirk-cli -p zirk-runtime
+
       # Run this after native conformance so unrelated workspace lint failures
       # cannot suppress the filesystem security/API evidence on a platform.
       - name: Clippy
