@@ -203,6 +203,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Build
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         run: cargo build --workspace
 
       # A permission-isolation E2E clears the child process environment. Restore
