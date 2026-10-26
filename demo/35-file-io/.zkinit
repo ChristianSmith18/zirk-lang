@@ -1,0 +1,11 @@
+project {
+    name: "demo-file-io";
+    version: "0.1.0";
+    type: application;
+    entry: "main.zrk";
+}
+
+requires {
+    filesystem.read;
+    filesystem.write;
+}

@@ -15,6 +15,7 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ./target/debug/zirk check demo/32-http-client/main.zrk
 ./target/debug/zirk check demo/33-http-server/main.zrk
 ./target/debug/zirk check demo/34-express-like/main.zrk
+./target/debug/zirk check demo/35-file-io
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
@@ -35,6 +36,11 @@ ejecútalo pasando la carpeta del proyecto con
 `./target/debug/zirk run demo/34-express-like` y prueba `GET /`,
 `GET /health` y `GET /users/42` desde otra terminal. Pasar `main.zrk`
 directamente omite el contexto de permisos del proyecto.
+El demo 35 lee `input.txt` y escribe `output.txt` dentro de su carpeta de
+proyecto. Ejecútalo con `./target/debug/zirk run demo/35-file-io`; la primera
+lectura y escritura solicitan consentimiento independiente para cada ruta.
+Acepta con `y` para que Zirk guarde el consentimiento exacto fuera del
+repositorio. `output.txt` se genera al ejecutar el ejemplo.
 
 ## Convenciones de los ejemplos
 
@@ -91,6 +97,7 @@ directamente omite el contexto de permisos del proyecto.
 | [`32-http-client/`](32-http-client/) | Cliente HTTP, `GET`, `QUERY`, status y consumo del body como texto. |
 | [`33-http-server/`](33-http-server/) | Servidor HTTP acotado, router, rutas `GET`/`QUERY` y respuestas JSON. |
 | [`34-express-like/`](34-express-like/) | Servidor HTTP persistente, middleware de registro, rutas `GET`, parámetro dinámico y respuestas JSON/texto. |
+| [`35-file-io/`](35-file-io/) | Lectura de texto con límite y escritura de un resultado, con requisitos y consentimiento por ruta. |
 
 ## Cobertura y límites actuales
 

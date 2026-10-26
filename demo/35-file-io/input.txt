@@ -1,0 +1,2 @@
+Hola desde Zirk.
+Este texto se lee desde un archivo y luego se escribe en output.txt.

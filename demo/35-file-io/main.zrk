@@ -1,0 +1,16 @@
+// DEMO 35 — Lectura acotada de texto y escritura con consentimiento por ruta.
+
+import { File } from std.fs::fs;
+import { Path } from std.path::path;
+import { stderr, stdout } from std.io;
+
+match File.read_text(Path.of("demo/35-file-io/input.txt"), 1048576) {
+    Error(error) => stderr.println("No se pudo leer input.txt:", error);
+    Ok(text) => {
+        inmut result = "Copia creada por Zirk.\n\n" + text;
+        match File.write_text(Path.of("demo/35-file-io/output.txt"), result) {
+            Ok(_) => stdout.println("Archivo escrito: demo/35-file-io/output.txt");
+            Error(error) => stderr.println("No se pudo escribir output.txt:", error);
+        }
+    }
+}
