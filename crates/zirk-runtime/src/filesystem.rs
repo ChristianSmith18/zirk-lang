@@ -3912,7 +3912,11 @@ unsafe fn execute(operation: i32, args: &[i64]) -> Result<FilesystemOut, FsError
                 "file.set_readonly",
                 FilesystemScopeExtent::Exact,
             )?;
-            file.set_permissions(permissions).map_err(map_io)?;
+            drop(file);
+            resolved
+                .parent
+                .set_permissions(&resolved.name, permissions)
+                .map_err(map_io)?;
             Ok(FilesystemOut::value())
         }
         FILE_READ_BYTES_ASYNC | FILE_READ_TEXT_ASYNC => {
