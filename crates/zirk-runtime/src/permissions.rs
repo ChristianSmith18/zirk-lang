@@ -379,14 +379,54 @@ fn filesystem_operation_scope_contains(
         }
         match saved.extent {
             FilesystemScopeExtent::Exact | FilesystemScopeExtent::Directory => {
-                saved.extent == requested.extent && saved.resource == requested.resource
+                saved.extent == requested.extent
+                    && filesystem_resource_eq(&saved.resource, &requested.resource)
             }
             FilesystemScopeExtent::Descendants => {
                 requested.extent == FilesystemScopeExtent::Descendants
-                    && Path::new(&requested.resource).starts_with(Path::new(&saved.resource))
+                    && filesystem_resource_starts_with(&requested.resource, &saved.resource)
             }
         }
     })
+}
+
+fn filesystem_resource_eq(left: &str, right: &str) -> bool {
+    #[cfg(windows)]
+    {
+        normalize_windows_filesystem_resource(left) == normalize_windows_filesystem_resource(right)
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn filesystem_resource_starts_with(resource: &str, root: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let resource = normalize_windows_filesystem_resource(resource);
+        let root = normalize_windows_filesystem_resource(root);
+        Path::new(&resource).starts_with(Path::new(&root))
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(resource).starts_with(Path::new(root))
+    }
+}
+
+#[cfg(windows)]
+fn normalize_windows_filesystem_resource(path: &str) -> String {
+    let normalized = path.replace('/', "\\");
+    let normalized = normalized
+        .strip_prefix("\\\\?\\UNC\\")
+        .map(|rest| format!("\\\\{rest}"))
+        .or_else(|| normalized.strip_prefix("\\\\?\\").map(str::to_owned))
+        .unwrap_or(normalized);
+    if normalized.len() > 3 {
+        normalized.trim_end_matches('\\').to_owned()
+    } else {
+        normalized
+    }
 }
 
 fn filesystem_extent_label(extent: FilesystemScopeExtent) -> &'static str {
@@ -399,13 +439,25 @@ fn filesystem_extent_label(extent: FilesystemScopeExtent) -> &'static str {
 
 fn scope_contains(scopes: &PermissionScopes, capability: &str, resource: &str) -> bool {
     match capability {
-        "filesystem.read" => scopes.filesystem_read.contains(resource),
-        "filesystem.write" => scopes.filesystem_write.contains(resource),
+        "filesystem.read" => scopes
+            .filesystem_read
+            .iter()
+            .any(|saved| filesystem_resource_eq(saved, resource)),
+        "filesystem.write" => scopes
+            .filesystem_write
+            .iter()
+            .any(|saved| filesystem_resource_eq(saved, resource)),
         // Full read access includes the less powerful metadata view, while a
         // metadata-only grant never authorizes reading file contents.
         "filesystem.metadata" => {
-            scopes.filesystem_metadata.contains(resource)
-                || scopes.filesystem_read.contains(resource)
+            scopes
+                .filesystem_metadata
+                .iter()
+                .any(|saved| filesystem_resource_eq(saved, resource))
+                || scopes
+                    .filesystem_read
+                    .iter()
+                    .any(|saved| filesystem_resource_eq(saved, resource))
         }
         "network.connect" => scopes.network_connect.contains(resource),
         "network.listen" => scopes.network_listen.contains(resource),
@@ -1150,6 +1202,77 @@ mod tests {
         };
         assert!(scope_contains(&read_scope, "filesystem.metadata", path));
         assert!(scope_contains(&read_scope, "filesystem.read", path));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_filesystem_grants_match_extended_and_regular_path_spellings() {
+        let regular_file = r"C:\zirk\project\data.txt";
+        let extended_file = r"\\?\C:\zirk\project\data.txt";
+        let exact_scopes = PermissionScopes {
+            filesystem_read: [extended_file.to_owned()].into(),
+            filesystem_write: [extended_file.to_owned()].into(),
+            filesystem_metadata: [extended_file.to_owned()].into(),
+            ..PermissionScopes::default()
+        };
+        assert!(scope_contains(
+            &exact_scopes,
+            "filesystem.read",
+            regular_file
+        ));
+        assert!(scope_contains(
+            &exact_scopes,
+            "filesystem.write",
+            regular_file
+        ));
+        assert!(scope_contains(
+            &exact_scopes,
+            "filesystem.metadata",
+            regular_file
+        ));
+
+        let saved_tree = FilesystemOperationScope {
+            capability: "filesystem.read".into(),
+            operation: "directory.walk".into(),
+            requester: "local".into(),
+            resource: r"\\?\C:\zirk\project\data".into(),
+            extent: FilesystemScopeExtent::Descendants,
+        };
+        let saved_listing = FilesystemOperationScope {
+            operation: "directory.entries".into(),
+            extent: FilesystemScopeExtent::Directory,
+            ..saved_tree.clone()
+        };
+        let listing_scopes = PermissionScopes {
+            filesystem_operations: [saved_listing.clone()].into(),
+            ..PermissionScopes::default()
+        };
+        let listing_request = FilesystemOperationScope {
+            resource: r"C:\zirk\project\data".into(),
+            ..saved_listing
+        };
+        assert!(filesystem_operation_scope_contains(
+            &listing_scopes,
+            &listing_request
+        ));
+
+        let subtree = PermissionScopes {
+            filesystem_operations: [saved_tree].into(),
+            ..PermissionScopes::default()
+        };
+        let child = FilesystemOperationScope {
+            capability: "filesystem.read".into(),
+            operation: "directory.walk".into(),
+            requester: "local".into(),
+            resource: r"C:\zirk\project\data\nested\item.txt".into(),
+            extent: FilesystemScopeExtent::Descendants,
+        };
+        let sibling = FilesystemOperationScope {
+            resource: r"C:\zirk\project\data-other\item.txt".into(),
+            ..child.clone()
+        };
+        assert!(filesystem_operation_scope_contains(&subtree, &child));
+        assert!(!filesystem_operation_scope_contains(&subtree, &sibling));
     }
 
     #[test]

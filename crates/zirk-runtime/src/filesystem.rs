@@ -2880,15 +2880,7 @@ fn path_text(path: &HostPath) -> Result<String, FsError> {
 }
 
 fn path_scope(path: &HostPath) -> Result<String, FsError> {
-    let text = path_text(path)?;
-    #[cfg(windows)]
-    {
-        Ok(normalize_windows_path(&text))
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(text)
-    }
+    path_text(path)
 }
 
 #[cfg(unix)]
@@ -4829,11 +4821,15 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_path_scope_normalizes_extended_absolute_paths() {
+    fn windows_path_scope_preserves_extended_absolute_paths() {
         let regular = HostPath::new(r"C:\zirk\project\data.txt");
         let extended = HostPath::new(r"\\?\C:\zirk\project\data.txt");
 
-        assert_eq!(path_scope(regular).unwrap(), path_scope(extended).unwrap());
+        assert_eq!(path_scope(regular).unwrap(), r"C:\zirk\project\data.txt");
+        assert_eq!(
+            path_scope(extended).unwrap(),
+            r"\\?\C:\zirk\project\data.txt"
+        );
     }
 
     #[cfg(windows)]
