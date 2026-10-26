@@ -1,0 +1,24 @@
+// DEMO 37 — El literal compartido `kind` selecciona el tipo de objeto correcto.
+
+import { stdout } from std.io;
+
+type NumberEntry = { kind: "number"; value: Int32 };
+type TextEntry = { kind: "text"; value: String };
+type Entry = NumberEntry | TextEntry;
+
+fn show(entry: Entry): Void {
+    if entry.kind == "number" {
+        stdout.println("número {entry.value}");
+    } else if entry.kind == "text" {
+        stdout.println("texto {entry.value}");
+    }
+}
+
+fn main(): Void {
+    inmut count: Entry = { kind: "number", value: 42 };
+    inmut title: Entry = { kind: "text", value: "listo" };
+    show(count);
+    show(title);
+}
+
+main();

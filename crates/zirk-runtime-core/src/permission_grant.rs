@@ -530,7 +530,7 @@ mod tests {
         .unwrap();
         let verified = SignedPermissionGrant::decode(&signed.encode().unwrap())
             .unwrap()
-            .verify(&"c".repeat(64), &"d".repeat(64), b"operation-scope-key")
+            .verify(b"operation-scope-key")
             .unwrap();
         assert!(verified.scopes().filesystem_operations.contains(&scope));
     }

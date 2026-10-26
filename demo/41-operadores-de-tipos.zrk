@@ -1,0 +1,26 @@
+// DEMO 41 — Consultas, transformaciones, inferencia y utilidades de tipos.
+// Estas declaraciones se resuelven en compilación; no generan código runtime.
+
+type Profile = {
+    name: String;
+    age: Int32;
+    active: Boolean;
+};
+
+type ProfileKey = keyof Profile;
+type ProfileValue = Profile[ProfileKey];
+type OptionalProfile = Partial<Profile>;
+type ReadonlyProfile = Readonly<Profile>;
+type PublicProfile = Pick<Profile, "name" | "active">;
+type ProfileWithoutAge = Omit<Profile, "age">;
+type StringRecord = Record<"primary" | "backup", String>;
+
+type Element<T> = T extends Array<infer Item> ? Item : Boolean;
+type NameFromArray = Element<Array<String >>;
+type ValueOf<T> = T[keyof T];
+type ProfileFields = ValueOf<Profile>;
+
+type Color = "red" | "blue" | "green";
+type ColorLabel = "color-{Color}";
+type NumericResult = Extract<Int32 | String | Boolean, Int32 | Boolean>;
+type PresentProfile = NonNullable<Profile?>;

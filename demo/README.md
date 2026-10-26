@@ -16,6 +16,12 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ./target/debug/zirk check demo/33-http-server/main.zrk
 ./target/debug/zirk check demo/34-express-like/main.zrk
 ./target/debug/zirk check demo/35-file-io
+./target/debug/zirk run demo/36-uniones-y-narrowing.zrk
+./target/debug/zirk run demo/37-uniones-discriminadas.zrk
+./target/debug/zirk run demo/38-intersecciones-y-constraints.zrk
+./target/debug/zirk run demo/39-singletons-de-valores.zrk
+./target/debug/zirk check demo/40-singletons-estructurales.zrk
+./target/debug/zirk check demo/41-operadores-de-tipos.zrk
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
@@ -41,6 +47,12 @@ proyecto. Ejecútalo con `./target/debug/zirk run demo/35-file-io`; la primera
 lectura y escritura solicitan consentimiento independiente para cada ruta.
 Acepta con `y` para que Zirk guarde el consentimiento exacto fuera del
 repositorio. `output.txt` se genera al ejecutar el ejemplo.
+Los demos 36–39 muestran uniones, narrowing, selección de objetos por
+discriminante, intersecciones y tipos singleton con valores primitivos,
+temporales y enums. El demo 40 es deliberadamente de solo tipos: el checker
+acepta singletons de tuplas y objetos, pero el backend nativo aún no los puede
+materializar. El demo 41 reúne operadores genéricos de tipos; sus aliases se
+resuelven en compilación y se verifican con `check`.
 
 ## Convenciones de los ejemplos
 
@@ -98,9 +110,15 @@ repositorio. `output.txt` se genera al ejecutar el ejemplo.
 | [`33-http-server/`](33-http-server/) | Servidor HTTP acotado, router, rutas `GET`/`QUERY` y respuestas JSON. |
 | [`34-express-like/`](34-express-like/) | Servidor HTTP persistente, middleware de registro, rutas `GET`, parámetro dinámico y respuestas JSON/texto. |
 | [`35-file-io/`](35-file-io/) | Lectura de texto con límite y escritura de un resultado, con requisitos y consentimiento por ruta. |
+| [`36-uniones-y-narrowing.zrk`](36-uniones-y-narrowing.zrk) | Unión de tres alternativas, alias de literales, narrowing con `match`, exhaustividad y `satisfies`. |
+| [`37-uniones-discriminadas.zrk`](37-uniones-discriminadas.zrk) | Selección contextual de objetos por propiedad literal y narrowing de sus campos. |
+| [`38-intersecciones-y-constraints.zrk`](38-intersecciones-y-constraints.zrk) | Intersección de tres contratos y genéricos que exigen todas sus capacidades. |
+| [`39-singletons-de-valores.zrk`](39-singletons-de-valores.zrk) | Literales numéricos, texto, caracteres, booleanos, duración, fechas, horas, DateTime y enums. |
+| [`40-singletons-estructurales.zrk`](40-singletons-estructurales.zrk) | Identidad exacta de valores singleton compuestos: tuplas y objetos estructurales; solo check. |
+| [`41-operadores-de-tipos.zrk`](41-operadores-de-tipos.zrk) | `keyof`, acceso indexado, condicionales con `infer`, mapped types, templates y utilidades estándar; solo check. |
 
 ## Cobertura y límites actuales
 
-Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos, además de las vistas actuales de `std.environment`, `std.net` y `std.http`. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. Los ejemplos de red requieren permiso aprobado, una conexión accesible y, para el cliente HTTP, el servidor local del demo 33. El catálogo de estado es la fuente para las restricciones por backend.
+Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, uniones/intersecciones y narrowing, operadores de tipos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos, además de las vistas actuales de `std.environment`, `std.net` y `std.http`. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. Los ejemplos de red requieren permiso aprobado, una conexión accesible y, para el cliente HTTP, el servidor local del demo 33. El catálogo de estado es la fuente para las restricciones por backend.
 
 No presento como implementadas las construcciones que el catálogo marca como pendientes o excluidas: entre ellas `async fn` y `await`, `task`/`select`, generadores `fn gen`, `|>`, `map`/`filter`/`reduce` funcionales, decoradores `fn dec`, `Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, `Once<T>`, atomics de punteros y adquisición/publicación de paquetes externos.

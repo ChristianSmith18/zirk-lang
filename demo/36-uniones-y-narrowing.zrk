@@ -1,0 +1,34 @@
+// DEMO 36 — Uniones de N alternativas, alias, discriminación y match exhaustivo.
+
+import { stdout } from std.io;
+
+type DisplayValue = Int32 | String | Boolean;
+type HttpCode = const(200) | const(404) | const(503);
+
+fn describe(value: DisplayValue): String {
+    return match value {
+        42 => "número conocido";
+        "listo" => "texto conocido";
+        true => "activo";
+        _ => "otro valor de la unión";
+    };
+}
+
+fn status(code: HttpCode): String {
+    return match code {
+        200 => "correcto";
+        404 => "no encontrado";
+        503 => "no disponible";
+    };
+}
+
+fn main(): Void {
+    inmut checked_number = 42 satisfies Int32;
+    stdout.println(checked_number);
+    stdout.println(describe(42));
+    stdout.println(describe("listo"));
+    stdout.println(describe(true));
+    stdout.println(status(404));
+}
+
+main();

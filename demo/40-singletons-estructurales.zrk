@@ -1,0 +1,10 @@
+// DEMO 40 — Valores compuestos como tipos singleton y comparación estructural.
+// Se valida con `zirk check`; algunas formas compuestas aún tienen límites de
+// ejecución nativa según docs/init/ZIRK_FEATURE_STATUS.md.
+
+type Coordinates = const((3, (true, "ready")))
+                 | const((4, (false, "paused")));
+
+type EnabledConfig = const({ enabled: true, retries: 3 });
+type DisabledConfig = const({ enabled: false, retries: 0 });
+type Config = EnabledConfig | DisabledConfig;

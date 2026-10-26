@@ -1,0 +1,59 @@
+// DEMO 38 — Una vista de intersección y un genérico exigen ambas capacidades.
+
+import { stdout } from std.io;
+
+contract Named {
+    name(): String;
+}
+
+contract Versioned {
+    version(): Int32;
+}
+
+contract Audited {
+    audit_id(): String;
+}
+
+type Described = Named & Versioned & Audited;
+
+class Document implements Named, Versioned, Audited {
+    inmut title: String;
+    inmut revision: Int32;
+    inmut identifier: String;
+
+    construct(name: String, version: Int32) {
+        this.title = name;
+        this.revision = version;
+        this.identifier = "DOC-{version}";
+    }
+
+    name(): String { return this.title; }
+    version(): Int32 { return this.revision; }
+    audit_id(): String { return this.identifier; }
+}
+
+fn describe(value: Described): String {
+    return value.name();
+}
+
+fn read_version<T from Named & Versioned & Audited>(value: T): Int32 {
+    return value.version();
+}
+
+fn audit<T from Named & Versioned & Audited>(value: T): String {
+    return value.audit_id();
+}
+
+fn preserve_capabilities<T from Named & Versioned>(value: T): T {
+    return value;
+}
+
+fn main(): Void {
+    inmut document = Document("manual", 3);
+    inmut same_document = preserve_capabilities(document);
+    stdout.println(describe(same_document));
+    stdout.println(read_version(same_document));
+    stdout.println(audit(same_document));
+}
+
+main();

@@ -1,0 +1,84 @@
+// DEMO 39 — Uniones de valores literales: números, texto, booleanos y tiempo.
+
+import { stdout } from std.io;
+
+enum Shade { Red, Blue }
+
+type Quantity = const(1) | const(2);
+type Word = const("one") | const("two");
+type Letter = const('a') | const('b');
+type Flag = true | false;
+type Ratio = const(1.5f64) | const(2.5f64);
+type Money = const(1.25) | const(2.5);
+type Wait = 250ms | 1s;
+type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));
+type ClockTime = const(Time(9, 30)) | const(Time(17, 0));
+type Moment = const(DateTime(Date(2026, 12, 25), Time(9, 30)))
+            | const(DateTime(Date(2027, 1, 1), Time(0, 0)));
+type Color = const(Shade.Red) | const(Shade.Blue);
+
+fn quantity(value: Quantity): String {
+    return match value { 1 => "uno"; 2 => "dos"; };
+}
+
+fn word(value: Word): String {
+    return match value { "one" => "primero"; "two" => "segundo"; };
+}
+
+fn letter(value: Letter): String {
+    return match value { 'a' => "primera"; 'b' => "segunda"; };
+}
+
+fn flag(value: Flag): String {
+    return match value { true => "sí"; false => "no"; };
+}
+
+fn ratio(value: Ratio): String {
+    return match value { 1.5f64 => "baja"; 2.5f64 => "alta"; };
+}
+
+fn money(value: Money): String {
+    return match value { 1.25 => "básica"; 2.5 => "premium"; };
+}
+
+fn wait(value: Wait): String {
+    return match value { 250ms => "rápida"; 1s => "normal"; };
+}
+
+fn day(value: Day): String {
+    return match value {
+        Date(2026, 12, 25) => "navidad";
+        Date(2027, 1, 1) => "año nuevo";
+    };
+}
+
+fn clock_time(value: ClockTime): String {
+    return match value { Time(9, 30) => "mañana"; Time(17, 0) => "tarde"; };
+}
+
+fn moment(value: Moment): String {
+    return match value {
+        DateTime(Date(2026, 12, 25), Time(9, 30)) => "evento uno";
+        DateTime(Date(2027, 1, 1), Time(0, 0)) => "evento dos";
+    };
+}
+
+fn color(value: Color): String {
+    return match value { Shade.Red => "rojo"; Shade.Blue => "azul"; };
+}
+
+fn main(): Void {
+    stdout.println(quantity(2));
+    stdout.println(word("two"));
+    stdout.println(letter('b'));
+    stdout.println(flag(true));
+    stdout.println(ratio(2.5f64));
+    stdout.println(money(1.25));
+    stdout.println(wait(250ms));
+    stdout.println(day(Date(2026, 12, 25)));
+    stdout.println(clock_time(Time(17, 0)));
+    stdout.println(moment(DateTime(Date(2027, 1, 1), Time(0, 0))));
+    stdout.println(color(Shade.Blue));
+}
+
+main();
