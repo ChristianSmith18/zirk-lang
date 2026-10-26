@@ -26,7 +26,7 @@
 
 ## 5. Remaining block 1: locks, watchers, and synchronous conformance gate
 
-- [x] 5.1 Implement shared/exclusive advisory locks, non-blocking try-lock, synchronous acquisition, and managed release on Unix; verify separate operation scopes, contention, and release. Async and Windows lock outcomes remain explicitly unsupported pending target work.
+- [x] 5.1 Implement shared/exclusive advisory locks, non-blocking try-lock, synchronous acquisition, and managed release on Unix; verify separate operation scopes, contention, and release. Async acquisition is delivered for supported Unix targets under task 6.2; Windows lock operations remain explicitly unsupported.
 - [x] 5.2 Implement managed directory watchers with bounded event queues; verify create/modify/remove/rename/closed/error outcomes and documented coalescing behavior.
 - [x] 5.3 Implement overflow reporting, rescan guidance, recursive scope containment, and watcher cleanup; verify forced overflow does not claim a complete history and links cannot reveal external events.
 - [x] 5.4 Verify platform-specific lock and watcher guarantees; verify unsupported or weaker guarantees are represented in the published support matrix and typed outcomes.
@@ -43,7 +43,7 @@
 ## 7. Validate, document, and synchronize
 
 - [x] 7.1 Add adversarial coverage for directory escape, link replacement, traversal cycles, temporary substitution, lock cleanup, watcher overflow, cancellation, and concurrent races; verify each invariant on native runtime tests.
-- [x] 7.2 Run conformance on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify each target meets published behavior or returns its documented typed unsupported/degraded outcome. macOS ARM64 and Linux ARM64 container runs pass; Linux x86_64 runtime tests and 20 serialized CLI E2Es pass in an emulated container; focused native Windows run [40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191) passes 10 filesystem CLI E2Es and 12 `windows_` runtime tests. The full Windows workspace suite was skipped for this focused conformance run.
+- [x] 7.2 Run conformance on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64; verify each target meets published behavior or returns its documented typed unsupported/degraded outcome. macOS ARM64 and Linux ARM64 container runs pass; native Linux x86_64 run [40259785377](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40259785377) passes 25 filesystem runtime tests and 20 CLI E2Es; focused native Windows run [40256201191](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40256201191) passes 10 filesystem CLI E2Es and 12 `windows_` runtime tests. The full Windows workspace suite was skipped for this focused conformance run.
 - [x] 7.3 Add browser capability preflight for all advanced filesystem effects; verify no host filesystem operation begins in browser mode.
 - [x] 7.4 Update standard-library specs, handbook pages, API indexes, examples, status, limitations, and roadmap; verify each distinguishes delivered core, advanced synchronous APIs, and async behavior.
 - [x] 7.5 Review and commit the complete `zirk-lang` implementation and documentation before synchronization; verify the source revision contains the approved scope and no unrelated changes.
