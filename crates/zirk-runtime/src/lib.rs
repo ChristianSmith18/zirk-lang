@@ -135,7 +135,8 @@ pub use background::{
 pub use channel::*;
 pub use char::*;
 pub use collector::{
-    zirk_rt_global_root_add, zirk_rt_global_root_remove, zirk_rt_pop_frame, zirk_rt_push_frame,
+    UnionRoot, zirk_rt_global_root_add, zirk_rt_global_root_remove, zirk_rt_pop_frame,
+    zirk_rt_push_frame, zirk_rt_push_union_roots,
 };
 pub use executor::{
     BACKGROUND_JOB_CAPACITY, BACKGROUND_SHUTDOWN_GRACE, background_diagnostics_current,
@@ -149,7 +150,7 @@ pub use context::{
 };
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
-    zirk_rt_index_out_of_bounds, zirk_rt_overflow,
+    zirk_rt_index_out_of_bounds, zirk_rt_invalid_union_tag, zirk_rt_overflow,
 };
 pub use io::{zirk_io_print, zirk_io_println};
 pub use journal::{

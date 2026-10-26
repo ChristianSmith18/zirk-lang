@@ -88,8 +88,8 @@ flow-analysis narrowing.
 
 ```zirk
 mut selected: String? = null;
-inmut name = selected ?? "anonymous";   // String
-selected.length;                        // error until narrowed
+inmut name = selected ?? "anonymous"; // String
+selected.length; // error until narrowed
 ```
 
 ### `Void`

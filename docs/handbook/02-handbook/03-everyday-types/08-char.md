@@ -24,9 +24,9 @@ scalars and many encoded bytes.
 exactly one scalar in the ASCII range; otherwise it returns `-1`:
 
 ```zirk
-'A'.ascii_code();          // 65
-'0'.ascii_code();          // 48
-'π'.ascii_code();          // -1
+'A'.ascii_code(); // 65
+'0'.ascii_code(); // 48
+'π'.ascii_code(); // -1
 '👨‍👩‍👧‍👦'.ascii_code(); // -1
 ```
 
@@ -79,10 +79,10 @@ grapheme, so they return `String`, not `Char`.
 
 ```zirk
 inmut pi: Char = 'π';
-pi.is_alphabetic();             // true
-'ß'.to_uppercase();             // "SS" — expansion returns String
-'A'.ascii_code();               // 65
-'👨‍👩‍👧‍👦'.ascii_code();   // -1
+pi.is_alphabetic(); // true
+'ß'.to_uppercase(); // "SS" — expansion returns String
+'A'.ascii_code(); // 65
+'👨‍👩‍👧‍👦'.ascii_code(); // -1
 ```
 
 ---

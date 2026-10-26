@@ -55,3 +55,4 @@ fn main(): Void {
         stdout.println("duplicate key caught");
     }
 }
+main();

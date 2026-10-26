@@ -15,6 +15,26 @@
 
 Numeric separators do not affect value. A Float suffix cannot force an out-of-range value, and lossy conversion never truncates silently. There is no `NaN` literal. Date and zone text remain String values until explicitly parsed or passed to a temporal constructor.
 
+## Literal and constant types
+
+Type aliases may preserve a specific value as a singleton alternative:
+
+```zirk
+type Status = const(200) | const(404);
+type Active = true | false;
+type Holiday = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));
+```
+
+The owning type is part of each value's identity. Supported singleton values
+include scalar and temporal values, enum variants with constant payloads,
+tuples, and recursively immutable user-defined values accepted by the
+constant evaluator. Zoned values also carry the time-zone rule-data identity
+used to compute them. Mutable references and effectful expressions cannot
+become constants. `const(expression)` permits bounded deterministic
+evaluation; I/O, environment, network, filesystem, clock, randomness, tasks,
+mutable globals, and unknown native calls are rejected. Budget exhaustion is
+a compile-time diagnostic, never a truncated type.
+
 ---
 
 **Previous:** [← Built-in Types](03-built-in-types.md) · **Next:** [ Grammar Summary](05-grammar-summary.md)

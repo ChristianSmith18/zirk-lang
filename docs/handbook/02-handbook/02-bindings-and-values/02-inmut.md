@@ -21,7 +21,7 @@ Default to `inmut`. Stable names reduce the number of states a reader and compil
 ```zirk
 inmut text = "hello";
 text[0] = 'H'; // valid: the String referent is mutable
-text = "bye";  // error: the binding is fixed
+text = "bye"; // error: the binding is fixed
 ```
 
 ---

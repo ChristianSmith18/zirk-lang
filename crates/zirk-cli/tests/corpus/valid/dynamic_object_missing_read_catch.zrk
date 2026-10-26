@@ -8,3 +8,4 @@ fn main(): Void {
         stdout.println("missing property caught");
     }
 }
+main();

@@ -28,8 +28,8 @@ mut copy = first.clone();
 
 first == alias; // true
 first is alias; // true
-first == copy;  // true
-first is copy;  // false
+first == copy; // true
+first is copy; // false
 ```
 
 Records have no observable identity, so `is` is invalid for them. Classes and

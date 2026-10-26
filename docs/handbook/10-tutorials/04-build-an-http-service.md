@@ -19,17 +19,17 @@ fn health(request: HTTPRequest, params: HTTPRouteParameters): HTTPResponse {
 }
 
 match HTTPServer.bind("tcp://127.0.0.1:8080") {
-        Ok(listener) => {
-            mut router: HTTPRouter = HTTPRouter();
-            match router.route(HTTPMethod.Get, "/health", health) {
-                Ok(_) => match router.serve_and_close(listener, 1) {
-                    Ok(count) => stdout.println(count);
-                    Error(error) => stderr.println(error);
-                };
+    Ok(listener) => {
+        mut router: HTTPRouter = HTTPRouter();
+        match router.route(HTTPMethod.Get, "/health", health) {
+            Ok(_) => match router.serve_and_close(listener, 1) {
+                Ok(count) => stdout.println(count);
                 Error(error) => stderr.println(error);
             };
-        }
-        Error(error) => stderr.println(error);
+            Error(error) => stderr.println(error);
+        };
+    }
+    Error(error) => stderr.println(error);
 }
 ```
 

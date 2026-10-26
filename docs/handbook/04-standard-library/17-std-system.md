@@ -139,7 +139,7 @@ for signal in Signals.shutdown_events() {
     match signal {
         Signal.Interrupt => stdout.println("interrupt requested");
         Signal.Terminate => stdout.println("termination requested");
-        _ => {}
+        _ => { }
     }
 }
 ```

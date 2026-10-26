@@ -4,7 +4,7 @@ A lambda that refers to surrounding bindings is a closure. Capture must preserve
 
 ```zirk
 inmut prefix = "item";
-inmut format = (id: UInt64): String => "{prefix}:{id}";
+inmut format =(id: UInt64): String => "{prefix}:{id}";
 ```
 
 When a lambda declares a local with the same name as a captured binding, the
@@ -12,7 +12,7 @@ unqualified name denotes the lambda-local value and `this.` selects the capture:
 
 ```zirk
 inmut prefix = "outer";
-inmut format = (prefix: String): String => "{this.prefix}:{prefix}";
+inmut format =(prefix: String): String => "{this.prefix}:{prefix}";
 ```
 
 Here `this.prefix` is the captured outer binding and `prefix` is the lambda

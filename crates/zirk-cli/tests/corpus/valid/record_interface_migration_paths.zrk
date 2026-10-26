@@ -22,7 +22,7 @@ fn main(): Void {
     inmut same_identity = identity;
     stdout.println(identity is same_identity);
 
-    inmut pair = (7, "tuple");
+    inmut pair =(7, "tuple");
     stdout.println(pair[0]);
 
     inmut status: Status = Status.Ready;

@@ -27,8 +27,8 @@ Prefer a new `inmut` value when transformation can be expressed without changing
 
 ```zirk
 mut text = "hello";
-text[0] = 'H';   // referent mutation
-text = "bye";    // binding reassignment
+text[0] = 'H'; // referent mutation
+text = "bye"; // binding reassignment
 ```
 
 ---

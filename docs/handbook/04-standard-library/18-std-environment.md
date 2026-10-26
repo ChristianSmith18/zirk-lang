@@ -214,8 +214,8 @@ Configure a child without changing the parent:
 
 ```zirk
 inmut operation = Process.command("worker")
-    .env("APP_MODE", "production")
-    .run();
+.env("APP_MODE", "production")
+.run();
 ```
 
 Child environment inheritance and secret transfer remain governed by

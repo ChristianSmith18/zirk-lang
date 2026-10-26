@@ -33,6 +33,7 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         contracts: Vec::new(),
         values: Vec::new(),
         enums: Vec::new(),
+        union_types: Vec::new(),
         pointer_types: Vec::new(),
         channel_types: Vec::new(),
         mutex_types: vec![IrType::Int(IntWidth::I32)],
@@ -46,6 +47,388 @@ fn module_with(blocks: Vec<Block>, return_type: IrType, slots: Vec<Slot>) -> Mod
         map_types: Vec::new(),
         set_types: Vec::new(),
         externs: Vec::new(),
+    }
+}
+
+#[test]
+fn verifier_rejects_union_layout_with_invalid_canonical_fingerprint() {
+    let mut module = Module::default();
+    let mut layout = UnionTypeLayout::new(vec![IrType::String, IrType::Boolean]).unwrap();
+    layout.fingerprint[0] ^= 1;
+    module.union_types.push(layout);
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("union layout 0") && error.contains("fingerprint")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_rejects_union_injection_with_mismatched_payload_type() {
+    let mut union =
+        UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)]).unwrap();
+    union.representation_layout = Some(0);
+    let alternatives = union.alternatives.clone();
+    let fields = alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ObjectField {
+            name: format!("member{index}"),
+            ty: *ty,
+        })
+        .collect();
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                value(0, InstKind::ConstBool(true), IrType::Boolean),
+                value(
+                    1,
+                    InstKind::UnionInject {
+                        union_id: 0,
+                        alternative: alternatives
+                            .iter()
+                            .position(|ty| *ty == IrType::Int(IntWidth::I32))
+                            .unwrap() as u32,
+                        payload: Operand(ValueId(0)),
+                    },
+                    IrType::Union(0),
+                ),
+            ],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        Vec::new(),
+    );
+    module.enums.push(EnumLayout {
+        name: "$Union0".into(),
+        fields,
+        variants: (0..alternatives.len())
+            .map(|index| vec![index as u32])
+            .collect(),
+        union_layout: None,
+    });
+    module.union_types.push(union);
+    install_union_descriptors(&mut module);
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("union alternative") && error.contains("expects")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_rejects_union_bridge_with_wrong_payload_width() {
+    let mut union =
+        UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)]).unwrap();
+    union.representation_layout = Some(0);
+    let alternatives = union.alternatives.clone();
+    let mut module = Module::default();
+    module.enums.push(EnumLayout {
+        name: "$Union0".into(),
+        fields: vec![ObjectField {
+            name: "payload".into(),
+            ty: IrType::Boolean,
+        }],
+        // Variant 1 has no payload slot even though the union declares one.
+        variants: vec![vec![0], vec![]],
+        union_layout: None,
+    });
+    module.union_types.push(union);
+    assert_eq!(alternatives.len(), 2);
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("alternative 0 does not match")),
+        "{errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("alternative 1 does not match")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_rejects_union_projection_from_a_different_union_type() {
+    let mut union_a =
+        UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)]).unwrap();
+    union_a.representation_layout = Some(0);
+    let mut union_b = UnionTypeLayout::new(vec![IrType::Boolean, IrType::String]).unwrap();
+    union_b.representation_layout = Some(1);
+    let bridge = |name: &str, alternatives: &[IrType]| EnumLayout {
+        name: name.into(),
+        fields: alternatives
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| ObjectField {
+                name: format!("payload{index}"),
+                ty: *ty,
+            })
+            .collect(),
+        variants: alternatives
+            .iter()
+            .enumerate()
+            .map(|(index, _)| vec![index as u32])
+            .collect(),
+        union_layout: None,
+    };
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![
+                value(0, InstKind::Undefined, IrType::Union(0)),
+                value(
+                    1,
+                    InstKind::UnionProject {
+                        value: Operand(ValueId(0)),
+                        union_id: 1,
+                        alternative: 0,
+                    },
+                    IrType::Boolean,
+                ),
+            ],
+            terminator: Some(Terminator::Return(None)),
+        }],
+        IrType::Void,
+        Vec::new(),
+    );
+    module.enums = vec![
+        bridge("$Union0", &union_a.alternatives),
+        bridge("$Union1", &union_b.alternatives),
+    ];
+    module.union_types = vec![union_a, union_b];
+    install_union_descriptors(&mut module);
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("expected this union layout")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_rejects_union_dispatch_with_missing_alternative_target() {
+    let mut union =
+        UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)]).unwrap();
+    union.representation_layout = Some(0);
+    let fields = union
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    let mut module = module_with(
+        vec![Block {
+            id: BlockId(0),
+            instructions: vec![value(0, InstKind::Undefined, IrType::Union(0))],
+            terminator: Some(Terminator::UnionDispatch {
+                value: Operand(ValueId(0)),
+                union_id: 0,
+                targets: vec![BlockId(0)],
+            }),
+        }],
+        IrType::Void,
+        Vec::new(),
+    );
+    module.enums.push(EnumLayout {
+        name: "$Union0".into(),
+        fields,
+        variants: (0..union.alternatives.len())
+            .map(|index| vec![index as u32])
+            .collect(),
+        union_layout: None,
+    });
+    module.union_types.push(union);
+    install_union_descriptors(&mut module);
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("union dispatch has 1 targets for 2 alternatives")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_accepts_nested_union_alternatives_with_consistent_bridge_layouts() {
+    let inner = UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)])
+        .unwrap()
+        .with_representation_layout(0);
+    let outer = UnionTypeLayout::with_canonical_alternatives(
+        vec![IrType::Union(0), IrType::String],
+        vec![b"union:inner".to_vec(), b"string".to_vec()],
+    )
+    .unwrap()
+    .with_representation_layout(1);
+    let outer_fields = outer
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    let inner_fields = inner
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    let mut module = Module::default();
+    module.enums = vec![
+        EnumLayout {
+            name: "$Union0".into(),
+            fields: inner_fields,
+            variants: vec![vec![0], vec![1]],
+            union_layout: None,
+        },
+        EnumLayout {
+            name: "$Union1".into(),
+            fields: outer_fields,
+            variants: vec![vec![0], vec![1]],
+            union_layout: None,
+        },
+    ];
+    module.union_types = vec![inner, outer];
+    install_union_descriptors(&mut module);
+    assert!(verify(&module).is_ok(), "{:?}", verify(&module));
+}
+
+#[test]
+fn verifier_rejects_union_bridge_with_forged_physical_layout_metadata() {
+    let union = UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)])
+        .unwrap()
+        .with_representation_layout(0);
+    let mut module = Module::default();
+    module.enums.push(EnumLayout {
+        name: "$Union0".into(),
+        fields: union
+            .alternatives
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| ObjectField {
+                name: format!("payload{index}"),
+                ty: *ty,
+            })
+            .collect(),
+        variants: vec![vec![0], vec![1]],
+        union_layout: None,
+    });
+    module.union_types.push(union);
+    let mut forged = module.union_layout_descriptor(0).unwrap();
+    forged.size_bits += u64::from(forged.alignment_bits);
+    module.enums[0].union_layout = Some(forged);
+
+    let errors = errors_of(&module);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("inconsistent physical layout metadata")),
+        "{errors:?}"
+    );
+
+    let mut missing = module;
+    missing.enums[0].union_layout = None;
+    let errors = errors_of(&missing);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("missing or inconsistent physical layout metadata")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn verifier_accepts_a_null_capable_nullable_union_alternative() {
+    let mut union = UnionTypeLayout::new(vec![
+        IrType::Nullable(Nullable::String),
+        IrType::Int(IntWidth::I32),
+    ])
+    .unwrap();
+    union.representation_layout = Some(0);
+    let fields = union
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    let variants = (0..union.alternatives.len())
+        .map(|index| vec![index as u32])
+        .collect();
+    let mut module = Module::default();
+    module.enums.push(EnumLayout {
+        name: "$NullableUnion".into(),
+        fields,
+        variants,
+        union_layout: None,
+    });
+    module.union_types.push(union);
+    install_union_descriptors(&mut module);
+    assert!(verify(&module).is_ok(), "{:?}", verify(&module));
+}
+
+#[test]
+fn verifier_accepts_nullable_nested_union_alternatives() {
+    let inner = UnionTypeLayout::new(vec![IrType::Boolean, IrType::Int(IntWidth::I32)])
+        .unwrap()
+        .with_representation_layout(0);
+    let outer = UnionTypeLayout::with_canonical_alternatives(
+        vec![IrType::Nullable(Nullable::Union(0)), IrType::String],
+        vec![b"pkg::InnerUnion?".to_vec(), b"builtin::String".to_vec()],
+    )
+    .unwrap()
+    .with_representation_layout(1);
+    let layout = |name: &str, alternatives: &[IrType]| EnumLayout {
+        name: name.into(),
+        fields: alternatives
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| ObjectField {
+                name: format!("payload{index}"),
+                ty: *ty,
+            })
+            .collect(),
+        variants: (0..alternatives.len())
+            .map(|index| vec![index as u32])
+            .collect(),
+        union_layout: None,
+    };
+    let mut module = Module::default();
+    module.enums = vec![
+        layout("$Union0", &inner.alternatives),
+        layout("$Union1", &outer.alternatives),
+    ];
+    module.union_types = vec![inner, outer];
+    install_union_descriptors(&mut module);
+    assert!(verify(&module).is_ok(), "{:?}", verify(&module));
+}
+
+fn install_union_descriptors(module: &mut Module) {
+    for index in 0..module.union_types.len() {
+        let Ok(descriptor) = module.union_layout_descriptor(index as u32) else {
+            continue;
+        };
+        if let Some(representation) = module.union_types[index].representation_layout {
+            module.enums[representation as usize].union_layout = Some(descriptor);
+        }
     }
 }
 
@@ -517,6 +900,7 @@ fn borrowed_value_field_paths_are_typed_and_enum_paths_are_rejected() {
             ty: IrType::Int(IntWidth::I32),
         }],
         variants: vec![vec![0]],
+        union_layout: None,
     });
     assert!(
         verify(&module)
@@ -2277,6 +2661,7 @@ fn an_enum_with_an_invalid_flattened_reference_path_is_rejected() {
             ty: IrType::String,
         }],
         variants: vec![vec![1]],
+        union_layout: None,
     });
     let errors = errors_of(&module);
     assert!(
@@ -2537,6 +2922,7 @@ fn a_binary_operation_between_different_types_is_rejected() {
         contracts: Vec::new(),
         values: Vec::new(),
         enums: Vec::new(),
+        union_types: Vec::new(),
         pointer_types: Vec::new(),
         channel_types: Vec::new(),
         mutex_types: Vec::new(),

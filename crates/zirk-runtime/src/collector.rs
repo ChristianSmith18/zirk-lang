@@ -232,6 +232,22 @@ pub(crate) struct Frame {
     /// object.
     pub(crate) roots: *mut *mut c_void,
     pub(crate) count: usize,
+    /// Union roots are inspected by tag so their inactive alternatives are
+    /// never treated as managed pointers. The backing array lives in the
+    /// generated stack frame just like `roots` above.
+    pub(crate) union_roots: *mut UnionRoot,
+    pub(crate) union_count: usize,
+}
+
+/// One stack-resident tagged union and its static, compiler-emitted
+/// alternative-to-reference-offset map.
+#[repr(C)]
+pub struct UnionRoot {
+    pub base: *const u8,
+    pub descriptor: *const usize,
+    /// Optional nullable `present` byte. A null pointer means the root is a
+    /// non-nullable union; a false byte makes the payload inaccessible.
+    pub present: *const u8,
 }
 
 const MAX_GLOBAL_ROOTS: usize = 4_096;
@@ -615,6 +631,38 @@ pub(crate) unsafe fn gc_field_offsets<'a>(descriptor: *const c_void) -> &'a [usi
     }
 }
 
+/// Reads compiler-emitted tag-dispatched union fields appended after a class
+/// descriptor's declared field metadata. Each entry is `[value_offset,
+/// union_descriptor, present_offset]`; `usize::MAX` means non-nullable.
+pub(crate) unsafe fn gc_union_fields<'a>(descriptor: *const c_void) -> &'a [usize] {
+    if descriptor.is_null() {
+        return &[];
+    }
+    unsafe {
+        let words = descriptor.cast::<usize>();
+        // Runtime-owned opaque objects such as String use a shorter
+        // descriptor whose first word is null. Generated class descriptors
+        // always point to their method table, including an empty table.
+        if *words == 0 {
+            return &[];
+        }
+        let ancestor_count = *words.add(1);
+        let contract_count_slot = 2 + ancestor_count;
+        let contract_count = *words.add(contract_count_slot);
+        let gc_count_slot = contract_count_slot + 1 + contract_count * 2;
+        let gc_count = *words.add(gc_count_slot);
+        let field_count_slot = gc_count_slot + 1 + gc_count;
+        let field_count = *words.add(field_count_slot);
+        let mut cursor = field_count_slot + 1;
+        for _ in 0..field_count {
+            let reference_count = *words.add(cursor + 5);
+            cursor += 6 + reference_count;
+        }
+        let union_count = *words.add(cursor);
+        std::slice::from_raw_parts(words.add(cursor + 1), union_count * 3)
+    }
+}
+
 /// Pushes this function activation's shadow-stack frame (design D2) —
 /// codegen calls this once at function entry, after every reference-typed
 /// slot has been zero-initialized (design D5).
@@ -632,7 +680,28 @@ pub unsafe extern "C" fn zirk_rt_push_frame(roots: *mut *mut c_void, count: i64)
         frames.push(Frame {
             roots,
             count: count as usize,
+            union_roots: std::ptr::null_mut(),
+            union_count: 0,
         });
+    });
+}
+
+/// Adds tag-dispatched union roots to the current shadow-stack frame.
+///
+/// # Safety
+/// `roots` points to `count` valid [`UnionRoot`] entries whose base slots and
+/// descriptors outlive the paired `zirk_rt_pop_frame`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_push_union_roots(roots: *mut UnionRoot, count: i64) {
+    if count <= 0 {
+        return;
+    }
+    with_active_frames(|frames| {
+        let Some(frame) = frames.last_mut() else {
+            crate::failure::fatal("internal error: union roots were pushed without a GC frame")
+        };
+        frame.union_roots = roots;
+        frame.union_count = count as usize;
     });
 }
 
@@ -1397,6 +1466,20 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
                 let child = unsafe { *field_addr };
                 enqueue(child);
             }
+            let union_fields = unsafe { gc_union_fields(descriptor as *const c_void) };
+            for fields in union_fields.chunks_exact(3) {
+                let present_offset = fields[2];
+                let root = UnionRoot {
+                    base: (object as usize + fields[0]) as *const u8,
+                    descriptor: fields[1] as *const usize,
+                    present: if present_offset == usize::MAX {
+                        std::ptr::null()
+                    } else {
+                        (object as usize + present_offset) as *const u8
+                    },
+                };
+                mark_union_root(&root, &mut enqueue);
+            }
         }
 
         let mut added_exception_edge = false;
@@ -1421,6 +1504,90 @@ fn mark_frame_roots(frame: &Frame, enqueue: &mut dyn FnMut(*mut c_void)) {
         if !root_addr.is_null() {
             let object = unsafe { *(root_addr as *mut *mut c_void) };
             enqueue(object);
+        }
+    }
+    for index in 0..frame.union_count {
+        let root = unsafe { &*frame.union_roots.add(index) };
+        mark_union_root(root, enqueue);
+    }
+}
+
+fn mark_union_root(root: &UnionRoot, enqueue: &mut dyn FnMut(*mut c_void)) {
+    if root.base.is_null() || root.descriptor.is_null() {
+        crate::failure::fatal("internal error: a union GC root has missing metadata");
+    }
+    if !root.present.is_null() && unsafe { *root.present } == 0 {
+        return;
+    }
+    let descriptor = root.descriptor;
+    let alternative_count = unsafe { *descriptor };
+    if alternative_count < 2 || alternative_count > 256 {
+        crate::failure::fatal("internal error: a union GC descriptor has an invalid tag count");
+    }
+    let tag = unsafe { *(root.base.cast::<u32>()) } as usize;
+    if tag >= alternative_count {
+        crate::failure::zirk_rt_invalid_union_tag();
+    }
+    let mut cursor = 1usize;
+    for alternative in 0..alternative_count {
+        let reference_count = unsafe { *descriptor.add(cursor) };
+        cursor += 1;
+        if reference_count > 4096 {
+            crate::failure::fatal("internal error: a union GC descriptor has too many references");
+        }
+        for _ in 0..reference_count {
+            let offset = unsafe { *descriptor.add(cursor) };
+            cursor += 1;
+            if alternative == tag {
+                let reference = unsafe { *root.base.add(offset).cast::<*mut c_void>() };
+                enqueue(reference);
+            }
+        }
+        let nested_count = unsafe { *descriptor.add(cursor) };
+        cursor += 1;
+        if nested_count > 4096 {
+            crate::failure::fatal(
+                "internal error: a union GC descriptor has too many nested unions",
+            );
+        }
+        for _ in 0..nested_count {
+            let offset = unsafe { *descriptor.add(cursor) };
+            let nested_descriptor = unsafe { *descriptor.add(cursor + 1) } as *const usize;
+            let present_offset = unsafe { *descriptor.add(cursor + 2) };
+            let guard_count = unsafe { *descriptor.add(cursor + 3) };
+            cursor += 4;
+            if guard_count > 64 {
+                crate::failure::fatal(
+                    "internal error: a union GC descriptor has too many enum guards",
+                );
+            }
+            let guards_start = cursor;
+            cursor = cursor.saturating_add(guard_count.saturating_mul(2));
+            if alternative != tag {
+                continue;
+            }
+            let mut enum_path_matches = true;
+            for guard in 0..guard_count {
+                let tag_offset = unsafe { *descriptor.add(guards_start + guard * 2) };
+                let expected_tag = unsafe { *descriptor.add(guards_start + guard * 2 + 1) };
+                let actual_tag = unsafe { *root.base.add(tag_offset).cast::<u32>() } as usize;
+                if actual_tag != expected_tag {
+                    enum_path_matches = false;
+                    break;
+                }
+            }
+            if enum_path_matches {
+                let nested_root = UnionRoot {
+                    base: unsafe { root.base.add(offset) },
+                    descriptor: nested_descriptor,
+                    present: if present_offset == u64::MAX as usize {
+                        std::ptr::null()
+                    } else {
+                        unsafe { root.base.add(present_offset) }
+                    },
+                };
+                mark_union_root(&nested_root, enqueue);
+            }
         }
     }
 }
@@ -1579,7 +1746,8 @@ pub(crate) mod test_support {
         words.extend_from_slice(field_offsets);
         // Runtime object descriptors now append declared-field metadata
         // after the collector reference paths. These synthetic descriptors
-        // have no language fields, so terminate them with a zero field count.
+        // have no language fields or union fields, so terminate both tables.
+        words.push(0);
         words.push(0);
         words
     }
@@ -1627,6 +1795,264 @@ pub(crate) use test_support::{
 mod tests {
     use super::*;
     use std::alloc::alloc_zeroed;
+
+    #[test]
+    fn union_gc_root_visits_only_the_active_alternatives_references() {
+        let mut storage = [0usize; 2];
+        storage[1] = 0x1234;
+        let descriptor = [2usize, 0, 0, 1, std::mem::size_of::<usize>(), 0];
+        let mut root = UnionRoot {
+            base: storage.as_ptr().cast(),
+            descriptor: descriptor.as_ptr(),
+            present: std::ptr::null(),
+        };
+        let frame = Frame {
+            roots: std::ptr::null_mut(),
+            count: 0,
+            union_roots: &mut root,
+            union_count: 1,
+        };
+
+        // Pointer-shaped bytes in the inactive reference alternative must
+        // not be visited when the scalar alternative is selected.
+        let mut visited = Vec::new();
+        mark_frame_roots(&frame, &mut |candidate| visited.push(candidate as usize));
+        assert!(visited.is_empty());
+
+        unsafe { std::ptr::write(root.base.cast::<u32>() as *mut u32, 1) };
+        visited.clear();
+        mark_frame_roots(&frame, &mut |candidate| visited.push(candidate as usize));
+        assert_eq!(visited, [0x1234]);
+    }
+
+    #[test]
+    fn nested_union_gc_root_recursively_traces_only_the_active_reference() {
+        let mut storage = [0usize; 3];
+        let inner_descriptor = [2usize, 0, 0, 1, 8, 0];
+        let outer_descriptor = [
+            2usize,
+            0,
+            1,
+            8,
+            inner_descriptor.as_ptr() as usize,
+            usize::MAX,
+            0,
+            0,
+            0,
+        ];
+        let bytes = storage.as_mut_ptr().cast::<u8>();
+        unsafe {
+            bytes.cast::<u32>().write(0);
+            bytes.add(8).cast::<u32>().write(1);
+            bytes.add(16).cast::<usize>().write(0x1234);
+        }
+        let root = UnionRoot {
+            base: bytes,
+            descriptor: outer_descriptor.as_ptr(),
+            present: std::ptr::null(),
+        };
+        let mut visited = Vec::new();
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert_eq!(visited, [0x1234]);
+
+        // Switching the nested tag to the scalar case leaves the pointer-like
+        // payload bytes inactive, so recursion must not report them.
+        unsafe { bytes.add(8).cast::<u32>().write(0) };
+        visited.clear();
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn enum_nested_union_is_traced_only_for_its_active_variant() {
+        let mut storage = [0usize; 4];
+        let inner_descriptor = [2usize, 0, 0, 1, 8, 0];
+        // Alternative zero contains an enum payload at byte 8. Its union is
+        // at byte 16 and may only be followed when the enum discriminant at
+        // byte 8 selects variant one.
+        let outer_descriptor = [
+            2usize,
+            0,
+            1,
+            16,
+            inner_descriptor.as_ptr() as usize,
+            usize::MAX,
+            1,
+            8,
+            1,
+            0,
+            0,
+        ];
+        let bytes = storage.as_mut_ptr().cast::<u8>();
+        unsafe {
+            bytes.cast::<u32>().write(0); // outer union alternative
+            bytes.add(8).cast::<u32>().write(0); // inactive enum variant
+            bytes.add(16).cast::<u32>().write(1); // nested union pointer alternative
+            bytes.add(24).cast::<usize>().write(0x1234);
+        }
+        let root = UnionRoot {
+            base: bytes,
+            descriptor: outer_descriptor.as_ptr(),
+            present: std::ptr::null(),
+        };
+        let mut visited = Vec::new();
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert!(
+            visited.is_empty(),
+            "inactive enum payload must not be followed"
+        );
+
+        unsafe { bytes.add(8).cast::<u32>().write(1) };
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert_eq!(visited, [0x1234]);
+    }
+
+    #[test]
+    fn absent_nullable_nested_union_skips_its_tag_and_present_value_is_traced() {
+        let mut storage = [0usize; 4];
+        let inner_descriptor = [2usize, 0, 0, 1, 8, 0];
+        let outer_descriptor = [
+            2usize,
+            0,
+            1,
+            16,
+            inner_descriptor.as_ptr() as usize,
+            8,
+            0,
+            0,
+            0,
+        ];
+        let bytes = storage.as_mut_ptr().cast::<u8>();
+        unsafe {
+            bytes.cast::<u32>().write(0);
+            bytes.add(8).write(0); // absent
+            bytes.add(16).cast::<u32>().write(u32::MAX); // invalid but absent
+            bytes.add(24).cast::<usize>().write(0x5678);
+        }
+        let root = UnionRoot {
+            base: bytes,
+            descriptor: outer_descriptor.as_ptr(),
+            present: std::ptr::null(),
+        };
+        let mut visited = Vec::new();
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert!(visited.is_empty());
+
+        unsafe {
+            bytes.add(8).write(1);
+            bytes.add(16).cast::<u32>().write(1);
+        }
+        mark_union_root(&root, &mut |candidate| visited.push(candidate as usize));
+        assert_eq!(visited, [0x5678]);
+    }
+
+    #[test]
+    fn absent_nullable_union_root_does_not_inspect_its_payload_tag() {
+        let storage = [2usize, 0x1234]; // Invalid tag, but payload is absent.
+        let descriptor = [2usize, 0, 0, 0, 0];
+        let present = 0u8;
+        let root = UnionRoot {
+            base: storage.as_ptr().cast(),
+            descriptor: descriptor.as_ptr(),
+            present: &present,
+        };
+        let frame = Frame {
+            roots: std::ptr::null_mut(),
+            count: 0,
+            union_roots: &root as *const UnionRoot as *mut UnionRoot,
+            union_count: 1,
+        };
+        let mut visited = Vec::new();
+
+        mark_frame_roots(&frame, &mut |candidate| visited.push(candidate as usize));
+
+        assert!(visited.is_empty());
+    }
+
+    #[test]
+    fn union_gc_root_rejects_invalid_tag_before_reading_payload() {
+        const CHILD: &str = "ZIRK_TEST_INVALID_UNION_GC_TAG_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let storage = [2usize, 0x1234]; // Tag 2 is outside this two-way union.
+            let descriptor = [2usize, 0, 0, 0, 0];
+            let root = UnionRoot {
+                base: storage.as_ptr().cast(),
+                descriptor: descriptor.as_ptr(),
+                present: std::ptr::null(),
+            };
+            let frame = Frame {
+                roots: std::ptr::null_mut(),
+                count: 0,
+                union_roots: &root as *const UnionRoot as *mut UnionRoot,
+                union_count: 1,
+            };
+            mark_frame_roots(&frame, &mut |_| panic!("invalid tag read a payload"));
+            panic!("invalid union tag was accepted");
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("collector::tests::union_gc_root_rejects_invalid_tag_before_reading_payload")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .expect("run corrupt GC tag in a subprocess");
+
+        assert_eq!(output.status.code(), Some(70));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("a tagged union contains an invalid alternative tag"),
+            "unexpected diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn nested_union_gc_root_rejects_invalid_active_tag_before_reading_payload() {
+        const CHILD: &str = "ZIRK_TEST_INVALID_NESTED_UNION_GC_TAG_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut storage = [0usize; 3];
+            let inner_descriptor = [2usize, 0, 0, 1, 8, 0];
+            let outer_descriptor = [
+                2usize,
+                0,
+                1,
+                8,
+                inner_descriptor.as_ptr() as usize,
+                usize::MAX,
+                0,
+                0,
+                0,
+            ];
+            let bytes = storage.as_mut_ptr().cast::<u8>();
+            unsafe {
+                bytes.cast::<u32>().write(0);
+                bytes.add(8).cast::<u32>().write(2);
+            }
+            let root = UnionRoot {
+                base: bytes,
+                descriptor: outer_descriptor.as_ptr(),
+                present: std::ptr::null(),
+            };
+            mark_union_root(&root, &mut |_| panic!("invalid nested tag read a payload"));
+            panic!("invalid nested union tag was accepted");
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("collector::tests::nested_union_gc_root_rejects_invalid_active_tag_before_reading_payload")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .expect("run corrupt nested GC tag in a subprocess");
+        assert_eq!(output.status.code(), Some(70));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("a tagged union contains an invalid alternative tag"),
+            "unexpected diagnostic: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn invalid_gc_candidate_is_rejected_before_header_access() {
@@ -1956,13 +2382,11 @@ mod tests {
     }
 
     /// A descriptor whose only content this test cares about is the
-    /// GC-field-offset table: `[ 0 (method table) | 0 (ancestors) | 0
-    /// (contracts) | field_count | field_offset* ]` — the exact shape
-    /// `gc_field_offsets` reads, with every earlier section empty so
-    /// nothing but the collector ever looks at it.
+    /// GC-field-offset table plus empty field and union descriptor tables.
     fn descriptor_with_fields(field_offsets: &[usize]) -> Vec<usize> {
         let mut words = vec![0usize, 0, 0, field_offsets.len()];
         words.extend_from_slice(field_offsets);
+        words.extend_from_slice(&[0, 0]);
         words
     }
 

@@ -127,3 +127,4 @@ fn main(): Void {
     show_rest_destructuring();
     show_object_spread_and_rest();
 }
+main();

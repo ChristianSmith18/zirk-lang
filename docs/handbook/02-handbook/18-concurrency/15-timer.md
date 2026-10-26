@@ -11,8 +11,8 @@ keep a finite scope alive.
 
 ```zirk
 concurrent {
-    Timer.after(1s, (): Void => stdout.println("saved"));
-    Timer.every(5s, (): Void => stdout.println("heartbeat"));
+    Timer.after(1s,(): Void => stdout.println("saved"));
+    Timer.every(5s,(): Void => stdout.println("heartbeat"));
     Timer.sleep(2s);
 }
 ```

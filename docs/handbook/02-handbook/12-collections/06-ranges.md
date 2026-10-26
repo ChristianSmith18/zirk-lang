@@ -3,7 +3,7 @@
 A range represents a progression between bounds and integrates with iteration and slicing.
 
 ```zirk
-for index in 0..10 {
+for index in 0 .. 10 {
     process(index);
 }
 ```
@@ -12,11 +12,11 @@ for index in 0..10 {
 without one, the step is inferred from the bounds:
 
 ```zirk
-0..10;              // 0 through 9
-0..=10;             // 0 through 10
-0..10:2;            // 0, 2, 4, 6, 8
-10..0;              // 10 down to 1
-9..0:-1;            // 9 down to 1
+0 .. 10; // 0 through 9
+0 ..= 10; // 0 through 10
+0 .. 10: 2; // 0, 2, 4, 6, 8
+10 .. 0; // 10 down to 1
+9 .. 0: -1; // 9 down to 1
 ```
 
 Bounds and step may be computed, and the element type is `Int32` for integer
@@ -25,7 +25,7 @@ must be enclosed in braces:
 
 ```zirk
 inmut number = 10;
-for index in 0..{number}:1 {
+for index in 0 .. { number }: 1 {
     process(index);
 }
 ```
@@ -34,9 +34,9 @@ for index in 0..{number}:1 {
 sequence — `r[1:4]` is the range of `r`'s second through fourth elements:
 
 ```zirk
-inmut r: Range<Int32> = 0..10;
-r[2:6];   // 2, 3, 4, 5
-r[::2];   // 0, 2, 4, 6, 8
+inmut r: Range<Int32> = 0 .. 10;
+r[2: 6]; // 2, 3, 4, 5
+r[::2]; // 0, 2, 4, 6, 8
 ```
 
 A zero step throws `InvalidStepError`. A range is lazy and implements
@@ -77,9 +77,9 @@ the yielded sequence.
 ### Examples
 
 ```zirk
-for index in 0..10:2 { process(index); }   // 0, 2, 4, 6, 8
-for index in 10..=0 { process(index); }     // descending
-for index in 9..0:-1 { process(index); }    // 9 down to 1
+for index in 0 .. 10: 2 { process(index); } // 0, 2, 4, 6, 8
+for index in 10 ..= 0 { process(index); } // descending
+for index in 9 .. 0: -1 { process(index); } // 9 down to 1
 ```
 
 ---

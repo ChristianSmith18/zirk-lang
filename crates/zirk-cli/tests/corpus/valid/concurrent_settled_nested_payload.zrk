@@ -4,6 +4,7 @@ class Payload {
     text: String;
     construct(text: String) { this.text = text; }
 }
+main();
 
 fn main(): Void {
     mut outcomes = Concurrent.of(

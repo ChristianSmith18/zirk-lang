@@ -36,8 +36,8 @@ while `Float64(3 / 4)` is binary `0.75`. It never retypes operands internally.
 Valid String repetition and explicit value conversion:
 
 ```zirk
-inmut laugh = "ja" * 3;                   // "jajaja"
-inmut label = "items=" + String(4);       // "items=4"
+inmut laugh = "ja" * 3; // "jajaja"
+inmut label = "items=" + String(4); // "items=4"
 ```
 
 Invalid forms include `"ja" * -1`, `"ja" * 1.5`, `"items=" + 4`, and
@@ -47,7 +47,7 @@ Valid shared reference mutation and strict isolation:
 
 ```zirk
 inmut text = String("hola");
-text[0] = 'H';               // binding stays fixed; referent changes
+text[0] = 'H'; // binding stays fixed; referent changes
 inmut::strict frozen = text.clone();
 // frozen[0] = 'h';          // Error: strict reachable state
 ```

@@ -26,15 +26,21 @@ pub fn parse_float(text: &str) -> Option<f64> {
 /// layout.  It keeps the target-width rounding boundary explicit instead of
 /// accidentally treating `Float16` as `Float32`.
 pub fn round_to_float16(value: f64) -> f64 {
+    f16_bits_to_f64(float16_bits(value))
+}
+
+/// Converts binary64 to the IEEE-754 binary16 payload with round-to-nearest,
+/// ties-to-even. The result can be decoded with [`float16_to_f64`].
+pub fn float16_bits(value: f64) -> u16 {
     let bits = value.to_bits();
     let sign = (bits >> 63) as u16 & 0x8000;
     let exponent = ((bits >> 52) & 0x7ff) as i32;
     let fraction = bits & ((1_u64 << 52) - 1);
     if exponent == 0x7ff {
-        return f64::from_bits(((sign as u64) << 48) | (0x7ff_u64 << 52));
+        return sign | 0x7c00 | if fraction == 0 { 0 } else { 0x0200 };
     }
     if exponent == 0 && fraction == 0 {
-        return f16_bits_to_f64(sign);
+        return sign;
     }
     let unbiased = if exponent == 0 {
         -1022
@@ -42,7 +48,7 @@ pub fn round_to_float16(value: f64) -> f64 {
         exponent - 1023
     };
     if unbiased > 15 {
-        return f16_bits_to_f64(sign | 0x7c00);
+        return sign | 0x7c00;
     }
     let significand = if exponent == 0 {
         fraction
@@ -78,6 +84,11 @@ pub fn round_to_float16(value: f64) -> f64 {
             sign | rounded as u16
         }
     };
+    bits
+}
+
+/// Widens an IEEE-754 binary16 payload exactly to binary64.
+pub fn float16_to_f64(bits: u16) -> f64 {
     f16_bits_to_f64(bits)
 }
 
@@ -540,6 +551,8 @@ mod tests {
         assert_eq!(parse_float("NaN"), None);
         assert_eq!(round_to_float16(0.1 + 0.2), 0.300048828125);
         assert_eq!(round_to_float16(65520.0), f64::INFINITY);
+        assert_eq!(float16_to_f64(float16_bits(0.1)), 0.0999755859375);
+        assert_eq!(float16_bits(1.00048828125), float16_bits(1.0));
         assert_eq!(format_integer_radix(-255, 16), "-ff");
         assert_eq!(format_float(1.5, "08.2"), "00001.50");
         assert_eq!(float128_bits_to_f64(f64_to_float128_bits(1.5)), 1.5);

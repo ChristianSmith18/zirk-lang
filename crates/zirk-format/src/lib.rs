@@ -1139,6 +1139,129 @@ fn canonical_literal(text: &str, start: usize, end: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_alias_formatting_round_trips_generic_structural_algebra() {
+        let source = "type Choice<T = String> = { inmut active: true, value?: T } | { active: false };\n\
+                      type Tagged = Int32 & { status?: 1 | 2 };\n\
+                      type Constant = const(1 + 2);\n\
+                      type Callable = Fn(Int32 | String) => Boolean;\n\
+                      type Nary = A & B & C | D | E;\n\
+                      type Grouped = (A | B) & (C | D);\n\
+                      type Temporal = const(Date(2026, 12, 25)) | const(Time(9, 30));\n";
+        let formatted = format("types.zrk", source).unwrap();
+        let formatted_again = format("types.zrk", &formatted).unwrap();
+        assert_eq!(formatted, formatted_again);
+        assert!(formatted.contains(" | "), "{formatted}");
+        assert!(formatted.contains(" & "), "{formatted}");
+        assert!(formatted.contains("value?: T"), "{formatted}");
+        assert!(formatted.contains("const(1 + 2)"), "{formatted}");
+        assert!(formatted.contains("A & B & C | D | E"), "{formatted}");
+        assert!(formatted.contains("A | B"), "{formatted}");
+        assert!(formatted.contains("C | D"), "{formatted}");
+        assert!(
+            formatted.contains("const(Date(2026, 12, 25)) | const(Time(9, 30))"),
+            "{formatted}"
+        );
+
+        fn parse_alias(text: &str, index: usize) -> zirk_ast::TypeAliasDecl {
+            let source = SourceFile::new("types.zrk", text.to_owned());
+            let mut sink = DiagnosticSink::new();
+            let tokens = zirk_lexer::tokenize(&source, &mut sink);
+            let program = zirk_parser::parse(&source, &tokens, &mut sink);
+            assert!(!sink.has_errors(), "{}", render_diagnostics(&sink));
+            program.type_aliases.into_iter().nth(index).unwrap()
+        }
+
+        let before = parse_alias(source, 0);
+        let after = parse_alias(&formatted, 0);
+        assert_eq!(before.type_params.len(), after.type_params.len());
+        assert_eq!(
+            before.type_params[0].name.name,
+            after.type_params[0].name.name
+        );
+        assert_eq!(
+            before.type_params[0].default.as_ref().unwrap().name,
+            after.type_params[0].default.as_ref().unwrap().name
+        );
+        let (
+            Some(zirk_ast::TypeExpr::Union {
+                members: before_members,
+                ..
+            }),
+            Some(zirk_ast::TypeExpr::Union {
+                members: after_members,
+                ..
+            }),
+        ) = (
+            before.target.expression.as_deref(),
+            after.target.expression.as_deref(),
+        )
+        else {
+            panic!("the formatter must preserve the alias union expression");
+        };
+        assert_eq!(before_members.len(), after_members.len());
+        for (before, after) in before_members.iter().zip(after_members) {
+            let (
+                zirk_ast::TypeExpr::Object {
+                    properties: before, ..
+                },
+                zirk_ast::TypeExpr::Object {
+                    properties: after, ..
+                },
+            ) = (before, after)
+            else {
+                panic!("the formatter must preserve both object alternatives");
+            };
+            assert_eq!(before.len(), after.len());
+            for (before, after) in before.iter().zip(after) {
+                assert_eq!(before.name.name, after.name.name);
+                assert_eq!(before.optional, after.optional);
+                assert_eq!(before.readonly, after.readonly);
+                assert_eq!(before.ty.name, after.ty.name);
+            }
+        }
+        let before_tagged = parse_alias(source, 1);
+        let after_tagged = parse_alias(&formatted, 1);
+        for alias in [&before_tagged, &after_tagged] {
+            let Some(zirk_ast::TypeExpr::Intersection { members, .. }) =
+                alias.target.expression.as_deref()
+            else {
+                panic!("the formatter must preserve the alias intersection expression");
+            };
+            assert_eq!(members.len(), 2);
+            let zirk_ast::TypeExpr::Object { properties, .. } = &members[1] else {
+                panic!("the formatter must preserve the structural member");
+            };
+            assert_eq!(properties.len(), 1);
+            assert_eq!(properties[0].name.name, "status");
+            assert!(properties[0].optional);
+            let Some(zirk_ast::TypeExpr::Union { members, .. }) =
+                properties[0].ty.expression.as_deref()
+            else {
+                panic!("the formatter must preserve the nested property union");
+            };
+            assert_eq!(members.len(), 2);
+            assert!(members.iter().all(|member| matches!(
+                member,
+                zirk_ast::TypeExpr::Value {
+                    value: zirk_ast::TypeValue::Int(_),
+                    ..
+                }
+            )));
+        }
+        assert!(matches!(
+            parse_alias(source, 2).target.expression.as_deref(),
+            Some(zirk_ast::TypeExpr::Constant { .. })
+        ));
+        assert!(matches!(
+            parse_alias(&formatted, 2).target.expression.as_deref(),
+            Some(zirk_ast::TypeExpr::Constant { .. })
+        ));
+        assert!(parse_alias(source, 3).target.function.is_some());
+        assert!(parse_alias(&formatted, 3).target.function.is_some());
+    }
+
     #[test]
     fn group_is_flat_when_it_fits() {
         assert_eq!(

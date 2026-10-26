@@ -50,10 +50,10 @@ discards either outcome.
 
 ```zirk
 mut users = [User(name: "Ada")]
-mut alias = users              // shared whole reference
-mut first = users[0]           // independent projected User
-users[0].name = "Grace"        // place write changes users and alias
-stdout.println(first.name)     // Ada
+mut alias = users // shared whole reference
+mut first = users[0] // independent projected User
+users[0].name = "Grace" // place write changes users and alias
+stdout.println(first.name) // Ada
 ```
 
 The projection-copy rule is transitive for statically typed projections.
@@ -195,6 +195,22 @@ copies. Direct destructuring supports tuples, partial object properties with an
 object rest binding (`{ field, ...rest }`), and ordered collections with a rest
 binding (`[first, ...rest]`);
 enum destructuring remains invalid. `Never` unifies with every branch result type.
+
+Unions and intersections are recursive n-ary type expressions; intersection
+binds more tightly, and explicit grouping overrides precedence. Canonical
+identity is independent of source order and alias spelling. Assignability
+checks every possible source-union member and every required intersection
+constituent. Literal types preserve their canonical value and owning type,
+including temporal values and recursively immutable user-defined values
+accepted by constant evaluation. Contextual object literals select a unique
+structural union alternative by required members and literal discriminants;
+ambiguous or unmatched literals are errors. Boolean, null, type, and literal
+tests refine only the reachable branch, and mutation or escaping effects
+invalidate facts that are no longer sound. `satisfies` checks compatibility
+while preserving the expression's inferred type. Generic aliases and erased
+type operators are specified in [`ZIRK_LANGUAGE_SPEC.md`](ZIRK_LANGUAGE_SPEC.md)
+§3; their evaluation, relation, normalization, and expansion budgets are
+source-located and never return partial results.
 
 ## 6. Collections and iteration
 

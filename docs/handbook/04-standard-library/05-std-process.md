@@ -14,9 +14,9 @@ The executable and its arguments are always separate.
 
 ```zirk
 inmut operation = Process.command("git")
-    .args(["status", "--short"])
-    .capture()
-    .run(timeout: 5s);
+.args(["status", "--short"])
+.capture()
+.run(timeout: 5s);
 
 match operation {
     Ok(result) => inspect(result),
@@ -28,7 +28,7 @@ match operation {
 successfully observed process outcome, not a process API failure:
 
 ```zirk
-if !result.success {
+if ! result.success {
     println(result.stderr_text_lossy());
 }
 ```
@@ -74,9 +74,9 @@ variables are not copied implicitly.
 
 ```zirk
 Process.command("deploy")
-    .env("DEPLOY_REGION", "us-east-1")
-    .current_directory(project_root)
-    .run();
+.env("DEPLOY_REGION", "us-east-1")
+.current_directory(project_root)
+.run();
 ```
 
 `inherit_environment()` deliberately requests the full accessible environment,
@@ -111,9 +111,9 @@ of every stage:
 
 ```zirk
 inmut pipeline = Process.command("cat")
-    .arg("access.log")
-    .pipe(Process.command("grep").arg("ERROR"))
-    .pipe(Process.command("sort"));
+.arg("access.log")
+.pipe(Process.command("grep").arg("ERROR"))
+.pipe(Process.command("sort"));
 
 inmut operation = pipeline.capture().run(timeout: 10s);
 ```

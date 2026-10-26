@@ -36,10 +36,7 @@ const EXCLUDED: &[(&str, &str)] = &[
         "managed background work",
     ),
     ("concurrent_fanout", "job handles"),
-    (
-        "concurrent_each_caller_cancel_joins",
-        "structured concurrency",
-    ),
+    ("concurrent_each_caller_cancel_joins", "type Job"),
     (
         "concurrent_each_fail_fast_cancels_and_joins",
         "managed completion outcomes",
@@ -49,10 +46,7 @@ const EXCLUDED: &[(&str, &str)] = &[
         "managed completion outcomes",
     ),
     ("concurrent_each_ordered", "managed completion outcomes"),
-    (
-        "concurrent_each_settled_caller_cancel_joins",
-        "structured concurrency",
-    ),
+    ("concurrent_each_settled_caller_cancel_joins", "type Job"),
     (
         "concurrent_each_settled_ordered",
         "managed completion outcomes",
@@ -119,7 +113,8 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("thread_run_throwable", "managed native threads"),
     ("transfer_resource", "resource transfer"),
     ("typed_channel_basic", "type Channel"),
-    ("universal_to_string", "structured concurrency"),
+    ("universal_to_string", "type Channel"),
+    ("no_entrypoint", "file-body entrypoints"),
     (
         "unsafe_journal_commit_durable_before_commit_block",
         "`unsafe` journal blocks",

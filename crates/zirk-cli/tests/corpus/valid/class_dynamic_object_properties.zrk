@@ -9,3 +9,4 @@ fn main(): Void {
     inmut name: String = open.name as String;
     stdout.println(name);
 }
+main();

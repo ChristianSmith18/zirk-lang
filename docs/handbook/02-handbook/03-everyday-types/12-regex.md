@@ -32,9 +32,9 @@ inmut broken = re'[a-z'; // error: unclosed character class
 ```zirk
 inmut digit = re'[0-9]+';
 
-digit.matches("2026");  // true
+digit.matches("2026"); // true
 digit.matches("42abc"); // false
-digit.matches("");      // false
+digit.matches(""); // false
 ```
 
 ## Finding a substring
@@ -149,8 +149,8 @@ guarantees linear-time matching (no backreferences or unsafe lookbehind).
 
 ```zirk
 inmut digit = re'[0-9]+';
-digit.matches("2026");          // true
-digit.replace("Room 42, floor 7", "X");  // "Room X, floor X"
+digit.matches("2026"); // true
+digit.replace("Room 42, floor 7", "X"); // "Room X, floor X"
 
 inmut date = re'(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})';
 match date.find("Log: 2026-09-05") {

@@ -20,11 +20,11 @@ Supported suffixes: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`.
 ## Arithmetic and printing
 
 ```zirk
-inmut total = 2h + 30m;      // 2h30m
-inmut scaled = 3 * 90s;      // 270s
-inmut ratio = 3h / 30m;      // 6.0 (Float)
+inmut total = 2h + 30m; // 2h30m
+inmut scaled = 3 * 90s; // 270s
+inmut ratio = 3h / 30m; // 6.0 (Float)
 
-stdout.println(total);       // prints a human-readable form
+stdout.println(total); // prints a human-readable form
 stdout.println("wait {total}");
 ```
 
@@ -59,9 +59,9 @@ component, rounding, formatting, and `std.time` surface is documented in
 ### Examples
 
 ```zirk
-inmut total = 2h + 30m;         // 2h30m
-inmut scaled = 3 * 90s;         // 270s
-inmut ratio = 3h / 30m;         // 6.0 (Float)
+inmut total = 2h + 30m; // 2h30m
+inmut scaled = 3 * 90s; // 270s
+inmut ratio = 3h / 30m; // 6.0 (Float)
 stdout.println("wait {total}");
 ```
 

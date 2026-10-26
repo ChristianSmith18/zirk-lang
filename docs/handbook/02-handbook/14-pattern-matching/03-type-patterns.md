@@ -3,14 +3,19 @@
 Type patterns select and narrow a value according to its runtime-observable type contract.
 
 ```zirk
-match value {
-    String(text) => stdout.println(text);
-    Int32(number) => stdout.println("{number}");
-    _ { stdout.println("unsupported"); }
+class Animal { }
+class Dog extends Animal { }
+
+fn describe(value: Animal): String {
+    if value is Dog { return "dog"; }
+    return "animal";
 }
 ```
 
-Inside a branch, the bound value has the narrowed type. The compiler must reject impossible or shadowed patterns and preserve safety across generics and native boundaries.
+Inside a successful branch, the tested value has the narrowed type. The
+compiler rejects impossible tests and preserves declared types after the
+branch. A type test requires a runtime-observable nominal type such as a class,
+contract, or enum; scalar types such as `String` do not have runtime type tags.
 
 Use algebraic enums instead when the set of alternatives is closed and owned by the model; they provide stronger exhaustiveness.
 

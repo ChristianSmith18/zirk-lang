@@ -133,6 +133,42 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .map(|(index, instance)| specialize_enum(&checked, instance, index))
         .collect();
     checked.enums.extend(specialized_enums);
+
+    // Executable scalar unions use the tagged-enum bridge. Each normalized
+    // member keeps a canonical tag even when alternatives share one physical
+    // payload type. Source aliases travel as diagnostic metadata, not as ABI
+    // identity.
+    for (union_id, members) in checked.unions.iter().enumerate() {
+        // `UnionTypeLayout` canonicalizes alternatives before assigning tags.
+        // Build the bridge enum in that exact order so each tag's payload
+        // type agrees with the ABI descriptor even when source order differs.
+        let mut canonical_members = members.iter().copied().collect::<Vec<_>>();
+        canonical_members.sort_by_key(|member| union_member_canonical_key(*member, &checked));
+        let variants = canonical_members
+            .iter()
+            .enumerate()
+            .map(|(index, member)| EnumVariantInfo {
+                name: format!("Member{index}"),
+                associated: vec![AssociatedFieldInfo {
+                    name: "value".into(),
+                    // The bridge enum describes the physical payload type.
+                    // Singleton alternatives retain their more precise
+                    // semantic identity in the union metadata and runtime
+                    // tag, while sharing their scalar storage type here.
+                    ty: Type::of(union_member_storage_base(*member, &checked)),
+                }],
+                mapping: None,
+                span: Span::empty(0),
+            })
+            .collect();
+        checked.enums.push(EnumType {
+            name: format!("$Union{union_id}"),
+            variants,
+            type_params: Vec::new(),
+            shared: false,
+            span: Span::empty(0),
+        });
+    }
     let checked = &checked;
 
     // The layouts come first: a function that builds an object needs the
@@ -324,6 +360,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                     name: e.name.clone(),
                     fields: Vec::new(),
                     variants: Vec::new(),
+                    union_layout: None,
                 };
             }
 
@@ -344,6 +381,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 name: e.name.clone(),
                 fields,
                 variants,
+                union_layout: None,
             }
         })
         .collect();
@@ -368,6 +406,48 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         enums,
         ..Module::default()
     };
+    let union_representation_base = module.enums.len() - checked.unions.len();
+    for (union_id, members) in checked.unions.iter().enumerate() {
+        let (alternatives, canonical_keys): (Vec<_>, Vec<_>) = members
+            .iter()
+            .map(|member| {
+                (
+                    union_member_ir_type(*member, instance_base, enum_instance_base, checked),
+                    union_member_canonical_key(*member, checked),
+                )
+            })
+            .unzip();
+        let layout =
+            crate::UnionTypeLayout::with_canonical_alternatives(alternatives, canonical_keys)
+                .expect("the checker admits only unions with portable scalar alternatives")
+                .with_source_aliases(
+                    if members
+                        .iter()
+                        .any(|member| matches!(member, Base::Param(_)))
+                    {
+                        // A symbolic template has no package ABI fingerprint;
+                        // each concrete specialization receives its own
+                        // canonical layout below.
+                        Vec::new()
+                    } else {
+                        checked
+                            .union_aliases
+                            .get(&(union_id as u32))
+                            .cloned()
+                            .unwrap_or_default()
+                    },
+                )
+                .with_representation_layout((union_representation_base + union_id) as u32);
+        let interned = module
+            .intern_union_type(layout)
+            .expect("each checked union has one canonical executable representation");
+        if let Ok(descriptor) = module.union_layout_descriptor(interned) {
+            let representation = module.union_types[interned as usize]
+                .representation_layout
+                .expect("checked union has a bridge representation");
+            module.enums[representation as usize].union_layout = Some(descriptor);
+        }
+    }
     module.project_globals = checked
         .project_globals
         .iter()
@@ -2784,10 +2864,10 @@ fn specialize_generic_functions(
         if signature.type_params.is_empty() {
             continue;
         }
-        let Some(declaration) = declarations
-            .iter()
-            .find(|function| function.name.name == call.callable)
-        else {
+        let source_name = call.callable.rsplit('.').next().unwrap_or(&call.callable);
+        let Some(declaration) = declarations.iter().find(|function| {
+            function.name.name == source_name && function.name.span.file == signature.span.file
+        }) else {
             // Generic methods use a different symbol and receiver ABI; they
             // remain gated until their class-aware specialization lands.
             continue;
@@ -2824,12 +2904,12 @@ fn specialize_generic_functions(
             .params
             .into_iter()
             .map(|mut parameter| {
-                parameter.ty = substitute_specialized_type(checked, parameter.ty, &substitution);
+                parameter.ty = materialize_specialized_type(checked, parameter.ty, &substitution);
                 parameter
             })
             .collect();
         specialized_signature.returns =
-            substitute_specialized_type(checked, specialized_signature.returns, &substitution);
+            materialize_specialized_type(checked, specialized_signature.returns, &substitution);
         if specialized_signature
             .params
             .iter()
@@ -2969,6 +3049,79 @@ fn materialize_specialized_type(
                         id as usize
                     });
                 Base::EnumInstance(concrete as u32)
+            }
+        }
+        Base::Union(id) => {
+            let Some(members) = checked.unions.get(id as usize).cloned() else {
+                return ty;
+            };
+            let mut concrete = Vec::new();
+            for member in members {
+                let resolved =
+                    materialize_specialized_type(checked, Type::of(member), substitution);
+                if type_contains_param(checked, resolved, &mut HashSet::new()) {
+                    return ty;
+                }
+                match resolved.base {
+                    Base::Union(nested) => {
+                        if let Some(nested_members) = checked.unions.get(nested as usize) {
+                            for nested_member in nested_members {
+                                if !concrete.contains(nested_member) {
+                                    concrete.push(*nested_member);
+                                }
+                            }
+                        }
+                    }
+                    Base::Never => {}
+                    base if !concrete.contains(&base) => concrete.push(base),
+                    _ => {}
+                }
+            }
+            match concrete.len() {
+                0 => Base::Never,
+                1 => {
+                    let resolved = Type::of(concrete[0]);
+                    return if ty.nullable || resolved.nullable {
+                        resolved.as_nullable()
+                    } else {
+                        resolved
+                    };
+                }
+                _ => {
+                    let existing = checked.unions.iter().position(|candidate| {
+                        candidate.len() == concrete.len()
+                            && candidate.iter().all(|member| concrete.contains(member))
+                    });
+                    let union_id = existing.unwrap_or_else(|| {
+                        concrete.sort_by_key(|member| union_member_canonical_key(*member, checked));
+                        let union_id = checked.unions.len() as u32;
+                        checked.unions.push(concrete);
+                        union_id as usize
+                    });
+                    Base::Union(union_id as u32)
+                }
+            }
+        }
+        Base::Shape(id) => {
+            let Some(mut shape) = checked.structural_types.get(id as usize).cloned() else {
+                return ty;
+            };
+            for property in &mut shape.properties {
+                property.ty = materialize_specialized_type(checked, property.ty, substitution);
+            }
+            if checked.structural_types.get(id as usize) == Some(&shape) {
+                Base::Shape(id)
+            } else {
+                let shape_id = checked
+                    .structural_types
+                    .iter()
+                    .position(|candidate| *candidate == shape)
+                    .unwrap_or_else(|| {
+                        let shape_id = checked.structural_types.len() as u32;
+                        checked.structural_types.push(shape);
+                        shape_id as usize
+                    });
+                Base::Shape(shape_id as u32)
             }
         }
         _ => return ty,
@@ -3261,6 +3414,15 @@ fn type_contains_param(checked: &CheckedProgram, ty: Type, seen: &mut HashSet<(u
             checked.unions[id as usize]
                 .iter()
                 .any(|base| contains(Type::of(*base), seen))
+        }
+        Base::Shape(id) => {
+            if !seen.insert((4, id)) {
+                return false;
+            }
+            checked.structural_types[id as usize]
+                .properties
+                .iter()
+                .any(|property| contains(property.ty, seen))
         }
         _ => false,
     }
@@ -3725,6 +3887,113 @@ fn surface_name(interned: &str) -> &str {
 /// `enum_instance_base` is the same idea for `specialize_enum`'s copies —
 /// one per `checked.enum_instances` entry, so `Base::EnumInstance(id)` is
 /// always at `enum_instance_base + id` (roadmap task 13.5).
+/// Runtime payload representation for a union alternative. Literal types keep
+/// their precise semantic identity in union metadata while sharing the
+/// storage type of their immutable scalar value.
+fn union_member_ir_type(
+    member: Base,
+    instance_base: u32,
+    enum_instance_base: u32,
+    checked: &CheckedProgram,
+) -> IrType {
+    ir_type(
+        Type::of(union_member_storage_base(member, checked)),
+        instance_base,
+        enum_instance_base,
+        checked,
+    )
+}
+
+fn union_member_storage_base(member: Base, checked: &CheckedProgram) -> Base {
+    if matches!(member, Base::Param(_)) {
+        // This bridge entry is an unreachable generic template placeholder;
+        // specialized copies use the concrete substituted alternative.
+        return Base::Dynamic;
+    }
+    if let Base::Singleton(id) = member {
+        let value = checked
+            .singleton_values
+            .get(id as usize)
+            .expect("checked singleton alternative has a canonical value");
+        return match &value.value {
+            zirk_sema::constant_value::ConstValue::Boolean(_) => Base::Boolean,
+            zirk_sema::constant_value::ConstValue::Integer { width, .. }
+            | zirk_sema::constant_value::ConstValue::BigUnsigned { width, .. } => Base::Int(*width),
+            zirk_sema::constant_value::ConstValue::Decimal { .. } => Base::Decimal,
+            zirk_sema::constant_value::ConstValue::Float { width, .. } => Base::Float(*width),
+            zirk_sema::constant_value::ConstValue::String(_) => Base::String,
+            zirk_sema::constant_value::ConstValue::Char(_) => Base::Char,
+            zirk_sema::constant_value::ConstValue::Duration(_) => Base::Duration,
+            zirk_sema::constant_value::ConstValue::Date(_) => Base::Date,
+            zirk_sema::constant_value::ConstValue::Time(_) => Base::Time,
+            zirk_sema::constant_value::ConstValue::DateTime(_) => Base::DateTime,
+            zirk_sema::constant_value::ConstValue::Enum { enum_identity, .. } => checked
+                .enums
+                .iter()
+                .position(|enum_type| enum_type.name == *enum_identity)
+                .map(|id| Base::Enum(id as u32))
+                .unwrap_or_else(|| {
+                    panic!("enum singleton `{enum_identity}` has no checked enum type")
+                }),
+            _ => unreachable!("checker rejects unsupported singleton union alternatives"),
+        };
+    }
+    member
+}
+
+/// ID-free identity for scalar union alternatives. The semantic base tag is
+/// included because distinct source types such as `Date` and `Int64` share an
+/// IR storage type. Singleton identities use their portable constant encoding.
+fn union_member_canonical_key(member: Base, checked: &CheckedProgram) -> Vec<u8> {
+    let (group, id) = match member {
+        Base::Int(width) => (1, width as u32),
+        Base::Float(width) => (2, width as u32),
+        Base::Decimal => (2, u32::MAX),
+        Base::Char => (3, 0),
+        Base::Boolean => (4, 0),
+        Base::String => (5, 0),
+        Base::Duration => (25, 0),
+        Base::Regex => (26, 0),
+        Base::Date => (32, 0),
+        Base::Time => (33, 0),
+        Base::DateTime => (34, 0),
+        Base::Enum(id) => {
+            let name = checked.enums[id as usize].name.as_bytes();
+            let mut key = vec![6];
+            key.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            key.extend_from_slice(name);
+            return key;
+        }
+        Base::Class(id) => {
+            let name = checked.classes[id as usize].name.as_bytes();
+            let mut key = vec![7];
+            key.extend_from_slice(&(name.len() as u64).to_be_bytes());
+            key.extend_from_slice(name);
+            return key;
+        }
+        Base::Singleton(id) => {
+            let mut singleton = vec![43];
+            singleton.extend_from_slice(&checked.singleton_values[id as usize].encode());
+            return singleton;
+        }
+        Base::Shape(id) => {
+            let mut key = vec![44];
+            let description = describe(Type::of(Base::Shape(id)), &TypeNamesResolver(checked));
+            key.extend_from_slice(description.as_bytes());
+            return key;
+        }
+        Base::Param(id) => {
+            let mut key = vec![45];
+            key.extend_from_slice(&id.to_be_bytes());
+            return key;
+        }
+        _ => unreachable!("checker rejects unsupported union alternatives"),
+    };
+    let mut key = vec![group];
+    key.extend_from_slice(&id.to_be_bytes());
+    key
+}
+
 fn ir_type(
     ty: Type,
     instance_base: u32,
@@ -3770,6 +4039,10 @@ fn ir_type(
         // representation of its own (roadmap task 11.3).
         Base::Enum(id) if enum_has_payload(checked, id) => IrType::Enum(id),
         Base::Enum(_) => IrType::Int(IntWidth::I32),
+        Base::Union(id) => {
+            let union_base = checked.enums.len() - checked.unions.len();
+            IrType::Union((union_base + id as usize) as u32)
+        }
         // A record is a value, not a reference: neither has
         // identity (roadmap task 11.5). An ordinary class is reached through
         // its address, which is its identity.
@@ -3878,7 +4151,34 @@ fn ir_type(
         Base::Range(_) => IrType::Range,
 
         Base::Tuple(id) => IrType::Value(id),
-        Base::Unknown | Base::Null | Base::Param(_) | Base::Union(_) => {
+        Base::Intersection(id) => {
+            let members = &checked.intersections[id as usize];
+            members
+                .iter()
+                .find_map(|member| match member {
+                    Base::Contract(id) => Some(IrType::Contract(*id)),
+                    Base::ContractInstance(instance) => Some(IrType::Contract(
+                        checked.contract_instances[*instance as usize].contract,
+                    )),
+                    _ => None,
+                })
+                .or_else(|| {
+                    members.iter().find_map(|member| match member {
+                        Base::Class(id) => Some(IrType::Object(*id)),
+                        Base::Instance(id) => Some(IrType::Object(instance_base + *id)),
+                        _ => None,
+                    })
+                })
+                .expect("the checker only lowers object-reference intersections")
+        }
+        Base::Singleton(id) => union_member_ir_type(
+            Base::Singleton(id),
+            instance_base,
+            enum_instance_base,
+            checked,
+        ),
+        Base::Shape(_) => IrType::ObjectAny,
+        Base::Unknown | Base::Null | Base::Param(_) => {
             unreachable!("lowering received a construct the checker should have rejected")
         }
     };
@@ -4273,6 +4573,36 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
             .map(|b| describe(Type::of(*b), self))
             .collect();
         format!("Union<{}>", parts.join(" | "))
+    }
+    fn intersection_name(&self, id: u32) -> String {
+        let parts: Vec<String> = self.0.intersections[id as usize]
+            .iter()
+            .map(|base| describe(Type::of(*base), self))
+            .collect();
+        format!("Intersection<{}>", parts.join(" & "))
+    }
+    fn shape_name(&self, id: u32) -> String {
+        let properties = &self.0.structural_types[id as usize].properties;
+        let parts: Vec<String> = properties
+            .iter()
+            .map(|property| {
+                format!(
+                    "{}{}{}: {}",
+                    if property.readonly { "inmut " } else { "" },
+                    property.name,
+                    if property.optional { "?" } else { "" },
+                    describe(property.ty, self)
+                )
+            })
+            .collect();
+        format!("{{ {} }}", parts.join(", "))
+    }
+    fn singleton_name(&self, id: u32) -> String {
+        self.0
+            .singleton_values
+            .get(id as usize)
+            .map(|value| format!("{}({:?})", value.type_identity, value.value))
+            .unwrap_or_else(|| "<singleton>".into())
     }
     fn pointer_element(&self, id: u32) -> Type {
         self.0.pointer_types[id as usize]
@@ -4758,318 +5088,432 @@ impl<'a> FunctionLowering<'a> {
     /// (roadmap task 11.1). A bare `Box` without arguments is the ordinary,
     /// unspecialized class it always was.
     fn resolve_written_type(&self, reference: &ast::TypeRef) -> Type {
-        // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d): the
-        // checker already interned every shape it type-checked
-        // (`Checker::intern_fn_type`, or a capturing lambda's own reserved
-        // id, design D14) — this looks the same shape up in
-        // `checked.fn_types` by structural equality rather than interning a
-        // second time, so it always lands on the exact id the checker used.
-        if let Some(function) = &reference.function {
-            let params: Vec<Type> = function
-                .params
-                .iter()
-                .map(|p| {
-                    let mut ty = self.resolve_written_type(&p.ty);
-                    ty.nullable = p.ty.nullable;
-                    ty
-                })
-                .collect();
-            let mut returns = self.resolve_written_type(&function.returns);
-            returns.nullable = function.returns.nullable;
-            let shape = FnType { params, returns };
-            let id = self
-                .checked
-                .fn_types
-                .iter()
-                .position(|f| *f == shape)
-                .expect("the checker interned every callable type it type-checked")
-                as u32;
-            return Type::of(Base::Function(id));
-        }
-
-        // `Pointer<T>` (roadmap Phase 4e, design D1): interned the same way
-        // `Fn(...) => R` above is — looked up in `checked.pointer_types` by
-        // structural equality, matching the exact id `Checker::resolve_pointer_type_ref`
-        // used, rather than interning a second, unrelated table here.
-        if reference.name == "Pointer" {
-            let pointee = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .pointer_types
-                .iter()
-                .position(|&t| t == pointee)
-                .expect("the checker interned every Pointer<T> it type-checked")
-                as u32;
-            return Type::of(Base::Pointer(id));
-        }
-
-        // `Job<T>` (`concurrent-blocks-and-timers`): the erased one-word branch
-        // handle. Looked up in `checked.job_types` by structural equality on
-        // the result `T`, matching the id `Checker::resolve_job_type_ref` used.
-        if reference.name == "Job" {
-            let result = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .job_types
-                .iter()
-                .position(|&t| t == result)
-                .expect("the checker interned every Job<T> it type-checked")
-                as u32;
-            return Type::of(Base::Job(id));
-        }
-
-        if reference.name == "Channel" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .channel_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every Channel<T> it type-checked")
-                as u32;
-            return Type::of(Base::Channel(id));
-        }
-
-        if reference.name == "Mutex" {
-            let payload = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .mutex_types
-                .iter()
-                .position(|&ty| ty == payload)
-                .expect("the checker interned every Mutex<T> it type-checked")
-                as u32;
-            return Type::of(Base::Mutex(id));
-        }
-
-        // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
-        // treatment as `Pointer<T>` above.
-        if reference.name == "Weak" {
-            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .weak_types
-                .iter()
-                .position(|&t| t == referent)
-                .expect("the checker interned every Weak<T> it type-checked")
-                as u32;
-            return Type::of(Base::Weak(id));
-        }
-
-        // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
-        // `fase-4e-native-slice`, design D1): same treatment as
-        // `Pointer<T>`/`Weak<T>` above.
-        if reference.name == "NativeSlice" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .native_slice_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every NativeSlice<T> it type-checked")
-                as u32;
-            return Type::of(Base::NativeSlice(id));
-        }
-        if reference.name == "NativeSliceMut" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .native_slice_mut_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every NativeSliceMut<T> it type-checked")
-                as u32;
-            return Type::of(Base::NativeSliceMut(id));
-        }
-
-        // `Dependent<T>` / `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
-        // design D1): same treatment as `Pointer<T>`/`Weak<T>` above.
-        if reference.name == "Dependent" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .dependent_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every Dependent<T> it type-checked")
-                as u32;
-            return Type::of(Base::Dependent(id));
-        }
-        if reference.name == "Pin" {
-            let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .pin_types
-                .iter()
-                .position(|&t| t == referent)
-                .expect("the checker interned every Pin<T> it type-checked")
-                as u32;
-            return Type::of(Base::Pin(id));
-        }
-
-        // `Array<T>` / `List<T>`: same interned-by-content treatment as slices.
-        if reference.name == "Array" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .array_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every Array<T> it type-checked")
-                as u32;
-            return Type::of(Base::Array(id));
-        }
-        if reference.name == "List" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .list_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every List<T> it type-checked")
-                as u32;
-            return Type::of(Base::List(id));
-        }
-
-        // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
-        // treatment — the checker already interned every shape.
-        if reference.name == "Map" {
-            let key = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let value = self.resolve_written_type_with_nullability(&reference.arguments[1]);
-            let id = self
-                .checked
-                .map_types
-                .iter()
-                .position(|t| t.key == key && t.value == value)
-                .expect("the checker interned every Map<K, V> it type-checked")
-                as u32;
-            return Type::of(Base::Map(id));
-        }
-        if reference.name == "Set" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .set_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every Set<T> it type-checked")
-                as u32;
-            return Type::of(Base::Set(id));
-        }
-
-        // `Range<T>` (roadmap Phase 7): same interned-by-content treatment —
-        // the element type the checker stored is resolved and matched back
-        // against `checked.range_types`.
-        if reference.name == "Range" {
-            let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
-            let id = self
-                .checked
-                .range_types
-                .iter()
-                .position(|&t| t == element)
-                .expect("the checker interned every Range<T> it type-checked")
-                as u32;
-            return Type::of(Base::Range(id));
-        }
-
-        // `Tuple<T...>` (roadmap Phase 3b): same interned-by-content treatment.
-        if reference.name == "Tuple" {
-            let elements: Vec<Type> = reference
-                .arguments
-                .iter()
-                .map(|a| self.resolve_written_type_with_nullability(a))
-                .collect();
-            let tuple = TupleType { elements };
-            let id = self
-                .checked
-                .tuple_types
-                .iter()
-                .position(|t| *t == tuple)
-                .expect("the checker interned every Tuple<T...> it type-checked")
-                as u32;
-            return Type::of(Base::Tuple(id));
-        }
-
-        let declared = self.declaration_of(&reference.name, reference.span);
-        if let Some(ty) = Type::from_name(&reference.name) {
-            return ty;
-        }
-        // A `type` alias is transparent (roadmap Phase 7): it expands to the
-        // target it was declared with, resolved here the same way the
-        // checker's own `resolve_type` does — cycles were already rejected
-        // there, so this cannot recurse forever.
-        if let Some(target) = self.checked.type_aliases.get(&declared).cloned() {
-            let mut resolved = self.resolve_written_type(&target);
-            resolved.nullable = reference.nullable;
-            return resolved;
-        }
-        if let Some(id) = self.checked.enums.iter().position(|e| e.name == declared) {
-            if reference.arguments.is_empty() {
-                return Type::of(Base::Enum(id as u32));
+        if let Some(value) = reference.value.as_ref().or_else(|| {
+            if let Some(ast::TypeExpr::Value { value, .. }) = reference.expression.as_deref() {
+                Some(value)
+            } else {
+                None
             }
-            let args: Vec<Type> = reference
-                .arguments
-                .iter()
-                .map(|a| self.resolve_written_type_with_nullability(a))
-                .collect();
-            let instance = self
+        }) {
+            let expression = match value {
+                ast::TypeValue::Int(value) => ast::Expr::Int(value.clone()),
+                ast::TypeValue::Float(value) => ast::Expr::Float(value.clone()),
+                ast::TypeValue::Duration(value) => ast::Expr::Duration(value.clone()),
+                ast::TypeValue::String(value) => ast::Expr::Str(value.clone()),
+                ast::TypeValue::Char(value) => ast::Expr::Char(value.clone()),
+                ast::TypeValue::Boolean(value) => ast::Expr::Bool(value.clone()),
+                ast::TypeValue::Null(value) => ast::Expr::Null(value.clone()),
+            };
+            let constant = zirk_sema::const_eval::evaluate_with_enum_variants(
+                &expression,
+                &mut zirk_sema::type_budget::TypeComputationBudget::default(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+            .expect("a checked literal type evaluates during lowering");
+            let id = self
                 .checked
-                .enum_instances
+                .singleton_values
                 .iter()
-                .position(|gi| gi.enum_id == id as u32 && gi.args == args)
-                .expect("the checker interned every instantiation it type-checked");
-            return Type::of(Base::EnumInstance(instance as u32));
+                .position(|candidate| *candidate == constant)
+                .expect("the checker interned every singleton literal it type-checked");
+            return Type::of(Base::Singleton(id as u32));
         }
-        if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
-            let class = &self.checked.classes[id];
-            let mut args: Vec<Type> = reference
-                .arguments
-                .iter()
-                .map(|a| self.resolve_written_type_with_nullability(a))
-                .collect();
 
-            // Apply trailing type-parameter defaults at use sites the same way
-            // the checker does (`resolve_class_reference`): `Box<>` with a
-            // default `T = Int32` is the same `Base::Instance` as `Box<Int32>`.
-            let params = &class.type_params;
-            if args.len() < params.len() {
-                let can_default = params[args.len()..]
+        if let Some(ast::TypeExpr::Constant { expression, .. }) = reference.expression.as_deref() {
+            let constant = zirk_sema::const_eval::evaluate_with_enum_variants(
+                expression,
+                &mut zirk_sema::type_budget::TypeComputationBudget::default(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            )
+            .expect("a checked built-in constant type evaluates during lowering");
+            let id = self
+                .checked
+                .singleton_values
+                .iter()
+                .position(|candidate| *candidate == constant)
+                .expect("the checker interned every constant singleton type it type-checked");
+            return Type::of(Base::Singleton(id as u32));
+        }
+
+        if let Some(ast::TypeExpr::Object { properties, .. }) = reference.expression.as_deref() {
+            let mut shape = zirk_sema::StructuralType {
+                properties: properties
                     .iter()
-                    .all(|&p| self.checked.type_params[p as usize].default.is_some());
-                if can_default {
-                    let mut subst: Vec<(u32, Type)> =
-                        params.iter().copied().zip(args.iter().copied()).collect();
-                    for &param in &params[args.len()..] {
-                        let default = self.checked.type_params[param as usize]
-                            .default
-                            .expect("the checker only omits arguments when a default exists");
-                        let ty = substitute_generic_type(self.checked, default, &subst);
-                        args.push(ty);
-                        subst.push((param, ty));
+                    .map(|property| zirk_sema::StructuralProperty {
+                        name: property.name.name.clone(),
+                        ty: self.resolve_written_type_with_nullability(&property.ty),
+                        optional: property.optional,
+                        readonly: property.readonly,
+                    })
+                    .collect(),
+            };
+            shape
+                .properties
+                .sort_by(|left, right| left.name.cmp(&right.name));
+            let id = self
+                .checked
+                .structural_types
+                .iter()
+                .position(|candidate| *candidate == shape)
+                .expect("the checker interned every structural type it type-checked");
+            return Type::of(Base::Shape(id as u32));
+        }
+
+        // Transparent aliases can target a source union. Resolve every member
+        // against the checker's already-normalized table so layout ids stay
+        // identical across signatures, fields, collections, and captures.
+        if !reference.union_with.is_empty() {
+            let mut first = reference.clone();
+            first.union_with.clear();
+            first.expression = None;
+            let members = std::iter::once(first)
+                .chain(reference.union_with.iter().cloned())
+                .map(|member| self.resolve_written_type(&member))
+                .collect::<Vec<_>>();
+            let mut nullable = false;
+            let mut bases = Vec::new();
+            for member in members {
+                nullable |= member.nullable || member.base == Base::Null;
+                match member.base {
+                    Base::Union(id) => {
+                        bases.extend(self.checked.unions[id as usize].iter().copied())
                     }
+                    Base::Null => {}
+                    base => bases.push(base),
                 }
             }
-
-            if args.is_empty() {
-                return Type::of(Base::Class(id as u32));
-            }
-            let instance = self
-                .checked
-                .generic_instances
+            self.checked
+                .unions
                 .iter()
-                .position(|gi| gi.class == id as u32 && gi.args == args)
-                .expect("the checker interned every instantiation it type-checked");
-            return Type::of(Base::Instance(instance as u32));
+                .position(|candidate| *candidate == bases)
+                .map(|id| {
+                    let mut ty = Type::of(Base::Union(id as u32));
+                    ty.nullable = nullable || reference.nullable;
+                    ty
+                })
+                .unwrap_or_else(|| {
+                    panic!("the checker did not intern source union members {bases:?}")
+                })
+        } else {
+            // `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d): the
+            // checker already interned every shape it type-checked
+            // (`Checker::intern_fn_type`, or a capturing lambda's own reserved
+            // id, design D14) — this looks the same shape up in
+            // `checked.fn_types` by structural equality rather than interning a
+            // second time, so it always lands on the exact id the checker used.
+            if let Some(function) = &reference.function {
+                let params: Vec<Type> = function
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let mut ty = self.resolve_written_type(&p.ty);
+                        ty.nullable = p.ty.nullable;
+                        ty
+                    })
+                    .collect();
+                let mut returns = self.resolve_written_type(&function.returns);
+                returns.nullable = function.returns.nullable;
+                let shape = FnType { params, returns };
+                let id = self
+                    .checked
+                    .fn_types
+                    .iter()
+                    .position(|f| *f == shape)
+                    .expect("the checker interned every callable type it type-checked")
+                    as u32;
+                return Type::of(Base::Function(id));
+            }
+
+            // `Pointer<T>` (roadmap Phase 4e, design D1): interned the same way
+            // `Fn(...) => R` above is — looked up in `checked.pointer_types` by
+            // structural equality, matching the exact id `Checker::resolve_pointer_type_ref`
+            // used, rather than interning a second, unrelated table here.
+            if reference.name == "Pointer" {
+                let pointee = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .pointer_types
+                    .iter()
+                    .position(|&t| t == pointee)
+                    .expect("the checker interned every Pointer<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Pointer(id));
+            }
+
+            // `Job<T>` (`concurrent-blocks-and-timers`): the erased one-word branch
+            // handle. Looked up in `checked.job_types` by structural equality on
+            // the result `T`, matching the id `Checker::resolve_job_type_ref` used.
+            if reference.name == "Job" {
+                let result = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .job_types
+                    .iter()
+                    .position(|&t| t == result)
+                    .expect("the checker interned every Job<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Job(id));
+            }
+
+            if reference.name == "Channel" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .channel_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Channel<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Channel(id));
+            }
+
+            if reference.name == "Mutex" {
+                let payload = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .mutex_types
+                    .iter()
+                    .position(|&ty| ty == payload)
+                    .expect("the checker interned every Mutex<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Mutex(id));
+            }
+
+            // `Weak<T>` (roadmap Phase 4e, `fase-4e-weak`, design D1): same
+            // treatment as `Pointer<T>` above.
+            if reference.name == "Weak" {
+                let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .weak_types
+                    .iter()
+                    .position(|&t| t == referent)
+                    .expect("the checker interned every Weak<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Weak(id));
+            }
+
+            // `NativeSlice<T>`/`NativeSliceMut<T>` (roadmap Phase 4e,
+            // `fase-4e-native-slice`, design D1): same treatment as
+            // `Pointer<T>`/`Weak<T>` above.
+            if reference.name == "NativeSlice" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .native_slice_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every NativeSlice<T> it type-checked")
+                    as u32;
+                return Type::of(Base::NativeSlice(id));
+            }
+            if reference.name == "NativeSliceMut" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .native_slice_mut_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every NativeSliceMut<T> it type-checked")
+                    as u32;
+                return Type::of(Base::NativeSliceMut(id));
+            }
+
+            // `Dependent<T>` / `Pin<T>` (roadmap Phase 4e, `phase-4e-memory`,
+            // design D1): same treatment as `Pointer<T>`/`Weak<T>` above.
+            if reference.name == "Dependent" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .dependent_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Dependent<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Dependent(id));
+            }
+            if reference.name == "Pin" {
+                let referent = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .pin_types
+                    .iter()
+                    .position(|&t| t == referent)
+                    .expect("the checker interned every Pin<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Pin(id));
+            }
+
+            // `Array<T>` / `List<T>`: same interned-by-content treatment as slices.
+            if reference.name == "Array" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .array_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Array<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Array(id));
+            }
+            if reference.name == "List" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .list_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the checker did not intern List element {element:?}; available: {:?}",
+                            self.checked.list_types
+                        )
+                    }) as u32;
+                return Type::of(Base::List(id));
+            }
+
+            // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
+            // treatment — the checker already interned every shape.
+            if reference.name == "Map" {
+                let key = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let value = self.resolve_written_type_with_nullability(&reference.arguments[1]);
+                let id = self
+                    .checked
+                    .map_types
+                    .iter()
+                    .position(|t| t.key == key && t.value == value)
+                    .expect("the checker interned every Map<K, V> it type-checked")
+                    as u32;
+                return Type::of(Base::Map(id));
+            }
+            if reference.name == "Set" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .set_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Set<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Set(id));
+            }
+
+            // `Range<T>` (roadmap Phase 7): same interned-by-content treatment —
+            // the element type the checker stored is resolved and matched back
+            // against `checked.range_types`.
+            if reference.name == "Range" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .range_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Range<T> it type-checked")
+                    as u32;
+                return Type::of(Base::Range(id));
+            }
+
+            // `Tuple<T...>` (roadmap Phase 3b): same interned-by-content treatment.
+            if reference.name == "Tuple" {
+                let elements: Vec<Type> = reference
+                    .arguments
+                    .iter()
+                    .map(|a| self.resolve_written_type_with_nullability(a))
+                    .collect();
+                let tuple = TupleType { elements };
+                let id = self
+                    .checked
+                    .tuple_types
+                    .iter()
+                    .position(|t| *t == tuple)
+                    .expect("the checker interned every Tuple<T...> it type-checked")
+                    as u32;
+                return Type::of(Base::Tuple(id));
+            }
+
+            let declared = self.declaration_of(&reference.name, reference.span);
+            if let Some(ty) = Type::from_name(&reference.name) {
+                return ty;
+            }
+            // A `type` alias is transparent (roadmap Phase 7): it expands to the
+            // target it was declared with, resolved here the same way the
+            // checker's own `resolve_type` does — cycles were already rejected
+            // there, so this cannot recurse forever.
+            if let Some(target) = self.checked.type_aliases.get(&declared).cloned() {
+                let mut resolved = self.resolve_written_type(&target);
+                resolved.nullable = reference.nullable;
+                return resolved;
+            }
+            if let Some(id) = self.checked.enums.iter().position(|e| e.name == declared) {
+                if reference.arguments.is_empty() {
+                    return Type::of(Base::Enum(id as u32));
+                }
+                let args: Vec<Type> = reference
+                    .arguments
+                    .iter()
+                    .map(|a| self.resolve_written_type_with_nullability(a))
+                    .collect();
+                let instance = self
+                    .checked
+                    .enum_instances
+                    .iter()
+                    .position(|gi| gi.enum_id == id as u32 && gi.args == args)
+                    .expect("the checker interned every instantiation it type-checked");
+                return Type::of(Base::EnumInstance(instance as u32));
+            }
+            if let Some(id) = self.checked.classes.iter().position(|c| c.name == declared) {
+                let class = &self.checked.classes[id];
+                let mut args: Vec<Type> = reference
+                    .arguments
+                    .iter()
+                    .map(|a| self.resolve_written_type_with_nullability(a))
+                    .collect();
+
+                // Apply trailing type-parameter defaults at use sites the same way
+                // the checker does (`resolve_class_reference`): `Box<>` with a
+                // default `T = Int32` is the same `Base::Instance` as `Box<Int32>`.
+                let params = &class.type_params;
+                if args.len() < params.len() {
+                    let can_default = params[args.len()..]
+                        .iter()
+                        .all(|&p| self.checked.type_params[p as usize].default.is_some());
+                    if can_default {
+                        let mut subst: Vec<(u32, Type)> =
+                            params.iter().copied().zip(args.iter().copied()).collect();
+                        for &param in &params[args.len()..] {
+                            let default = self.checked.type_params[param as usize]
+                                .default
+                                .expect("the checker only omits arguments when a default exists");
+                            let ty = substitute_generic_type(self.checked, default, &subst);
+                            args.push(ty);
+                            subst.push((param, ty));
+                        }
+                    }
+                }
+
+                if args.is_empty() {
+                    return Type::of(Base::Class(id as u32));
+                }
+                let instance = self
+                    .checked
+                    .generic_instances
+                    .iter()
+                    .position(|gi| gi.class == id as u32 && gi.args == args)
+                    .expect("the checker interned every instantiation it type-checked");
+                return Type::of(Base::Instance(instance as u32));
+            }
+            if let Some(id) = self
+                .checked
+                .contracts
+                .iter()
+                .position(|c| c.name == declared)
+            {
+                return Type::of(Base::Contract(id as u32));
+            }
+            unreachable!("a verified program only names known types")
         }
-        if let Some(id) = self
-            .checked
-            .contracts
-            .iter()
-            .position(|c| c.name == declared)
-        {
-            return Type::of(Base::Contract(id as u32));
-        }
-        unreachable!("a verified program only names known types")
     }
 
     /// Lowers an expression whose value must survive lowering a later one.
@@ -5136,6 +5580,15 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    fn union_id_for_ir_type(&self, ty: IrType) -> Option<u32> {
+        let IrType::Union(enum_id) = ty.unwrapped() else {
+            return None;
+        };
+        self.module
+            .union_type_for_representation(enum_id)
+            .map(|(id, _)| id)
+    }
+
     /// Lowers an expression into the type its destination expects.
     ///
     /// `T` is accepted where `T?` is expected, `null` fits any nullable type,
@@ -5150,6 +5603,59 @@ impl<'a> FunctionLowering<'a> {
             && self.checked.first_plans.contains_key(&call.span)
         {
             return self.lower_concurrent_first(call, call.span);
+        }
+        if let Some(union_id) = self.union_id_for_ir_type(expected)
+            && let Some(actual) = self.checked.expr_types.get(&expr.span()).copied()
+        {
+            if matches!(actual.base, Base::Union(id) if id == union_id) {
+                let value = self.lower_expr(expr);
+                if self.type_of_operand(value) == expected {
+                    return value;
+                }
+                if let IrType::Nullable(base) = expected
+                    && self.type_of_operand(value) == base.inner()
+                {
+                    return self.emit(InstKind::Wrap { base, value }, expected, expr.span());
+                }
+                return value;
+            }
+            if matches!(actual.base, Base::Null) {
+                // The nullable conversion below creates the absent union
+                // value with its explicit present flag.
+            } else {
+                let members = &self.checked.unions[union_id as usize];
+                let actual_member = actual.without_null().base;
+                if let Some(member) = members.iter().find(|member| **member == actual_member) {
+                    let canonical = union_member_canonical_key(*member, self.checked);
+                    let layout = &self.module.union_types[union_id as usize];
+                    let Some(variant) = layout
+                        .canonical_alternatives
+                        .iter()
+                        .position(|key| *key == canonical)
+                    else {
+                        unreachable!("checked union member has one canonical IR tag")
+                    };
+                    let payload_type = layout.alternatives[variant];
+                    let payload = self.lower_expr_as(expr, payload_type);
+                    let IrType::Union(_) = expected.unwrapped() else {
+                        unreachable!("a checked union uses a typed union IR value")
+                    };
+                    let value = self.emit(
+                        InstKind::UnionInject {
+                            union_id,
+                            alternative: variant as u32,
+                            payload,
+                        },
+                        expected.unwrapped(),
+                        expr.span(),
+                    );
+                    return if let IrType::Nullable(base) = expected {
+                        self.emit(InstKind::Wrap { base, value }, expected, expr.span())
+                    } else {
+                        value
+                    };
+                }
+            }
         }
         // `std.io::Stringifiable` is a compiler-provided trait, not an
         // erased `String` parameter.  Values that do not already have the
@@ -5274,7 +5780,20 @@ impl<'a> FunctionLowering<'a> {
             // extended first (both mirror the non-nullable branch below),
             // since `Wrap` itself only adds the present flag, not the
             // widening.
-            let value = if actual == base.inner() {
+            let value = if actual == IrType::Dynamic
+                && self
+                    .checked
+                    .expr_types
+                    .get(&expr.span())
+                    .is_some_and(|ty| self.ir_type(*ty) == base.inner())
+                && let Some(tag) = base.inner().dynamic_tag()
+            {
+                self.emit(
+                    InstKind::DynamicUnbox { value, tag },
+                    base.inner(),
+                    expr.span(),
+                )
+            } else if actual == base.inner() {
                 value
             } else if matches!(
                 actual,
@@ -5297,6 +5816,22 @@ impl<'a> FunctionLowering<'a> {
         let actual = self.type_of_operand(value);
         if actual == expected {
             return value;
+        }
+
+        // A Dynamic value narrowed by a successful `value is Type` test or
+        // `as? Type != null` still occupies a Dynamic slot. The checked
+        // branch proves the exact tag, so materialize the concrete payload
+        // only when the expression's flow type agrees with the destination.
+        if actual == IrType::Dynamic
+            && !matches!(expected, IrType::Contract(_))
+            && self
+                .checked
+                .expr_types
+                .get(&expr.span())
+                .is_some_and(|ty| self.ir_type(*ty) == expected)
+            && let Some(tag) = expected.dynamic_tag()
+        {
+            return self.emit(InstKind::DynamicUnbox { value, tag }, expected, expr.span());
         }
 
         // `Dynamic` is an explicit tagged container.  Assignability to it is
@@ -6036,6 +6571,7 @@ impl<'a> FunctionLowering<'a> {
             | IrType::Dynamic
             | IrType::Value(_)
             | IrType::Enum(_)
+            | IrType::Union(_)
             // A `Pointer<T>` field is unreachable in a verified program: the
             // checker's escape rule (design D4) rejects every assignment of
             // a `Pointer<T>` value into a field, so nothing here ever needs
@@ -8628,6 +9164,30 @@ impl<'a> FunctionLowering<'a> {
         let span = expr.span();
 
         match expr {
+            ast::Expr::Binary(e) if e.op == ast::BinaryOp::In => {
+                let object = self.lower_expr(&e.right);
+                let object_ty = self.type_of(&e.right, e.right.span());
+                let object = if object_ty == IrType::ObjectAny {
+                    object
+                } else {
+                    self.emit(InstKind::Retype(object), IrType::ObjectAny, e.right.span())
+                };
+                let key = self.lower_expr_as(&e.left, IrType::String);
+                let found = self.emit(
+                    InstKind::ObjectGet { object, key },
+                    IrType::Nullable(Nullable::Dynamic),
+                    span,
+                );
+                let absent = self.emit(InstKind::IsNull(found), IrType::Boolean, span);
+                self.emit(
+                    InstKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: absent,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            }
             ast::Expr::Int(lit) => {
                 let ty = self
                     .checked
@@ -8728,6 +9288,36 @@ impl<'a> FunctionLowering<'a> {
                         let payload = self.module.mutex_types[mutex_type as usize];
                         let view = self.emit(InstKind::Load(slot), ty, span);
                         self.emit(InstKind::BorrowViewLoad { view }, payload, span)
+                    } else if let IrType::Union(_) = ty
+                        && let Some(narrowed) = self.checked.expr_types.get(&span).copied()
+                        && !narrowed.is_unknown()
+                        && matches!(
+                            narrowed.without_null().base,
+                            Base::Class(_) | Base::Shape(_)
+                        )
+                        && let Some(union_id) = self.union_id_for_ir_type(ty)
+                    {
+                        let key =
+                            union_member_canonical_key(narrowed.without_null().base, self.checked);
+                        let layout = &self.module.union_types[union_id as usize];
+                        if let Some(alternative) = layout
+                            .canonical_alternatives
+                            .iter()
+                            .position(|candidate| *candidate == key)
+                        {
+                            let loaded = self.emit(InstKind::Load(slot), ty, span);
+                            self.emit(
+                                InstKind::UnionProject {
+                                    value: loaded,
+                                    union_id,
+                                    alternative: alternative as u32,
+                                },
+                                self.ir_type(narrowed),
+                                span,
+                            )
+                        } else {
+                            self.emit(InstKind::Load(slot), ty, span)
+                        }
                     } else {
                         self.emit(InstKind::Load(slot), ty, span)
                     }
@@ -8818,6 +9408,18 @@ impl<'a> FunctionLowering<'a> {
 
             ast::Expr::Binary(e) if e.op == ast::BinaryOp::Coalesce => self.lower_coalesce(e, span),
 
+            ast::Expr::Binary(e) if self.checked.type_test_targets.contains_key(&e.span) => {
+                self.lower_type_test(e, span)
+            }
+
+            ast::Expr::Binary(e)
+                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && (matches!(&*e.left, ast::Expr::Null(_))
+                        || matches!(&*e.right, ast::Expr::Null(_))) =>
+            {
+                self.lower_null_comparison(e, span)
+            }
+
             // `&&` and `||` must not evaluate their right operand when the
             // left already decides the answer.
             ast::Expr::Binary(e) if matches!(e.op, ast::BinaryOp::And | ast::BinaryOp::Or) => {
@@ -8879,11 +9481,14 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Binary(e)
-                if is_string_operator(
-                    self.type_of(&e.left, e.left.span()),
-                    self.type_of(&e.right, e.right.span()),
-                    e.op,
-                ) =>
+                if !(matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && (matches!(&*e.left, ast::Expr::Null(_))
+                        || matches!(&*e.right, ast::Expr::Null(_))))
+                    && is_string_operator(
+                        self.type_of(&e.left, e.left.span()),
+                        self.type_of(&e.right, e.right.span()),
+                        e.op,
+                    ) =>
             {
                 let held = self.lower_and_hold(&e.left, self.opens_blocks(&e.right));
                 let right = self.lower_expr(&e.right);
@@ -8907,6 +9512,11 @@ impl<'a> FunctionLowering<'a> {
             }
 
             ast::Expr::Binary(e) => {
+                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq) {
+                    if let Some(result) = self.lower_union_singleton_comparison(e, span) {
+                        return result;
+                    }
+                }
                 // The binary itself may introduce a guard branch (integer or
                 // `Float` arithmetic, `Shl`/`Shr`), in which case the left
                 // value has to be held in a slot so it survives to the block
@@ -11697,6 +12307,12 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_regex_match_group_call(e, span) {
                     return operand;
                 }
+                // Safe receiver dispatch must run before the ordinary
+                // contract/class call lowerers: their semantic receiver type
+                // still has the contract/class base even when nullable.
+                if let Some(operand) = self.lower_safe_method_call(e, span) {
+                    return operand;
+                }
                 if let Some(operand) = self.lower_contract_call(e, span) {
                     let ty = self.type_of_operand(operand);
                     return self.lower_throws_check(operand, ty, span);
@@ -11726,9 +12342,6 @@ impl<'a> FunctionLowering<'a> {
                 if let Some(operand) = self.lower_method_call(e, span) {
                     let ty = self.type_of_operand(operand);
                     return self.lower_throws_check(operand, ty, span);
-                }
-                if let Some(operand) = self.lower_safe_method_call(e, span) {
-                    return operand;
                 }
                 if let Some((enum_id, variant)) = self.variant_construction(e) {
                     return self.lower_variant_construction(e, enum_id, variant, span);
@@ -11787,6 +12400,7 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Lambda(e) => self.lower_lambda(e, span),
 
             ast::Expr::Cast(e) => self.lower_cast(e, span),
+            ast::Expr::Satisfies(e) => self.lower_expr(&e.expr),
 
             ast::Expr::Interpolated(e) => self.lower_interpolated(e, span),
 
@@ -17156,6 +17770,10 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_grouped_match(expr, span);
         }
 
+        if let Some(value) = self.lower_union_literal_match(expr, span) {
+            return value;
+        }
+
         let scrutinee_type = self.type_of(&expr.scrutinee, expr.scrutinee.span());
         let value = self.lower_expr(&expr.scrutinee);
 
@@ -17301,16 +17919,60 @@ impl<'a> FunctionLowering<'a> {
                     .get(template_id as usize)
                     .and_then(|e| e.discriminant(&v.variant.name))
                     .expect("the checker resolved this variant");
-                // A sibling `null` arm already narrowed a nullable scrutinee
-                // (`narrowed_type`) down to the bare enum this pattern
-                // destructures.
-                let IrType::Enum(module_id) = narrowed_type else {
-                    unreachable!("a variant pattern with bindings matches an enum with a payload")
+                // The checked arm type is the enum alternative selected from
+                // a heterogeneous union. Project it only after the variant
+                // test has established that the union tag matches.
+                let arm_semantic_type = self
+                    .checked
+                    .match_arm_types
+                    .get(&arm.pattern.span())
+                    .copied()
+                    .expect("checked variant arm has a refined semantic type");
+                let arm_ir_type = self.ir_type(arm_semantic_type);
+                let (module_id, object) = match narrowed_type {
+                    IrType::Union(_) => {
+                        let enum_id = match arm_ir_type {
+                            IrType::Enum(enum_id) => enum_id,
+                            _ => unreachable!("a union variant arm narrows to an enum payload"),
+                        };
+                        let union_id = self
+                            .union_id_for_ir_type(narrowed_type)
+                            .expect("union type has a canonical layout");
+                        let alternative = self.module.union_types[union_id as usize]
+                            .alternatives
+                            .iter()
+                            .position(|alternative| *alternative == arm_ir_type)
+                            .expect("refined enum is a union alternative");
+                        let union_value = self.load_scrutinee_narrowed(
+                            scrutinee,
+                            scrutinee_type,
+                            narrowed_type,
+                            span,
+                        );
+                        let object = self.emit(
+                            InstKind::UnionProject {
+                                value: union_value,
+                                union_id,
+                                alternative: alternative as u32,
+                            },
+                            arm_ir_type,
+                            span,
+                        );
+                        (enum_id, object)
+                    }
+                    IrType::Enum(enum_id) => {
+                        let object = self.load_scrutinee_narrowed(
+                            scrutinee,
+                            scrutinee_type,
+                            narrowed_type,
+                            span,
+                        );
+                        (enum_id, object)
+                    }
+                    _ => unreachable!("a variant pattern with bindings narrows to an enum"),
                 };
                 let indices =
                     self.module.enums[module_id as usize].variants[variant as usize].clone();
-                let object =
-                    self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
                 for (sub_pattern, index) in v.bindings.iter().zip(indices) {
                     let ast::Pattern::Binding(ident) = sub_pattern else {
                         continue;
@@ -17400,6 +18062,323 @@ impl<'a> FunctionLowering<'a> {
             // Nothing reads the result of a statement `match`; a placeholder
             // keeps the signature of `lower_expr` total.
             None => self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span),
+        }
+    }
+
+    /// Lowers the common literal/wildcard form of a union match through one
+    /// tag dispatch. The fallback chain remains responsible for patterns with
+    /// bindings, blocks, or semantics this compact path cannot represent.
+    fn lower_union_literal_match(&mut self, expr: &ast::MatchExpr, span: Span) -> Option<Operand> {
+        let scrutinee_type = self.type_of(&expr.scrutinee, expr.scrutinee.span());
+        let union_id = self.union_id_for_ir_type(scrutinee_type)?;
+        if scrutinee_type != scrutinee_type.unwrapped() || expr.arms.is_empty() {
+            return None;
+        }
+        let fallback_index = expr
+            .arms
+            .iter()
+            .position(|arm| arm.pattern.is_irrefutable());
+        if fallback_index.is_some_and(|index| index + 1 != expr.arms.len())
+            || expr
+                .arms
+                .iter()
+                .any(|arm| !matches!(arm.body, ast::ArmBody::Expr(_)))
+            || expr.arms[..fallback_index.unwrap_or(expr.arms.len())]
+                .iter()
+                .any(|arm| !Self::is_union_scalar_pattern(&arm.pattern))
+        {
+            return None;
+        }
+
+        let alternatives = self
+            .module
+            .union_types
+            .get(union_id as usize)?
+            .alternatives
+            .clone();
+        let sema_alternatives = self.checked.unions.get(union_id as usize)?;
+        if alternatives.len() != sema_alternatives.len() {
+            return None;
+        }
+        let layout = &self.module.union_types[union_id as usize];
+        let ordered_members = layout
+            .canonical_alternatives
+            .iter()
+            .map(|key| {
+                sema_alternatives
+                    .iter()
+                    .find(|base| union_member_canonical_key(**base, self.checked) == *key)
+                    .copied()
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        self.scopes.push(HashMap::new());
+        let result_type = self.arm_value_type(expr);
+        self.scopes.pop();
+        if result_type == IrType::Void {
+            return None;
+        }
+
+        let value = self.lower_expr(&expr.scrutinee);
+        let value_slot = self.declare_slot("<union-match>", scrutinee_type, span);
+        self.emit_effect(InstKind::Store(value_slot, value), span);
+
+        let result_slot = self.declare_slot("<union-match-result>", result_type, span);
+        let continue_block = self.new_block();
+        let alternative_blocks: Vec<_> = alternatives.iter().map(|_| self.new_block()).collect();
+        let dispatch_value = self.emit(InstKind::Load(value_slot), scrutinee_type, span);
+        self.terminate(Terminator::UnionDispatch {
+            value: dispatch_value,
+            union_id,
+            targets: alternative_blocks.clone(),
+        });
+
+        let fallback_block = fallback_index.map(|_| self.new_block());
+        let unmatched_block = if fallback_index.is_none() {
+            Some(self.new_block())
+        } else {
+            None
+        };
+        let arm_blocks: Vec<_> = expr.arms[..fallback_index.unwrap_or(expr.arms.len())]
+            .iter()
+            .map(|_| self.new_block())
+            .collect();
+        for (alternative_index, base) in ordered_members.iter().enumerate() {
+            self.current = alternative_blocks[alternative_index];
+            let payload_type = alternatives[alternative_index];
+            let matching_arms: Vec<_> = expr.arms[..fallback_index.unwrap_or(expr.arms.len())]
+                .iter()
+                .enumerate()
+                .filter(|(_, arm)| self.union_pattern_matches_base(*base, &arm.pattern))
+                .collect();
+            for (position, (arm_index, arm)) in matching_arms.iter().enumerate() {
+                let loaded = self.emit(InstKind::Load(value_slot), scrutinee_type, arm.span);
+                let payload = self.emit(
+                    InstKind::UnionProject {
+                        value: loaded,
+                        union_id,
+                        alternative: alternative_index as u32,
+                    },
+                    payload_type,
+                    arm.span,
+                );
+                let expected = match &arm.pattern {
+                    ast::Pattern::Int(lit) => {
+                        self.emit(InstKind::ConstInt(lit.value), payload_type, arm.span)
+                    }
+                    ast::Pattern::Float(lit) => match payload_type {
+                        IrType::Float(width) => self.emit(
+                            InstKind::ConstFloat(width, lit.text.clone()),
+                            payload_type,
+                            arm.span,
+                        ),
+                        IrType::Decimal => self.emit(
+                            InstKind::ConstDecimal(lit.text.clone()),
+                            payload_type,
+                            arm.span,
+                        ),
+                        _ => return None,
+                    },
+                    ast::Pattern::Duration(lit) => self.emit(
+                        InstKind::ConstInt(lit.nanos as i128),
+                        payload_type,
+                        arm.span,
+                    ),
+                    ast::Pattern::Str(lit) => {
+                        let id = self.module.intern_string(&lit.value);
+                        self.emit(InstKind::ConstString(id), IrType::String, arm.span)
+                    }
+                    ast::Pattern::Char(lit) => {
+                        let id = self.module.intern_string(&lit.value);
+                        self.emit(InstKind::ConstChar(id), IrType::Char, arm.span)
+                    }
+                    ast::Pattern::Bool(lit) => {
+                        self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, arm.span)
+                    }
+                    ast::Pattern::Constant(expression) => {
+                        if let Some(singleton) = self
+                            .checked
+                            .pattern_singletons
+                            .get(&arm.pattern.span())
+                            .copied()
+                        {
+                            self.lower_singleton_pattern_value(singleton, payload_type, arm.span)?
+                        } else {
+                            self.lower_expr_as(expression, payload_type)
+                        }
+                    }
+                    _ => unreachable!(),
+                };
+                let equal = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: payload,
+                        right: expected,
+                    },
+                    IrType::Boolean,
+                    arm.span,
+                );
+                let next = if position + 1 == matching_arms.len() {
+                    fallback_block
+                        .or(unmatched_block)
+                        .expect("fallback or unreachable block")
+                } else {
+                    self.new_block()
+                };
+                self.terminate(Terminator::Branch {
+                    condition: equal,
+                    then_block: arm_blocks[*arm_index],
+                    else_block: next,
+                });
+                self.current = next;
+            }
+            self.terminate(Terminator::Jump(
+                fallback_block
+                    .or(unmatched_block)
+                    .expect("fallback or unreachable block"),
+            ));
+        }
+
+        for (index, arm) in expr.arms.iter().enumerate() {
+            if Some(index) == fallback_index {
+                self.current = fallback_block.expect("fallback block exists");
+            } else {
+                self.current = arm_blocks[index];
+            }
+            let ast::ArmBody::Expr(body) = &arm.body else {
+                unreachable!()
+            };
+            let value = self.lower_expr_as(body, result_type);
+            self.emit_effect(InstKind::Store(result_slot, value), arm.span);
+            self.terminate(Terminator::Jump(continue_block));
+        }
+        if let Some(block) = unmatched_block {
+            self.current = block;
+            self.terminate(Terminator::Unreachable);
+        }
+        self.current = continue_block;
+        Some(self.emit(InstKind::Load(result_slot), result_type, span))
+    }
+
+    fn is_union_scalar_pattern(pattern: &ast::Pattern) -> bool {
+        matches!(
+            pattern,
+            ast::Pattern::Int(_)
+                | ast::Pattern::Float(_)
+                | ast::Pattern::Duration(_)
+                | ast::Pattern::Str(_)
+                | ast::Pattern::Char(_)
+                | ast::Pattern::Bool(_)
+                | ast::Pattern::Constant(_)
+        )
+    }
+
+    fn lower_singleton_pattern_value(
+        &mut self,
+        singleton_id: u32,
+        payload_type: IrType,
+        span: Span,
+    ) -> Option<Operand> {
+        use zirk_sema::constant_value::ConstValue;
+        let value = &self
+            .checked
+            .singleton_values
+            .get(singleton_id as usize)?
+            .value;
+        Some(match value {
+            ConstValue::Duration(value) | ConstValue::Date(value) | ConstValue::Time(value) => {
+                self.emit(InstKind::ConstInt(*value as i128), payload_type, span)
+            }
+            ConstValue::DateTime(value) => {
+                self.emit(InstKind::ConstInt(*value), payload_type, span)
+            }
+            _ => return None,
+        })
+    }
+
+    fn union_pattern_matches_base(&self, base: Base, pattern: &ast::Pattern) -> bool {
+        use zirk_sema::constant_value::ConstValue;
+        if let Some(pattern_id) = self.checked.pattern_singletons.get(&pattern.span()) {
+            if let Base::Singleton(id) = base {
+                return id == *pattern_id;
+            }
+            if let Some(value) = self.checked.singleton_values.get(*pattern_id as usize) {
+                return matches!(
+                    (&value.value, base),
+                    (
+                        ConstValue::Integer { .. } | ConstValue::BigUnsigned { .. },
+                        Base::Int(_)
+                    ) | (ConstValue::Float { .. }, Base::Float(_))
+                        | (ConstValue::Decimal { .. }, Base::Decimal)
+                        | (ConstValue::Duration(_), Base::Duration)
+                        | (ConstValue::String(_), Base::String)
+                        | (ConstValue::Char(_), Base::Char)
+                        | (ConstValue::Boolean(_), Base::Boolean)
+                        | (ConstValue::Date(_), Base::Date)
+                        | (ConstValue::Time(_), Base::Time)
+                        | (ConstValue::DateTime(_), Base::DateTime)
+                );
+            }
+        }
+        match (base, pattern) {
+            (Base::Int(_), ast::Pattern::Int(_))
+            | (Base::Float(_), ast::Pattern::Float(_))
+            | (Base::Decimal, ast::Pattern::Float(_))
+            | (Base::Duration, ast::Pattern::Duration(_))
+            | (Base::String, ast::Pattern::Str(_))
+            | (Base::Char, ast::Pattern::Char(_))
+            | (Base::Boolean, ast::Pattern::Bool(_)) => true,
+            (Base::Singleton(id), pattern) => {
+                let Some(value) = self.checked.singleton_values.get(id as usize) else {
+                    return false;
+                };
+                match (&value.value, pattern) {
+                    (
+                        ConstValue::Integer { .. } | ConstValue::BigUnsigned { .. },
+                        ast::Pattern::Int(_),
+                    ) => true,
+                    (
+                        ConstValue::Float { .. } | ConstValue::Decimal { .. },
+                        ast::Pattern::Float(_),
+                    ) => true,
+                    (ConstValue::Duration(_), ast::Pattern::Duration(_)) => true,
+                    (ConstValue::String(_), ast::Pattern::Str(_)) => true,
+                    (ConstValue::Char(_), ast::Pattern::Char(_)) => true,
+                    (ConstValue::Boolean(_), ast::Pattern::Bool(_)) => true,
+                    (
+                        ConstValue::Date(_) | ConstValue::Time(_) | ConstValue::DateTime(_),
+                        ast::Pattern::Constant(expression),
+                    ) => self
+                        .checked
+                        .expr_types
+                        .get(&expression.span())
+                        .is_some_and(|ty| match ty.base {
+                            Base::Singleton(pattern_id) => self
+                                .checked
+                                .singleton_values
+                                .get(pattern_id as usize)
+                                .is_some_and(|pattern_value| {
+                                    pattern_value.type_identity == value.type_identity
+                                }),
+                            Base::Date => value.type_identity == "Date",
+                            Base::Time => value.type_identity == "Time",
+                            Base::DateTime => value.type_identity == "DateTime",
+                            _ => false,
+                        }),
+                    (_, ast::Pattern::Constant(expression)) => self
+                        .checked
+                        .expr_types
+                        .get(&expression.span())
+                        .is_some_and(|ty| ty.base == Base::Singleton(id)),
+                    _ => false,
+                }
+            }
+            (_, ast::Pattern::Constant(expression)) => self
+                .checked
+                .expr_types
+                .get(&expression.span())
+                .is_some_and(|ty| ty.base == base),
+            _ => false,
         }
     }
 
@@ -17783,12 +18762,32 @@ impl<'a> FunctionLowering<'a> {
                 IrType::Int(IntWidth::I32),
                 span,
             ),
+            ast::Pattern::Float(lit) => {
+                let IrType::Float(width) = narrowed_type else {
+                    unreachable!("the checker only admits Float patterns for Float scrutinees")
+                };
+                self.emit(
+                    InstKind::ConstFloat(width, lit.text.clone()),
+                    IrType::Float(width),
+                    span,
+                )
+            }
+            ast::Pattern::Duration(lit) => self.emit(
+                InstKind::ConstInt(lit.nanos as i128),
+                IrType::Int(IntWidth::I64),
+                span,
+            ),
+            ast::Pattern::Constant(expression) => self.lower_expr(expression),
             ast::Pattern::Bool(lit) => {
                 self.emit(InstKind::ConstBool(lit.value), IrType::Boolean, span)
             }
             ast::Pattern::Str(lit) => {
                 let id = self.module.intern_string(&lit.value);
                 self.emit(InstKind::ConstString(id), IrType::String, span)
+            }
+            ast::Pattern::Char(lit) => {
+                let id = self.module.intern_string(&lit.value);
+                self.emit(InstKind::ConstChar(id), IrType::Char, span)
             }
             ast::Pattern::Variant(v) => {
                 let value = self.discriminant(&v.enum_name, &v.variant.name);
@@ -17818,6 +18817,179 @@ impl<'a> FunctionLowering<'a> {
                 unreachable!("an irrefutable pattern is not tested this way")
             }
         };
+
+        if let Some(union_id) = self.union_id_for_ir_type(narrowed_type) {
+            if let ast::Pattern::Variant(variant_pattern) = pattern {
+                let arm_semantic_type = self
+                    .checked
+                    .match_arm_types
+                    .get(&pattern.span())
+                    .copied()
+                    .expect("checked variant arm has a refined semantic type");
+                let arm_ir_type = self.ir_type(arm_semantic_type);
+                // Several semantic singleton members can share one storage
+                // IR type (for example two enum discriminants are I32).
+                // Resolve the tag by the canonical semantic member identity,
+                // never by the lossy payload representation.
+                let arm_key = union_member_canonical_key(arm_semantic_type.base, self.checked);
+                let alternative = self.module.union_types[union_id as usize]
+                    .canonical_alternatives
+                    .iter()
+                    .position(|key| *key == arm_key)
+                    .expect("refined enum type is an alternative of its checked union");
+                let union_value =
+                    self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
+                let union_slot = self.spill(union_value, narrowed_type, span);
+                let expected_type = self.type_of_operand(expected);
+                let expected_slot = self.spill(expected, expected_type, span);
+                let union_value = self.emit(InstKind::Load(union_slot), narrowed_type, span);
+                let tag = self.emit(
+                    InstKind::UnionTag(union_value),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let expected_tag =
+                    self.const_int_at(alternative as i128, IrType::Int(IntWidth::U32), span);
+                let is_alternative = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: tag,
+                        right: expected_tag,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let payload_block = self.new_block();
+                let mismatch_block = self.new_block();
+                let join_block = self.new_block();
+                let result_slot =
+                    self.declare_slot("<union-variant-pattern-result>", IrType::Boolean, span);
+                self.terminate(Terminator::Branch {
+                    condition: is_alternative,
+                    then_block: payload_block,
+                    else_block: mismatch_block,
+                });
+                self.current = mismatch_block;
+                let no_match = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+                self.emit_effect(InstKind::Store(result_slot, no_match), span);
+                self.terminate(Terminator::Jump(join_block));
+                self.current = payload_block;
+                let union_value = self.emit(InstKind::Load(union_slot), narrowed_type, span);
+                let enum_value = self.emit(
+                    InstKind::UnionProject {
+                        value: union_value,
+                        union_id,
+                        alternative: alternative as u32,
+                    },
+                    arm_ir_type,
+                    span,
+                );
+                // An enum singleton alternative is represented by its
+                // scalar discriminant directly; ordinary enum alternatives
+                // carry the algebraic enum value and need `Discriminant`.
+                let discriminant = if arm_ir_type == IrType::Int(IntWidth::I32) {
+                    enum_value
+                } else {
+                    self.emit(
+                        InstKind::Discriminant(enum_value),
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                let expected = self.emit(InstKind::Load(expected_slot), expected_type, span);
+                let matches_variant = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: discriminant,
+                        right: expected,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, matches_variant), span);
+                self.terminate(Terminator::Jump(join_block));
+                self.current = join_block;
+                let _ = variant_pattern;
+                return self.emit(InstKind::Load(result_slot), IrType::Boolean, span);
+            }
+            let member_base = match pattern {
+                ast::Pattern::Int(_) => Some(Base::Int(SemaIntWidth::I32)),
+                ast::Pattern::Str(_) => Some(Base::String),
+                _ => None,
+            };
+            if let Some(variant) = member_base.and_then(|base| {
+                self.checked.unions[union_id as usize]
+                    .iter()
+                    .position(|member| *member == base)
+            }) {
+                let IrType::Union(_) = narrowed_type else {
+                    unreachable!("a normalized union pattern receives a typed union value")
+                };
+                let value =
+                    self.load_scrutinee_narrowed(scrutinee, scrutinee_type, narrowed_type, span);
+                let value_slot = self.spill(value, narrowed_type, span);
+                let expected_type = self.type_of_operand(expected);
+                let expected_slot = self.spill(expected, expected_type, span);
+                let value_for_tag = self.emit(InstKind::Load(value_slot), narrowed_type, span);
+                let discriminant = self.emit(
+                    InstKind::UnionTag(value_for_tag),
+                    IrType::Int(IntWidth::U32),
+                    span,
+                );
+                let tag = self.const_int_at(variant as i128, IrType::Int(IntWidth::U32), span);
+                let has_variant = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: discriminant,
+                        right: tag,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let payload_block = self.new_block();
+                let mismatch_block = self.new_block();
+                let join_block = self.new_block();
+                let result_slot =
+                    self.declare_slot("<union-pattern-result>", IrType::Boolean, span);
+                self.terminate(Terminator::Branch {
+                    condition: has_variant,
+                    then_block: payload_block,
+                    else_block: mismatch_block,
+                });
+
+                self.current = mismatch_block;
+                let no_match = self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+                self.emit_effect(InstKind::Store(result_slot, no_match), span);
+                self.terminate(Terminator::Jump(join_block));
+
+                self.current = payload_block;
+                let value = self.emit(InstKind::Load(value_slot), narrowed_type, span);
+                let payload = self.emit(
+                    InstKind::UnionProject {
+                        value,
+                        union_id,
+                        alternative: variant as u32,
+                    },
+                    self.module.union_types[union_id as usize].alternatives[variant],
+                    span,
+                );
+                let expected = self.emit(InstKind::Load(expected_slot), expected_type, span);
+                let equals_pattern = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: payload,
+                        right: expected,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                self.emit_effect(InstKind::Store(result_slot, equals_pattern), span);
+                self.terminate(Terminator::Jump(join_block));
+
+                self.current = join_block;
+                return self.emit(InstKind::Load(result_slot), IrType::Boolean, span);
+            }
+        }
 
         // Every other pattern tests a value that is known present (either
         // the scrutinee was never nullable, or a sibling `null` arm already
@@ -18158,8 +19330,52 @@ impl<'a> FunctionLowering<'a> {
         {
             return None;
         }
-        let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
-            return None;
+        let receiver_type = self
+            .checked
+            .expr_types
+            .get(&field.object.span())
+            .copied()
+            .filter(|ty| !ty.is_unknown())
+            // Contract default bodies introduce `this` as a lowering slot.
+            // The checker need not duplicate that receiver type in expr_types,
+            // so consult the slot before treating a contract method as a
+            // callable-valued field.
+            .or_else(|| {
+                let receiver = self.type_of(&field.object, field.object.span());
+                let base = match receiver {
+                    IrType::Contract(id) => Some(Base::Contract(id)),
+                    _ => None,
+                }?;
+                Some(Type::of(base))
+            })?;
+        let id = match receiver_type.base {
+            Base::Contract(id) => id,
+            Base::ContractInstance(instance) => {
+                self.checked.contract_instances[instance as usize].contract
+            }
+            Base::Intersection(intersection) => self.checked.intersections[intersection as usize]
+                .iter()
+                .find_map(|member| match member {
+                    Base::Contract(id)
+                        if self.checked.contracts[*id as usize]
+                            .method(&field.name.name)
+                            .is_some() =>
+                    {
+                        Some(*id)
+                    }
+                    Base::ContractInstance(instance)
+                        if self.checked.contracts[self.checked.contract_instances
+                            [*instance as usize]
+                            .contract
+                            as usize]
+                            .method(&field.name.name)
+                            .is_some() =>
+                    {
+                        Some(self.checked.contract_instances[*instance as usize].contract)
+                    }
+                    _ => None,
+                })?,
+            _ => return None,
         };
         self.checked.contracts[id as usize].method(&field.name.name)
     }
@@ -20584,8 +21800,52 @@ impl<'a> FunctionLowering<'a> {
         {
             return None;
         }
-        let IrType::Contract(id) = self.type_of(&field.object, field.object.span()) else {
-            return None;
+        let receiver_type = self
+            .checked
+            .expr_types
+            .get(&field.object.span())
+            .copied()
+            .filter(|ty| !ty.is_unknown())
+            .or_else(|| {
+                let receiver = self.type_of(&field.object, field.object.span());
+                let base = match receiver {
+                    IrType::Contract(id) => Some(Base::Contract(id)),
+                    _ => None,
+                }?;
+                Some(Type::of(base))
+            })?;
+        let (id, intersection_receiver) = match receiver_type.base {
+            Base::Contract(id) => (id, false),
+            Base::ContractInstance(instance) => (
+                self.checked.contract_instances[instance as usize].contract,
+                false,
+            ),
+            Base::Intersection(intersection) => {
+                let contract = self.checked.intersections[intersection as usize]
+                    .iter()
+                    .find_map(|member| match member {
+                        Base::Contract(id)
+                            if self.checked.contracts[*id as usize]
+                                .method(&field.name.name)
+                                .is_some() =>
+                        {
+                            Some(*id)
+                        }
+                        Base::ContractInstance(instance)
+                            if self.checked.contracts[self.checked.contract_instances
+                                [*instance as usize]
+                                .contract
+                                as usize]
+                                .method(&field.name.name)
+                                .is_some() =>
+                        {
+                            Some(self.checked.contract_instances[*instance as usize].contract)
+                        }
+                        _ => None,
+                    })?;
+                (contract, true)
+            }
+            _ => return None,
         };
 
         let contract = &self.checked.contracts[id as usize];
@@ -20614,7 +21874,15 @@ impl<'a> FunctionLowering<'a> {
             .map(|arg| self.type_of(&arg.value, arg.value.span()))
             .collect();
 
-        let receiver = self.lower_expr(&field.object);
+        let receiver = if intersection_receiver {
+            let object = self.lower_expr(&field.object);
+            // The intersection retains a single object address. Re-type that
+            // address to the selected contract only at the dispatch site;
+            // this is a static view and performs no allocation or wrapping.
+            self.emit(InstKind::Retype(object), IrType::Contract(id), field.span)
+        } else {
+            self.lower_expr(&field.object)
+        };
         let mut args = Vec::new();
         for (arg, ty) in call.args.iter().zip(params) {
             args.push(self.lower_expr_as(&arg.value, ty));
@@ -27403,7 +28671,13 @@ impl<'a> FunctionLowering<'a> {
             // earlier operand across the branch it opens (found via a
             // recursive traversal combining a call with a `?.` read of the
             // same discriminant in one arm).
-            ast::Expr::Field(e) => e.safe || self.opens_blocks(&e.object),
+            ast::Expr::Field(e) => {
+                e.safe
+                    || self.opens_blocks(&e.object)
+                    || self.semantic_type(&e.object).is_some_and(|ty| {
+                        matches!(ty.without_null().base, Base::Shape(_) | Base::Union(_))
+                    })
+            }
             // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,
             // design D5) always opens a `fail`/`cont` split for its own
             // bounds check (`Self::lower_native_slice_bounds_check`),
@@ -28102,6 +29376,256 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Retype(value_loaded), target_ty, span)
     }
 
+    fn lower_type_test(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+        let target = *self
+            .checked
+            .type_test_targets
+            .get(&expr.span)
+            .expect("the checker recorded the type-test target");
+        let target_ir = self.ir_type(target);
+        let value = self.lower_expr(&expr.left);
+        let actual_ir = self.type_of_operand(value);
+
+        if actual_ir == IrType::Dynamic {
+            if let IrType::Contract(contract) = target_ir {
+                let cast = self.lower_dynamic_contract_optional_cast(value, contract, span);
+                let absent = self.emit(InstKind::IsNull(cast), IrType::Boolean, span);
+                return self.emit(
+                    InstKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: absent,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+            }
+            if let Some(tag) = target_ir.dynamic_tag() {
+                return self.emit(
+                    InstKind::DynamicIsType { value, tag },
+                    IrType::Boolean,
+                    span,
+                );
+            }
+        }
+
+        // A nominal class alternative is represented by its canonical union
+        // tag. The checked projection occurs only in branches where the
+        // semantic flow state narrowed a path to this alternative.
+        if matches!(actual_ir, IrType::Union(_))
+            && let Base::Class(class_id) = target.base
+            && let Some(union_id) = self.union_id_for_ir_type(actual_ir)
+        {
+            let key = union_member_canonical_key(Base::Class(class_id), self.checked);
+            let layout = &self.module.union_types[union_id as usize];
+            let Some(alternative) = layout
+                .canonical_alternatives
+                .iter()
+                .position(|candidate| *candidate == key)
+            else {
+                return self.emit(InstKind::ConstBool(false), IrType::Boolean, span);
+            };
+            let tag = self.emit(InstKind::UnionTag(value), IrType::Int(IntWidth::U32), span);
+            let expected = self.const_int_at(alternative as i128, IrType::Int(IntWidth::U32), span);
+            return self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: tag,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+        }
+
+        if let IrType::Object(target_class) = target_ir
+            && matches!(actual_ir, IrType::Object(_) | IrType::ObjectAny)
+        {
+            return self.emit(
+                InstKind::IsInstance {
+                    object: value,
+                    target_class,
+                },
+                IrType::Boolean,
+                span,
+            );
+        }
+
+        if let IrType::Contract(contract) = target_ir
+            && matches!(actual_ir, IrType::Object(_) | IrType::ObjectAny)
+        {
+            let object = if actual_ir == IrType::ObjectAny {
+                value
+            } else {
+                self.emit(InstKind::Retype(value), IrType::ObjectAny, span)
+            };
+            let requirements = self.contract_object_requirements(contract);
+            let status = self.emit(
+                InstKind::ObjectConform {
+                    object,
+                    contract,
+                    requirements,
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+            return self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: status,
+                    right: zero,
+                },
+                IrType::Boolean,
+                span,
+            );
+        }
+
+        if actual_ir == target_ir {
+            return self.emit(InstKind::ConstBool(true), IrType::Boolean, span);
+        }
+
+        unreachable!(
+            "the checker only records runtime-lowerable nominal type tests: {actual_ir:?} is not tested against {target_ir:?} at {span:?}"
+        )
+    }
+
+    /// Compares a tagged union against one of its singleton alternatives by
+    /// tag. The payload representation may be wider than the singleton's
+    /// source type, so comparing the union operand directly is invalid IR.
+    fn lower_union_singleton_comparison(
+        &mut self,
+        expr: &ast::BinaryExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        for (union_expr, singleton_expr) in
+            [(&*expr.left, &*expr.right), (&*expr.right, &*expr.left)]
+        {
+            let union_semantic = self.checked.expr_types.get(&union_expr.span()).copied()?;
+            let Base::Union(_) = union_semantic.without_null().base else {
+                continue;
+            };
+            let singleton_semantic = self
+                .checked
+                .expr_types
+                .get(&singleton_expr.span())
+                .copied()?;
+            let singleton_id = match singleton_semantic.base {
+                Base::Singleton(id) => id,
+                _ => {
+                    let literal = match singleton_expr {
+                        ast::Expr::Int(value) => ast::Expr::Int(value.clone()),
+                        ast::Expr::Float(value) => ast::Expr::Float(value.clone()),
+                        ast::Expr::Duration(value) => ast::Expr::Duration(value.clone()),
+                        ast::Expr::Str(value) => ast::Expr::Str(value.clone()),
+                        ast::Expr::Char(value) => ast::Expr::Char(value.clone()),
+                        ast::Expr::Bool(value) => ast::Expr::Bool(value.clone()),
+                        _ => continue,
+                    };
+                    let constant = zirk_sema::const_eval::evaluate_with_enum_variants(
+                        &literal,
+                        &mut zirk_sema::type_budget::TypeComputationBudget::default(),
+                        &std::collections::HashMap::new(),
+                        &std::collections::HashMap::new(),
+                    )
+                    .ok()?;
+                    let Base::Union(sema_union_id) = union_semantic.without_null().base else {
+                        continue;
+                    };
+                    self.checked
+                        .unions
+                        .get(sema_union_id as usize)?
+                        .iter()
+                        .find_map(|base| match base {
+                            Base::Singleton(id)
+                                if self
+                                    .checked
+                                    .singleton_values
+                                    .get(*id as usize)
+                                    .is_some_and(|value| *value == constant) =>
+                            {
+                                Some(*id)
+                            }
+                            _ => None,
+                        })?
+                }
+            };
+            let union_ir = self.ir_type(union_semantic);
+            let union_id = self.union_id_for_ir_type(union_ir)?;
+            let canonical = union_member_canonical_key(Base::Singleton(singleton_id), self.checked);
+            let layout = self.module.union_types.get(union_id as usize)?;
+            let Some(alternative) = layout
+                .canonical_alternatives
+                .iter()
+                .position(|candidate| *candidate == canonical)
+            else {
+                return Some(self.emit(
+                    InstKind::ConstBool(expr.op == ast::BinaryOp::NotEq),
+                    IrType::Boolean,
+                    span,
+                ));
+            };
+            let union = self.lower_expr(union_expr);
+            let tag = self.emit(InstKind::UnionTag(union), IrType::Int(IntWidth::U32), span);
+            let expected = self.const_int_at(alternative as i128, IrType::Int(IntWidth::U32), span);
+            let equal = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: tag,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            return Some(if expr.op == ast::BinaryOp::NotEq {
+                self.emit(
+                    InstKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: equal,
+                    },
+                    IrType::Boolean,
+                    span,
+                )
+            } else {
+                equal
+            });
+        }
+        None
+    }
+
+    fn lower_null_comparison(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
+        let value_expr = if matches!(&*expr.left, ast::Expr::Null(_)) {
+            &expr.right
+        } else {
+            &expr.left
+        };
+        let value = self.lower_expr(value_expr);
+        let is_nullable = matches!(
+            self.type_of(value_expr, value_expr.span()),
+            IrType::Nullable(_)
+        );
+        let is_null = if is_nullable {
+            self.emit(InstKind::IsNull(value), IrType::Boolean, span)
+        } else {
+            self.emit(
+                InstKind::ConstBool(matches!(&*expr.left, ast::Expr::Null(_))),
+                IrType::Boolean,
+                span,
+            )
+        };
+        if expr.op == ast::BinaryOp::Eq {
+            is_null
+        } else {
+            self.emit(
+                InstKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: is_null,
+                },
+                IrType::Boolean,
+                span,
+            )
+        }
+    }
+
     /// Lowers `a.b`, which is a variant access or a field read.
     ///
     /// The checker already decided which one it is and recorded the answer, so
@@ -28515,9 +30039,33 @@ impl<'a> FunctionLowering<'a> {
             return self.lower_safe_field(expr, span);
         }
 
+        if let Some(value) = self.lower_structural_union_field(&expr.object, &expr.name.name, span)
+        {
+            return value;
+        }
+
         if self.type_of(&expr.object, expr.object.span()) == IrType::ObjectAny {
             let object = self.lower_expr(&expr.object);
             let key = self.const_string(&expr.name.name, expr.name.span);
+            if let Some(Base::Shape(shape_id)) = self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .map(|ty| ty.without_null().base)
+                && let Some(property) = self.checked.structural_types[shape_id as usize]
+                    .properties
+                    .iter()
+                    .find(|property| property.name == expr.name.name)
+                    .cloned()
+            {
+                return self.lower_shape_property_get(
+                    object,
+                    key,
+                    &property,
+                    &expr.name.name,
+                    span,
+                );
+            }
             return self.lower_dynamic_object_get(object, key, &expr.name.name, span);
         }
 
@@ -29569,6 +31117,15 @@ impl<'a> FunctionLowering<'a> {
 
     /// The type a member access produces.
     fn field_type_of(&self, expr: &ast::FieldExpr) -> IrType {
+        if let Some(ty) = self
+            .checked
+            .expr_types
+            .get(&expr.span)
+            .copied()
+            .filter(|ty| !ty.is_unknown())
+        {
+            return self.ir_type(ty);
+        }
         let object_type = self.checked.expr_types.get(&expr.object.span()).copied();
         let contract_instance = object_type.and_then(|ty| match ty.base {
             Base::Contract(id) => Some((id, Vec::new())),
@@ -30422,6 +31979,256 @@ impl<'a> FunctionLowering<'a> {
             expected,
             span,
         )
+    }
+
+    /// Reads a statically checked structural property from its open-object
+    /// representation, validating the runtime value against the declared
+    /// property type. Optional properties produce null when the key is absent.
+    fn lower_shape_property_get(
+        &mut self,
+        object: Operand,
+        key: Operand,
+        property: &zirk_sema::StructuralProperty,
+        description: &str,
+        span: Span,
+    ) -> Operand {
+        // A union projection may have been defined in the predecessor block.
+        // Preserve it in a slot because optional reads and runtime type checks
+        // introduce control-flow blocks of their own.
+        let object_slot = self.spill(object, IrType::ObjectAny, span);
+        let key_slot = self.spill(key, IrType::String, span);
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        let key = self.emit(InstKind::Load(key_slot), IrType::String, span);
+        let expected = self.ir_type(property.ty);
+        if !property.optional {
+            return self.lower_dynamic_object_get_as(object, key, expected, description, span);
+        }
+
+        let result_type = if matches!(expected, IrType::Nullable(_)) {
+            expected
+        } else {
+            IrType::Nullable(
+                Nullable::of(expected)
+                    .expect("optional structural properties have a nullable IR representation"),
+            )
+        };
+        let Some(result_base) = (match result_type {
+            IrType::Nullable(base) => Some(base),
+            _ => None,
+        }) else {
+            unreachable!("an optional structural property is nullable")
+        };
+        let lookup_type = IrType::Nullable(Nullable::Dynamic);
+        let object = self.emit(InstKind::Load(object_slot), IrType::ObjectAny, span);
+        let key = self.emit(InstKind::Load(key_slot), IrType::String, span);
+        let found = self.emit(InstKind::ObjectGet { object, key }, lookup_type, span);
+        let found_slot = self.spill(found, lookup_type, span);
+        let missing = self.emit(InstKind::IsNull(found), IrType::Boolean, span);
+        let result_slot = self.declare_slot("<shape_property>", result_type, span);
+        let absent = self.new_block();
+        let present = self.new_block();
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: missing,
+            then_block: absent,
+            else_block: present,
+        });
+
+        self.current = absent;
+        let null = self.emit(InstKind::NullValue(result_base), result_type, span);
+        self.emit_effect(InstKind::Store(result_slot, null), span);
+        self.terminate(Terminator::Jump(done));
+
+        self.current = present;
+        let found = self.emit(InstKind::Load(found_slot), lookup_type, span);
+        let dynamic = self.emit(InstKind::Unwrap(found), IrType::Dynamic, span);
+        let dynamic_slot = self.spill(dynamic, IrType::Dynamic, span);
+        let tag = expected
+            .dynamic_tag()
+            .expect("structural property types have a Dynamic representation");
+        let value_matches = self.emit(
+            InstKind::DynamicIsType {
+                value: dynamic,
+                tag,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let invalid = self.new_block();
+        let valid = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: value_matches,
+            then_block: valid,
+            else_block: invalid,
+        });
+
+        self.current = invalid;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("a structural property read registers ContractViolationError");
+        self.throw_native_failure(
+            native.contract_violation,
+            &format!("structural property `{description}` changed to an incompatible value"),
+            span,
+        );
+
+        self.current = valid;
+        let dynamic = self.emit(InstKind::Load(dynamic_slot), IrType::Dynamic, span);
+        let value = self.emit(
+            InstKind::DynamicUnbox {
+                value: dynamic,
+                tag,
+            },
+            expected,
+            span,
+        );
+        let value = if expected == result_type {
+            value
+        } else {
+            self.emit(
+                InstKind::Wrap {
+                    base: result_base,
+                    value,
+                },
+                result_type,
+                span,
+            )
+        };
+        self.emit_effect(InstKind::Store(result_slot, value), span);
+        self.terminate(Terminator::Jump(done));
+
+        self.current = done;
+        self.emit(InstKind::Load(result_slot), result_type, span)
+    }
+
+    /// Reads a property common to all structural alternatives of a union.
+    /// The discriminant selects the verified payload layout; the ordinary
+    /// structural reader then checks the property value against that
+    /// alternative's declared property type.
+    fn lower_structural_union_field(
+        &mut self,
+        object_expr: &ast::Expr,
+        member_name: &str,
+        span: Span,
+    ) -> Option<Operand> {
+        let object_type = self
+            .checked
+            .expr_types
+            .get(&object_expr.span())
+            .copied()?
+            .without_null();
+        let Base::Union(sema_union_id) = object_type.base else {
+            return None;
+        };
+        let object_ir = self.ir_type(object_type);
+        let union_id = self.union_id_for_ir_type(object_ir)?;
+        let sema_members = self.checked.unions.get(sema_union_id as usize)?;
+        let layout = self.module.union_types.get(union_id as usize)?.clone();
+        let ordered_members = layout
+            .canonical_alternatives
+            .iter()
+            .map(|key| {
+                sema_members
+                    .iter()
+                    .find(|base| union_member_canonical_key(**base, self.checked) == *key)
+                    .copied()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let properties = ordered_members
+            .iter()
+            .map(|base| {
+                let Base::Shape(shape_id) = base else {
+                    return None;
+                };
+                self.checked.structural_types[*shape_id as usize]
+                    .properties
+                    .iter()
+                    .find(|property| property.name == member_name)
+                    .cloned()
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let result_semantic_type = self
+            .checked
+            .expr_types
+            .get(&span)
+            .copied()
+            .filter(|ty| !ty.is_unknown())?;
+        let result_type = self.ir_type(result_semantic_type);
+        if result_type == IrType::Void {
+            return None;
+        }
+
+        let object = self.lower_expr(object_expr);
+        let object_slot = self.spill(object, object_ir, span);
+        let result_slot = self.declare_slot("<union_shape_property>", result_type, span);
+        let done = self.new_block();
+        let alternatives = layout.alternatives.len();
+        let blocks = (0..alternatives)
+            .map(|_| self.new_block())
+            .collect::<Vec<_>>();
+        let dispatch_value = self.emit(InstKind::Load(object_slot), object_ir, span);
+        self.terminate(Terminator::UnionDispatch {
+            value: dispatch_value,
+            union_id,
+            targets: blocks.clone(),
+        });
+
+        for index in 0..alternatives {
+            self.current = blocks[index];
+            let loaded = self.emit(InstKind::Load(object_slot), object_ir, span);
+            let payload = self.emit(
+                InstKind::UnionProject {
+                    value: loaded,
+                    union_id,
+                    alternative: index as u32,
+                },
+                layout.alternatives[index],
+                span,
+            );
+            let object = if layout.alternatives[index] == IrType::ObjectAny {
+                payload
+            } else {
+                self.emit(InstKind::Retype(payload), IrType::ObjectAny, span)
+            };
+            let key = self.const_string(member_name, span);
+            let property = &properties[index];
+            let value = self.lower_shape_property_get(object, key, property, member_name, span);
+            let value = if let Some((result_union_id, _)) = self
+                .module
+                .union_type_for_representation(match result_type {
+                    IrType::Union(id) => id,
+                    _ => u32::MAX,
+                }) {
+                let property_key = union_member_canonical_key(property.ty.base, self.checked);
+                let result_layout = &self.module.union_types[result_union_id as usize];
+                let result_alternative = result_layout
+                    .canonical_alternatives
+                    .iter()
+                    .position(|candidate| *candidate == property_key)
+                    .expect("common structural property type belongs to its result union");
+                self.emit(
+                    InstKind::UnionInject {
+                        union_id: result_union_id,
+                        alternative: result_alternative as u32,
+                        payload: value,
+                    },
+                    result_type,
+                    span,
+                )
+            } else {
+                if self.type_of_operand(value) != result_type {
+                    return None;
+                }
+                value
+            };
+            self.emit_effect(InstKind::Store(result_slot, value), span);
+            self.terminate(Terminator::Jump(done));
+        }
+
+        self.current = done;
+        Some(self.emit(InstKind::Load(result_slot), result_type, span))
     }
 
     /// Mutates an open object's property set and converts a sealed-key status
@@ -31344,6 +33151,11 @@ impl<'a> FunctionLowering<'a> {
             ast::Expr::Call(e) if self.checked.service_ready_calls.contains_key(&e.span) => {
                 self.lower_service_ready(e, expr.span());
             }
+            // `?.` keeps the receiver's nominal base in semantic metadata;
+            // lower its null split before ordinary contract/class dispatch.
+            ast::Expr::Call(e) if self.safe_method_call_info(e).is_some() => {
+                self.lower_safe_method_call(e, expr.span());
+            }
             ast::Expr::Call(e) if self.contract_method_of(e).is_some() => {
                 let span = expr.span();
                 if let Some(result) = self.lower_contract_call(e, span) {
@@ -31357,11 +33169,6 @@ impl<'a> FunctionLowering<'a> {
                     let ty = self.type_of_operand(result);
                     self.lower_throws_check(result, ty, span);
                 }
-            }
-            // `u?.greet();` as a bare statement still needs the absent/present
-            // split — only the value it produces goes unused.
-            ast::Expr::Call(e) if self.safe_method_call_info(e).is_some() => {
-                self.lower_safe_method_call(e, expr.span());
             }
             // `array.add(...)`, `list.remove(...)` and other built-in collection
             // methods are lowered to collection instructions/runtime calls.
@@ -33662,6 +35469,15 @@ impl<'a> FunctionLowering<'a> {
                 .map(|ty| self.ir_type(*ty))
                 .expect("the checker records Mutex construction and with result types");
         }
+        // A flow-refined path keeps its declared slot type in storage, while
+        // operations in this branch use the checked narrowed type. The path
+        // lowerer materializes the corresponding union payload.
+        if let ast::Expr::Path(path) = expr
+            && let Some(ty) = self.checked.expr_types.get(&path.span)
+            && !ty.is_unknown()
+        {
+            return self.ir_type(*ty);
+        }
         // The checker records the contextual width for numeric literals and the
         // result type for binary operations; use it when available so lowering
         // matches the semantic type. Other expressions keep their IR-derived type
@@ -33735,6 +35551,17 @@ impl<'a> FunctionLowering<'a> {
                 } else {
                     left.unwrapped()
                 }
+            }
+            ast::Expr::Binary(e) if self.checked.type_test_targets.contains_key(&e.span) => {
+                IrType::Boolean
+            }
+            ast::Expr::Binary(e) if e.op == ast::BinaryOp::In => IrType::Boolean,
+            ast::Expr::Binary(e)
+                if matches!(e.op, ast::BinaryOp::Eq | ast::BinaryOp::NotEq)
+                    && (matches!(&*e.left, ast::Expr::Null(_))
+                        || matches!(&*e.right, ast::Expr::Null(_))) =>
+            {
+                IrType::Boolean
             }
             ast::Expr::Binary(e)
                 if matches!(
@@ -34161,6 +35988,7 @@ impl<'a> FunctionLowering<'a> {
                     base
                 }
             }
+            ast::Expr::Satisfies(e) => self.type_of(&e.expr, e.expr.span()),
             ast::Expr::Interpolated(_) => IrType::String,
             ast::Expr::Unsafe(u) => self.block_value_type(&u.body),
             ast::Expr::Commit(c) => self.block_value_type(&c.body),
@@ -34866,6 +36694,7 @@ fn binary_op(op: ast::BinaryOp) -> BinaryOp {
         A::And => BinaryOp::And,
         A::Or => BinaryOp::Or,
         A::Is => BinaryOp::Identical,
+        A::In => unreachable!("`in` is lowered through ObjectGet, not as an operator"),
         A::BitAnd => BinaryOp::BitAnd,
         A::BitOr => BinaryOp::BitOr,
         A::BitXor => BinaryOp::BitXor,

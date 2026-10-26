@@ -17,6 +17,17 @@ changes: trait defaults under generic substitution, nested contract
 arguments (`Container<Box<T>>`), type-parameter defaults and bodies for
 user-defined generic functions, and `static` on `enum`.
 
+The native type-algebra slice adds recursive n-ary unions/intersections,
+canonical singleton and constant types, generic aliases and erased type
+operators, structural candidate selection, flow narrowing, and LSP semantic
+queries. Native tagged-union execution is verified for scalar/string,
+temporal-singleton, enum-constant, and narrowed class-reference cases; broader alternative-family
+parity, structural-shape lowering, some nominal/scalar combinations,
+cross-target runtime ABI checks, and GC stress at suspended-task/channel/
+exception/container boundaries remain tracked work. See the
+[type-system status](../11-reference/12-feature-status.md) and
+[current limitations](07-current-limitations.md) for evidence and boundaries.
+
 Phase 5 scoped delivery is complete: alongside the structured executor,
 `parallel`, and typed channels, the compiler supports bounded completion and
 collection combinators, public background and service supervision, managed

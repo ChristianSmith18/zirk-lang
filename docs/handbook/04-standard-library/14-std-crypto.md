@@ -66,7 +66,7 @@ constant-time promise; secret/digest/tag comparison uses
 ```zirk
 inmut bytes = SecureRandom.bytes(length: 32);
 inmut token = SecureRandom.token(length: 32); // Base64URL, no padding.
-inmut value = SecureRandom.int(range: 0..100);
+inmut value = SecureRandom.int(range: 0 .. 100);
 ```
 
 Integer ranges use rejection sampling to avoid modulo bias. Reproducible random

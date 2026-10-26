@@ -75,7 +75,7 @@ A `Date` + `Time` pair, deliberately without a zone.
 ```zirk
 inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
 inmut composed = Date(2026, 8, 15) + Time(14, 30);
-local + 2h;                         // 2026-08-15T16:30
+local + 2h; // 2026-08-15T16:30
 
 match local.start_of("month") {
     Ok(month_start) => stdout.println(month_start);

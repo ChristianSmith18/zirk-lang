@@ -76,8 +76,8 @@ calendar information.
 ### Examples
 
 ```zirk
-inmut shifted = Time(23, 30) + 2h;   // 01:30 — wraps modulo one day
-shifted.is_between(Time(0, 0), Time(6, 0));       // true
+inmut shifted = Time(23, 30) + 2h; // 01:30 — wraps modulo one day
+shifted.is_between(Time(0, 0), Time(6, 0)); // true
 
 match shifted.start_of("hour") {
     Ok(bounds) => stdout.println(bounds);

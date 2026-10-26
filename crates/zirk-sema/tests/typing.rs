@@ -3,8 +3,8 @@
 //! `ZIRK_SPEC_FINAL.md` section 8 requires one valid and one invalid case per
 //! rule. Tests are grouped by rule so that correspondence stays verifiable.
 
-use zirk_ast::{Expr, Ident, ModuleDecl, Stmt};
-use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
+use zirk_ast::{Expr, Ident, ModuleDecl, Mutability, Stmt};
+use zirk_diagnostics::{DiagnosticSink, RenderStyle, Severity, SourceFile, SourceMap};
 use zirk_lexer::tokenize;
 use zirk_parser::{codes as parser_codes, parse};
 use zirk_sema::{Base, ProjectGlobalSpec, Type, check, check_with_globals, codes};
@@ -2754,6 +2754,812 @@ fn valid_a_class_implementing_iterable_lowers() {
               next(): Iteration<Int32> { return Iteration.Done; }
          }
          fn main(): Void { }",
+    );
+}
+
+#[test]
+fn generic_contract_assignability_preserves_the_implemented_type_argument() {
+    let implementation = "class Counter implements Iterable<Int32> {
+             construct() { }
+              iterator(): Iterator<Int32> { return CounterIterator(); }
+         }
+         class CounterIterator implements Iterator<Int32> {
+             construct() { }
+              next(): Iteration<Int32> { return Iteration.Done; }
+         }";
+    accepted(&format!(
+        "{implementation}\nfn take(values: Iterable<Int32>): Void {{ }}\nfn main(): Void {{ take(Counter()); }}"
+    ));
+
+    let wrong_argument = rejected(&format!(
+        "{implementation}\nfn take(values: Iterable<String>): Void {{ }}\nfn main(): Void {{ take(Counter()); }}"
+    ));
+    assert!(
+        wrong_argument.contains(codes::TYPE_MISMATCH.as_str()),
+        "{wrong_argument}"
+    );
+}
+
+#[test]
+fn classes_satisfy_structural_shapes_only_through_public_compatible_fields() {
+    let public = "type HasId = { inmut id: String };\n\
+         class Named { id: String; }\n\
+         fn take(value: HasId): Void { }\n\
+         fn main(): Void { take(Named()); mut item: HasId = { id: \"literal\" }; }";
+    let (_, public_diagnostics) = parse_and_check(public);
+    let public_output = public_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !public_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "a public read-only compatible field should satisfy the shape: {public_output}"
+    );
+
+    let private = "type HasId = { inmut id: String };\n\
+         class Hidden { private id: String; }\n\
+         fn take(value: HasId): Void { }\
+         fn main(): Void { take(Hidden()); }";
+    let (_, private_diagnostics) = parse_and_check(private);
+    let private_output = private_diagnostics.render(RenderStyle::Human);
+    assert!(
+        private_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "private fields must not satisfy a public structural requirement: {private_output}"
+    );
+
+    let missing = "type HasId = { inmut id: String };\n\
+         fn take(value: HasId): Void { }\n\
+         fn main(): Void { mut item: HasId = { extra: 1 }; }";
+    let (_, missing_diagnostics) = parse_and_check(missing);
+    let missing_output = missing_diagnostics.render(RenderStyle::Human);
+    assert!(
+        missing_output.contains("missing required property `id`"),
+        "a structural literal must provide each required property: {missing_output}"
+    );
+}
+
+#[test]
+fn structural_optional_reads_are_nullable_and_readonly_views_reject_writes() {
+    let valid = "type Profile = { name: String; nickname?: String; mut score: Int32 };\n\
+         fn inspect(profile: Profile): Void { mut nickname: String? = profile.nickname; }\n\
+         fn main(): Void { mut profile: Profile = { name: \"Ada\", score: 1 }; profile.score = 2; profile.nickname = \"A\"; }";
+    let (_, valid_diagnostics) = parse_and_check(valid);
+    let valid_output = valid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !valid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "optional reads and mutable shape writes should type-check: {valid_output}"
+    );
+
+    let (_, readonly_diagnostics) = parse_and_check(
+        "type Profile = { inmut name: String };\n\
+         fn main(): Void { mut profile: Profile = { name: \"Ada\" }; profile.name = \"Grace\"; }",
+    );
+    let readonly = readonly_diagnostics.render(RenderStyle::Human);
+    assert!(
+        readonly.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{readonly}"
+    );
+
+    let (_, non_nullable_diagnostics) = parse_and_check(
+        "type Profile = { nickname?: String };\n\
+         fn inspect(profile: Profile): Void { mut nickname: String = profile.nickname; }\n\
+         fn main(): Void { }",
+    );
+    let non_nullable = non_nullable_diagnostics.render(RenderStyle::Human);
+    assert!(
+        non_nullable.contains(codes::TYPE_MISMATCH.as_str()),
+        "optional field reads must include absence: {non_nullable}"
+    );
+
+    let explicit_null = rejected(
+        "type Profile = { nickname?: String };\n\
+         fn main(): Void { mut profile: Profile = { nickname: null }; }",
+    );
+    assert!(
+        explicit_null.contains(codes::TYPE_MISMATCH.as_str()),
+        "an optional property's declared value type excludes Null unless declared nullable: {explicit_null}"
+    );
+}
+
+#[test]
+fn structural_literals_check_excess_keys_width_and_known_spreads() {
+    let valid = "type Source = { id: Int32; label?: String };\n\
+         type Target = { id: Int32 };\n\
+         fn take(target: Target): Void { }\n\
+         fn forward(source: Source): Void { take(source); mut target: Target = { ...source }; }\n\
+         fn main(): Void { }";
+    let (_, valid_diagnostics) = parse_and_check(valid);
+    let valid_output = valid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !valid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "typed width compatibility and a known compatible spread should pass: {valid_output}"
+    );
+
+    let excess = rejected(
+        "type Target = { id: Int32 };\n\
+         fn main(): Void { mut target: Target = { id: 1, extra: true }; }",
+    );
+    assert!(excess.contains("unknown property `extra`"), "{excess}");
+
+    let unknown_spread = rejected(
+        "type Target = { id: Int32 };\n\
+         fn main(): Void { mut source: Object = { id: 1 }; mut target: Target = { ...source }; }",
+    );
+    assert!(
+        unknown_spread.contains("missing required property `id`"),
+        "an unknown spread cannot establish a required property: {unknown_spread}"
+    );
+
+    let invalid_spread = rejected(
+        "type Target = { id: Int32 };\n\
+         fn main(): Void { mut target: Target = { ...1 }; }",
+    );
+    assert!(
+        invalid_spread.contains("object spread requires an object value"),
+        "{invalid_spread}"
+    );
+}
+
+#[test]
+fn union_object_literals_collect_candidates_and_contextualize_nested_values() {
+    let (sources, sink) = parse_and_check(
+        "type Enabled = { active: true; payload: { amount: Int8 } };\n\
+         type Disabled = { active: false; payload: { reason: String } };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn choose(): Choice { return { active: true, payload: { amount: 7 } }; }\n\
+         fn main(): Void { }",
+    );
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    let _ = sources;
+
+    let ambiguous = rejected(
+        "type Left = { value: Int32; left?: Boolean }; type Right = { value: Int32; right?: Boolean }; type Choice = Left | Right; fn choose(): Choice { return { value: 7 }; } fn main(): Void { }",
+    );
+    assert!(
+        ambiguous.contains("ambiguous between union alternatives"),
+        "{ambiguous}"
+    );
+    assert!(
+        ambiguous.contains("let value: Left = { ... }"),
+        "ambiguity guidance should show an explicit alternative annotation: {ambiguous}"
+    );
+    assert!(
+        ambiguous.contains("known fields remain compatible with: { left?: Boolean, value: Int32 } | { right?: Boolean, value: Int32 }"),
+        "candidate names should be listed deterministically: {ambiguous}"
+    );
+    let reversed_ambiguity = rejected(
+        "type Left = { value: Int32; left?: Boolean }; type Right = { value: Int32; right?: Boolean }; type Choice = Right | Left; fn choose(): Choice { return { value: 7 }; } fn main(): Void { }",
+    );
+    assert!(
+        reversed_ambiguity.contains("known fields remain compatible with: { left?: Boolean, value: Int32 } | { right?: Boolean, value: Int32 }"),
+        "reordering union alternatives must not reorder the ambiguity report: {reversed_ambiguity}"
+    );
+
+    let no_candidate = rejected(
+        "type Left = { value: Int32 }; type Right = { name: String }; type Choice = Left | Right; fn choose(): Choice { return { extra: true }; } fn main(): Void { }",
+    );
+    assert!(
+        no_candidate.contains("matches no alternative"),
+        "{no_candidate}"
+    );
+    assert!(
+        no_candidate.contains("missing required property `value`"),
+        "{no_candidate}"
+    );
+    assert!(
+        no_candidate.contains("missing required property `name`"),
+        "{no_candidate}"
+    );
+
+    let callable_candidates = "type ReturnsInt = { map: Fn(Int32) => Int32 };\n\
+         type ReturnsText = { map: Fn(Int32) => String };\n\
+         type CallableChoice = ReturnsInt | ReturnsText;\n\
+         fn choose_callable(): CallableChoice { return { map: (value): Int32 => value }; }\n\
+         fn main(): Void { }";
+    let (_, callable_sink) = parse_and_check(callable_candidates);
+    let callable_output = callable_sink.render(RenderStyle::Human);
+    assert!(
+        !callable_output.contains("ambiguous between union alternatives"),
+        "the lambda's declared return type must filter incompatible candidates: {callable_output}"
+    );
+    assert!(
+        !callable_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "{callable_output}"
+    );
+
+    let singleton_candidates = "enum Shade { Red, Blue }\n\
+         const fn scale(value: Int32): Int32 { return value * 2; }\n\
+         type FloatLeft = { choice: const(1.5f64); left: Int32 };\n\
+         type FloatRight = { choice: const(2.5f64); right: Int32 };\n\
+         type DateLeft = { choice: const(Date(2026, 12, 25)); left: Int32 };\n\
+         type DateRight = { choice: const(Date(2027, 1, 1)); right: Int32 };\n\
+         type TimeLeft = { choice: const(Time(9, 30)); left: Int32 };\n\
+         type TimeRight = { choice: const(Time(17, 0)); right: Int32 };\n\
+         type DateTimeLeft = { choice: const(DateTime(Date(2026, 12, 25), Time(9, 30))); left: Int32 };\n\
+         type DateTimeRight = { choice: const(DateTime(Date(2027, 1, 1), Time(0, 0))); right: Int32 };\n\
+         type EnumLeft = { choice: const(Shade.Red); left: Int32 };\n\
+         type EnumRight = { choice: const(Shade.Blue); right: Int32 };\n\
+         type ValueLeft = { choice: const({ x: 1 }); left: Int32 };\n\
+         type ValueRight = { choice: const({ x: 2 }); right: Int32 };\n\
+         type ConstFnLeft = { choice: const(scale(3)); left: Int32 };\n\
+         type ConstFnRight = { choice: const(scale(4)); right: Int32 };\n\
+         type FloatChoice = FloatLeft | FloatRight;\n\
+         type DateChoice = DateLeft | DateRight;\n\
+         type TimeChoice = TimeLeft | TimeRight;\n\
+         type DateTimeChoice = DateTimeLeft | DateTimeRight;\n\
+         type EnumChoice = EnumLeft | EnumRight;\n\
+         type ValueChoice = ValueLeft | ValueRight;\n\
+         type ConstFnChoice = ConstFnLeft | ConstFnRight;\n\
+         fn float_choice(): FloatChoice { return { choice: 1.5f64, left: 1 }; }\n\
+         fn date_choice(): DateChoice { return { choice: Date(2026, 12, 25), left: 1 }; }\n\
+         fn time_choice(): TimeChoice { return { choice: Time(9, 30), left: 1 }; }\n\
+         fn datetime_choice(): DateTimeChoice { return { choice: DateTime(Date(2026, 12, 25), Time(9, 30)), left: 1 }; }\n\
+         fn enum_choice(): EnumChoice { return { choice: Shade.Red, left: 1 }; }\n\
+         fn value_choice(): ValueChoice { return { choice: { x: 1 }, left: 1 }; }\n\
+         fn const_fn_choice(): ConstFnChoice { return { choice: scale(3), left: 1 }; }\n\
+         fn main(): Void { }";
+    let (_, singleton_sink) = parse_and_check(singleton_candidates);
+    let singleton_output = singleton_sink.render(RenderStyle::Human);
+    assert!(
+        !singleton_output.contains("ambiguous between union alternatives"),
+        "{singleton_output}"
+    );
+    assert!(
+        !singleton_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "{singleton_output}"
+    );
+
+    let wrong_discriminant = rejected(
+        "type One = { tag: const(1); one: Int32 }; type Two = { tag: const(2); two: Int32 }; type Choice = One | Two; fn choose(): Choice { return { tag: 3, one: 1 }; } fn main(): Void { }",
+    );
+    assert!(
+        wrong_discriminant.contains("matches no alternative"),
+        "a value outside all singleton discriminants must not select an alternative: {wrong_discriminant}"
+    );
+
+    let nested_mismatch = "type Counted = { payload: { count: Int32 } };\n\
+         type Named = { payload: { name: String } };\n\
+         type Choice = Counted | Named;\n\
+         fn choose(): Choice { return { payload: { count: \"wrong\" } }; }\n\
+         fn main(): Void { }";
+    let (_, nested_sink) = parse_and_check(nested_mismatch);
+    let nested_output = nested_sink.render(RenderStyle::Human);
+    assert!(
+        nested_output.contains("property `count` has a value incompatible with `Int32`"),
+        "zero-candidate diagnostics should report the closest nested field mismatch: {nested_output}"
+    );
+    let diagnostic = nested_sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("matches no alternative"))
+        .expect("a zero-candidate diagnostic is emitted");
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("diagnostic is source-located");
+    let source_line = nested_mismatch.lines().nth(3).unwrap();
+    let expected_column = source_line.find("\"wrong\"").unwrap() as u32 + 1;
+    assert_eq!(location.line, 4);
+    assert_eq!(location.column, expected_column, "{nested_output}");
+}
+
+#[test]
+fn type_algebra_diagnostics_keep_codes_locations_causes_and_next_steps() {
+    let relation_limit = zirk_sema::type_budget::BudgetKind::NormalizationMembers.limit() as usize;
+    let mut wide = String::new();
+    for index in 0..=relation_limit {
+        wide.push_str(&format!("enum Option{index} {{ Item }}\n"));
+    }
+    let alternatives = (0..=relation_limit)
+        .map(|index| format!("Option{index}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    wide.push_str(&format!(
+        "fn take(value: {alternatives}): Void {{ }}\nfn main(): Void {{ }}"
+    ));
+
+    let cases = [
+        (
+            "incompatible union assignment",
+            "type Choice = Int32 | String; fn take(value: Choice): Void { } fn main(): Void { take(true); }",
+            codes::TYPE_MISMATCH,
+        ),
+        (
+            "conflicting intersection members",
+            "contract Named { name: String; } contract Numbered { name: Int32; } contract Both implements Named, Numbered { } fn main(): Void { }",
+            codes::DUPLICATE_DECLARATION,
+        ),
+        (
+            "ambiguous structural union literal",
+            "type Left = { value: Int32; left?: Boolean }; type Right = { value: Int32; right?: Boolean }; type Choice = Left | Right; fn choose(): Choice { return { value: 7 }; } fn main(): Void { }",
+            codes::TYPE_MISMATCH,
+        ),
+        (
+            "invalid temporal literal",
+            "type InvalidValue = const(Time(25, 0)); fn take(value: InvalidValue): Void { } fn main(): Void { }",
+            codes::INVALID_CONSTANT_TYPE,
+        ),
+        (
+            "impossible type predicate",
+            "class Box { } fn test(value: String): Boolean { return value is Box; } fn main(): Void { }",
+            codes::TYPE_MISMATCH,
+        ),
+        (
+            "type complexity budget",
+            wide.as_str(),
+            codes::TYPE_COMPUTATION_LIMIT,
+        ),
+    ];
+
+    for (label, source, expected_code) in cases {
+        let (_sources, sink) = parse_and_check(source);
+        let diagnostic = sink
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == expected_code)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing {label} diagnostic: {}",
+                    sink.render(RenderStyle::Human)
+                )
+            });
+        assert!(
+            diagnostic.location.is_some(),
+            "{label} must retain a source location"
+        );
+        assert!(
+            !diagnostic.message.is_empty(),
+            "{label} must have a stable message"
+        );
+        assert!(
+            diagnostic
+                .cause
+                .as_ref()
+                .is_some_and(|cause| !cause.is_empty()),
+            "{label} must explain the mismatch"
+        );
+        assert!(
+            diagnostic
+                .help
+                .as_ref()
+                .is_some_and(|help| !help.is_empty()),
+            "{label} must provide actionable guidance"
+        );
+    }
+}
+
+#[test]
+fn composite_type_diagnostics_bound_their_utf8_display() {
+    let alternatives = (0..8)
+        .map(|index| format!("const(\"{}-{index}\")", "🙂".repeat(80)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let source = format!(
+        "type Choice = {alternatives};\nfn consume(value: Int32): Void {{ }}\nfn reject(value: Choice): Void {{ consume(value); }}\nfn main(): Void {{ }}"
+    );
+    let (_sources, sink) = parse_and_check(&source);
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::TYPE_MISMATCH)
+        .expect("the composite union argument is incompatible with Int32");
+    let cause = diagnostic.cause.as_deref().expect("type mismatch cause");
+    assert!(
+        cause.contains("..."),
+        "the union display is truncated: {cause}"
+    );
+    assert!(
+        cause.len() <= 240,
+        "composite type names must stay bounded in the diagnostic, got {} bytes",
+        cause.len()
+    );
+    assert!(std::str::from_utf8(cause.as_bytes()).is_ok());
+}
+
+#[test]
+fn structural_discriminants_and_property_presence_narrow_known_unions_conservatively() {
+    let source = "type Enabled = { active: true; enabledOnly: String };\n\
+         type Disabled = { active: false; disabledOnly: String };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn by_value(value: Choice): String {\n\
+             if value.active == true { return value.enabledOnly; } else { return value.disabledOnly; }\n\
+         }\n\
+         fn after_early_return(value: Choice): String {\n\
+             if value.active == true { return value.enabledOnly; }\n\
+             return value.disabledOnly;\n\
+         }\n\
+         fn after_never(value: Choice): String {\n\
+             if value.active == true { fatalError(\"stop\"); }\n\
+             return value.disabledOnly;\n\
+         }\n\
+         fn after_throw(value: Choice): String {\n\
+             if value.active == true { throw DivisionByZeroError(\"stop\"); }\n\
+             return value.disabledOnly;\n\
+         }\n\
+         fn short_circuit(value: Choice): String {\n\
+             if value.active == true && value.enabledOnly == \"yes\" { return value.enabledOnly; }\n\
+             if value.active == false || value.enabledOnly == \"no\" { return \"ok\"; }\n\
+             return \"other\";\n\
+         }\n\
+         type HasName = { name: String }; type NoName = { id: Int32 };\n\
+         type Named = HasName | NoName;\n\
+         fn by_presence(value: Named): String {\n\
+             if (\"name\" in value) { return value.name; }\n\
+             return \"missing\";\n\
+         }\n\
+         type MaybeName = { name?: String };\n\
+         fn optional_stays_uncertain(value: MaybeName): String {\n\
+             if (\"name\" in value) { return value.name ?? \"none\"; }\n\
+             return value.name ?? \"none\";\n\
+         }\n\
+         fn open_object(value: Object): Void {\n\
+             if (\"name\" in value) { mut name = value.name; }\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn flow_facts_are_invalidated_by_reassignment_and_escaping_calls() {
+    let reassigned = rejected(
+        "type Enabled = { active: Boolean; enabledOnly: String }; type Disabled = { active: Boolean; disabledOnly: String }; type Choice = Enabled | Disabled; fn read(value: Choice): String { if value.active == true { value.active = false; return value.enabledOnly; } return \"off\"; } fn main(): Void { }",
+    );
+    assert!(
+        reassigned.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "a field write must discard the prior discriminant refinement: {reassigned}"
+    );
+
+    let escaped = rejected(
+        "type Enabled = { active: true; enabledOnly: String }; type Disabled = { active: false; disabledOnly: String }; type Choice = Enabled | Disabled; fn mutate(value: Choice): Void { } fn read(value: Choice): String { if value.active == true { mutate(value); return value.enabledOnly; } return \"off\"; } fn main(): Void { }",
+    );
+    assert!(
+        escaped.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "passing a narrowed value to a call may invalidate its fact: {escaped}"
+    );
+
+    let unrelated = "type Enabled = { active: true; enabledOnly: String }; type Disabled = { active: false; disabledOnly: String }; type Choice = Enabled | Disabled; fn noop(): Void { } fn read(value: Choice): String { if value.active == true { noop(); return value.enabledOnly; } return value.disabledOnly; } fn main(): Void { }";
+    let (_, sink) = parse_and_check(unrelated);
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn closures_do_not_capture_transient_union_narrowing() {
+    let output = rejected(
+        "type Enabled = { active: true; enabledOnly: String }; type Disabled = { active: false; disabledOnly: String }; type Choice = Enabled | Disabled; fn read(value: Choice): String { if value.active == true { let callback = (): String => value.enabledOnly; return callback(); } return value.disabledOnly; } fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "a closure may run after a mutable referent changes, so it must check the declared union type: {output}"
+    );
+}
+
+#[test]
+fn invoking_a_capturing_closure_invalidates_its_captured_flow_facts() {
+    let output = rejected(
+        "type Enabled = { active: Boolean; enabledOnly: String }; type Disabled = { active: Boolean; disabledOnly: String }; type Choice = Enabled | Disabled; fn read(mut value: Choice): String { if value.active == true { let flip = (): Void => { value.active = false; }; flip(); return value.enabledOnly; } return \"off\"; } fn main(): Void { }",
+    );
+    assert!(
+        output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "calling a closure that mutates a captured object invalidates its prior refinement: {output}"
+    );
+}
+
+#[test]
+fn union_flow_composes_with_result_resources_exceptions_cancellation_and_nullable_projection() {
+    let source = format!(
+        "{OPEN_ERROR}\n{FAKE_FILE}\n{BOOM_ERROR}\n\
+         type Ready = {{ ready: true; label: String; file: FakeFile? }};\n\
+         type Failed = {{ ready: false; message: String }};\n\
+         type Status = Ready | Failed;\n\
+         fn summarize(value: Status): String {{\n\
+             if value.ready == true {{ return value.file?.name ?? value.label; }}\n\
+             return value.message;\n\
+         }}\n\
+         fn load_label(): String {{\n\
+             mut label: String = \"\";\n\
+             match open(\"report.txt\") with file {{\n\
+                 Ok(file) => {{ label = file.name; }}\n\
+                 Error(error) => {{ label = error.message(); }}\n\
+             }}\n\
+             return label;\n\
+         }}\n\
+         fn main(): Void {{\n\
+             mut output: String = load_label();\n\
+         try {{ throw BoomError(); }}\n\
+         catch BoomError(error) {{ output = error.message(); }}\n\
+             finally {{ output = output + \"!\"; }}\n\
+         inmut job: Job<Int32> = Timer.after(1s, (): Int32 => 42);\n\
+         job.cancel();\n\
+         }}"
+    );
+    let (_, sink) = parse_and_check(&source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        sink.diagnostics().iter().all(|diagnostic| {
+            diagnostic.severity != Severity::Error || diagnostic.code == codes::NOT_LOWERED
+        }),
+        "cross-feature semantic checks should pass; the anonymous union is currently only semantically checked, not code generated:\n{output}"
+    );
+}
+
+#[test]
+fn type_predicates_are_inferred_only_from_direct_safe_type_tests() {
+    let accepted = "class Box { construct() { } }\n\
+         fn isBox(value: Dynamic): Boolean { return value is Box; }\n\
+         fn getBox(value: Dynamic): Box? { if isBox(value) { return value; } return null; }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(accepted);
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+
+    let forged = rejected(
+        "class Box { construct() { } } fn isBox(value: String): Boolean { return value is Box; } fn main(): Void { }",
+    );
+    assert!(forged.contains("can never succeed"), "{forged}");
+
+    let external_boundary = rejected(
+        "class Box { construct() { } } extern \"C\" fn nativePredicate(value: Int32): Boolean; fn checkExternal(value: Dynamic): Void { if nativePredicate(1) { mut box: Box = value; } } fn main(): Void { }",
+    );
+    assert!(
+        external_boundary.contains("incompatible types"),
+        "{external_boundary}"
+    );
+}
+
+#[test]
+fn match_bindings_receive_remaining_singletons_and_structural_candidates() {
+    let source = "type One = const(1); type Two = const(2); type Choice = One | Two;\n\
+         fn select(value: Choice): Int32 { match value { 1 => 10, remaining => { let two: Two = remaining; return 20; } } }\n\
+         type HasLabel = { label: String }; type HasCode = { code: Int32 };\n\
+         type RecordChoice = HasLabel | HasCode;\n\
+         fn get_text(value: RecordChoice): String {\n\
+             match value { { label } => label, { code } => \"numeric\" }\n\
+         }\n\
+         fn get_remaining(value: RecordChoice): String {\n\
+             match value { { label } => label, other => { let code: HasCode = other; return \"numeric\"; } }\n\
+         }\n\
+         fn get_from_scrutinee(value: RecordChoice): String {\n\
+             match value { { label } => value.label, { code } => \"numeric\" }\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+}
+
+#[test]
+fn finite_match_exhaustiveness_covers_nullable_mixed_and_temporal_domains() {
+    let accepted = "enum Shade { Red, Blue }\n\
+         type One = const(1); type Mixed = One | Shade;\n\
+         type Holiday = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         fn boolean(value: Boolean?): Int32 { return match value { true => 1, false => 0, null => 2 }; }\n\
+         fn mixed(value: Mixed): Int32 { return match value { 1 => 1, Shade.Red => 2, Shade.Blue => 3 }; }\n\
+         fn holiday(value: Holiday): Int32 { return match value { Date(2026, 12, 25) => 1, Date(2027, 1, 1) => 2 }; }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(accepted);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::NON_EXHAUSTIVE_MATCH.as_str()),
+        "{output}"
+    );
+
+    let missing_null = rejected(
+        "fn incomplete(value: Boolean?): Int32 { return match value { true => 1, false => 0 }; } fn main(): Void { }",
+    );
+    assert!(missing_null.contains("null"), "{missing_null}");
+
+    let partial_payload = rejected(
+        "enum Shape { Circle(radius: Int32), Point } fn incomplete(value: Shape): Int32 { return match value { Shape.Circle(1) => 1, Shape.Point => 0 }; } fn main(): Void { }",
+    );
+    assert!(
+        partial_payload.contains("Shape.Circle"),
+        "{partial_payload}"
+    );
+}
+
+#[test]
+fn duplicate_and_impossible_match_patterns_report_unreachable_arms() {
+    let duplicate = rejected(
+        "type Choice = const(1) | const(2); fn classify(value: Choice): Int32 { return match value { 1 => 1, 1 => 2, _ => 3 }; } fn main(): Void { }",
+    );
+    assert!(
+        duplicate.contains(codes::UNREACHABLE_PATTERN.as_str()),
+        "{duplicate}"
+    );
+
+    let impossible = rejected(
+        "type One = const(1); fn classify(value: One): Int32 { return match value { 2 => 2, _ => 1 }; } fn main(): Void { }",
+    );
+    assert!(
+        impossible.contains(codes::UNREACHABLE_PATTERN.as_str()),
+        "{impossible}"
+    );
+}
+
+#[test]
+fn loop_flow_reaches_a_bounded_stable_header() {
+    let source = "class Box { construct() { } }\n\
+         fn inspect(value: Box?): Box? { while value != null { return value; } return value; }\n\
+         fn inspect_do(value: Box?): Box? { do { if value != null { return value; } } while true; return value; }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        !output.contains(codes::TYPE_COMPUTATION_LIMIT.as_str()),
+        "{output}"
+    );
+}
+
+#[test]
+fn selected_union_candidate_contextualizes_nested_generic_tuple_and_callable_values() {
+    let valid = "contract Payload<T> { value: T; }\n\
+         type Enabled = { active: true; payload: Payload<Int32>; pair: Tuple<Int32, String>; map: Fn(Int32) => Int32 };\n\
+         type Disabled = { active: false; payload: Payload<String>; pair: Tuple<String, Int32>; map: Fn(String) => String };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn choose(): Choice { return { active: true, payload: { value: 7 }, pair: (8, \"ok\"), map: (value): Int32 => value }; }\n\
+         fn main(): Void { }";
+    let (_, valid_diagnostics) = parse_and_check(valid);
+    let valid_output = valid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !valid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "the selected candidate must contextualize its nested generic contract, tuple, and callable: {valid_output}"
+    );
+
+    let invalid = "contract Payload<T> { value: T; }\n\
+         type Enabled = { active: true; payload: Payload<Int32>; pair: Tuple<Int32, String>; map: Fn(Int32) => Int32 };\n\
+         type Disabled = { active: false; payload: Payload<String>; pair: Tuple<String, Int32>; map: Fn(String) => String };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn choose(): Choice { return { active: true, payload: { value: \"wrong\" }, pair: (\"wrong\", 8), map: (value): String => value }; }\n\
+         fn main(): Void { }";
+    let (_, invalid_diagnostics) = parse_and_check(invalid);
+    let invalid_output = invalid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        invalid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "the selected alternative must reject values incompatible with its nested generic, tuple, and callable types: {invalid_output}"
+    );
+}
+
+#[test]
+fn union_object_literal_spreads_use_only_their_declared_discriminant_type() {
+    let precise = "type Enabled = { active: true; value: Int32 };\n\
+         type Disabled = { active: false; value: Int32 };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn copy_enabled(source: Enabled): Choice { return { ...source }; }\n\
+         fn main(): Void { }";
+    let (_, precise_diagnostics) = parse_and_check(precise);
+    let precise_output = precise_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !precise_output.contains("matches no alternative")
+            && !precise_output.contains("ambiguous between union alternatives")
+            && !precise_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "a spread with a statically singleton discriminant should select its compatible alternative: {precise_output}"
+    );
+
+    let broad = "type Enabled = { active: true; value: Int32 };\n\
+         type Disabled = { active: false; value: Int32 };\n\
+         type Choice = Enabled | Disabled;\n\
+         type Broad = { active: Boolean; value: Int32 };\n\
+         fn copy_broad(source: Broad): Choice { return { ...source }; }\n\
+         fn main(): Void { }";
+    let (_, broad_diagnostics) = parse_and_check(broad);
+    let broad_output = broad_diagnostics.render(RenderStyle::Human);
+    assert!(
+        broad_output.contains("matches no alternative"),
+        "a spread declared with a broad mutable-compatible discriminant must not be treated as either singleton: {broad_output}"
+    );
+
+    let no_flow_fact = "type Enabled = { active: true; value: Int32 };\n\
+         type Disabled = { active: false; value: Int32 };\n\
+         type Choice = Enabled | Disabled;\n\
+         fn consume_disabled(value: Disabled): Void { }\n\
+         fn build(source: Choice): Choice {\n\
+             mut selected: Choice = { ...source, active: true, value: 1 };\n\
+             consume_disabled(source);\n\
+             return selected;\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, no_flow_diagnostics) = parse_and_check(no_flow_fact);
+    let no_flow_output = no_flow_diagnostics.render(RenderStyle::Human);
+    assert!(
+        no_flow_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "selecting an alternative for a new object literal must not narrow the source union binding: {no_flow_output}"
+    );
+}
+
+#[test]
+fn if_branches_narrow_booleans_null_and_finite_singleton_unions() {
+    let source = "type Choice = const(1) | const(2);\n\
+         fn inspect(flag: Boolean, maybe: String?, choice: Choice): Void {\n\
+             if flag { mut yes: const(true) = flag; } else { mut no: const(false) = flag; }\n\
+             if maybe != null { mut text: String = maybe; } else { }\n\
+             if choice == 1 { mut one: const(1) = choice; } else { mut two: const(2) = choice; }\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, diagnostics) = parse_and_check(source);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "true/false, null, and singleton equality branches should each expose only the reachable type: {output}"
+    );
+}
+
+#[test]
+fn nominal_type_tests_and_checked_casts_narrow_branch_values() {
+    let source = "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         class Cat extends Animal { }\n\
+         fn inspect(value: Dog | Cat): Void {\n\
+             if value is Dog { mut dog: Dog = value; } else { mut cat: Cat = value; }\n\
+         }\n\
+         fn inspect_dynamic(value: Dynamic): Void {\n\
+             if value is Dog { mut dog: Dog = value; }\n\
+         }\n\
+         fn inspect_cast(value: Animal): Void {\n\
+             if (value as? Dog) != null { mut dog: Dog = value; }\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, diagnostics) = parse_and_check(source);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "nominal, Dynamic, and checked-cast success branches should use their narrowed types: {output}"
+    );
+
+    let impossible = "class Animal { } class Rock { } fn inspect(value: Animal): Void { if value is Rock { } } fn main(): Void { }";
+    let (_, impossible_diagnostics) = parse_and_check(impossible);
+    let impossible_output = impossible_diagnostics.render(RenderStyle::Human);
+    assert!(
+        impossible_output.contains("can never succeed"),
+        "a disjoint nominal type test should report that its true branch is impossible: {impossible_output}"
+    );
+}
+
+#[test]
+fn nested_generic_class_fields_are_substituted_for_structural_assignability() {
+    let source = "type HasStrings = { inmut values: List<String> };\n\
+         type HasDetails = { inmut details: { inmut value: String } };\n\
+         class Box<T> { values: List<T>; details: { inmut value: T }; }\n\
+         fn take(value: HasStrings): Void { }\n\
+         fn take_details(value: HasDetails): Void { }\n\
+         fn forward(value: Box<String>): Void { take(value); take_details(value); }\
+         fn main(): Void { }";
+    let (_, diagnostics) = parse_and_check(source);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "Box<String>.values must substitute to List<String>: {output}"
+    );
+
+    let incompatible = "type HasStrings = { inmut values: List<String> };\n\
+         type HasDetails = { inmut details: { inmut value: String } };\n\
+         class Box<T> { values: List<T>; details: { inmut value: T }; }\n\
+         fn take(value: HasStrings): Void { }\
+         fn take_details(value: HasDetails): Void { }\
+         fn forward(value: Box<Int32>): Void { take(value); take_details(value); }\
+         fn main(): Void { }";
+    let (_, incompatible_diagnostics) = parse_and_check(incompatible);
+    let incompatible_output = incompatible_diagnostics.render(RenderStyle::Human);
+    assert!(
+        incompatible_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "Box<Int32>.values must not satisfy List<String>: {incompatible_output}"
+    );
+
+    let union = "type HasTextOrNumber = { inmut value: String | Int32 };\n\
+         class UnionBox<T> { value: T | String; }\n\
+         fn take(value: HasTextOrNumber): Void { }\n\
+         fn forward(value: UnionBox<Int32>): Void { take(value); }\
+         fn main(): Void { }";
+    let (_, union_diagnostics) = parse_and_check(union);
+    let union_output = union_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !union_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "generic substitutions inside unions should preserve compatible alternatives: {union_output}"
     );
 }
 
@@ -5826,7 +6632,11 @@ fn invalid_match_narrowing_does_not_apply_inside_the_null_arm_itself() {
              }
          }",
     );
-    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains(codes::TYPE_MISMATCH.as_str())
+            || output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "{output}"
+    );
 }
 
 #[test]
@@ -5875,8 +6685,12 @@ fn valid_type_alias_lowers() {
 
 #[test]
 fn invalid_type_alias_mismatched_target() {
-    let output = rejected("type UserId = Int32;\nfn main(): Void { mut id: UserId = \"x\"; }");
+    let output = rejected(
+        "type RawId = Int32;\ntype UserId = RawId;\nfn main(): Void { mut id: UserId = \"x\"; }",
+    );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("to UserId"), "{output}");
+    assert!(output.contains("UserId` was expected"), "{output}");
 }
 
 #[test]
@@ -5888,6 +6702,10 @@ fn invalid_duplicate_type_alias() {
     );
     assert!(
         output.contains(codes::DUPLICATE_DECLARATION.as_str()),
+        "{output}"
+    );
+    assert!(
+        output.contains("a previous `type` alias exists with this name"),
         "{output}"
     );
 }
@@ -5904,6 +6722,50 @@ fn invalid_type_alias_cycle() {
         "{output}"
     );
     assert!(output.contains("itself"), "{output}");
+    assert!(
+        output.contains("A -> B -> A"),
+        "the recursive alias diagnostic should retain its declaration chain: {output}"
+    );
+}
+
+#[test]
+fn guarded_recursive_object_aliases_are_finite_and_unguarded_cycles_still_fail() {
+    let guarded = "type Node = { value: Int32; next: Node? };\n\
+         type Left = { right: Right? };\n\
+         type Right = { left: Left? };\n\
+         fn value(node: Node): Int32 { return node.value; }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(guarded);
+    let guarded_output = sink.render(RenderStyle::Human);
+    assert!(
+        sink.diagnostics().iter().all(|diagnostic| {
+            diagnostic.severity != Severity::Error || diagnostic.code == codes::NOT_LOWERED
+        }),
+        "object-guarded recursion should resolve into a finite semantic graph: {guarded_output}"
+    );
+
+    let unguarded = rejected("type A = B; type B = A; fn main(): Void { mut value: A = 1; }");
+    assert!(
+        unguarded.contains(codes::DUPLICATE_DECLARATION.as_str())
+            && unguarded.contains("A -> B -> A"),
+        "an alias cycle without an object guard must keep its deterministic cycle diagnostic: {unguarded}"
+    );
+
+    let mut deep_chain = String::new();
+    for index in 0..=256 {
+        let target = if index == 256 {
+            "Int32".to_string()
+        } else {
+            format!("Alias{}", index + 1)
+        };
+        deep_chain.push_str(&format!("type Alias{index} = {target};\n"));
+    }
+    deep_chain.push_str("fn main(): Void { mut value: Alias0 = 1; }");
+    let deep = rejected(&deep_chain);
+    assert!(
+        deep.contains(codes::TYPE_COMPUTATION_LIMIT.as_str()),
+        "alias unfolding must stop at its deterministic depth budget: {deep}"
+    );
 }
 
 #[test]
@@ -5918,12 +6780,108 @@ fn valid_type_alias_chain() {
 // --- Uniones ---------------------------------------------------------------
 
 #[test]
+fn type_algebra_baseline_has_unambiguous_expected_types() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "types.zrk",
+        "type Count = Int32;\n\
+         type UserId = Count;\n\
+         class Holder {\n\
+           direct: Int32;\n\
+           alias: UserId;\n\
+           optional: String?;\n\
+           union: Int32 | String;\n\
+           mut active: Boolean;\n\
+           inmut name: String;\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .expect("Holder is checked");
+    let field = |name: &str| {
+        holder
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap_or_else(|| panic!("missing field {name}"))
+    };
+
+    assert_eq!(field("direct").ty, Type::INT32);
+    assert_eq!(field("alias").ty, Type::INT32);
+    assert_eq!(field("direct").ty, field("alias").ty);
+    assert_eq!(field("optional").ty, Type::STRING.as_nullable());
+    assert_eq!(field("active").ty, Type::BOOLEAN);
+    assert_eq!(field("active").mutability, Mutability::Mutable);
+    assert_eq!(field("name").ty, Type::STRING);
+    assert_eq!(field("name").mutability, Mutability::Immutable);
+    let Base::Union(union_id) = field("union").ty.base else {
+        panic!("Int32 | String should have the canonical union type");
+    };
+    let normalized = &checked.unions[union_id as usize];
+    assert_eq!(normalized.len(), 2);
+    assert!(normalized.contains(&Base::String));
+    assert!(normalized.iter().any(|base| matches!(base, Base::Int(_))));
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
+        "the Int32 | String prototype union is admitted by the current lowering gate"
+    );
+}
+
+#[test]
 fn valid_union_type_accepts_either_alternative() {
-    let output = rejected(
+    accepted(
         "fn f(x: String | Int32): Void { }
          fn main(): Void { f(\"a\"); f(1); }",
     );
-    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn union_assignability_checks_every_source_member_and_target_alternatives() {
+    accepted(
+        "fn wider(value: String | Int32 | Boolean): Void { }\n\
+         fn from_union(value: String | Int32): Void { wider(value); }\n\
+         fn from_value(): Void { wider(1); }\n\
+         fn main(): Void { }",
+    );
+
+    let output = rejected(
+        "fn only_string(value: String): Void { }\n\
+         fn from_union(value: String | Int32): Void { only_string(value); }\n\
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn intersection_assignability_uses_each_target_member_and_proven_source_member() {
+    accepted(
+        "contract Readable { read(): String; }\n\
+         contract Closeable { close(): Void; }\n\
+         fn needs_both(value: Readable & Closeable): Void { }\n\
+         fn needs_readable(value: Readable): Void { }\n\
+         fn from_intersection(value: Readable & Closeable): Void {\n\
+             needs_both(value);\n\
+             needs_readable(value);\n\
+         }\n\
+         class Both implements Readable, Closeable {\n\
+             construct() { }\n\
+             #override read(): String { return \"data\"; }\n\
+             #override close(): Void { }\n\
+         }\n\
+         fn from_class(value: Both): Void { needs_both(value); }\n\
+         fn main(): Void { }",
+    );
 }
 
 #[test]
@@ -5933,6 +6891,123 @@ fn invalid_union_type_rejects_a_third_type() {
          fn main(): Void { f(true); }",
     );
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn normalization_budget_reports_source_location_without_interning_a_partial_union() {
+    let alternative_count =
+        zirk_sema::type_budget::BudgetKind::NormalizationMembers.limit() as usize + 1;
+    let mut source = String::new();
+    let names: Vec<_> = (0..alternative_count)
+        .map(|index| {
+            let name = format!("Kind{index}");
+            source.push_str(&format!("enum {name} {{ Item }}\n"));
+            name
+        })
+        .collect();
+    source.push_str(&format!(
+        "fn choose(value: {}): Void {{ }}\nfn main(): Void {{ }}",
+        names.join(" | ")
+    ));
+
+    let (_sources, sink) = parse_and_check(&source);
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::TYPE_COMPUTATION_LIMIT)
+        .expect("normalization must fail at its deterministic member limit");
+    assert!(diagnostic.message.contains("normalized type members"));
+    assert!(diagnostic.message.contains("256"));
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("normalization exhaustion must retain a source location");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, alternative_count as u32 + 1);
+}
+
+#[test]
+fn temporal_singleton_patterns_cover_canonical_union_members() {
+    let source = "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Wait = 250ms | 1s;\n\
+         fn classify(day: Day): String {\n\
+             return match day { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; };\n\
+         }\n\
+         fn classify_wait(wait: Wait): String {\n\
+             return match wait { 250ms => \"short\"; 1s => \"long\"; };\n\
+         }\n\
+         fn main(): Void { }";
+    let (_sources, sink) = parse_and_check(source);
+    let diagnostics = sink.diagnostics();
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::NON_EXHAUSTIVE_MATCH),
+        "both canonical Date values are covered: {diagnostics:?}"
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::TYPE_MISMATCH),
+        "each Date constructor pattern must match its singleton alternative: {diagnostics:?}"
+    );
+
+    let missing_source = "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         fn classify(day: Day): String {\n\
+             return match day { Date(2026, 12, 25) => \"holiday\"; };\n\
+         }\n\
+         fn main(): Void { }";
+    let (_sources, missing_sink) = parse_and_check(missing_source);
+    let diagnostic = missing_sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::NON_EXHAUSTIVE_MATCH)
+        .expect("an unhandled Date singleton must remain non-exhaustive");
+    assert!(diagnostic.message.contains("singleton"));
+}
+
+#[test]
+fn finite_singleton_unions_are_exhaustive_across_value_families() {
+    let source = "type NumberChoice = const(1) | const(2);\n\
+         type WordChoice = const(\"one\") | const(\"two\");\n\
+         type FloatChoice = const(1.5f64) | const(2.5f64);\n\
+         type CharChoice = const('a') | const('b');\n\
+         type FlagChoice = true | false;\n\
+         type TimeChoice = const(Time(9, 30)) | const(Time(17, 0));\n\
+         type EventChoice = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
+         fn number(value: NumberChoice): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
+         fn word(value: WordChoice): String { return match value { \"one\" => \"first\"; \"two\" => \"second\"; }; }\n\
+         fn float(value: FloatChoice): String { return match value { 1.5f64 => \"first\"; 2.5f64 => \"second\"; }; }\n\
+         fn character(value: CharChoice): String { return match value { 'a' => \"first\"; 'b' => \"second\"; }; }\n\
+         fn flag(value: FlagChoice): String { return match value { true => \"yes\"; false => \"no\"; }; }\n\
+         fn time(value: TimeChoice): String { return match value { Time(9, 30) => \"morning\"; Time(17, 0) => \"evening\"; }; }\n\
+         fn event(value: EventChoice): String { return match value { DateTime(Date(2026, 12, 25), Time(9, 30)) => \"holiday\"; DateTime(Date(2027, 1, 1), Time(0, 0)) => \"new year\"; }; }\n\
+         fn main(): Void { }";
+    let (_sources, sink) = parse_and_check(source);
+    let diagnostics = sink.diagnostics();
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::NON_EXHAUSTIVE_MATCH),
+        "all finite members across these domains are covered: {diagnostics:?}"
+    );
+
+    let missing_source = "type WordChoice = const(\"one\") | const(\"two\");\n\
+         fn word(value: WordChoice): String { return match value { \"one\" => \"first\"; }; }\n\
+         fn main(): Void { }";
+    let (_sources, missing_sink) = parse_and_check(missing_source);
+    let diagnostic = missing_sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::NON_EXHAUSTIVE_MATCH)
+        .expect("an uncovered String singleton must be reported");
+    assert!(
+        diagnostic
+            .cause
+            .as_deref()
+            .unwrap_or_default()
+            .contains("two")
+    );
 }
 
 #[test]
@@ -5957,6 +7032,77 @@ fn valid_union_order_is_irrelevant() {
 }
 
 #[test]
+fn generated_algebra_permutations_and_groupings_share_canonical_types() {
+    let union_orders = [
+        ["Animal", "Dog", "String"],
+        ["Animal", "String", "Dog"],
+        ["Dog", "Animal", "String"],
+        ["Dog", "String", "Animal"],
+        ["String", "Animal", "Dog"],
+        ["String", "Dog", "Animal"],
+    ];
+    let intersection_orders = [
+        ["Readable", "Closeable", "Taggable"],
+        ["Readable", "Taggable", "Closeable"],
+        ["Closeable", "Readable", "Taggable"],
+        ["Closeable", "Taggable", "Readable"],
+        ["Taggable", "Readable", "Closeable"],
+        ["Taggable", "Closeable", "Readable"],
+    ];
+    let mut source = String::from(
+        "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         class Readable { }\n\
+         class Closeable { }\n\
+         class Taggable { }\n\
+         type NestedUnion = (Animal | Dog) | String;\n\
+         type NestedIntersection = (Readable & Closeable) & Taggable;\n\
+         class Holder {\n",
+    );
+    for (index, order) in union_orders.iter().enumerate() {
+        source.push_str(&format!("u{index}: {};\n", order.join(" | ")));
+    }
+    source.push_str("u_duplicate: Dog | Animal | String | Dog;\nu_nested: NestedUnion;\n");
+    for (index, order) in intersection_orders.iter().enumerate() {
+        source.push_str(&format!("i{index}: {};\n", order.join(" & ")));
+    }
+    source.push_str(
+        "i_duplicate: Readable & Closeable & Taggable & Readable;\n\
+         i_nested: NestedIntersection;\n\
+         }\n\
+         fn main(): Void { }",
+    );
+
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("generated-algebra.zrk", source));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .expect("generated fixture declares Holder");
+
+    let union_type = holder.fields[0].ty;
+    for field in &holder.fields[1..8] {
+        assert_eq!(
+            field.ty, union_type,
+            "union normalization depends on syntax"
+        );
+    }
+    let intersection_type = holder.fields[8].ty;
+    for field in &holder.fields[9..16] {
+        assert_eq!(
+            field.ty, intersection_type,
+            "intersection normalization depends on syntax"
+        );
+    }
+}
+
+#[test]
 fn valid_union_duplicates_collapse() {
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new(
@@ -5975,6 +7121,642 @@ fn valid_union_duplicates_collapse() {
         2,
         "a repeated alternative is one member"
     );
+}
+
+#[test]
+fn valid_union_flattens_nested_alias_members() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "type Inner = String | Int32;\n\
+         class Holder { value: Inner | Boolean; }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    let Base::Union(id) = holder.fields[0].ty.base else {
+        panic!("nested union should resolve to a union");
+    };
+    let members = &checked.unions[id as usize];
+    assert_eq!(members.len(), 3, "nested members must be flattened");
+    assert!(members.contains(&Base::String));
+    assert!(members.contains(&Base::Boolean));
+    assert!(members.iter().any(|base| matches!(base, Base::Int(_))));
+}
+
+#[test]
+fn never_is_absorbed_by_unions_and_intersections() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "type Bottom = Never;\n\
+         class Holder { union: Bottom | String; intersection: Never & String; }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, Type::STRING);
+    assert_eq!(holder.fields[1].ty, Type::of(Base::Never));
+    assert!(checked.unions.is_empty());
+    assert!(checked.intersections.is_empty());
+}
+
+#[test]
+fn singleton_type_values_are_canonical_and_reused_by_constants() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             yes_a: true; yes_b: true; no: false;\n\
+             computed: const(1 + 2); written: 3;\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
+    assert_eq!(holder.fields[3].ty, holder.fields[4].ty);
+    assert_eq!(checked.singleton_values.len(), 3);
+    assert!(matches!(holder.fields[0].ty.base, Base::Singleton(_)));
+    assert!(matches!(holder.fields[3].ty.base, Base::Singleton(_)));
+    assert!(
+        checked
+            .describe_type(holder.fields[0].ty)
+            .contains("Boolean")
+    );
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != codes::NOT_LOWERED)
+    );
+}
+
+#[test]
+fn tuple_constant_singletons_are_interned_through_type_resolution() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             first: const((3, (true, \"ready\")));\n\
+             same: const((3, (true, \"ready\")));\n\
+             other: const((3, (false, \"ready\")));\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
+    let Base::Singleton(id) = holder.fields[0].ty.base else {
+        panic!("tuple constants must be interned as singleton types");
+    };
+    assert!(matches!(
+        checked.singleton_values[id as usize].value,
+        zirk_sema::constant_value::ConstValue::Tuple { .. }
+    ));
+}
+
+#[test]
+fn immutable_object_constant_singletons_intern_nested_values_by_shape() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             first: const({ x: 3, nested: (true, \"ready\") });\n\
+             same: const({ nested: (true, \"ready\"), x: 3 });\n\
+             other: const({ x: 4, nested: (true, \"ready\") });\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
+        "object constants should resolve canonically; only runtime lowering is pending: {}",
+        sink.render(RenderStyle::Human)
+    );
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
+    let Base::Singleton(id) = holder.fields[0].ty.base else {
+        panic!("immutable aggregate constants must intern as singleton types");
+    };
+    let zirk_sema::constant_value::ConstValue::Aggregate { fields, .. } =
+        &checked.singleton_values[id as usize].value
+    else {
+        panic!("expected canonical immutable aggregate value");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].0, "nested");
+    assert_eq!(fields[1].0, "x");
+}
+
+#[test]
+fn enum_variant_constants_are_typed_and_interned_by_variant_and_payload() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "enum Color { Red, Blue }\n\
+         enum Shape { Circle(radius: Int32, color: Color), Point }\n\
+         class Holder {\n\
+             first: const(Shape.Circle(3, Color.Red));\n\
+             same: const(Shape.Circle(3, Color.Red));\n\
+             other_color: const(Shape.Circle(3, Color.Blue));\n\
+             other_variant: const(Shape.Point);\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
+        "enum values should resolve semantically; only pending runtime lowering is expected: {}",
+        sink.render(RenderStyle::Human)
+    );
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
+    assert_ne!(holder.fields[0].ty, holder.fields[3].ty);
+    let Base::Singleton(id) = holder.fields[0].ty.base else {
+        panic!("enum constants must be represented as singleton types");
+    };
+    let zirk_sema::constant_value::ConstValue::Enum { fields, .. } =
+        &checked.singleton_values[id as usize].value
+    else {
+        panic!("expected canonical algebraic enum value");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].type_identity, "Int32");
+    assert_eq!(fields[1].type_identity, "Color");
+}
+
+#[test]
+fn const_class_construction_is_rejected_as_runtime_identity() {
+    let (_sources, sink) = parse_and_check(
+        "class Box { value: Int32; construct(value: Int32) { this.value = value; } }\n\
+         type Boxed = const(Box(1));\n\
+         fn take(value: Boxed): Void { }\n\
+         fn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .unwrap_or_else(|| {
+            panic!(
+                "class identity must not become a singleton: {}",
+                sink.render(RenderStyle::Human)
+            )
+        });
+    assert!(
+        diagnostic
+            .message
+            .contains("not declared and verified as a pure constant function"),
+        "class constructors must fail clearly as unverified runtime operations: {}",
+        diagnostic.message
+    );
+}
+
+#[test]
+fn satisfies_checks_assignability_and_preserves_singleton_type() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "type Three = const(3);\n\
+         fn check(value: Three): Three { return value satisfies Int32; }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
+        "satisfies should type-check while retaining the singleton: {}",
+        sink.render(RenderStyle::Human)
+    );
+    let expr = match &program.functions[0].body.statements[0] {
+        Stmt::Return(statement) => statement.value.as_ref().unwrap(),
+        other => panic!("expected a return containing satisfies, got {other:?}"),
+    };
+    let Expr::Satisfies(satisfies) = expr else {
+        panic!("expected satisfies in the argument");
+    };
+    assert!(matches!(
+        checked.expr_types[&satisfies.span].base,
+        Base::Singleton(_)
+    ));
+}
+
+#[test]
+fn satisfies_rejects_an_expression_outside_the_target_type() {
+    let output =
+        rejected("fn main(): Void { inmut text: String = \"hello\"; _ = text satisfies Int32; }");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("does not satisfy"), "{output}");
+}
+
+#[test]
+fn builtin_singletons_are_assignable_to_their_owning_primitive_types() {
+    let (_, sink) = parse_and_check(
+        "fn take_bool(value: Boolean): Void { }\n\
+         fn take_string(value: String): Void { }\n\
+         fn take_date(value: Date): Void { }\n\
+         fn main(): Void {\n\
+             take_bool(true);\n\
+             take_string(\"ready\");\n\
+             take_date(Date(2026, 12, 25));\n\
+         }",
+    );
+    assert!(
+        !sink.has_errors(),
+        "a singleton value must fit its owning primitive type: {}",
+        sink.render(RenderStyle::Human)
+    );
+}
+
+#[test]
+fn mutable_numeric_literals_widen_to_the_primitive_for_reassignment() {
+    accepted_body("mut count = 1; count = 2; count = 2147483647;");
+    let immutable = rejected_body("inmut count = 1; count = 2;");
+    assert!(
+        immutable.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "{immutable}"
+    );
+}
+
+#[test]
+fn expected_union_context_selects_and_retains_literal_alternatives() {
+    accepted(
+        "type Value = Int32 | String;\n\
+         type Number = const(1) | const(2);\n\
+         type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         fn take(value: Value): Void { }\n\
+         fn take_number(value: Number): Void { }\n\
+         fn take_day(value: Day): Void { }\n\
+         fn main(): Void {\n\
+             mut current: Value = 1;\n\
+             current = \"ready\";\n\
+             take(2);\n\
+             take(\"done\");\n\
+             take_number(2);\n\
+             take_day(Date(2026, 12, 25));\n\
+         }",
+    );
+}
+
+#[test]
+fn explicit_singleton_annotation_rejects_a_different_value_after_widening() {
+    let output = rejected("fn main(): Void { mut one: const(1) = 1; one = 2; }");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+}
+
+#[test]
+fn primitive_union_members_absorb_owned_singletons() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             numeric: Int32 | 3;\n\
+             text: String | \"ready\";\n\
+             day: Date | const(Date(2026, 12, 25));\n\
+             flags: true | false;\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, Type::INT32);
+    assert_eq!(holder.fields[1].ty, Type::STRING);
+    assert_eq!(holder.fields[2].ty, Type::of(Base::Date));
+    assert_eq!(holder.fields[3].ty, Type::BOOLEAN);
+}
+
+#[test]
+fn primitive_and_enum_union_coverage_absorbs_singleton_members() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "enum Color { Red, Blue }\n\
+         class Holder {\n\
+             integer: Int32 | 3;\n\
+             float: Float64 | 1.5f64;\n\
+             decimal: Decimal | 1.5;\n\
+             text: String | \"ready\";\n\
+             character: Char | 'x';\n\
+             duration: Duration | 1s;\n\
+             date: Date | const(Date(2026, 12, 25));\n\
+             time: Time | const(Time(9, 30));\n\
+             datetime: DateTime | const(DateTime(2026, 12, 25, 9, 30));\n\
+             flag: Boolean | true;\n\
+             color: Color | const(Color.Red);\n\
+             both_flags: true | false;\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, Type::INT32);
+    assert_eq!(
+        holder.fields[1].ty,
+        Type::of(Base::Float(zirk_sema::FloatWidth::F64))
+    );
+    assert_eq!(holder.fields[2].ty, Type::of(Base::Decimal));
+    assert_eq!(holder.fields[3].ty, Type::STRING);
+    assert_eq!(holder.fields[4].ty, Type::of(Base::Char));
+    assert_eq!(holder.fields[5].ty, Type::of(Base::Duration));
+    assert_eq!(holder.fields[6].ty, Type::of(Base::Date));
+    assert_eq!(holder.fields[7].ty, Type::of(Base::Time));
+    assert_eq!(holder.fields[8].ty, Type::of(Base::DateTime));
+    assert_eq!(holder.fields[9].ty, Type::BOOLEAN);
+    assert!(matches!(holder.fields[10].ty.base, Base::Enum(_)));
+    assert_eq!(holder.fields[11].ty, Type::BOOLEAN);
+}
+
+#[test]
+fn integer_singletons_fit_only_representable_signed_and_unsigned_targets() {
+    let (_sources, sink) = parse_and_check(
+        "fn take_i8(value: Int8): Void { }\n\
+         fn take_u8(value: UInt8): Void { }\n\
+         fn signed(value: const(-128)): Void { take_i8(value); }\n\
+         fn unsigned(value: const(255)): Void { take_u8(value); }\n\
+         fn main(): Void { }",
+    );
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::TYPE_MISMATCH),
+        "representable integer singletons should fit their destination widths"
+    );
+
+    for (source, expected) in [
+        (
+            "fn take_i8(value: Int8): Void { }\n\
+             fn too_small(value: const(-129)): Void { take_i8(value); }\n\
+             fn main(): Void { }",
+            "Int8",
+        ),
+        (
+            "fn take_u8(value: UInt8): Void { }\n\
+             fn negative(value: const(-1)): Void { take_u8(value); }\n\
+             fn main(): Void { }",
+            "UInt8",
+        ),
+        (
+            "fn take_u8(value: UInt8): Void { }\n\
+             fn too_large(value: const(256)): Void { take_u8(value); }\n\
+             fn main(): Void { }",
+            "UInt8",
+        ),
+    ] {
+        let output = rejected(source);
+        assert!(
+            output.contains(codes::TYPE_MISMATCH.as_str()),
+            "singleton outside {expected} range must fail: {output}"
+        );
+    }
+}
+
+#[test]
+fn union_normalization_absorbs_only_sound_numeric_supertypes() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class NumericChoices {\n\
+             widened_integer: Int8 | Int32;\n\
+             exactly_representable_float: Int32 | Float64;\n\
+             not_exactly_representable_float: Int64 | Float64;\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let choices = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "NumericChoices")
+        .unwrap();
+    assert!(
+        Type::of(Base::Int(zirk_sema::IntWidth::I32))
+            .accepts(Type::of(Base::Int(zirk_sema::IntWidth::I8)))
+    );
+
+    let field = |name: &str| {
+        choices
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .unwrap()
+            .ty
+    };
+    assert_eq!(
+        field("widened_integer"),
+        Type::of(Base::Int(zirk_sema::IntWidth::I32)),
+        "unions: {:?}",
+        checked.unions
+    );
+    assert_eq!(
+        field("exactly_representable_float"),
+        Type::of(Base::Float(zirk_sema::FloatWidth::F64))
+    );
+    assert!(matches!(
+        field("not_exactly_representable_float").base,
+        Base::Union(_)
+    ));
+    assert_eq!(checked.unions.len(), 1);
+}
+
+#[test]
+fn numeric_union_normalization_matches_all_existing_lossless_assignability_pairs() {
+    use zirk_sema::{FloatWidth, IntWidth};
+
+    let numeric_types = [
+        ("Int8", Type::of(Base::Int(IntWidth::I8))),
+        ("Int16", Type::of(Base::Int(IntWidth::I16))),
+        ("Int32", Type::of(Base::Int(IntWidth::I32))),
+        ("Int64", Type::of(Base::Int(IntWidth::I64))),
+        ("Int128", Type::of(Base::Int(IntWidth::I128))),
+        ("UInt8", Type::of(Base::Int(IntWidth::U8))),
+        ("UInt16", Type::of(Base::Int(IntWidth::U16))),
+        ("UInt32", Type::of(Base::Int(IntWidth::U32))),
+        ("UInt64", Type::of(Base::Int(IntWidth::U64))),
+        ("UInt128", Type::of(Base::Int(IntWidth::U128))),
+        ("Float16", Type::of(Base::Float(FloatWidth::F16))),
+        ("Float32", Type::of(Base::Float(FloatWidth::F32))),
+        ("Float64", Type::of(Base::Float(FloatWidth::F64))),
+        ("Float128", Type::of(Base::Float(FloatWidth::F128))),
+        ("Decimal", Type::of(Base::Decimal)),
+    ];
+    let mut source = String::from("class NumericMatrix {\n");
+    let mut cases = Vec::new();
+    for left in 0..numeric_types.len() {
+        for right in (left + 1)..numeric_types.len() {
+            let field = format!("pair_{left}_{right}");
+            source.push_str(&format!(
+                "{field}: {} | {};\n",
+                numeric_types[left].0, numeric_types[right].0
+            ));
+            cases.push((field, left, right));
+        }
+    }
+    source.push_str("}\nfn main(): Void { }");
+
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("numeric-union-matrix.zrk", source));
+    let entry = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(entry, &mut sink);
+    let program = parse(entry, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let class = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "NumericMatrix")
+        .unwrap();
+
+    for (field_name, left, right) in cases {
+        let actual = class
+            .fields
+            .iter()
+            .find(|field| field.name == field_name)
+            .unwrap()
+            .ty;
+        let (left_name, left_type) = numeric_types[left];
+        let (right_name, right_type) = numeric_types[right];
+        if left_type.accepts(right_type) {
+            assert_eq!(actual, left_type, "{left_name} | {right_name}");
+        } else if right_type.accepts(left_type) {
+            assert_eq!(actual, right_type, "{left_name} | {right_name}");
+        } else {
+            let Base::Union(id) = actual.base else {
+                panic!("{left_name} | {right_name} must remain a union, got {actual:?}");
+            };
+            let members = &checked.unions[id as usize];
+            assert!(
+                members.contains(&left_type.base),
+                "{left_name} | {right_name}"
+            );
+            assert!(
+                members.contains(&right_type.base),
+                "{left_name} | {right_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn singleton_boolean_and_temporal_values_flow_into_union_nodes() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             flag: true | false;\n\
+             one_flag: true;\n\
+             covered_flag: Boolean | false;\n\
+             day: const(Date(2026, 12, 25)) | const(Date(2026, 12, 26));\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty.base, Base::Boolean);
+    assert!(matches!(holder.fields[1].ty.base, Base::Singleton(_)));
+    assert_eq!(holder.fields[2].ty.base, Base::Boolean);
+    let Base::Union(days) = holder.fields[3].ty.base else {
+        panic!("distinct Date constants should remain a finite union");
+    };
+    assert_eq!(checked.unions[days as usize].len(), 2);
+    for base in &checked.unions[days as usize] {
+        let Base::Singleton(id) = base else {
+            panic!("each temporal union alternative must be a singleton");
+        };
+        assert!(matches!(
+            checked.singleton_values[*id as usize].value,
+            zirk_sema::constant_value::ConstValue::Date(_)
+        ));
+    }
 }
 
 #[test]
@@ -6016,21 +7798,642 @@ fn valid_union_subsumes_a_subclass_alternative() {
 }
 
 #[test]
-fn invalid_member_access_on_an_unnarrowed_union() {
+fn normalized_union_supertypes_preserve_bidirectional_assignability() {
+    accepted(
+        "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         type Numeric = Int8 | Int32;\n\
+         type Pet = Animal | Dog;\n\
+         fn take_int(value: Int32): Void { }\n\
+         fn take_numeric(value: Numeric): Void { }\n\
+         fn take_animal(value: Animal): Void { }\n\
+         fn take_pet(value: Pet): Void { }\n\
+         fn check(number: Numeric, small: Int8, pet: Pet): Void {\n\
+             take_int(number); take_numeric(small);\n\
+             take_animal(pet); take_pet(Dog());\n\
+         }\n\
+         fn main(): Void { }",
+    );
+}
+
+#[test]
+fn union_reads_allow_common_structural_fields_and_join_their_types() {
+    let (sources, sink) = parse_and_check(
+        "class A { id: Int32; }
+         class B { id: Int64; }
+         fn f(x: A | B): Int32 | Int64 { return x.id; }
+         fn main(): Void { }",
+    );
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    // The present runtime prototype does not lower arbitrary nominal unions;
+    // this test isolates the static common-field rule from that separate gate.
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    let _ = sources;
+}
+
+#[test]
+fn union_reads_still_reject_fields_missing_from_an_alternative() {
     let output = rejected(
-        "class A {  hello(): Void { } }
+        "class A { id: Int32; }
          class B { }
-         fn f(x: A | B): Void { x.hello(); }
+         fn f(x: A | B): Void { inmut value = x.id; }
          fn main(): Void { }",
     );
     assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
-    assert!(output.contains("narrow"), "{output}");
+}
+
+#[test]
+fn union_method_calls_merge_safe_parameter_and_return_types() {
+    let (sources, sink) = parse_and_check(
+        "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         class A { read(value: Animal): Int32 { return 1; } }\n\
+         class B { read(value: Dog): Int64 { return 2; } }\n\
+         fn read_any(value: A | B): Int32 | Int64 { return value.read(Dog()); }\n\
+         fn main(): Void { }",
+    );
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    let _ = sources;
+
+    let incompatible_argument = rejected(
+        "class A { read(value: Int32): Int32 { return 1; } }\n\
+         class B { read(value: String): Int64 { return 2; } }\n\
+         fn read_any(value: A | B): Void { value.read(1); }\n\
+         fn main(): Void { }",
+    );
+    assert!(
+        incompatible_argument.contains(codes::TYPE_MISMATCH.as_str()),
+        "the common call must be valid for every receiver alternative: {incompatible_argument}"
+    );
+
+    let missing = rejected(
+        "class A { read(): Int32 { return 1; } }\n\
+         class B { }\n\
+         fn read_any(value: A | B): Void { value.read(); }\n\
+         fn main(): Void { }",
+    );
+    assert!(
+        missing.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "{missing}"
+    );
+
+    let callable_properties = "type ReadsInt = { read: Fn(Int32) => Int32 };\n\
+         type ReadsWide = { read: Fn(Int32) => Int64 };\n\
+         fn invoke(value: ReadsInt | ReadsWide): Int32 | Int64 { return value.read(3); }\n\
+         fn main(): Void { }";
+    let (_, callable_sink) = parse_and_check(callable_properties);
+    let callable_output = callable_sink.render(RenderStyle::Human);
+    assert!(
+        !callable_output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "common function-valued properties should be callable: {callable_output}"
+    );
+    assert!(
+        !callable_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "{callable_output}"
+    );
+
+    let generic_methods = "class A { read<T>(value: T): T { return value; } }\n\
+         class B { read<U>(value: U): U { return value; } }\n\
+         fn invoke(value: A | B): Int32 { return value.read(3); }\n\
+         fn main(): Void { }";
+    let (_, generic_sink) = parse_and_check(generic_methods);
+    let generic_output = generic_sink.render(RenderStyle::Human);
+    assert!(
+        !generic_output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "alpha-equivalent generic methods should share a callable signature: {generic_output}"
+    );
+    assert!(
+        !generic_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "{generic_output}"
+    );
+
+    let incompatible_generic_bounds = rejected(
+        "contract Left { } contract Right { }\n\
+         class A { read<T from Left>(value: T): T { return value; } }\n\
+         class B { read<U from Right>(value: U): U { return value; } }\n\
+         fn invoke(value: A | B): Void { value.read(3); }\n\
+         fn main(): Void { }",
+    );
+    assert!(
+        incompatible_generic_bounds.contains("incompatible generic method"),
+        "different generic bounds cannot be merged: {incompatible_generic_bounds}"
+    );
+}
+
+#[test]
+fn union_writes_allow_only_a_shared_required_mutable_field() {
+    let (_, sink) = parse_and_check(
+        "class A { id: Int32; }\n\
+         class B { id: Int32; }\n\
+         fn update(value: A | B): Void { value.id = 3; }\n\
+         fn main(): Void { }",
+    );
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn union_writes_reject_absent_or_conflicting_common_fields() {
+    let output = rejected(
+        "class A { id: Int32; } class B { } fn update(value: A | B): Void { value.id = 3; } fn main(): Void { }",
+    );
+    assert!(output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
+    assert!(output.contains("safely writable common field"), "{output}");
+
+    let conflicting = rejected(
+        "class A { id: Int32; } class B { id: String; } fn update(value: A | B): Void { value.id = 3; } fn main(): Void { }",
+    );
+    assert!(
+        conflicting.contains(codes::TYPE_MISMATCH.as_str()),
+        "{conflicting}"
+    );
+    assert!(
+        !conflicting.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "a shared writable field remains addressable, but no value fits both unrelated types: {conflicting}"
+    );
+
+    let readonly = rejected(
+        "class A { id: Int32; } class B { inmut id: Int32; } fn update(value: A | B): Void { value.id = 3; } fn main(): Void { }",
+    );
+    assert!(
+        readonly.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "{readonly}"
+    );
+}
+
+#[test]
+fn union_writes_accept_values_compatible_with_every_destination() {
+    let (sources, sink) = parse_and_check(
+        "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         class A { value: Animal; }\n\
+         class B { value: Dog; }\n\
+         fn update(target: A | B): Void { target.value = Dog(); }\n\
+         fn main(): Void { }",
+    );
+    let output = sink.render(RenderStyle::Human);
+    assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    let _ = sources;
+
+    let unsafe_value = rejected(
+        "class Animal { } class Dog extends Animal { } class A { value: Animal; } class B { value: Dog; } fn update(target: A | B): Void { target.value = Animal(); } fn main(): Void { }",
+    );
+    assert!(
+        unsafe_value.contains(codes::TYPE_MISMATCH.as_str()),
+        "{unsafe_value}"
+    );
+}
+
+#[test]
+fn named_contracts_and_structural_shapes_share_property_relations() {
+    let source = "type Shape = { inmut id: String };\n\
+         type ShapeAlias = Shape;\n\
+         contract Named { inmut id: String; }\n\
+         type Combined = Shape & Named;\n\
+         fn needs_shape(value: Shape): Void { }\n\
+         fn needs_contract(value: Named): Void { }\
+         fn exercise(shape: ShapeAlias, named: Named, combined: Combined): Void {\n\
+             needs_contract(shape);\n\
+             needs_shape(named);\n\
+             needs_contract(combined);\n\
+             needs_shape(combined);\n\
+         }\n\
+         fn main(): Void { }";
+    let (_sources, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
+        "shape/contract property rules should agree through aliases and intersections: {output}"
+    );
 }
 
 #[test]
 fn invalid_union_type_is_not_lowered_yet() {
-    let output = rejected("fn f(x: String | Int32): Void { }\nfn main(): Void { }");
+    let output = rejected(
+        "class Left { } class Right { }\n\
+         fn f(x: Left | Right): Void { }\n\
+         fn main(): Void { }",
+    );
     assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_intersection_type_is_not_lowered_yet() {
+    let output = rejected(
+        "class Readable { }\n\
+         class Closeable { }\n\
+         fn f(x: Readable & Closeable): Void { }\n\
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(output.contains("intersection type"), "{output}");
+}
+
+#[test]
+fn intersections_reduce_only_proven_primitive_and_singleton_contradictions() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             primitive: Int32 & String;\n\
+             literals: 3 & 4;\n\
+             numeric: Int32 & Int64;\n\
+             compatible: String & \"ready\";\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, Type::of(Base::Never));
+    assert_eq!(holder.fields[1].ty, Type::of(Base::Never));
+    assert!(matches!(holder.fields[2].ty.base, Base::Intersection(_)));
+    assert!(matches!(holder.fields[3].ty.base, Base::Singleton(_)));
+}
+
+#[test]
+fn intersection_members_are_sorted_deduplicated_and_interned() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Readable { }\n\
+         class Closeable { }\n\
+         class Taggable { }\n\
+         type Both = Readable & Closeable;\n\
+         class Holder { a: Readable & Closeable; b: Closeable & Readable; c: Readable & Readable; d: Both; e: Both & Taggable; f: Taggable & Closeable & Readable; }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    assert!(matches!(holder.fields[0].ty.base, Base::Intersection(_)));
+    assert!(checked.describe_type(holder.fields[0].ty).contains(" & "));
+    assert_eq!(checked.intersections.len(), 2);
+    assert_eq!(checked.intersections[0].len(), 2);
+    assert_eq!(
+        holder.fields[2].ty,
+        Type::of(Base::Class(
+            checked
+                .classes
+                .iter()
+                .position(|class| class.name == "Readable")
+                .unwrap() as u32
+        ))
+    );
+    assert_eq!(holder.fields[0].ty, holder.fields[3].ty);
+    assert_eq!(holder.fields[4].ty, holder.fields[5].ty);
+    let Base::Intersection(flat_id) = holder.fields[4].ty.base else {
+        panic!("nested intersections should flatten to an interned intersection");
+    };
+    assert_eq!(checked.intersections[flat_id as usize].len(), 3);
+    assert_eq!(checked.intersections.len(), 2);
+}
+
+#[test]
+fn anonymous_shapes_preserve_properties_and_intern_independent_of_source_order() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "test.zrk",
+        "class Holder {\n\
+             first: { inmut name: String, age?: Int32 };\n\
+             second: { age?: Int32, inmut name: String };\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let holder = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Holder")
+        .unwrap();
+    assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
+    let Base::Shape(shape_id) = holder.fields[0].ty.base else {
+        panic!("expected an interned structural shape");
+    };
+    assert_eq!(checked.structural_types.len(), 1);
+    let shape = &checked.structural_types[shape_id as usize];
+    assert_eq!(shape.properties.len(), 2);
+    assert_eq!(shape.properties[0].name, "age");
+    assert!(shape.properties[0].optional);
+    assert!(!shape.properties[0].readonly);
+    assert_eq!(shape.properties[1].name, "name");
+    assert!(shape.properties[1].readonly);
+    assert!(
+        checked
+            .describe_type(holder.fields[0].ty)
+            .contains("inmut name")
+    );
+}
+
+#[test]
+fn scalar_literal_type_expressions_lower_while_shapes_remain_gated() {
+    accepted(
+        "fn flag(value: true | false): Void { }\n\
+         fn date(value: const(Date(2026, 12, 25))): Void { }\n\
+         fn main(): Void { flag(true); date(Date(2026, 12, 25)); }",
+    );
+    let output = rejected(
+        "fn f(x: { inmut id: String; name?: String }): Void { }\n\
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+}
+
+#[test]
+fn invalid_constant_type_arithmetic_reports_a_source_diagnostic() {
+    let (_sources, sink) = parse_and_check(
+        "type BeyondInt32 = const(2147483647 + 1);\nfn f(value: BeyondInt32): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .expect("invalid constant arithmetic has a dedicated diagnostic");
+    assert!(diagnostic.message.contains("Overflow"));
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("diagnostic is source located");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+
+    let (_sources, sink) = parse_and_check(
+        "type InvalidTime = const(Time(25, 0));\nfn f(value: InvalidTime): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .expect("invalid clock time has a dedicated constant diagnostic");
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("time diagnostic is source located");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+}
+
+#[test]
+fn constant_type_effect_rejection_is_a_source_diagnostic() {
+    let (_sources, sink) = parse_and_check(
+        "type FromEnvironment = const(Env.get(\"PATH\"));\nfn f(value: FromEnvironment): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .expect("environment access is rejected in constant type position");
+    assert!(diagnostic.message.contains("DisallowedEffect"));
+    assert!(diagnostic.message.contains("environment access"));
+    let location = diagnostic.location.as_ref().expect("source location");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+}
+
+#[test]
+fn const_functions_evaluate_with_typed_parameters_and_return_values() {
+    let (_sources, sink) = parse_and_check(
+        "const fn add(left: Int32, right: Int32): Int32 { return left + right; }\ntype Three = const(add(1, 2));\nfn f(value: Three): Void { }\nfn main(): Void { }",
+    );
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
+        "valid pure const call should be evaluated, diagnostics: {}",
+        sink.render(RenderStyle::Human)
+    );
+
+    let (_sources, sink) = parse_and_check(
+        "const fn double(value: Int32): Int32 { return value + value; }\nconst fn triple(value: Int32): Int32 { return double(value) + value; }\ntype Six = const(triple(2));\nfn f(value: Six): Void { }\nfn main(): Void { }",
+    );
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
+        "forward and nested const calls should evaluate: {}",
+        sink.render(RenderStyle::Human)
+    );
+}
+
+#[test]
+fn ordinary_functions_and_effectful_const_functions_are_rejected_in_const_types() {
+    let (_sources, sink) = parse_and_check(
+        "fn ordinary(value: Int32): Int32 { return value; }\ntype A = const(ordinary(1));\nfn f(value: A): Void { }\nfn main(): Void { }",
+    );
+    let invalid: Vec<_> = sink
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .collect();
+    assert_eq!(invalid.len(), 1, "{}", sink.render(RenderStyle::Human));
+    assert!(invalid[0].message.contains("not declared and verified"));
+
+    let (_sources, sink) = parse_and_check(
+        "const fn unused_impure(): String { return Env.get(\"PATH\"); }\nfn main(): Void { }",
+    );
+    assert!(
+        sink.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == codes::INVALID_CONSTANT_TYPE
+                && diagnostic.message.contains("environment access")
+        }),
+        "an unused const function must still be effect-checked: {}",
+        sink.render(RenderStyle::Human)
+    );
+}
+
+#[test]
+fn constant_numeric_arithmetic_uses_runtime_decimal_rules() {
+    let (_sources, sink) = parse_and_check(
+        "type Quotient = const(3 / 4);\ntype Mixed = const(1 + 0.5);\ntype Repeating = const(1.0 / 3.0);\nfn f(a: Quotient, b: Mixed, c: Repeating): Void { }\nfn main(): Void { }",
+    );
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
+        "well-defined arithmetic constants must evaluate without invalid-value diagnostics: {}",
+        sink.render(RenderStyle::Human)
+    );
+
+    let (_sources, sink) = parse_and_check(
+        "type DivideByZero = const(3 / 0);\nfn f(a: DivideByZero): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .expect("division by zero is rejected during constant evaluation");
+    let location = diagnostic.location.as_ref().expect("source location");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+}
+
+#[test]
+fn decimal_singletons_normalize_scale_without_binary_float_conversion() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "decimal-singletons.zrk",
+        "class Amounts {\n\
+             one_decimal: const(1.0);\n\
+             one_with_extra_scale: const(1.00);\n\
+             nearby: const(1.01);\n\
+             zero_scaled: const(0.000);\n\
+             zero_plain: const(0.0);\n\
+         }\n\
+         fn main(): Void { }",
+    ));
+    let entry = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(entry, &mut sink);
+    let program = parse(entry, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let amounts = checked
+        .classes
+        .iter()
+        .find(|class| class.name == "Amounts")
+        .unwrap();
+    assert_eq!(amounts.fields[0].ty, amounts.fields[1].ty);
+    assert_ne!(amounts.fields[0].ty, amounts.fields[2].ty);
+    assert_eq!(amounts.fields[3].ty, amounts.fields[4].ty);
+    assert_eq!(checked.singleton_values.len(), 3);
+    assert!(checked.singleton_values.iter().all(|value| {
+        matches!(
+            value.value,
+            zirk_sema::constant_value::ConstValue::Decimal { .. }
+        )
+    }));
+}
+
+#[test]
+fn float_singletons_allow_exact_widening_but_not_narrowing() {
+    let (_sources, sink) = parse_and_check(
+        "fn take_f32(value: Float32): Void { }\n\
+         fn take_f64(value: Float64): Void { }\n\
+         fn take_f128(value: Float128): Void { }\n\
+         fn f16(value: const(1.5f16)): Void { take_f16(value); take_f32(value); take_f64(value); take_f128(value); }\n\
+         fn take_f16(value: Float16): Void { }\n\
+         fn f32(value: const(1.5f32)): Void { take_f64(value); take_f128(value); }\n\
+         fn f64(value: const(1.5f64)): Void { take_f128(value); }\n\
+         fn main(): Void { }",
+    );
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::TYPE_MISMATCH),
+        "finite Float singletons should widen exactly to larger binary formats: {}",
+        sink.render(RenderStyle::Human)
+    );
+
+    for (literal, target) in [("1.5f32", "Float16"), ("1.5f64", "Float32")] {
+        let source = format!(
+            "fn take(value: {target}): Void {{ }}\n\
+             fn f(singleton: const({literal})): Void {{ take(singleton); }}\n\
+             fn main(): Void {{ }}"
+        );
+        let (_sources, sink) = parse_and_check(&source);
+        assert!(
+            sink.diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == codes::TYPE_MISMATCH),
+            "{literal} must not implicitly narrow to {target}: {}",
+            sink.render(RenderStyle::Human)
+        );
+    }
+}
+
+#[test]
+fn constant_uint128_can_construct_and_evaluate_the_full_unsigned_range() {
+    let source = "type HighBit = const(UInt128(1) << 127);\ntype Max = const(((UInt128(1) << 127) - UInt128(1)) * UInt128(2) + UInt128(1));\nfn f(high: HighBit, max: Max): Void { }\nfn main(): Void { }";
+    let (_sources, sink) = parse_and_check(source);
+    assert!(
+        !sink
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
+        "typed UInt128 construction and exact arithmetic should evaluate: {}",
+        sink.render(RenderStyle::Human)
+    );
+}
+
+#[test]
+fn constant_expression_depth_limit_is_source_located() {
+    let source = format!(
+        "type TooDeep = const({}1);\nfn f(value: TooDeep): Void {{ }}\nfn main(): Void {{ }}",
+        "~".repeat(129)
+    );
+    let (_sources, sink) = parse_and_check(&source);
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::TYPE_COMPUTATION_LIMIT)
+        .expect("deep constant expressions report the stable budget diagnostic");
+    assert!(diagnostic.message.contains("constant call depth"));
+    let location = diagnostic.location.as_ref().expect("source location");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+
+    let (_sources, sink) = parse_and_check(
+        "type TooLarge = const(\"x\" * 1048577);\nfn f(value: TooLarge): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::TYPE_COMPUTATION_LIMIT)
+        .expect("oversized constant strings report the stable budget diagnostic");
+    assert!(diagnostic.message.contains("canonical constant size"));
+    let location = diagnostic.location.as_ref().expect("source location");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
+}
+
+#[test]
+fn invalid_constant_temporal_constructor_reports_its_location() {
+    let (_sources, sink) = parse_and_check(
+        "type Holiday = const(Date(2024, 2, 30));\nfn f(value: Holiday): Void { }\nfn main(): Void { }",
+    );
+    let diagnostic = sink
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .expect("invalid calendar date has a dedicated constant diagnostic");
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("diagnostic is source located");
+    assert_eq!(location.file, "test.zrk");
+    assert_eq!(location.line, 1);
 }
 
 // --- Casts -----------------------------------------------------------------
@@ -6278,6 +8681,46 @@ fn valid_closure_returned_from_a_function() {
     accepted(
         "fn make(): Fn() => Void { return (): Void => { }; }
          fn main(): Void { }",
+    );
+}
+
+#[test]
+fn callable_assignability_uses_contravariant_inputs_and_covariant_results() {
+    accepted(
+        "fn wide(value: Int32): Float32 { return value as Float32; }\n\
+         fn main(): Void { mut callback: Fn(Int8) => Float64 = wide; }",
+    );
+
+    let narrow_input = rejected(
+        "fn narrow(value: Int8): Float64 { return 1.0f64; }\n\
+         fn main(): Void { mut callback: Fn(Int32) => Float64 = narrow; }",
+    );
+    assert!(
+        narrow_input.contains(codes::TYPE_MISMATCH.as_str()),
+        "a callable may not require narrower inputs: {narrow_input}"
+    );
+
+    let incompatible_result = rejected(
+        "fn text(value: Int32): String { return \"x\"; }\n\
+         fn main(): Void { mut callback: Fn(Int8) => Float64 = text; }",
+    );
+    assert!(
+        incompatible_result.contains(codes::TYPE_MISMATCH.as_str()),
+        "a callable result must fit the target result type: {incompatible_result}"
+    );
+}
+
+#[test]
+fn enum_assignability_preserves_declared_enum_identity() {
+    let output = rejected(
+        "enum Color { Red }\n\
+         enum Mood { Red }\n\
+         fn paint(color: Color): Void { }\n\
+         fn main(): Void { paint(Mood.Red); }",
+    );
+    assert!(
+        output.contains(codes::TYPE_MISMATCH.as_str()),
+        "variants with the same spelling from distinct enums are incompatible: {output}"
     );
 }
 
@@ -7310,6 +9753,14 @@ fn invalid_extern_call_missing_commit() {
 fn invalid_extern_disallowed_parameter_type() {
     let output = rejected("extern \"C\" fn f(s: String): Void;\nfn main(): Void { }");
     assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+}
+
+#[test]
+fn extern_union_parameter_explains_c_abi_wrapper() {
+    let output = rejected("extern \"C\" fn f(value: String | Int32): Void;\nfn main(): Void { }");
+    assert!(output.contains(codes::NOT_FFI_SAFE.as_str()), "{output}");
+    assert!(output.contains("no stable C ABI"), "{output}");
+    assert!(output.contains("wrapper function"), "{output}");
 }
 
 #[test]
@@ -9257,5 +11708,574 @@ fn object_literal_callable_properties_satisfy_contract_operations() {
     assert!(
         mismatch.contains("operation `run`") || mismatch.contains("contract"),
         "{mismatch}"
+    );
+}
+
+#[test]
+fn generic_type_aliases_substitute_arguments_defaults_and_constraints() {
+    accepted(
+        "type Boxed<T> = T;\n\
+         type Pair<A, B = A> = A;\n\
+         fn take(value: Boxed<Int32>): Void { }\n\
+         fn main(): Void { mut value: Pair<Int32> = 1; take(value); }",
+    );
+
+    let missing = rejected("type Boxed<T> = T; fn main(): Void { mut value: Boxed; }");
+    assert!(
+        missing.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{missing}"
+    );
+
+    let extra = rejected("type Boxed<T> = T; fn main(): Void { mut value: Boxed<Int32, String>; }");
+    assert!(
+        extra.contains(codes::WRONG_ARGUMENT_COUNT.as_str()),
+        "{extra}"
+    );
+
+    let constrained = rejected(
+        "type Numeric<T from Int32> = T;\n\
+         fn main(): Void { mut value: Numeric<String> = \"no\"; }",
+    );
+    assert!(
+        constrained.contains(codes::TYPE_MISMATCH.as_str()),
+        "{constrained}"
+    );
+}
+
+#[test]
+fn checked_union_records_transitive_source_aliases_for_diagnostics() {
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new(
+        "aliases.zrk",
+        "type InternalValue = Int32 | String;\n\
+         type PublicValue = InternalValue;\n\
+         fn take(value: PublicValue): Void { }\n\
+         fn main(): Void { take(1); }",
+    ));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+
+    assert!(!sink.has_errors(), "{}", sink.render(RenderStyle::Human));
+    let aliases = checked
+        .union_aliases
+        .values()
+        .find(|aliases| aliases.contains(&"PublicValue".to_string()))
+        .expect("the resolved union carries the public alias provenance");
+    assert_eq!(aliases, &["InternalValue", "PublicValue"]);
+}
+
+#[test]
+fn union_type_mismatch_diagnostic_preserves_alias_and_expansion() {
+    let output = rejected(
+        "type InternalValue = Int32 | String;\n\
+         type PublicValue = InternalValue;\n\
+         fn take(value: PublicValue): Void { }\n\
+         fn main(): Void { take(true); }",
+    );
+    assert!(output.contains("PublicValue"), "{output}");
+    assert!(output.contains("Int32 | String"), "{output}");
+}
+
+#[test]
+fn generic_union_alias_substitution_checks_each_argument_alternative() {
+    let valid = "type Choice<T> = T | Int32;\n\
+         fn take(value: Choice<String>): Void { }\n\
+         fn main(): Void { take(\"text\"); take(1); }";
+    let (_, valid_diagnostics) = parse_and_check(valid);
+    let valid_output = valid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        !valid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "valid generic union alternatives should type-check: {valid_output}"
+    );
+
+    let invalid = "type Choice<T> = T | Int32;\n\
+         fn take(value: Choice<String>): Void { }\n\
+         fn main(): Void { take(true); }";
+    let (_, invalid_diagnostics) = parse_and_check(invalid);
+    let invalid_output = invalid_diagnostics.render(RenderStyle::Human);
+    assert!(
+        invalid_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "an incompatible argument must not fit a substituted generic union: {invalid_output}"
+    );
+
+    let returns = "type Choice<T> = T | Int32;\n\
+         fn valid(): Choice<String> { return \"text\"; }\n\
+         fn invalid(): Choice<String> { return true; }\n\
+         fn main(): Void { }";
+    let (_, return_diagnostics) = parse_and_check(returns);
+    let return_output = return_diagnostics.render(RenderStyle::Human);
+    assert!(
+        return_output.contains(codes::TYPE_MISMATCH.as_str()),
+        "return expressions must use the same substituted union relation: {return_output}"
+    );
+    assert!(return_output.contains("the returned type does not match the signature"));
+}
+
+#[test]
+fn generic_alias_substitution_preserves_canonical_union_and_intersection_types() {
+    let source = "type Choice<T> = T | Int32;\n\
+         type SameChoice = String | Int32;\n\
+         type TextView<T> = T & String;\n\
+         type SameText = String & String;\n\
+         fn take_choice(value: SameChoice): Void { }\n\
+         fn take_text(value: SameText): Void { }\n\
+         fn pass_aliases(choice: Choice<String>, text: TextView<String>): Void {\n\
+             take_choice(choice);\n\
+             take_text(text);\n\
+         }\n\
+         fn main(): Void { }";
+    let (_, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "substituting generic parameters must canonicalize to the same union/intersection types as direct expressions: {output}"
+    );
+}
+
+#[test]
+fn keyof_returns_finite_visible_structural_and_tuple_keys() {
+    fn checked_program(source_text: &str) -> (zirk_sema::CheckedProgram, DiagnosticSink) {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("keyof.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = tokenize(source, &mut sink);
+        let program = parse(source, &tokens, &mut sink);
+        let checked = check(&sources, &program, &mut sink);
+        (checked, sink)
+    }
+
+    let source = "type Profile = { name: String; enabled: Boolean };\n\
+         type ProfileKey = keyof Profile;\n\
+         type Pair = Tuple<Int32, String>;\n\
+         type PairKey = keyof Pair;\n\
+         fn profile_key(key: ProfileKey): Void { }\n\
+         fn pair_key(key: PairKey): Void { }\
+         fn main(): Void { }";
+    let (checked, sink) = checked_program(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "keyof must produce canonical string singleton keys: {output}"
+    );
+    let profile_keys = checked.describe_type(checked.functions["profile_key"].params[0].ty);
+    assert!(profile_keys.contains("enabled") && profile_keys.contains("name"));
+    let pair_keys = checked.describe_type(checked.functions["pair_key"].params[0].ty);
+    assert!(
+        pair_keys.contains("\"0\"") && pair_keys.contains("\"1\"") && pair_keys.contains("length")
+    );
+
+    let private = "class Profile { public name: String; private token: String; describe(): String { return name; } }\n\
+         type ProfileKey = keyof Profile;\n\
+         fn take(key: ProfileKey): Void { }\n\
+         fn main(): Void { }";
+    let (private_checked, private_sink) = checked_program(private);
+    let private_output = private_sink.render(RenderStyle::Human);
+    let private_keys =
+        private_checked.describe_type(private_checked.functions["take"].params[0].ty);
+    assert!(
+        private_keys.contains("name")
+            && private_keys.contains("describe")
+            && !private_keys.contains("token"),
+        "private fields must not be exposed as keys; resolved {private_keys}: {private_output}"
+    );
+
+    let dynamic = rejected(
+        "type RuntimeKey = keyof Dynamic; fn dynamic(key: RuntimeKey): Void { } fn main(): Void { }",
+    );
+    assert!(
+        dynamic.contains("runtime-only properties do not form a finite static key set"),
+        "Dynamic must not turn runtime properties into static keys: {dynamic}"
+    );
+}
+
+#[test]
+fn indexed_access_resolves_finite_keys_optional_properties_readonly_fields_and_union_receivers() {
+    fn checked_program(source_text: &str) -> (zirk_sema::CheckedProgram, DiagnosticSink) {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("indexed-access.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = tokenize(source, &mut sink);
+        let program = parse(source, &tokens, &mut sink);
+        let checked = check(&sources, &program, &mut sink);
+        (checked, sink)
+    }
+
+    let source = "type Shape = { name: String; maybe?: Int32; inmut title: String; active: Boolean };\n\
+         type AllValues = Shape[keyof Shape];\n\
+         type MaybeValue = Shape[\"maybe\"];\n\
+         type ReadonlyValue = Shape[\"title\"];\n\
+         type Left = { shared: Boolean; left: String };\n\
+         type Right = { shared: Boolean; right: Int32 };\n\
+         type Choice = Left | Right;\n\
+         type Shared = Choice[\"shared\"];\n\
+         fn values(all: AllValues, maybe: MaybeValue, title: ReadonlyValue, shared: Shared): Void { }\n\
+         fn main(): Void { }";
+    let (checked, sink) = checked_program(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::UNKNOWN_MEMBER.as_str())
+            && !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "valid indexed reads must resolve across finite keys and compatible union members: {output}"
+    );
+    let signature = &checked.functions["values"];
+    let all_values = checked.describe_type(signature.params[0].ty);
+    assert!(
+        all_values.contains("String")
+            && all_values.contains("Int32")
+            && all_values.contains("Boolean"),
+        "unexpected indexed union: {all_values}"
+    );
+    assert!(checked.describe_type(signature.params[1].ty).ends_with('?'));
+    assert_eq!(checked.describe_type(signature.params[2].ty), "String");
+    assert_eq!(checked.describe_type(signature.params[3].ty), "Boolean");
+
+    let invalid_key = rejected(
+        "type Shape = { name: String }; type Value = Shape[\"missing\"]; fn read(value: Value): Void { }",
+    );
+    assert!(
+        invalid_key.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "keys absent from the receiver must be rejected: {invalid_key}"
+    );
+
+    let invalid_union_key = rejected(
+        "type Left = { left: String }; type Right = { right: Int32 }; type Choice = Left | Right; type Value = Choice[\"left\"]; fn read(value: Value): Void { }",
+    );
+    assert!(
+        invalid_union_key.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "an indexed key must exist on every possible union receiver: {invalid_union_key}"
+    );
+}
+
+#[test]
+fn conditional_types_distribute_only_for_naked_generic_parameters() {
+    let source = "type Distributed<T> = T extends String ? String : Boolean;\n\
+         type Grouped<T> = (T) extends String ? String : Boolean;\n\
+         type Input = String | Int32;\n\
+         type Each = Distributed<Input>;\n\
+         type Whole = Grouped<Input>;\n\
+         fn results(each: Each, whole: Whole): Void { }\n\
+         fn main(): Void { }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("conditional.zrk", source));
+    let source_file = sources.entry();
+    let mut diagnostics = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut diagnostics);
+    let program = parse(source_file, &tokens, &mut diagnostics);
+    let output = check(&sources, &program, &mut diagnostics);
+    assert!(
+        diagnostics.is_empty(),
+        "conditional aliases should type-check: {}",
+        diagnostics.render(RenderStyle::Human)
+    );
+    let signature = &output.functions["results"];
+    let distributed = output.describe_type(signature.params[0].ty);
+    let grouped = output.describe_type(signature.params[1].ty);
+    assert!(
+        distributed.contains("String") && distributed.contains("Boolean"),
+        "expected distribution, got {distributed}"
+    );
+    assert_eq!(
+        grouped, "Boolean",
+        "a grouped type parameter must be checked as a whole"
+    );
+}
+
+#[test]
+fn conditional_infer_binds_generic_components_only_in_true_branch() {
+    let source = "type Element<T> = T extends Array<infer Item> ? Item : Boolean;\n\
+         type TextElement<T> = T extends Array<infer Item from String> ? Item : Boolean;\n\
+         type Found = Element<Array<String>>;\n\
+         type Missing = Element<Int32>;\n\
+         type Constrained = TextElement<Array<Int32>>;\n\
+         fn results(found: Found, missing: Missing, constrained: Constrained): Void { }\n\
+         fn main(): Void { }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("conditional-infer.zrk", source));
+    let source_file = sources.entry();
+    let mut diagnostics = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut diagnostics);
+    let program = parse(source_file, &tokens, &mut diagnostics);
+    let checked = check(&sources, &program, &mut diagnostics);
+    assert!(
+        diagnostics.is_empty(),
+        "conditional infer should type-check: {}",
+        diagnostics.render(RenderStyle::Human)
+    );
+    let signature = &checked.functions["results"];
+    assert_eq!(checked.describe_type(signature.params[0].ty), "String");
+    assert_eq!(checked.describe_type(signature.params[1].ty), "Boolean");
+    assert_eq!(checked.describe_type(signature.params[2].ty), "Boolean");
+
+    let escaped = rejected(
+        "type Leaks<T> = T extends Array<infer Item> ? String : Item; type Result = Leaks<Int32>; fn read_result(value: Result): Void { }",
+    );
+    assert!(
+        escaped.contains(codes::UNKNOWN_TYPE.as_str()),
+        "infer bindings must not escape the true branch: {escaped}"
+    );
+}
+
+#[test]
+fn mapped_types_transform_finite_keys_and_keep_source_modifiers() {
+    let source = "type Source = { name: String; maybe?: Int32; inmut active: Boolean };\n\
+         type Optional<T> = { [K in keyof T]?: T[K] };\n\
+         type Frozen<T> = { inmut [K in keyof T]: T[K] };\n\
+         type MutableRequired<T> = { mut [K in keyof T]!: T[K] };\n\
+         type Renamed<T> = { [K in keyof T as K]: T[K] };\n\
+         type PartialSource = Optional<Source>;\n\
+         type FrozenSource = Frozen<Source>;\n\
+         type MutableSource = MutableRequired<Source>;\n\
+         type RenamedSource = Renamed<Source>;\n\
+         fn values(partial: PartialSource, frozen: FrozenSource, mutable: MutableSource, renamed: RenamedSource): Void { }\n\
+         fn main(): Void { }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("mapped.zrk", source));
+    let source_file = sources.entry();
+    let mut diagnostics = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut diagnostics);
+    let program = parse(source_file, &tokens, &mut diagnostics);
+    let checked = check(&sources, &program, &mut diagnostics);
+    let rendered = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !rendered.contains("mapped type produced a duplicate key"),
+        "identity remapping should preserve unique keys: {rendered}"
+    );
+    let signature = &checked.functions["values"];
+    let partial = checked.describe_type(signature.params[0].ty);
+    let frozen = checked.describe_type(signature.params[1].ty);
+    let mutable = checked.describe_type(signature.params[2].ty);
+    let renamed = checked.describe_type(signature.params[3].ty);
+    assert!(
+        partial.contains("name?: String") && partial.contains("maybe?: Int32?"),
+        "optional mapping should preserve optionality: {partial}"
+    );
+    assert!(
+        frozen.contains("inmut name: String") && frozen.contains("inmut maybe?: Int32?"),
+        "readonly mapping should preserve and add readonly: {frozen}"
+    );
+    assert!(
+        mutable.contains("active: Boolean")
+            && !mutable.contains("inmut")
+            && mutable.contains("maybe: Int32"),
+        "mutable required mapping should remove source modifiers: {mutable}"
+    );
+    assert!(
+        renamed.contains("name: String"),
+        "identity key remapping should retain its key: {renamed}"
+    );
+    let duplicate = rejected(
+        "type Source = { first: String; second: Int32 }; type Collapsed = { [K in keyof Source as \"field\"]: Source[K] }; fn read(value: Collapsed): Void { }",
+    );
+    assert!(
+        duplicate.contains("mapped type produced a duplicate key"),
+        "duplicate remapped keys need a deterministic error: {duplicate}"
+    );
+}
+
+#[test]
+fn template_literal_types_expand_finite_string_numeric_and_boolean_unions() {
+    let source = "type Color = \"red\" | \"blue\";\n\
+         type Number = 2 | 7;\n\
+         type Flag = true | false;\n\
+         type Names = \"color-{Color}\";\n\
+         type Numbers = \"n{Number}\";\n\
+         type Flags = \"flag-{Flag}\";\n\
+         fn values(names: Names, numbers: Numbers, flags: Flags): Void { }\n\
+         fn main(): Void { }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("template-types.zrk", source));
+    let source_file = sources.entry();
+    let mut diagnostics = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut diagnostics);
+    let program = parse(source_file, &tokens, &mut diagnostics);
+    let checked = check(&sources, &program, &mut diagnostics);
+    let rendered = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !rendered.contains("template interpolation requires")
+            && !rendered.contains("template literal expansion limit"),
+        "finite values should expand: {rendered}"
+    );
+    let signature = &checked.functions["values"];
+    let names = checked.describe_type(signature.params[0].ty);
+    let numbers = checked.describe_type(signature.params[1].ty);
+    let flags = checked.describe_type(signature.params[2].ty);
+    assert!(
+        names.contains("color-red") && names.contains("color-blue"),
+        "unexpected template keys: {names}"
+    );
+    assert!(
+        numbers.contains("n2") && numbers.contains("n7"),
+        "unexpected numeric expansion: {numbers}"
+    );
+    assert!(
+        flags.contains("flag-true") && flags.contains("flag-false"),
+        "unexpected Boolean expansion: {flags}"
+    );
+    let rejected_dynamic =
+        rejected("type DynamicName = \"x{String}\"; fn read(value: DynamicName): Void { }");
+    assert!(
+        rejected_dynamic.contains("template interpolation requires a finite singleton"),
+        "unbounded interpolation must be rejected: {rejected_dynamic}"
+    );
+    let placeholders = "{Flag}".repeat(13);
+    let stress = format!(
+        "type Flag = Boolean; type Product = \"{placeholders}\"; fn use_product(value: Product): Void {{ }}"
+    );
+    let limited = rejected(&stress);
+    assert!(
+        limited.contains("template literal expansion limit exceeded"),
+        "cross products must stop at the deterministic budget: {limited}"
+    );
+}
+
+#[test]
+fn standard_type_utilities_resolve_structures_unions_and_callables() {
+    let source = "type Source = { name: String; count?: Int32; inmut enabled: Boolean };\n\
+         type MaybeSource = Partial<Source>;\n\
+         type RequiredSource = Required<Source>;\n\
+         type FrozenSource = Readonly<Source>;\n\
+         type NameOnly = Pick<Source, \"name\">;\n\
+         type WithoutCount = Omit<Source, \"count\">;\n\
+         type Table = Record<\"first\" | \"second\", Int32>;\n\
+         type TextOnly = Extract<String | Int32, String>;\n\
+         type NonNull = NonNullable<String?>;\n\
+         type Args = Parameters<Fn(String, Int32) => Boolean>;\n\
+         type Result = ReturnType<Fn(String) => Boolean>;\n\
+         fn values(maybe: MaybeSource, required: RequiredSource, frozen: FrozenSource, name: NameOnly, without: WithoutCount, table: Table, text: TextOnly, non_null: NonNull, args: Args, result: Result): Void { }\n\
+         fn main(): Void { }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("utilities.zrk", source));
+    let source_file = sources.entry();
+    let mut diagnostics = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut diagnostics);
+    let program = parse(source_file, &tokens, &mut diagnostics);
+    let checked = check(&sources, &program, &mut diagnostics);
+    let rendered = diagnostics.render(RenderStyle::Human);
+    assert!(
+        !rendered.contains("utility has the wrong number")
+            && !rendered.contains("requires a structural type"),
+        "standard utilities should resolve: {rendered}"
+    );
+    let params = &checked.functions["values"].params;
+    assert!(
+        checked
+            .describe_type(params[0].ty)
+            .contains("name?: String")
+    );
+    assert!(
+        checked.describe_type(params[1].ty).contains("count: Int32"),
+        "required utility result: {}",
+        checked.describe_type(params[1].ty)
+    );
+    assert!(
+        checked
+            .describe_type(params[2].ty)
+            .contains("inmut enabled: Boolean")
+    );
+    assert!(checked.describe_type(params[3].ty).contains("name: String"));
+    assert!(!checked.describe_type(params[4].ty).contains("count"));
+    assert!(
+        checked.describe_type(params[5].ty).contains("first: Int32")
+            && checked
+                .describe_type(params[5].ty)
+                .contains("second: Int32")
+    );
+    assert_eq!(checked.describe_type(params[6].ty), "String");
+    assert_eq!(checked.describe_type(params[7].ty), "String");
+    assert!(checked.describe_type(params[8].ty).contains("String"));
+    assert_eq!(checked.describe_type(params[9].ty), "Boolean");
+}
+
+#[test]
+fn generic_inference_combines_arguments_and_expected_result_context() {
+    accepted(
+        "fn optional<T>(): T? { return null; }\n\
+         fn identity<T>(value: T): T { return value; }\n\
+         fn main(): Void {\n\
+             mut inferred: String? = optional();\n\
+             mut combined: String = identity(\"ready\");\n\
+         }",
+    );
+    let conflict = rejected(
+        "fn pair<T>(left: T, right: T): T { return left; } fn main(): Void { pair(1, \"text\"); }",
+    );
+    assert!(
+        conflict.contains("cannot infer `T`") && conflict.contains("both"),
+        "conflicting constraints must be diagnosed rather than selecting the last argument: {conflict}"
+    );
+}
+
+#[test]
+fn declared_generic_variance_controls_nested_assignability() {
+    accepted(
+        "class Animal { }\n\
+         class Dog extends Animal { }\n\
+         class ReadBox<out T> { inmut value: T; }\n\
+         class Consumer<in T> { accept(value: T): Void { } }\n\
+         fn take_read(box: ReadBox<Animal>): Void { }\n\
+         fn pass_read(box: ReadBox<Dog>): Void { take_read(box); }\n\
+         fn take_consumer(box: Consumer<Dog>): Void { }\n\
+         fn pass_consumer(box: Consumer<Animal>): Void { take_consumer(box); }",
+    );
+    let invariant = rejected(
+        "class Animal { } class Dog extends Animal { } class MutableBox<T> { mut value: T; } fn take(box: MutableBox<Dog>): Void { } fn pass(box: MutableBox<Animal>): Void { take(box); }",
+    );
+    assert!(
+        invariant.contains(codes::TYPE_MISMATCH.as_str()),
+        "mutable generic arguments remain invariant: {invariant}"
+    );
+    accepted("type Producer<out T> = Fn() => T; type Consumer<in T> = Fn(T) => Void;");
+    let alias_variance = rejected("type Bad<out T> = Fn(T) => Void;");
+    assert!(
+        alias_variance.contains(codes::INVALID_VARIANCE.as_str()),
+        "aliases must validate variance through callable positions: {alias_variance}"
+    );
+    let mutable_alias = rejected("type BadContainer<out T> = Array<T>;");
+    assert!(
+        mutable_alias.contains(codes::INVALID_VARIANCE.as_str()),
+        "mutable generic containers are invariant through aliases: {mutable_alias}"
+    );
+}
+
+#[test]
+fn callable_unions_require_all_alternatives_and_intersections_select_one_signature() {
+    let source = "type TextFn = Fn(String) => String;\n\
+         type BoolFn = Fn(String) => Boolean;\n\
+         type NumberFn = Fn(Int32) => Int32;\n\
+         type Either = TextFn | BoolFn;\n\
+         type TextOverload = TextFn & NumberFn;\n\
+         fn union_call(callable: Either): Void { mut result: String | Boolean = callable(\"x\"); }\n\
+         fn overloaded(callable: TextOverload): Void { mut text: String = callable(\"x\"); mut number: Int32 = callable(1); }";
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("callable-algebra.zrk", source));
+    let source_file = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source_file, &mut sink);
+    let program = parse(source_file, &tokens, &mut sink);
+    let _checked = check(&sources, &program, &mut sink);
+    let valid_diagnostics = sink.render(RenderStyle::Human);
+    assert!(
+        !valid_diagnostics.contains(codes::TYPE_MISMATCH.as_str())
+            && !valid_diagnostics.contains(codes::NOT_CALLABLE.as_str()),
+        "callable algebra should select safe signatures: {valid_diagnostics}"
+    );
+    let invalid_union = rejected(
+        "type TextFn = Fn(String) => String; type NumberFn = Fn(Int32) => Int32; type Either = TextFn | NumberFn; fn invoke(callable: Either): Void { callable(\"x\"); }",
+    );
+    assert!(
+        invalid_union.contains("valid for every callable alternative"),
+        "union calls must satisfy every possible signature: {invalid_union}"
+    );
+    let ambiguous = rejected(
+        "type A = Fn(String) => String; type B = Fn(String) => Boolean; type Both = A & B; fn invoke(callable: Both): Void { callable(\"x\"); }",
+    );
+    assert!(
+        ambiguous.contains("intersection callable selection is ambiguous"),
+        "intersection calls need one unique match: {ambiguous}"
     );
 }

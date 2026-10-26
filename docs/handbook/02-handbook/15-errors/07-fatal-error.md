@@ -3,7 +3,7 @@
 `fatalError(message)` marks an irreparable process state and does not return normally.
 
 ```zirk
-if !runtime_invariant {
+if ! runtime_invariant {
     fatalError("runtime invariant violated");
 }
 ```

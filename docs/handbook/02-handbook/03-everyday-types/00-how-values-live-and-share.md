@@ -41,7 +41,7 @@ alias[0] = 'H'; // both names see "Hello"
 
 mut child: Object = { value: 1 };
 mut parent: Object = { child: child };
-mut copied: Object = { ...parent };
+mut copied: Object = { ... parent };
 inmut original_child: Object = parent.child as Object;
 inmut copied_child: Object = copied.child as Object;
 original_child is copied_child; // true: object spread is shallow

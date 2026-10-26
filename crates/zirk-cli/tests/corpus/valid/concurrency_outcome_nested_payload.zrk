@@ -3,6 +3,7 @@ import { stdout } from std.io;
 enum Payload {
     Text(value: String),
 }
+main();
 
 fn main(): Void {
     mut outcome: Outcome<Payload> = Outcome.Fulfilled(Payload.Text("kept through GC"));

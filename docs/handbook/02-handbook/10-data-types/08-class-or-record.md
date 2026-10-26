@@ -37,6 +37,24 @@ A contract does not create an immutable projection or copy. Successful
 conformance validates the shape and seals the object's existing key set across
 aliases. Extra keys remain stored but are hidden from the contract-typed view.
 
+## Anonymous structural types
+
+A type alias may also name an anonymous property shape. Required and optional
+members compose with unions and intersections:
+
+```zirk
+type Contact = { email: String; phone?: String };
+type IdentifiedContact = Contact & { inmut id: String };
+type PreferredContact = IdentifiedContact | { active: false; reason: String };
+```
+
+These are static structural types, not open `Object` values. When a fresh
+object literal is checked against a union of shapes, the compiler checks
+required properties, nested values, and literal discriminants. It accepts one
+viable alternative and reports an error for zero or multiple candidates.
+Conflicting property types or mutability requirements make an intersection
+invalid.
+
 ---
 
 **Previous:** [← Union Types](07-union-types.md) · **Next:** [Collections](../12-collections/README.md)

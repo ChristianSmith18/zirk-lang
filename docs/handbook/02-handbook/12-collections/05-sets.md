@@ -62,8 +62,8 @@ should be rejected or avoided.
 
 ```zirk
 mut permissions: Set<Permission> = Set();
-permissions.add(Permission.Network);    // true
-permissions.add(Permission.Network);    // false — no duplicate
+permissions.add(Permission.Network); // true
+permissions.add(Permission.Network); // false — no duplicate
 permissions.is_subset(all_required);
 ```
 

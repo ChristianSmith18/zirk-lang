@@ -8,6 +8,7 @@ fn main(): Void {
     value["status"];
     value["count"];
     inmut count: Int32 = value["count"] as Int32;
-    inmut maybe_text: String? = value["count"] as? String;
+    inmut maybe_text: String? = value["count"] as ? String;
     stdout.println("dynamic read succeeded: {count}, {maybe_text}");
 }
+main();

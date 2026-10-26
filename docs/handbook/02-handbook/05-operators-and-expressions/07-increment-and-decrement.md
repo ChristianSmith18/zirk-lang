@@ -4,8 +4,8 @@
 
 ```zirk
 mut index = 0;
-inmut previous = index++;
-inmut current = ++index;
+inmut previous = index ++;
+inmut current = ++ index;
 ```
 
 Postfix yields the old value before updating; prefix updates first and yields the new value. Use the operators as standalone statements when the yielded value is unnecessary.

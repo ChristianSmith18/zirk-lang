@@ -17,8 +17,8 @@ components through nanoseconds and `is_dst`.
 
 ```zirk
 inmut tokyo = chile.in_zone("Asia/Tokyo");
-chile == tokyo;              // true when the instant is identical
-chile.zone == tokyo.zone;    // false
+chile == tokyo; // true when the instant is identical
+chile.zone == tokyo.zone; // false
 ```
 
 `in_zone()` preserves the instant and changes its local display. Equality and
@@ -77,8 +77,8 @@ explicitly when they are part of the domain. Ambiguous local input requires
 ```zirk
 inmut chile = ZonedDateTime.now("America/Santiago");
 inmut tokyo = chile.in_zone("Asia/Tokyo");
-chile == tokyo;            // true when the instant is identical
-chile.zone == tokyo.zone;  // false
+chile == tokyo; // true when the instant is identical
+chile.zone == tokyo.zone; // false
 
 inmut parsed = ZonedDateTime.parse("2026-08-15T14:30:00-04:00[America/Santiago]");
 ```

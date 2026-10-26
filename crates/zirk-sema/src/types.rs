@@ -15,6 +15,7 @@
 //! rather than their contents, for the same reason.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use zirk_ast::Variance;
 use zirk_diagnostics::Phase;
 
 static NEXT_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
@@ -391,6 +392,12 @@ pub enum Base {
     /// every other type's `?`, so a `Union` always has at least two
     /// alternatives.
     Union(u32),
+    /// `A & B`, identified by its index in the checker's intersection table.
+    Intersection(u32),
+    /// An anonymous structural object shape interned by the checker.
+    Shape(u32),
+    /// A canonical compile-time value interned as a singleton type.
+    Singleton(u32),
     /// `Range<T>` (roadmap Phase 7): the result of `a..b`, `a..=b` or
     /// `a..b..step`, iterable by `for ... in`, identified by the index of
     /// its element type `T` in the checker's `range_types` table.
@@ -851,6 +858,9 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::ContractInstance(id) => names.contract_instance_name(id),
         Base::EnumInstance(id) => names.enum_instance_name(id),
         Base::Union(id) => names.union_name(id),
+        Base::Intersection(id) => names.intersection_name(id),
+        Base::Shape(id) => names.shape_name(id),
+        Base::Singleton(id) => names.singleton_name(id),
         Base::Pointer(id) => format!("Pointer<{}>", describe(names.pointer_element(id), names)),
         Base::Weak(id) => format!("Weak<{}>", describe(names.weak_element(id), names)),
         Base::NativeSlice(id) => format!(
@@ -899,6 +909,9 @@ pub trait TypeNames {
     fn contract_instance_name(&self, id: u32) -> String;
     fn enum_instance_name(&self, id: u32) -> String;
     fn union_name(&self, id: u32) -> String;
+    fn intersection_name(&self, id: u32) -> String;
+    fn shape_name(&self, id: u32) -> String;
+    fn singleton_name(&self, id: u32) -> String;
     fn pointer_element(&self, id: u32) -> Type;
     fn weak_element(&self, id: u32) -> Type;
     fn native_slice_element(&self, id: u32) -> Type;
@@ -919,6 +932,22 @@ pub trait TypeNames {
 pub struct FnType {
     pub params: Vec<Type>,
     pub returns: Type,
+}
+
+/// One checked property in an anonymous structural type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructuralProperty {
+    pub name: String,
+    pub ty: Type,
+    pub optional: bool,
+    pub readonly: bool,
+}
+
+/// Canonical anonymous object shape. Properties are sorted by name before
+/// interning, so declaration order does not affect structural identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructuralType {
+    pub properties: Vec<StructuralProperty>,
 }
 
 /// A generic class instantiated with concrete type arguments, as the checker
@@ -1207,6 +1236,7 @@ pub struct FieldInfo {
 pub struct TypeParamInfo {
     pub name: String,
     pub constraints: Vec<Type>,
+    pub variance: Variance,
     /// Resolved default type for trailing parameters (`<T = Int32>`).
     pub default: Option<Type>,
     pub span: zirk_diagnostics::Span,

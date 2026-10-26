@@ -690,6 +690,184 @@ fn build_produces_an_executable_that_runs_on_its_own() {
 }
 
 #[test]
+fn scalar_singleton_unions_match_and_execute_on_native_backend() {
+    let root = workspace("scalar_singleton_union_native");
+    let source = root.join("singletons.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Wait = 250ms | 1s;\n\
+         type ClockTime = const(Time(9, 30)) | const(Time(17, 0));\n\
+         type Moment = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
+         type CivilOrClock = const(Date(2026, 12, 25)) | const(Time(9, 30));\n\
+         type Number = const(1) | const(2);\n\
+         type Word = const(\"one\") | const(\"two\");\n\
+         type Letter = const('a') | const('b');\n\
+         type Ratio = const(1.5f64) | const(2.5f64);\n\
+         type Money = const(1.25) | const(2.5);\n\
+         type Flag = true | false;\n\
+         fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
+         fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
+         fn clock_time(value: ClockTime): String { return match value { Time(9, 30) => \"morning\"; Time(17, 0) => \"evening\"; }; }\n\
+         fn moment(value: Moment): String { return match value { DateTime(Date(2026, 12, 25), Time(9, 30)) => \"holiday\"; DateTime(Date(2027, 1, 1), Time(0, 0)) => \"new year\"; }; }\n\
+         fn civil_or_clock(value: CivilOrClock): String { return match value { Date(2026, 12, 25) => \"date\"; Time(9, 30) => \"time\"; }; }\n\
+         fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
+         fn word(value: Word): String { return match value { \"one\" => \"first\"; \"two\" => \"second\"; }; }\n\
+         fn letter(value: Letter): String { return match value { 'a' => \"first\"; 'b' => \"second\"; }; }\n\
+         fn ratio(value: Ratio): String { return match value { 1.5f64 => \"first\"; 2.5f64 => \"second\"; }; }\n\
+         fn money(value: Money): String { return match value { 1.25 => \"first\"; 2.5 => \"second\"; }; }\n\
+         fn flag(value: Flag): String { return match value { true => \"yes\"; false => \"no\"; }; }\n\
+         fn main(): Void { stdout.println(day(Date(2026, 12, 25))); stdout.println(wait(1s)); stdout.println(clock_time(Time(17, 0))); stdout.println(moment(DateTime(Date(2027, 1, 1), Time(0, 0)))); stdout.println(civil_or_clock(Time(9, 30))); stdout.println(number(2)); stdout.println(word(\"two\")); stdout.println(letter('b')); stdout.println(ratio(2.5f64)); stdout.println(money(2.5)); stdout.println(flag(true)); }\n\
+         main();\n",
+    )
+    .expect("write native singleton union source");
+    let output = zirk("run", &source, "scalar_singleton_union_native_run", &[]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "holiday\nlong\nevening\nnew year\ntime\ntwo\nsecond\nsecond\nsecond\nsecond\nyes\n"
+    );
+}
+
+#[test]
+fn enum_constant_singleton_unions_execute_with_exact_variant_identity() {
+    let root = workspace("enum_constant_union_native");
+    let source = root.join("enum_union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         enum Shade { Red, Blue }\n\
+         type Color = const(Shade.Red) | const(Shade.Blue);\n\
+         fn label(value: Color): String { return match value { Shade.Red => \"red\"; Shade.Blue => \"blue\"; }; }\n\
+         fn main(): Void { stdout.println(label(Shade.Red)); stdout.println(label(Shade.Blue)); }\n\
+         main();\n",
+    )
+    .expect("write enum singleton union source");
+    let output = zirk("run", &source, "enum_constant_union_native_run", &[]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "red\nblue\n");
+}
+
+#[test]
+fn heterogeneous_union_crosses_native_calls_without_boxing_each_injection() {
+    let root = workspace("heterogeneous_union_native");
+    let source = root.join("union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn apply(transform: Fn(Value) => Value, value: Value): Value { return transform(value); }\n\
+         fn classify(value: Value): String { return match value { 42 => \"number\"; \"ready\" => \"text\"; _ => \"other\"; }; }\n\
+         fn main(): Void { stdout.println(classify(identity(42))); stdout.println(classify(identity(\"ready\"))); stdout.println(classify(apply(identity, 42))); stdout.println(classify(apply(identity, \"ready\"))); }\n\
+         main();\n",
+    )
+    .expect("write heterogeneous union source");
+    let output = zirk("run", &source, "heterogeneous_union_native_run", &[]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "number\ntext\nnumber\ntext\n");
+}
+
+#[test]
+fn structural_union_discriminants_narrow_before_field_reads() {
+    let root = workspace("structural_union_discriminant_native");
+    let source = root.join("shape_union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type NumberEntry = { kind: \"number\"; value: Int32 };\n\
+         type TextEntry = { kind: \"text\"; value: String };\n\
+         type Entry = NumberEntry | TextEntry;\n\
+         fn show(entry: Entry): Void {\n\
+             if entry.kind == \"number\" { stdout.println(\"number {entry.value}\"); }\n\
+             else if entry.kind == \"text\" { stdout.println(\"text {entry.value}\"); }\n\
+         }\n\
+         fn main(): Void {\n\
+             inmut first: Entry = { kind: \"number\", value: 42 };\n\
+             inmut second: Entry = { kind: \"text\", value: \"ready\" };\n\
+             show(first); show(second);\n\
+         }\n\
+         main();\n",
+    )
+    .expect("write structural union source");
+    let output = zirk(
+        "run",
+        &source,
+        "structural_union_discriminant_native_run",
+        &[],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "number 42\ntext ready\n");
+}
+
+#[test]
+fn heterogeneous_union_round_trips_at_every_llvm_optimization_level() {
+    use zirk_cli::driver::{CodegenOptimizationLevel, compile_with_optimization};
+
+    let root = workspace("heterogeneous_union_optimization");
+    let source = root.join("union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn apply(transform: Fn(Value) => Value, value: Value): Value { return transform(value); }\n\
+         fn classify(value: Value): String { return match value { 42 => \"number\"; \"ready\" => \"text\"; _ => \"other\"; }; }\n\
+         fn main(): Void { stdout.println(classify(identity(42))); stdout.println(classify(identity(\"ready\"))); stdout.println(classify(apply(identity, 42))); stdout.println(classify(apply(identity, \"ready\"))); }\n\
+         main();\n",
+    )
+    .expect("write heterogeneous union source");
+
+    let test_exe_dir = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .expect("test executable directory")
+        .to_path_buf();
+    let runtime_name = if cfg!(windows) {
+        "zirk_runtime.lib"
+    } else {
+        "libzirk_runtime.a"
+    };
+    let runtime_source = test_exe_dir
+        .parent()
+        .expect("Cargo profile directory")
+        .join(runtime_name);
+    let runtime_target = test_exe_dir.join(runtime_name);
+    std::fs::copy(runtime_source, runtime_target).expect("refresh runtime for compiler driver");
+
+    for (label, level) in [
+        ("none", CodegenOptimizationLevel::None),
+        ("less", CodegenOptimizationLevel::Less),
+        ("default", CodegenOptimizationLevel::Default),
+        ("aggressive", CodegenOptimizationLevel::Aggressive),
+    ] {
+        let compilation = compile_with_optimization(&source, &root.join(label), level);
+        let executable = compilation.executable.unwrap_or_else(|| {
+            panic!(
+                "{label} compilation failed:\n{}",
+                compilation
+                    .sink
+                    .render(zirk_diagnostics::RenderStyle::Human)
+            )
+        });
+        let output = Command::new(executable)
+            .output()
+            .expect("run compiled union");
+        assert!(
+            output.status.success(),
+            "{label} run failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            normalize(&String::from_utf8_lossy(&output.stdout)),
+            "number\ntext\nnumber\ntext\n",
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn the_executable_stays_small() {
     // How much the dead-code-elimination flag (`Self::dead_strip_flag`, or
     // rather `driver::dead_strip_flag`) recovers is genuinely
@@ -8751,6 +8929,27 @@ fn capturing_callable_passed_through_a_function_parameter_executes() {
 }
 
 #[test]
+fn nominal_dynamic_type_test_preserves_and_checks_the_runtime_tag() {
+    let output = crate_of(
+        "dynamic_nominal_type_test",
+        &[(
+            "main.zrk",
+            "import { stdout } from std.io;\n\
+             class Box { }\n\
+             class Other { }\n\
+             fn inspect(value: Dynamic): Void {\n\
+                 if value is Box { stdout.println(\"box\"); } else { stdout.println(\"not-box\"); }\n\
+                 if value is Other { stdout.println(\"other\"); } else { stdout.println(\"not-other\"); }\n\
+                 if (value as? Box) != null { mut box_value: Box = value; stdout.println(\"cast-box\"); }\n\
+             }\n\
+             fn main(): Void { inspect(Box()); }",
+        )],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "box\nnot-other\ncast-box\n");
+}
+
+#[test]
 fn captured_http_style_handler_survives_list_storage() {
     let output = crate_of(
         "captured_handler_list_storage",
@@ -9592,6 +9791,75 @@ fn an_external_package_reexport_compiles_and_runs_through_the_native_backend() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(normalize(&String::from_utf8_lossy(&output.stdout)), "42\n");
+}
+
+#[test]
+fn generic_union_aliases_cross_external_source_package_boundaries() {
+    let dir = workspace("external_generic_union_alias_native");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.values: { from: \"path:dep\"; version: \"^1\"; } }\n",
+    )
+    .unwrap();
+    write_entry(
+        dir.join("src/main.zrk"),
+        "import { stdout } from std.io;\nimport { api } from acme.values;\ntype Value = Int32 | String;\nfn show(value: Value): String { return match value { 42 => \"number\"; \"ready\" => \"text\"; _ => \"other\"; }; }\nfn main(): Void { stdout.println(show(api.echo(42))); stdout.println(show(api.echo(\"ready\"))); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project { name: \"acme.values\"; version: \"1.0.0\"; type: package; root: \"src/package.zrk\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.values;\nshare mod api from \"./api\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/api.zrk"),
+        "share type Choice<T> = T | String;\nshare fn echo(value: Choice<Int32>): Choice<Int32> { return value; }",
+    )
+    .unwrap();
+    let manifest = zirk_cli::project::read_manifest(&dir.join("dep/.zkinit")).unwrap();
+    let hash = zirk_cli::project::package_integrity_hash(&dir.join("dep"), &manifest).unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+            packages: [(
+                "acme.values".into(),
+                zirk_cli::project::LockedPackage {
+                    name: "acme.values".into(),
+                    version: manifest.version.clone(),
+                    source: "local".into(),
+                    locator: "path:dep".into(),
+                    revision: None,
+                    hash: format!("sha256:{hash}"),
+                    package_root: manifest.entry.to_string_lossy().into_owned(),
+                },
+            )]
+            .into(),
+        }),
+    )
+    .unwrap();
+
+    let output = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run generic union alias package client");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "number\ntext\n"
+    );
 }
 
 #[test]

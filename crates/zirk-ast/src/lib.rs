@@ -140,6 +140,7 @@ pub struct ModuleReexport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAliasDecl {
     pub name: Ident,
+    pub type_params: Vec<TypeParam>,
     pub target: TypeRef,
     /// Marked `share`, so other files of the crate may import it.
     pub shared: bool,
@@ -431,6 +432,8 @@ pub struct FnDecl {
     /// `unsafe fn`, whose whole body runs as if wrapped in `unsafe {}`
     /// (roadmap Phase 4e).
     pub is_unsafe: bool,
+    /// Explicitly pure function eligible for bounded compile-time evaluation.
+    pub is_const: bool,
     pub span: Span,
 }
 
@@ -488,6 +491,70 @@ impl Ident {
     }
 }
 
+/// A recursive source type expression.
+///
+/// `TypeRef` remains as the declaration-facing compatibility wrapper while
+/// existing semantic consumers migrate. Composite expressions preserve their
+/// full tree here so grouping cannot overwrite alternatives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeExpr {
+    Named {
+        name: String,
+        arguments: Vec<TypeRef>,
+        nullable: bool,
+        function: Option<Box<FnTypeRef>>,
+        fixed_size: Option<IntLit>,
+        span: Span,
+    },
+    Union {
+        members: Vec<TypeExpr>,
+        span: Span,
+    },
+    Intersection {
+        members: Vec<TypeExpr>,
+        span: Span,
+    },
+    Group {
+        expression: Box<TypeExpr>,
+        span: Span,
+    },
+    Value {
+        value: TypeValue,
+        span: Span,
+    },
+    Constant {
+        source: String,
+        expression: Box<Expr>,
+        span: Span,
+    },
+    Object {
+        properties: Vec<TypeShapeProperty>,
+        span: Span,
+    },
+}
+
+/// A built-in literal value written directly in type position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeValue {
+    Int(IntLit),
+    Float(FloatLit),
+    Duration(DurationLit),
+    String(StrLit),
+    Char(CharLit),
+    Boolean(BoolLit),
+    Null(NullLit),
+}
+
+/// One property in an anonymous structural object type expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeShapeProperty {
+    pub name: Ident,
+    pub optional: bool,
+    pub readonly: bool,
+    pub ty: TypeRef,
+    pub span: Span,
+}
+
 /// A syntactic reference to a type.
 ///
 /// This is what the user **wrote**, not the resolved type: `zirk-sema` turns it
@@ -504,6 +571,18 @@ pub struct TypeRef {
     /// alone), and each further `A |` adds one entry here. Empty for an
     /// ordinary, non-union type.
     pub union_with: Vec<TypeRef>,
+    /// Additional operands in an intersection expression such as
+    /// `Readable & Closeable`. Like `union_with`, this is a transitional flat
+    /// representation until all type expressions use the recursive AST.
+    pub intersection_with: Vec<TypeRef>,
+    /// Whether this reference was explicitly grouped in source. This retains
+    /// grouping while the recursive type-expression model is being migrated.
+    pub grouped: bool,
+    /// Lossless recursive source representation for composite and grouped
+    /// types. Simple named references continue to use the legacy fields.
+    pub expression: Option<Box<TypeExpr>>,
+    /// Direct literal value in type position, when present.
+    pub value: Option<TypeValue>,
     /// `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d), when this
     /// reference names a callable type instead of an ordinary one. `name` is
     /// still set (`"Fn"` or `"Function"`, whichever was written) purely for
@@ -525,6 +604,10 @@ impl TypeRef {
             arguments: Vec::new(),
             nullable: false,
             union_with: Vec::new(),
+            intersection_with: Vec::new(),
+            grouped: false,
+            expression: None,
+            value: None,
             function: None,
             fixed_size: None,
             span,
@@ -537,6 +620,10 @@ impl TypeRef {
             arguments: Vec::new(),
             nullable: true,
             union_with: Vec::new(),
+            intersection_with: Vec::new(),
+            grouped: false,
+            expression: None,
+            value: None,
             function: None,
             fixed_size: None,
             span,
@@ -550,10 +637,69 @@ impl TypeRef {
             arguments: Vec::new(),
             nullable: false,
             union_with: Vec::new(),
+            intersection_with: Vec::new(),
+            grouped: false,
+            expression: None,
+            value: None,
             function: Some(Box::new(function)),
             fixed_size: None,
             span,
         }
+    }
+
+    /// A direct literal singleton written in type position.
+    pub fn literal(value: TypeValue, span: Span) -> Self {
+        Self {
+            name: String::new(),
+            arguments: Vec::new(),
+            nullable: false,
+            union_with: Vec::new(),
+            intersection_with: Vec::new(),
+            grouped: false,
+            expression: None,
+            value: Some(value),
+            function: None,
+            fixed_size: None,
+            span,
+        }
+    }
+
+    /// Builds the recursive source expression represented by this reference.
+    pub fn to_type_expr(&self) -> TypeExpr {
+        if let Some(expression) = &self.expression {
+            return (**expression).clone();
+        }
+        if let Some(value) = &self.value {
+            return TypeExpr::Value {
+                value: value.clone(),
+                span: self.span,
+            };
+        }
+        let mut expression = TypeExpr::Named {
+            name: self.name.clone(),
+            arguments: self.arguments.clone(),
+            nullable: self.nullable,
+            function: self.function.clone(),
+            fixed_size: self.fixed_size.clone(),
+            span: self.span,
+        };
+        if !self.intersection_with.is_empty() {
+            let mut members = vec![expression];
+            members.extend(self.intersection_with.iter().map(TypeRef::to_type_expr));
+            expression = TypeExpr::Intersection {
+                members,
+                span: self.span,
+            };
+        }
+        if !self.union_with.is_empty() {
+            let mut members = vec![expression];
+            members.extend(self.union_with.iter().map(TypeRef::to_type_expr));
+            expression = TypeExpr::Union {
+                members,
+                span: self.span,
+            };
+        }
+        expression
     }
 }
 
@@ -1078,6 +1224,9 @@ pub enum Expr {
     /// `expr as Type` or `<Type>expr`, the postfix and prefix spellings of
     /// the same checkable cast (`ZIRK_LANGUAGE_SPEC.md` section 11).
     Cast(CastExpr),
+    /// `expr satisfies Type` validates compatibility but retains the
+    /// expression's inferred type.
+    Satisfies(SatisfiesExpr),
     /// `"text {expr} more text"` (roadmap Phase 3b).
     Interpolated(InterpolatedStrExpr),
     /// `unsafe { ... }` used where a value is expected (roadmap Phase 4e),
@@ -1097,6 +1246,11 @@ pub enum Expr {
     /// concurrent scope.
     Spawn(SpawnExpr),
 }
+
+// The AST represents literal data textually rather than as IEEE values and
+// every remaining node is a finite source tree, so expression equality is
+// reflexive and supports Eq wherever a type expression owns an Expr.
+impl Eq for Expr {}
 
 /// The body of a [`SpawnExpr`].
 #[derive(Debug, Clone, PartialEq)]
@@ -1119,6 +1273,14 @@ pub struct CastExpr {
     pub target: TypeRef,
     /// `true` for the nullable form `as?`.
     pub optional: bool,
+    pub span: Span,
+}
+
+/// `expr satisfies Type`: a checked expression that keeps the original type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SatisfiesExpr {
+    pub expr: Box<Expr>,
+    pub target: TypeRef,
     pub span: Span,
 }
 
@@ -1160,6 +1322,7 @@ impl Expr {
             Expr::Variant(e) => e.span,
             Expr::Println(e) => e.span,
             Expr::Cast(e) => e.span,
+            Expr::Satisfies(e) => e.span,
             Expr::Interpolated(e) => e.span,
             Expr::Unsafe(e) => e.span,
             Expr::Commit(e) => e.span,
@@ -1475,7 +1638,10 @@ pub enum Pattern {
     /// `Direction.North`
     Variant(VariantPattern),
     Int(IntLit),
+    Float(FloatLit),
+    Duration(DurationLit),
     Str(StrLit),
+    Char(CharLit),
     Bool(BoolLit),
     Null(NullLit),
     Tuple(TuplePattern),
@@ -1488,6 +1654,9 @@ pub enum Pattern {
     /// `re'pattern' name?` — matches a `String` scrutinee against the regex
     /// and optionally binds the resulting `Regex.Match` to `name`.
     Regex(RegexPattern),
+    /// A deterministic constructor call used as an exact value pattern,
+    /// such as `Date(2026, 12, 25)` or `Time(9, 30)`.
+    Constant(Expr),
 }
 
 /// `re'pattern' name?` in pattern position (roadmap Phase 7, `zirk-regex`
@@ -1509,13 +1678,17 @@ impl Pattern {
             Pattern::Binding(i) => i.span,
             Pattern::Variant(v) => v.span,
             Pattern::Int(l) => l.span,
+            Pattern::Float(l) => l.span,
+            Pattern::Duration(l) => l.span,
             Pattern::Str(l) => l.span,
+            Pattern::Char(l) => l.span,
             Pattern::Bool(l) => l.span,
             Pattern::Null(l) => l.span,
             Pattern::Tuple(t) => t.span,
             Pattern::Collection(c) => c.span,
             Pattern::Object(r) => r.span,
             Pattern::Regex(r) => r.span,
+            Pattern::Constant(e) => e.span(),
         }
     }
 
@@ -1745,6 +1918,8 @@ pub enum BinaryOp {
     /// the same content while being different objects — which is exactly the
     /// difference this operator exists to make visible.
     Is,
+    /// `key in object`, a runtime or statically understood property-presence test.
+    In,
     /// `??`, which yields the left operand unless it is null.
     Coalesce,
     /// `&`
@@ -1764,6 +1939,7 @@ impl BinaryOp {
         use BinaryOp::*;
         match self {
             Is => "is",
+            In => "in",
             Add => "+",
             Sub => "-",
             Mul => "*",
@@ -1790,7 +1966,7 @@ impl BinaryOp {
     /// types.
     pub const fn yields_boolean(self) -> bool {
         use BinaryOp::*;
-        matches!(self, Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or)
+        matches!(self, Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or | In)
     }
 }
 

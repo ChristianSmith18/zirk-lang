@@ -11,8 +11,8 @@ inmut::strict values: List<Int32> = [1, 2, 3, 4];
 inmut doubled: List<Int32> = values.parallel.map((n: Int32): Int32 => n * 2);
 inmut even: List<Int32> = doubled.parallel.filter((n: Int32): Boolean => n % 4 == 0);
 values.parallel.for_each((n: Int32): Void => { });
-inmut total: Int32 = values.parallel.reduce(0, (a: Int32, b: Int32): Int32 => a + b);
-inmut shifted: List<Int32> = Parallel.each(values, (n: Int32): Int32 => n + 1);
+inmut total: Int32 = values.parallel.reduce(0,(a: Int32, b: Int32): Int32 => a + b);
+inmut shifted: List<Int32> = Parallel.each(values,(n: Int32): Int32 => n + 1);
 ```
 
 `map`, `filter`, `Parallel.each`, and `reduce` preserve input order in their

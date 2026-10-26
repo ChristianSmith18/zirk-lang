@@ -5,6 +5,8 @@
 //! `ZIRK_LANGUAGE_SPEC.md` section 4 fixes, and adding an operator means adding
 //! a row rather than a function.
 
+use std::collections::HashSet;
+
 use crate::codes;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceFile, Span};
@@ -37,15 +39,15 @@ pub fn parse(source: &SourceFile, tokens: &[Token], sink: &mut DiagnosticSink) -
 /// fail. The limit turns that into an error that says what happened.
 ///
 /// The number is set by the smallest stack the parser can be called on, not by
-/// the language: measured on a 2 MB thread — what a test thread gets, and less
-/// than the main thread's 8 MB — a debug build runs out somewhere between 260
-/// and 280 levels. 128 keeps a factor of two on the worst case while sitting
-/// far above anything written by hand.
+/// the language. The expanded type-reference representation increases the size of
+/// parser frames; 96 levels overflowed the standard 2 MB test-thread stack
+/// before the guard could unwind. 48 leaves room for the diagnostic and
+/// recovery frames while remaining well above ordinary source nesting.
 ///
 /// Raising it means giving the compiler a stack of its own to run on, the way
 /// `rustc` spawns a thread for the job. That belongs with the compilation
 /// driver, not here.
-const MAX_NESTING: u32 = 96;
+const MAX_NESTING: u32 = 48;
 
 struct Parser<'a> {
     source: &'a SourceFile,
@@ -71,6 +73,8 @@ struct Parser<'a> {
     /// parenthesis, bracket, or braced range operand so an explicit group
     /// can still write a stepped range there.
     range_step_suppressed: u32,
+    /// Nonzero while parsing the constraint before a conditional type's `?`.
+    conditional_constraint: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -84,6 +88,7 @@ impl<'a> Parser<'a> {
             pending_gt: None,
             block_follows: 0,
             range_step_suppressed: 0,
+            conditional_constraint: 0,
         }
     }
 
@@ -570,8 +575,17 @@ impl<'a> Parser<'a> {
                 span
             });
 
+            // `const` remains an ordinary identifier elsewhere. In this
+            // declaration position, `const fn` marks a pure compile-time
+            // function and is unambiguous from an expression.
+            let is_const = matches!(self.peek(), TokenKind::Identifier(name) if name == "const")
+                && matches!(self.peek_at(1), TokenKind::Keyword(Keyword::Fn));
+            if is_const {
+                self.pos += 1;
+            }
+
             if self.check_keyword(Keyword::Fn) {
-                if let Some(f) = self.parse_fn(shared_at.is_some(), unsafe_at.is_some()) {
+                if let Some(f) = self.parse_fn(shared_at.is_some(), unsafe_at.is_some(), is_const) {
                     functions.push(f);
                 }
                 continue;
@@ -1199,7 +1213,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params(false);
+        let params = self.parse_params(false, false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         // A contract method's annotation is optional only when a body follows:
         // a `trait` default may infer its return; a signature-only member of
@@ -1589,7 +1603,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Construct);
 
         self.expect(&TokenKind::LParen, "after `construct`");
-        let params = self.parse_params(true);
+        let params = self.parse_params(true, false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -1614,7 +1628,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("as the name of a method")?;
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::LParen, "after the method name");
-        let params = self.parse_params(false);
+        let params = self.parse_params(false, false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
         // An `abstract` method has no body to infer a return type from; a
         // concrete one may omit it (`return-type-inference`).
@@ -1784,6 +1798,7 @@ impl<'a> Parser<'a> {
         self.eat_keyword(Keyword::Type);
 
         let name = self.expect_identifier("after `type`")?;
+        let type_params = self.parse_type_params();
         self.expect(&TokenKind::Assign, "after the alias name");
         let target = self.parse_type()?;
         let end = self.peek_span();
@@ -1791,13 +1806,14 @@ impl<'a> Parser<'a> {
 
         Some(TypeAliasDecl {
             name,
+            type_params,
             target,
             shared,
             span: start.to(end),
         })
     }
 
-    fn parse_fn(&mut self, shared: bool, is_unsafe: bool) -> Option<FnDecl> {
+    fn parse_fn(&mut self, shared: bool, is_unsafe: bool, is_const: bool) -> Option<FnDecl> {
         let start = self.peek_span();
         self.eat_keyword(Keyword::Fn);
 
@@ -1805,7 +1821,7 @@ impl<'a> Parser<'a> {
         let type_params = self.parse_type_params();
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params(false);
+        let params = self.parse_params(false, false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
         let return_type = self.parse_optional_return_type();
@@ -1823,6 +1839,7 @@ impl<'a> Parser<'a> {
             body,
             shared,
             is_unsafe,
+            is_const,
             span,
         })
     }
@@ -1869,7 +1886,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier("after `fn`")?;
 
         self.expect(&TokenKind::LParen, "after the function name");
-        let params = self.parse_params(false);
+        let params = self.parse_params(false, false);
         self.expect(&TokenKind::RParen, "to close the parameter list");
 
         let return_type = self.require_return_type(&name)?;
@@ -1947,7 +1964,7 @@ impl<'a> Parser<'a> {
 
     /// Parameters, with the optional, default and variadic forms of
     /// `ZIRK_LANGUAGE_SPEC.md` section 6.
-    fn parse_params(&mut self, allow_promotion: bool) -> Vec<Param> {
+    fn parse_params(&mut self, allow_promotion: bool, allow_inference: bool) -> Vec<Param> {
         let mut params = Vec::new();
         let mut variadic_at: Option<Span> = None;
 
@@ -2014,10 +2031,21 @@ impl<'a> Parser<'a> {
             // `name?: T` marks the parameter optional.
             let optional = self.eat(&TokenKind::Question);
 
-            if !self.expect(&TokenKind::Colon, "after the parameter name") {
+            let ty = if self.eat(&TokenKind::Colon) {
+                let Some(ty) = self.parse_type() else { break };
+                ty
+            } else if allow_inference {
+                TypeRef::new("Unknown", name.span)
+            } else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    self.peek_span(),
+                    "expected `:` after the parameter name",
+                    "function parameters require an explicit type",
+                    None,
+                );
                 break;
-            }
-            let Some(ty) = self.parse_type() else { break };
+            };
 
             let default = if self.eat(&TokenKind::Assign) {
                 let Some(expr) = self.parse_expr() else { break };
@@ -2052,7 +2080,7 @@ impl<'a> Parser<'a> {
         params
     }
 
-    /// A type, admitting `A | B | ...` (`ZIRK_LANGUAGE_SPEC.md` section 4).
+    /// A type expression, admitting `A & B | C` with intersection precedence.
     ///
     /// One alternative is [`Self::parse_type_atom`]; this only adds the `|`
     /// loop around it, so a caller that never wants a union in its position
@@ -2060,19 +2088,90 @@ impl<'a> Parser<'a> {
     /// instead.
     fn parse_type(&mut self) -> Option<TypeRef> {
         let start = self.peek_span();
+        let first = self.parse_type_intersection()?;
+        let mut check = first;
+        if matches!(self.peek(), TokenKind::Pipe) {
+            let mut union_with = Vec::new();
+            while self.eat(&TokenKind::Pipe) {
+                union_with.push(self.parse_type_intersection()?);
+            }
+            let end = union_with.last().map(|t| t.span).unwrap_or(check.span);
+            let mut members = vec![check.to_type_expr()];
+            members.extend(union_with.iter().map(TypeRef::to_type_expr));
+            check.expression = Some(Box::new(TypeExpr::Union {
+                members,
+                span: start.to(end),
+            }));
+            check.union_with = union_with;
+            check.span = start.to(end);
+        }
+        if self.eat_keyword(Keyword::Extends) {
+            self.conditional_constraint += 1;
+            let constraint = self.parse_type()?;
+            self.conditional_constraint -= 1;
+            let question = self.peek_span();
+            if !self.eat(&TokenKind::Question) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    question,
+                    "expected `?` in conditional type",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
+            }
+            let yes = self.parse_type()?;
+            let colon = self.peek_span();
+            if !self.eat(&TokenKind::Colon) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    colon,
+                    "expected `:` in conditional type",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
+            }
+            let no = self.parse_type()?;
+            let mut conditional = TypeRef::new(
+                if check.grouped {
+                    "conditional"
+                } else {
+                    "conditional-distributive"
+                },
+                start.to(no.span),
+            );
+            conditional.arguments = vec![check, constraint, yes, no];
+            return Some(conditional);
+        }
+        Some(check)
+    }
+
+    /// Intersections bind more tightly than unions, matching the type grammar
+    /// contract.
+    fn parse_type_intersection(&mut self) -> Option<TypeRef> {
+        let start = self.peek_span();
         let first = self.parse_type_atom()?;
-        if !matches!(self.peek(), TokenKind::Pipe) {
+        if !matches!(self.peek(), TokenKind::Amp) {
             return Some(first);
         }
 
-        let mut union_with = Vec::new();
-        while self.eat(&TokenKind::Pipe) {
-            union_with.push(self.parse_type_atom()?);
+        let mut intersection_with = Vec::new();
+        while self.eat(&TokenKind::Amp) {
+            intersection_with.push(self.parse_type_atom()?);
         }
-        let end = union_with.last().map(|t| t.span).unwrap_or(first.span);
-
+        let end = intersection_with
+            .last()
+            .map(|ty| ty.span)
+            .unwrap_or(first.span);
         let mut ty = first;
-        ty.union_with = union_with;
+        let mut members = vec![ty.to_type_expr()];
+        members.extend(intersection_with.iter().map(TypeRef::to_type_expr));
+        ty.expression = Some(Box::new(TypeExpr::Intersection {
+            members,
+            span: start.to(end),
+        }));
+        ty.intersection_with = intersection_with;
         ty.span = start.to(end);
         Some(ty)
     }
@@ -2081,6 +2180,188 @@ impl<'a> Parser<'a> {
     /// and a trailing `?`. Never a union on its own — see [`Self::parse_type`].
     fn parse_type_atom(&mut self) -> Option<TypeRef> {
         let span = self.peek_span();
+        if let TokenKind::InterpolatedStr(parts) = self.peek().clone() {
+            self.pos += 1;
+            let mut encoded = String::from("template:");
+            let mut arguments = Vec::new();
+            for part in parts {
+                match part {
+                    StrPart::Literal(text) => encoded.push_str(&format!("L{}:{text}", text.len())),
+                    StrPart::Expr { text, span } => {
+                        let type_name = text.trim();
+                        if type_name.is_empty()
+                            || !type_name
+                                .chars()
+                                .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.')
+                        {
+                            self.error(
+                                codes::UNEXPECTED_TOKEN,
+                                span,
+                                "template type interpolation must name a type",
+                                format!("found `{type_name}`"),
+                                Some("interpolate a type alias or type parameter".into()),
+                            );
+                            return None;
+                        }
+                        encoded.push_str(&format!("P{};", arguments.len()));
+                        arguments.push(TypeRef::new(type_name, span));
+                    }
+                }
+            }
+            let mut template = TypeRef::new(encoded, span);
+            template.arguments = arguments;
+            return Some(template);
+        }
+        if matches!(self.peek(), TokenKind::Identifier(name) if name == "keyof") {
+            self.pos += 1;
+            let argument = self.parse_type_atom()?;
+            let mut operator = TypeRef::new("keyof", span.to(argument.span));
+            operator.arguments.push(argument);
+            return Some(operator);
+        }
+        if matches!(self.peek(), TokenKind::Identifier(name) if name == "infer") {
+            self.pos += 1;
+            let binding_span = self.peek_span();
+            let TokenKind::Identifier(binding) = self.peek().clone() else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    binding_span,
+                    "expected an inferred type variable after `infer`",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
+            };
+            self.pos += 1;
+            let mut inferred = TypeRef::new("infer", span.to(binding_span));
+            inferred.arguments.push(TypeRef::new(binding, binding_span));
+            if self.eat_keyword(Keyword::From) {
+                let constraint = self.parse_type_atom()?;
+                inferred.span = inferred.span.to(constraint.span);
+                inferred.arguments.push(constraint);
+            }
+            return Some(inferred);
+        }
+        if matches!(self.peek(), TokenKind::LBrace) {
+            return self.parse_object_type_shape();
+        }
+        if matches!(self.peek(), TokenKind::Identifier(name) if name == "const")
+            && matches!(self.peek_at(1), TokenKind::LParen)
+        {
+            return self.parse_const_type_expression();
+        }
+        if self.eat(&TokenKind::LParen) {
+            if !self.enter() {
+                self.leave();
+                return None;
+            }
+            let Some(mut grouped) = self.parse_type() else {
+                self.leave();
+                return None;
+            };
+            let end = self.peek_span();
+            if !self.eat(&TokenKind::RParen) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    end,
+                    "expected `)` to close grouped type",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                self.leave();
+                return None;
+            }
+            grouped.span = span.to(end);
+            grouped.grouped = true;
+            grouped.expression = Some(Box::new(TypeExpr::Group {
+                expression: Box::new(grouped.to_type_expr()),
+                span: span.to(end),
+            }));
+            self.leave();
+            return Some(grouped);
+        }
+        match self.peek().clone() {
+            TokenKind::Integer(value) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::Int(IntLit { value, span }),
+                    span,
+                ));
+            }
+            TokenKind::Minus if matches!(self.peek_at(1), TokenKind::Integer(_)) => {
+                self.pos += 1;
+                let TokenKind::Integer(value) = self.peek().clone() else {
+                    unreachable!("lookahead established a signed integer type literal")
+                };
+                self.pos += 1;
+                let Some(value) = value.checked_neg() else {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        span,
+                        "negative integer type literal is out of range",
+                        "the value cannot be represented by the compiler's exact integer literal model",
+                        None,
+                    );
+                    return None;
+                };
+                let end = self.tokens[self.pos - 1].span;
+                return Some(TypeRef::literal(
+                    TypeValue::Int(IntLit {
+                        value,
+                        span: span.to(end),
+                    }),
+                    span.to(end),
+                ));
+            }
+            TokenKind::Float(literal) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::Float(FloatLit {
+                        text: literal.text,
+                        width: literal.width,
+                        span,
+                    }),
+                    span,
+                ));
+            }
+            TokenKind::Duration(literal, unit) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::Duration(DurationLit {
+                        nanos: duration_nanos(&literal.text, unit),
+                        span,
+                    }),
+                    span,
+                ));
+            }
+            TokenKind::Str(value) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::String(StrLit { value, span }),
+                    span,
+                ));
+            }
+            TokenKind::Char(value) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::Char(CharLit { value, span }),
+                    span,
+                ));
+            }
+            TokenKind::Keyword(Keyword::True | Keyword::False) => {
+                let value = matches!(self.peek(), TokenKind::Keyword(Keyword::True));
+                self.pos += 1;
+                return Some(TypeRef::literal(
+                    TypeValue::Boolean(BoolLit { value, span }),
+                    span,
+                ));
+            }
+            TokenKind::Keyword(Keyword::Null) => {
+                self.pos += 1;
+                return Some(TypeRef::literal(TypeValue::Null(NullLit { span }), span));
+            }
+            _ => {}
+        }
         let name = match self.peek().clone() {
             TokenKind::Identifier(name) => {
                 self.pos += 1;
@@ -2161,8 +2442,21 @@ impl<'a> Parser<'a> {
             return Some(array);
         }
 
+        if self.eat(&TokenKind::LBracket) {
+            let key = self.parse_type()?;
+            let end = self.peek_span();
+            if !self.expect(&TokenKind::RBracket, "to close indexed access") {
+                return None;
+            }
+            let mut receiver = TypeRef::new(name, span);
+            receiver.arguments = arguments;
+            let mut indexed = TypeRef::new("indexed", span.to(end));
+            indexed.arguments = vec![receiver, key];
+            return Some(indexed);
+        }
+
         // `T?` is `T | Null`, per `ZIRK_LANGUAGE_SPEC.md` section 4.
-        if matches!(self.peek(), TokenKind::Question) {
+        if self.conditional_constraint == 0 && matches!(self.peek(), TokenKind::Question) {
             let end = self.peek_span();
             self.pos += 1;
             let mut ty = TypeRef::nullable(name, span.to(end));
@@ -2175,9 +2469,221 @@ impl<'a> Parser<'a> {
         Some(ty)
     }
 
+    fn parse_const_type_expression(&mut self) -> Option<TypeRef> {
+        if !self.enter() {
+            self.leave();
+            return None;
+        }
+        let result = self.parse_const_type_expression_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_const_type_expression_inner(&mut self) -> Option<TypeRef> {
+        let start = self.peek_span();
+        self.pos += 2; // `const(`
+        let expression = self.parse_expr()?;
+        let expression_span = expression.span();
+        let source = self.source.slice(expression_span).to_string();
+        let close = self.peek_span();
+        if !self.expect(&TokenKind::RParen, "to close `const(...)`") {
+            return None;
+        }
+        let span = start.to(close);
+        let mut reference = TypeRef::new("const", span);
+        reference.expression = Some(Box::new(TypeExpr::Constant {
+            source,
+            expression: Box::new(expression),
+            span,
+        }));
+        Some(reference)
+    }
+
+    fn parse_object_type_shape(&mut self) -> Option<TypeRef> {
+        if !self.enter() {
+            self.leave();
+            return None;
+        }
+        let result = self.parse_object_type_shape_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_object_type_shape_inner(&mut self) -> Option<TypeRef> {
+        let start = self.peek_span();
+        self.pos += 1; // `{`
+        let mapped_readonly = if matches!(self.peek(), TokenKind::Keyword(Keyword::Inmut))
+            && matches!(self.peek_at(1), TokenKind::LBracket)
+        {
+            self.pos += 1;
+            1
+        } else if matches!(self.peek(), TokenKind::Keyword(Keyword::Mut))
+            && matches!(self.peek_at(1), TokenKind::LBracket)
+        {
+            self.pos += 1;
+            2
+        } else {
+            0
+        };
+        if matches!(self.peek(), TokenKind::LBracket) {
+            self.pos += 1;
+            let key_span = self.peek_span();
+            let TokenKind::Identifier(key_name) = self.peek().clone() else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    key_span,
+                    "expected mapped type key variable",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
+            };
+            self.pos += 1;
+            if !self.eat_keyword(Keyword::In) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    self.peek_span(),
+                    "expected `in` in mapped type",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
+            }
+            let keys = self.parse_type()?;
+            let remap = if self.eat_keyword(Keyword::As) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            if !self.expect(&TokenKind::RBracket, "to close mapped type key") {
+                return None;
+            }
+            let optional = if self.eat(&TokenKind::Question) {
+                1
+            } else if self.eat(&TokenKind::Not) {
+                2
+            } else {
+                0
+            };
+            if !self.expect(&TokenKind::Colon, "before mapped type value") {
+                return None;
+            }
+            let value = self.parse_type()?;
+            let end = self.peek_span();
+            if !self.expect(&TokenKind::RBrace, "to close mapped type") {
+                return None;
+            }
+            let mut mapped = TypeRef::new(
+                format!("mapped:{key_name}:{mapped_readonly}:{optional}"),
+                start.to(end),
+            );
+            mapped.arguments.push(keys);
+            mapped
+                .arguments
+                .push(remap.unwrap_or_else(|| TypeRef::new("<same-key>", key_span)));
+            mapped.arguments.push(value);
+            return Some(mapped);
+        }
+        if mapped_readonly != 0 {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                start,
+                "`inmut`/`mut` modifiers in a type shape require a mapped member",
+                "expected `[Key in Keys]`",
+                None,
+            );
+            return None;
+        }
+        let mut properties = Vec::new();
+        let mut names = HashSet::new();
+        while !matches!(self.peek(), TokenKind::RBrace) && !self.at_eof() {
+            let property_start = self.peek_span();
+            let readonly = if self.eat_keyword(Keyword::Inmut) {
+                if self.eat(&TokenKind::ColonColon) {
+                    if matches!(self.peek(), TokenKind::Identifier(name) if name == "strict") {
+                        self.pos += 1;
+                    } else {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            self.peek_span(),
+                            "expected `strict` after `inmut::` in a type shape",
+                            "`inmut::strict` is the only qualified immutable property modifier",
+                            None,
+                        );
+                        return None;
+                    }
+                }
+                true
+            } else {
+                self.eat_keyword(Keyword::Mut);
+                false
+            };
+            let name = self.expect_identifier("as a structural type property")?;
+            if !names.insert(name.name.clone()) {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    name.span,
+                    format!("duplicate structural property `{}`", name.name),
+                    "each property name can appear only once in a type shape",
+                    None,
+                );
+            }
+            let optional = self.eat(&TokenKind::Question);
+            if !self.expect(&TokenKind::Colon, "after a structural property name") {
+                return None;
+            }
+            let ty = self.parse_type()?;
+            let property_span = property_start.to(ty.span);
+            properties.push(TypeShapeProperty {
+                name,
+                optional,
+                readonly,
+                ty,
+                span: property_span,
+            });
+            if !self.eat(&TokenKind::Comma) && !self.eat(&TokenKind::Semicolon) {
+                if !matches!(self.peek(), TokenKind::RBrace) {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        self.peek_span(),
+                        "expected `,`, `;`, or `}` after a structural property",
+                        format!("found {}", self.peek().description()),
+                        None,
+                    );
+                    return None;
+                }
+            }
+        }
+        let end = self.peek_span();
+        if !self.eat(&TokenKind::RBrace) {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                end,
+                "expected `}` to close structural type",
+                format!("found {}", self.peek().description()),
+                None,
+            );
+            return None;
+        }
+        let span = start.to(end);
+        let mut reference = TypeRef::new("<object>", span);
+        reference.expression = Some(Box::new(TypeExpr::Object { properties, span }));
+        Some(reference)
+    }
+
     /// `Fn(P...) => R` or `Function(P...) => R` in type position (roadmap
     /// Phase 4d) — `name` is already consumed, `(` is next.
     fn parse_function_type(&mut self, name: String, start: Span) -> Option<TypeRef> {
+        if !self.enter() {
+            self.leave();
+            return None;
+        }
+        let result = self.parse_function_type_inner(name, start);
+        self.leave();
+        result
+    }
+
+    fn parse_function_type_inner(&mut self, name: String, start: Span) -> Option<TypeRef> {
         self.pos += 1; // `(`
 
         let mut params = Vec::new();
@@ -2260,10 +2766,9 @@ impl<'a> Parser<'a> {
         let mut arguments = Vec::new();
         if !self.check_gt() {
             loop {
-                // A union as a type argument is out of scope for now: it
-                // would need `check_gt`-style splitting for the `|` inside
-                // `Box<A | B>` too, which nothing exercises yet.
-                arguments.push(self.parse_type_atom()?);
+                // Type arguments admit full expressions (`Box<A | B>` and
+                // `Box<A & B>`); `check_gt` still handles nested `>>`.
+                arguments.push(self.parse_type()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -2322,7 +2827,7 @@ impl<'a> Parser<'a> {
             }
 
             let default = if self.eat(&TokenKind::Assign) {
-                let Some(ty) = self.parse_type_atom() else {
+                let Some(ty) = self.parse_type() else {
                     break;
                 };
                 Some(ty)
@@ -3008,7 +3513,7 @@ impl<'a> Parser<'a> {
             let catch_start = self.peek_span();
             self.eat_keyword(Keyword::Catch);
 
-            let ty = self.parse_type_atom()?;
+            let ty = self.parse_type()?;
             self.expect(&TokenKind::LParen, "after the caught type");
             let binding = self.expect_identifier("naming the caught value")?;
             self.expect(&TokenKind::RParen, "after the catch binding");
@@ -3374,7 +3879,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
 
         self.expect(&TokenKind::LParen, "to open the lambda parameters");
-        let params = self.parse_params(false);
+        let params = self.parse_params(false, true);
         self.expect(&TokenKind::RParen, "to close the lambda parameters");
 
         self.expect(&TokenKind::Colon, "before the lambda return type");
@@ -3584,11 +4089,55 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Some(Pattern::Int(IntLit { value, span }))
             }
+            TokenKind::Float(literal) => {
+                self.pos += 1;
+                Some(Pattern::Float(FloatLit {
+                    text: literal.text,
+                    width: literal.width,
+                    span,
+                }))
+            }
+            TokenKind::Duration(literal, unit) => {
+                self.pos += 1;
+                Some(Pattern::Duration(DurationLit {
+                    nanos: duration_nanos(&literal.text, unit),
+                    span,
+                }))
+            }
             // A negative literal is one pattern, not a unary operator applied
             // to one: patterns have no operators.
             TokenKind::Minus => {
                 self.pos += 1;
-                let TokenKind::Integer(value) = self.peek().clone() else {
+                let next = self.peek().clone();
+                if let TokenKind::Float(mut literal) = next {
+                    let end = self.peek_span();
+                    self.pos += 1;
+                    literal.text.insert(0, '-');
+                    return Some(Pattern::Float(FloatLit {
+                        text: literal.text,
+                        width: literal.width,
+                        span: span.to(end),
+                    }));
+                }
+                if let TokenKind::Duration(literal, unit) = next {
+                    let end = self.peek_span();
+                    self.pos += 1;
+                    let Some(nanos) = duration_nanos(&literal.text, unit).checked_neg() else {
+                        self.error(
+                            codes::UNEXPECTED_TOKEN,
+                            span.to(end),
+                            "negative duration pattern is out of range",
+                            "its magnitude exceeds the Duration representation",
+                            None,
+                        );
+                        return None;
+                    };
+                    return Some(Pattern::Duration(DurationLit {
+                        nanos,
+                        span: span.to(end),
+                    }));
+                }
+                let TokenKind::Integer(value) = next else {
                     let found = self.peek().description();
                     self.error(
                         codes::UNEXPECTED_TOKEN,
@@ -3609,6 +4158,10 @@ impl<'a> Parser<'a> {
             TokenKind::Str(value) => {
                 self.pos += 1;
                 Some(Pattern::Str(StrLit { value, span }))
+            }
+            TokenKind::Char(value) => {
+                self.pos += 1;
+                Some(Pattern::Char(CharLit { value, span }))
             }
             // `re'pattern' name?` — the optional trailing identifier binds
             // the `Regex.Match` inside the arm.
@@ -3727,6 +4280,26 @@ impl<'a> Parser<'a> {
                 }))
             }
             TokenKind::Identifier(name) => {
+                if self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| matches!(token.kind, TokenKind::LParen))
+                    && name != "Ok"
+                    && name != "Error"
+                {
+                    let expression = self.parse_expr()?;
+                    if matches!(expression, Expr::Call(_)) {
+                        return Some(Pattern::Constant(expression));
+                    }
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        expression.span(),
+                        "expected a constant constructor pattern",
+                        "constructor-call patterns must be compile-time constants",
+                        None,
+                    );
+                    return None;
+                }
                 self.pos += 1;
 
                 // `Direction.North` names a variant; a bare name binds.
@@ -3811,7 +4384,20 @@ impl<'a> Parser<'a> {
     /// A `?` after an expression is unambiguously this operator: `??` and `?.`
     /// are their own tokens, and the `?` of `T?` only appears in type position.
     fn parse_ternary(&mut self) -> Option<Expr> {
-        let condition = self.parse_range()?;
+        let mut condition = self.parse_range()?;
+
+        // Contextual operator: `satisfies` remains usable as an identifier
+        // unless it follows an expression in this type-checking position.
+        if matches!(self.peek(), TokenKind::Identifier(name) if name == "satisfies") {
+            self.pos += 1;
+            let target = self.parse_type()?;
+            let span = condition.span().to(target.span);
+            condition = Expr::Satisfies(SatisfiesExpr {
+                expr: Box::new(condition),
+                target,
+                span,
+            });
+        }
 
         if !matches!(self.peek(), TokenKind::Question) {
             return Some(condition);
@@ -4550,7 +5136,7 @@ impl<'a> Parser<'a> {
     /// already consumed nothing but seen the leading `<`.
     fn parse_prefix_cast(&mut self, span: Span) -> Option<Expr> {
         self.pos += 1; // `<`
-        let target = self.parse_type_atom()?;
+        let target = self.parse_type()?;
         if !self.eat_gt() {
             let found = self.peek().description();
             self.error(
@@ -4755,7 +5341,7 @@ impl<'a> Parser<'a> {
                     if optional {
                         self.pos += 1;
                     }
-                    let target = self.parse_type_atom()?;
+                    let target = self.parse_type()?;
                     object = Expr::Cast(CastExpr {
                         span: object.span().to(target.span),
                         expr: Box::new(object),
@@ -5092,6 +5678,7 @@ fn precedence(kind: &TokenKind) -> Option<(BinaryOp, u8)> {
         // Same level as `==`: they answer neighbouring questions about the
         // same two values.
         T::Keyword(Keyword::Is) => (Is, 3),
+        T::Keyword(Keyword::In) => (In, 3),
         T::Lt => (Lt, 4),
         T::LtEq => (LtEq, 4),
         T::Gt => (Gt, 4),

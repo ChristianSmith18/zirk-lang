@@ -21,8 +21,8 @@ A `List<T>` annotation also selects list storage for `[...]`; ranges expand in
 place in literals and constructor calls:
 
 ```zirk
-inmut values: List<Int32> = [0..3];
-inmut more: List<Int32> = List(-1, 3..6, 6);
+inmut values: List<Int32> = [0 .. 3];
+inmut more: List<Int32> = List(-1, 3 .. 6, 6);
 ```
 
 ## Growth, insertion, and removal
@@ -30,12 +30,12 @@ inmut more: List<Int32> = List(-1, 3..6, 6);
 ```zirk
 inmut numbers = List(10, 20);
 
-numbers.add(30);              // [10, 20, 30]
-numbers.insert(0, 5);         // [5, 10, 20, 30]
-numbers.remove(1);            // [5, 20, 30]
+numbers.add(30); // [10, 20, 30]
+numbers.insert(0, 5); // [5, 10, 20, 30]
+numbers.remove(1); // [5, 20, 30]
 
-numbers.length;               // 3
-numbers.is_empty();           // false
+numbers.length; // 3
+numbers.is_empty(); // false
 ```
 
 Insertion and removal shift the later elements. Indexing is bounds-checked: an
@@ -46,8 +46,8 @@ are appended and contracts only after becoming substantially sparse. There is
 no user-facing capacity setting; use `Array<T>` when the final size is fixed.
 
 ```zirk
-numbers[0];      // 5
-numbers[10];     // error: index out of bounds
+numbers[0]; // 5
+numbers[10]; // error: index out of bounds
 ```
 
 ## Sharing and cloning
@@ -80,15 +80,15 @@ forbids even that:
 
 ```zirk
 mut a = List(1, 2, 3); // this example demonstrates rebinding
-a.add(4);        // valid
-a = List();      // valid
+a.add(4); // valid
+a = List(); // valid
 
 inmut b = List(1, 2, 3);
-b.add(4);        // valid: the referent may change
-b = List();      // error: binding cannot be reassigned
+b.add(4); // valid: the referent may change
+b = List(); // error: binding cannot be reassigned
 
 inmut::strict c = List(1, 2, 3);
-c.add(4);        // error: no mutable alias is allowed
+c.add(4); // error: no mutable alias is allowed
 ```
 
 ## Iteration

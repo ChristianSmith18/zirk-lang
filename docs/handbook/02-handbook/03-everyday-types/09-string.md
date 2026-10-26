@@ -21,8 +21,8 @@ mut first = "hello";
 mut second = first;
 second[0] = 'H';
 
-first == "Hello";  // true: content equality
-first is second;   // true: same reference
+first == "Hello"; // true: content equality
+first is second; // true: same reference
 ```
 
 `clone()` makes independent logical content:
@@ -44,10 +44,10 @@ yield a mutable alias or be acquired while one remains accessible.
 ```zirk
 inmut fixed = "hello";
 fixed[0] = 'H'; // valid
-fixed = "bye";  // error
+fixed = "bye"; // error
 
 inmut::strict frozen = "hello";
-frozen[0] = 'H';       // error
+frozen[0] = 'H'; // error
 mut safe = frozen.clone(); // valid independent copy
 ```
 
@@ -59,10 +59,10 @@ Every bound is checked—Zirk never clamps an invalid index silently.
 ```zirk
 text[0]
 text[-1]
-text[start:end:step]
-text[:end]
+text[start: end: step]
+text[: end]
 text[start:]
-text[::-1]
+text[::- 1]
 ```
 
 Individual assignment requires one `Char`. Slice assignment requires exactly
@@ -82,7 +82,7 @@ Only two Strings concatenate directly:
 
 ```zirk
 "value=" + "42"; // valid
-"value=" + 42;   // type error
+"value=" + 42; // type error
 ```
 
 Convert the individual value explicitly with `String(42)`/`to_string()`, or use
@@ -90,7 +90,7 @@ interpolation:
 
 ```zirk
 "value=" + String(42); // "value=42"
-"value={42}";          // "value=42"
+"value={42}"; // "value=42"
 ```
 
 `String(expression)` evaluates the complete expression first and converts only

@@ -70,7 +70,7 @@ clock API, not wall-clock `Instant.now()`.
 inmut now = Instant.now();
 inmut parsed = Instant.parse("2026-08-15T18:30:00Z");
 inmut later = now + 250ms;
-inmut latency = Instant.now() - now;   // signed Duration
+inmut latency = Instant.now() - now; // signed Duration
 ```
 
 ---

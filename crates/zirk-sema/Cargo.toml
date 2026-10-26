@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
+zirk-runtime-core.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 unicode-segmentation.workspace = true
 regex.workspace = true
 

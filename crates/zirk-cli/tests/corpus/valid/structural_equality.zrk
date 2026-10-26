@@ -24,3 +24,4 @@ fn main(): Void {
     stdout.println(open is object_alias);
     stdout.println(open is another);
 }
+main();

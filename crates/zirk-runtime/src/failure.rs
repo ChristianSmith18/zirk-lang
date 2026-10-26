@@ -101,6 +101,13 @@ pub extern "C" fn zirk_rt_invalid_cast() -> ! {
     fatal("invalid cast: the value's runtime type is not the target type")
 }
 
+/// Reports a corrupt compiler-generated tagged-union discriminant and
+/// terminates before generated code reads the corresponding payload.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_invalid_union_tag() -> ! {
+    fatal("internal error: a tagged union contains an invalid alternative tag")
+}
+
 /// Reports a `Float` operation that would produce `NaN` and terminates
 /// (roadmap Phase 3b, design decision D2).
 ///
@@ -144,4 +151,35 @@ pub unsafe extern "C" fn zirk_rt_fatal_error(message: *const std::ffi::c_void) -
         None => String::new(),
     };
     fatal(&text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::zirk_rt_invalid_union_tag;
+    use std::process::Command;
+
+    const INVALID_UNION_TAG_CHILD: &str = "ZIRK_TEST_INVALID_UNION_TAG_CHILD";
+
+    #[test]
+    fn invalid_union_tag_handler_reports_controlled_internal_failure() {
+        if std::env::var_os(INVALID_UNION_TAG_CHILD).is_some() {
+            zirk_rt_invalid_union_tag();
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("failure::tests::invalid_union_tag_handler_reports_controlled_internal_failure")
+            .arg("--nocapture")
+            .env(INVALID_UNION_TAG_CHILD, "1")
+            .output()
+            .expect("run invalid union tag failure in a subprocess");
+
+        assert_eq!(output.status.code(), Some(70));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("internal error: a tagged union contains an invalid alternative tag"),
+            "unexpected stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

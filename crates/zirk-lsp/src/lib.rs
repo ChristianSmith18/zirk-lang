@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tower_lsp::Client;
@@ -62,6 +63,14 @@ pub fn analyze_with_overlays(
     path: &Path,
     overlays: &HashMap<std::path::PathBuf, String>,
 ) -> Analysis {
+    analyze_with_overlays_cancellable(path, overlays, None)
+}
+
+fn analyze_with_overlays_cancellable(
+    path: &Path,
+    overlays: &HashMap<std::path::PathBuf, String>,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Analysis {
     if let Some((manifest_path, text)) = overlays
         .iter()
         .find(|(path, _)| path.file_name().is_some_and(|name| name == ".zkinit"))
@@ -73,7 +82,12 @@ pub fn analyze_with_overlays(
         };
     }
     let mut sink = DiagnosticSink::new();
-    let result = frontend::run_frontend_ide_with_overlay(path, overlays, &mut sink);
+    let result = frontend::run_frontend_ide_with_overlay_cancellable(
+        path,
+        overlays,
+        cancellation,
+        &mut sink,
+    );
     let mut diagnostics = sink.diagnostics().to_vec();
     if let Some(frontend) = &result {
         diagnostics.extend(capability_requirement_diagnostics(frontend));
@@ -913,7 +927,7 @@ fn inferred_type_hints(
             }
             Some(InlayHint {
                 position,
-                label: format!(": {}", entry.text).into(),
+                label: format!(": {}", bounded_type_text(&entry.text)).into(),
                 kind: Some(InlayHintKind::TYPE),
                 text_edits: None,
                 tooltip: None,
@@ -980,7 +994,7 @@ pub fn best_hover_entry_in_file(
 /// The hover's display line: `fn name(params): Return`, `name: Type`, or the
 /// bare expression type.
 pub fn hover_text(entry: &TypeMapEntry) -> String {
-    match (entry.kind, entry.name.as_deref()) {
+    let text = match (entry.kind, entry.name.as_deref()) {
         (TypeMapKind::Function, Some(name)) => {
             format!("fn {name}{}", &entry.text["fn".len()..])
         }
@@ -991,7 +1005,22 @@ pub fn hover_text(entry: &TypeMapEntry) -> String {
             format!("{name}: {}", entry.text)
         }
         _ => entry.text.clone(),
+    };
+    bounded_type_text(&text)
+}
+
+const MAX_TYPE_QUERY_DISPLAY_BYTES: usize = 180;
+
+fn bounded_type_text(text: &str) -> String {
+    if text.len() <= MAX_TYPE_QUERY_DISPLAY_BYTES {
+        return text.to_owned();
     }
+    let ellipsis = "…";
+    let mut end = MAX_TYPE_QUERY_DISPLAY_BYTES - ellipsis.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ellipsis}", &text[..end])
 }
 
 /// Import declarations are represented by semantic references rather than
@@ -1176,6 +1205,16 @@ fn to_lsp_diagnostic(diag: &ZirkDiagnostic) -> (Option<String>, Diagnostic) {
 /// declaration belongs to its own document's outline.
 pub fn document_symbols(program: &zirk_ast::Program, sources: &SourceMap) -> Vec<DocumentSymbol> {
     document_symbols_in_file(program, sources, FileId::ENTRY)
+}
+
+fn recovered_document_symbols(uri: &Url, text: &str) -> Vec<DocumentSymbol> {
+    let mut sources = SourceMap::new();
+    let file_id = sources.add(SourceFile::new(uri.to_string(), text.to_owned()));
+    let source = sources.file(file_id);
+    let mut sink = DiagnosticSink::new();
+    let tokens = zirk_lexer::tokenize(source, &mut sink);
+    let program = zirk_parser::parse(source, &tokens, &mut sink);
+    document_symbols_in_file(&program, &sources, file_id)
 }
 
 pub fn document_symbols_in_file(
@@ -1816,6 +1855,7 @@ struct State {
     module_indexes: HashMap<std::path::PathBuf, Arc<zirk_ide::ModuleIndex>>,
     module_index_generation: u64,
     workspace_generations: HashMap<std::path::PathBuf, u64>,
+    analysis_cancellations: HashMap<std::path::PathBuf, Arc<AtomicBool>>,
     semantic_token_legend: Option<SemanticTokensLegend>,
     supports_document_changes: bool,
     supports_work_done_progress: bool,
@@ -1862,6 +1902,12 @@ fn analysis_snapshot_is_current(
         && overlay_versions_current
         && snapshot_uris == current_uris
         && generation_current
+}
+
+fn cancel_workspace_analysis(state: &State, root: &Path) {
+    if let Some(cancellation) = state.analysis_cancellations.get(root) {
+        cancellation.store(true, Ordering::Relaxed);
+    }
 }
 
 async fn begin_analysis_progress(
@@ -2122,6 +2168,7 @@ impl Backend {
         for root in &affected_roots {
             let generation = state.workspace_generations.entry(root.clone()).or_default();
             *generation = generation.wrapping_add(1);
+            cancel_workspace_analysis(&state, root);
         }
 
         let mut invalidated = Vec::new();
@@ -2150,6 +2197,7 @@ impl Backend {
         // the gate it must either reuse that completed snapshot or analyze
         // the newest overlay set itself.
         let permit = analysis_lock.lock().await;
+        let cancellation = Arc::new(AtomicBool::new(false));
         let (version, root, path, overlays, overlay_versions, generation, progress_token) = {
             let mut state = state.lock().unwrap();
             let Some(document) = state.documents.get(&uri) else {
@@ -2163,6 +2211,9 @@ impl Backend {
                 return;
             };
             let root = workspace_root(&path);
+            state
+                .analysis_cancellations
+                .insert(root.clone(), cancellation.clone());
             let mut overlays = HashMap::new();
             let mut versions = HashMap::new();
             for (open_uri, open_document) in &state.documents {
@@ -2198,18 +2249,29 @@ impl Backend {
         let root_for_validation = root.clone();
         let progress_token = begin_analysis_progress(&client, progress_token).await;
 
+        let cancellation_for_analysis = cancellation.clone();
         let analysis = match tokio::task::spawn_blocking(move || {
             let target = if root.join(".zkinit").is_file() {
                 root
             } else {
                 path
             };
-            analyze_with_overlays(&target, &overlays)
+            analyze_with_overlays_cancellable(&target, &overlays, Some(cancellation_for_analysis))
         })
         .await
         {
             Ok(analysis) => analysis,
             Err(_) => {
+                {
+                    let mut state = state.lock().unwrap();
+                    if state
+                        .analysis_cancellations
+                        .get(&root_for_validation)
+                        .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
+                    {
+                        state.analysis_cancellations.remove(&root_for_validation);
+                    }
+                }
                 end_analysis_progress(&client, progress_token, "Workspace analysis failed").await;
                 return;
             }
@@ -2217,6 +2279,13 @@ impl Backend {
 
         let outcome = {
             let mut state = state.lock().unwrap();
+            if state
+                .analysis_cancellations
+                .get(&root_for_validation)
+                .is_some_and(|active| Arc::ptr_eq(active, &cancellation))
+            {
+                state.analysis_cancellations.remove(&root_for_validation);
+            }
             if !analysis_snapshot_is_current(
                 &state,
                 &uri,
@@ -2332,6 +2401,7 @@ impl Backend {
                 .map(|document| document.semantic_token_history.clone())
                 .unwrap_or_default();
             if let Some(root) = &root {
+                cancel_workspace_analysis(&state, root);
                 let generation = state.workspace_generations.entry(root.clone()).or_default();
                 *generation = generation.wrapping_add(1);
             }
@@ -3302,14 +3372,19 @@ impl LanguageServer for Backend {
         let Some(analysis) = &document.analysis else {
             return Ok(None);
         };
-        let Some(result) = &analysis.frontend else {
-            return Ok(None);
-        };
-        let Some(file_id) = file_id_for_uri(&result.sources, uri) else {
-            return Ok(None);
-        };
+        if let Some(result) = &analysis.frontend {
+            let Some(file_id) = file_id_for_uri(&result.sources, uri) else {
+                return Ok(None);
+            };
+            return Ok(Some(DocumentSymbolResponse::Nested(
+                document_symbols_in_file(&result.program, &result.sources, file_id),
+            )));
+        }
+        // Syntax errors suppress semantic providers, but the parser's
+        // declaration recovery can still offer a safe outline for unaffected
+        // declarations in the current document version.
         Ok(Some(DocumentSymbolResponse::Nested(
-            document_symbols_in_file(&result.program, &result.sources, file_id),
+            recovered_document_symbols(uri, &document.text),
         )))
     }
 
@@ -3667,6 +3742,35 @@ mod tests {
     }
 
     #[test]
+    fn superseding_a_workspace_analysis_signals_its_cancellation_token() {
+        let root = scratch("analysis-cancel-token");
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let mut state = State::default();
+        state
+            .analysis_cancellations
+            .insert(root.clone(), cancellation.clone());
+
+        cancel_workspace_analysis(&state, &root);
+
+        assert!(cancellation.load(Ordering::Relaxed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_type_analysis_never_returns_a_partial_semantic_snapshot() {
+        let dir = scratch("analysis-cancelled-snapshot");
+        let path = dir.join("main.zrk");
+        let overlays =
+            HashMap::from([(path.clone(), "fn value(): Int32 { return 1; }".to_owned())]);
+        let cancellation = Arc::new(AtomicBool::new(true));
+
+        let analysis = analyze_with_overlays_cancellable(&path, &overlays, Some(cancellation));
+
+        assert!(analysis.frontend.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn analysis_reports_diagnostics_for_broken_text() {
         let dir = scratch("broken");
         let path = dir.join("broken.zrk");
@@ -3875,6 +3979,52 @@ mod tests {
     }
 
     #[test]
+    fn union_member_completion_keeps_common_members_and_uses_narrowed_types() {
+        let dir = scratch("union-member-completion");
+        let path = dir.join("main.zrk");
+        let source = "class Alpha { shared(): Void {} alpha_only(): Void {} }\n\
+            class Beta { shared(): Void {} beta_only(): Void {} }\n\
+            type Choice = Alpha | Beta;\n\
+            fn inspect(value: Choice): Void {\n\
+                value.shared();\n\
+                if value is Alpha { value.alpha_only(); }\n\
+            }\n\
+            fn main(): Void {}";
+        let analysis = analyze(&path, source);
+        let frontend = analysis.frontend.expect("valid union source");
+        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index);
+        let first_offset = source.find("value.shared").unwrap() as u32 + "value.".len() as u32;
+        let (line, character) = frontend.sources.entry().line_column_utf16(first_offset);
+        let common = snapshot.completions(FileId::ENTRY, IdePosition { line, character });
+        assert!(common.iter().any(|candidate| candidate.label == "shared"));
+        assert!(
+            !common
+                .iter()
+                .any(|candidate| candidate.label == "alpha_only")
+        );
+        assert!(
+            !common
+                .iter()
+                .any(|candidate| candidate.label == "beta_only")
+        );
+
+        let narrowed_offset =
+            source.rfind("value.alpha_only").unwrap() as u32 + "value.".len() as u32;
+        let (line, character) = frontend.sources.entry().line_column_utf16(narrowed_offset);
+        let narrowed = snapshot.completions(FileId::ENTRY, IdePosition { line, character });
+        assert!(
+            narrowed
+                .iter()
+                .any(|candidate| candidate.label == "alpha_only")
+        );
+        assert!(
+            !narrowed
+                .iter()
+                .any(|candidate| candidate.label == "beta_only")
+        );
+    }
+
+    #[test]
     fn hover_prefers_the_declaration_over_the_expression() {
         let dir = scratch("hover");
         let path = dir.join("ok.zrk");
@@ -3888,6 +4038,69 @@ mod tests {
         assert_eq!(hover_text(entry), "fn square(n: Int32): Int32");
         assert!(entry.inferred);
         assert_eq!(entry.span.file, file.id());
+    }
+
+    #[test]
+    fn type_map_reports_branch_refined_singleton_types() {
+        let dir = scratch("narrowed-type-map");
+        let path = dir.join("main.zrk");
+        let source = "type Choice = const(1) | const(2);\n\
+            fn inspect(value: Choice): Void {\n\
+                if value == 1 { inmut selected = value; }\n\
+            }\n\
+            fn main(): Void { }";
+        let analysis = analyze(&path, source);
+        let frontend = analysis
+            .frontend
+            .expect("valid source should produce semantic query data");
+        let entry = frontend
+            .checked
+            .type_map
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some("selected"))
+            .expect("branch-local declaration should be exposed in the type map");
+        assert_eq!(entry.text, "Int32(1)");
+        assert!(entry.inferred);
+        assert_eq!(hover_text(entry), "selected: Int32(1)");
+        let hints = inferred_type_hints(
+            &frontend.checked.type_map,
+            &frontend.sources,
+            FileId::ENTRY,
+            Range::new(Position::new(0, 0), Position::new(20, 0)),
+        );
+        assert!(hints.iter().any(
+            |hint| matches!(&hint.label, InlayHintLabel::String(label) if label == ": Int32(1)")
+        ));
+    }
+
+    #[test]
+    fn singleton_hover_text_is_bounded_for_long_unicode_values() {
+        let dir = scratch("singleton-hover-bounds");
+        let path = dir.join("main.zrk");
+        let repeated = "🙂".repeat(200);
+        let source = format!(
+            "type LongText = const(\"{repeated}\");\n\
+             fn inspect(value: LongText): LongText {{ return value; }}\n\
+             fn main(): Void {{ }}"
+        );
+        let analysis = analyze(&path, &source);
+        let frontend = analysis.frontend.expect("source should be analyzed");
+        let offset = source.find("value: LongText").unwrap() as u32;
+        let entry = best_hover_entry(&frontend.checked.type_map, offset)
+            .expect("parameter declaration should have a hover entry");
+        let rendered = hover_text(entry);
+        assert!(rendered.len() <= 180, "{rendered}");
+        assert!(rendered.contains("..."), "{rendered}");
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn composite_type_query_display_is_bounded_at_utf8_boundaries() {
+        let nested = "Map<String, List<{ inmut label: \"🙂value\" | Int32 }>>".repeat(20);
+        let rendered = bounded_type_text(&nested);
+        assert!(rendered.len() <= MAX_TYPE_QUERY_DISPLAY_BYTES);
+        assert!(rendered.ends_with('…'));
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
     }
 
     #[test]
@@ -4012,6 +4225,157 @@ mod tests {
     }
 
     #[test]
+    fn document_symbols_recover_after_an_incomplete_nested_type() {
+        let uri = Url::from_file_path(scratch("nested-type-recovery").join("main.zrk")).unwrap();
+        let symbols = recovered_document_symbols(
+            &uri,
+            "type Open = List<{ active: true | false;\nfn preserved(): Void { }",
+        );
+        assert!(
+            symbols.iter().any(|symbol| symbol.name == "preserved"),
+            "the current parse should retain safe outline symbols after malformed type syntax"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_document_symbols_survive_an_incomplete_nested_type() {
+        let root = scratch("nested-type-outline-protocol");
+        let uri = Url::from_file_path(root.join("main.zrk")).unwrap();
+        let (mut server, _socket) = service();
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("initialize")
+                    .params(serde_json::json!({"capabilities": {}}))
+                    .id(1)
+                    .finish(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "zirk",
+                            "version": 1,
+                            "text": "fn initial(): Void { }"
+                        }
+                    }))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(serde_json::json!({
+                        "textDocument": {"uri": uri, "version": 2},
+                        "contentChanges": [{
+                            "text": "type Open = List<{ active: true | false;\nfn preserved(): Void { }"
+                        }]
+                    }))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+        let symbols = server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("textDocument/documentSymbol")
+                    .params(serde_json::json!({"textDocument": {"uri": uri}}))
+                    .id(2)
+                    .finish(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            symbols.result().unwrap().as_array().is_some_and(|symbols| {
+                symbols.iter().any(|symbol| symbol["name"] == "preserved")
+            }),
+            "the LSP should return declarations recovered from the current malformed document"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn protocol_document_change_cancels_the_active_workspace_analysis() {
+        let root = scratch("protocol-analysis-cancel");
+        let path = root.join("main.zrk");
+        let uri = Url::from_file_path(&path).unwrap();
+        let workspace = workspace_root(&path);
+        let (mut server, _socket, state) = service_with_state();
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("initialize")
+                    .params(serde_json::json!({"capabilities": {}}))
+                    .id(1)
+                    .finish(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("textDocument/didOpen")
+                    .params(serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "zirk",
+                            "version": 1,
+                            "text": "fn initial(): Void { }"
+                        }
+                    }))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        state
+            .lock()
+            .unwrap()
+            .analysis_cancellations
+            .insert(workspace, cancellation.clone());
+        server
+            .ready()
+            .await
+            .unwrap()
+            .call(
+                Request::build("textDocument/didChange")
+                    .params(serde_json::json!({
+                        "textDocument": {"uri": uri, "version": 2},
+                        "contentChanges": [{"text": "fn current(): Void { }"}]
+                    }))
+                    .finish(),
+            )
+            .await
+            .unwrap();
+
+        assert!(cancellation.load(Ordering::Relaxed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn promoted_constructor_parameters_are_field_symbols() {
         let dir = scratch("promoted-symbols");
         let path = dir.join("promoted.zrk");
@@ -4058,9 +4422,32 @@ mod tests {
         let dir = scratch("overlay");
         let path = dir.join("doc.zrk");
         fs::write(&path, "fn on_disk() { return 0; }\n").unwrap();
-        let analysis = analyze(&path, EXAMPLE);
+        let overlay = "type Choice = const(1) | const(2);\n\
+            fn inspect(value: Choice): Void {\n\
+                if value == 1 { inmut selected = value; }\n\
+            }\n\
+            fn main(): Void {}";
+        let analysis = analyze(&path, overlay);
         let result = analysis.frontend.as_ref().unwrap();
-        assert!(result.sources.entry().text().contains("square"));
+        assert!(result.sources.entry().text().contains("selected"));
+        assert!(!result.sources.entry().text().contains("on_disk"));
+        let selected = result
+            .checked
+            .type_map
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some("selected"))
+            .expect("overlay branch binding should have a semantic type");
+        assert_eq!(selected.text, "Int32(1)");
+        let hints = inferred_type_hints(
+            &result.checked.type_map,
+            &result.sources,
+            FileId::ENTRY,
+            Range::new(Position::new(0, 0), Position::new(20, 0)),
+        );
+        assert!(hints.iter().any(|hint| matches!(
+            &hint.label,
+            InlayHintLabel::String(label) if label == ": Int32(1)"
+        )));
     }
 
     #[test]
@@ -4105,6 +4492,22 @@ mod tests {
                 .contracts
                 .iter()
                 .any(|contract| contract.name.name == "Named")
+        );
+        let copied_user = frontend
+            .checked
+            .type_map
+            .iter()
+            .find(|entry| entry.name.as_deref() == Some("copied_user"))
+            .expect("generic alias call should expose its inferred binding type");
+        assert_eq!(copied_user.text, "User");
+        let generic_call_offset = text.find("keep(user);").unwrap() as u32;
+        assert_eq!(
+            frontend
+                .checked
+                .semantic_index
+                .expression_type_at(FileId::ENTRY, generic_call_offset)
+                .expect("generic call expression type should be queryable"),
+            "User"
         );
 
         let named_use = text.find("value: NamedValue").unwrap() as u32 + "value: ".len() as u32;
@@ -4400,7 +4803,7 @@ mod tests {
                 "lookup_user",
             )
             .expect("local alias can be renamed");
-        assert_eq!(alias_edits.len(), 2, "rename edits alias and its use only");
+        assert_eq!(alias_edits.len(), 3, "rename edits the alias and both uses");
         assert!(alias_edits.iter().all(|edit| {
             edit.location.path.ends_with("main.zrk")
                 && frontend
@@ -5203,7 +5606,8 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            3,
+            "renaming the imported generic alias updates its declaration and both uses"
         );
 
         let conflicting_rename = server

@@ -46,3 +46,4 @@ fn main(): Void {
         stdout.println("non-callable contract property caught");
     }
 }
+main();

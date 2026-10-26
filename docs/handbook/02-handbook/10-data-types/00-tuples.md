@@ -17,13 +17,13 @@ runtime integer.
 ```zirk
 mut index = 1
 inmut value = result[index] // error: tuple index is not a compile-time literal
-inmut part = result[0:2]    // error: tuples do not slice
+inmut part = result[0: 2] // error: tuples do not slice
 ```
 
 Tuple destructuring works both at binding sites and inside `match`:
 
 ```zirk
-inmut (name, score) = ("Ada", 100)
+inmut (name, score) =("Ada", 100)
 
 match result {
     ("", 0, false) => show_empty();

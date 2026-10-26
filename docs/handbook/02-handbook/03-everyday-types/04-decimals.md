@@ -7,8 +7,8 @@ digits with no rounding artifacts:
 
 ```zirk
 inmut a, b: Decimal = 0.1, 0.2;
-(a + b) == 0.3;                  // true
-inmut ratio = 0.625;            // Decimal — no annotation needed
+(a + b) == 0.3; // true
+inmut ratio = 0.625; // Decimal — no annotation needed
 ```
 
 A suffix-less fractional or scientific literal is a `Decimal`. A literal that
@@ -26,27 +26,27 @@ budget. Zirk omits `++`/`--` because a fractional unit is not a safe discrete
 step.
 
 ```zirk
-0.5 + 0.025;    // 0.525  — exact
-1.2 * 0.5;      // 0.6    — exact
-1.0 / 3.0;      // 0.333…3 (28 digits), half-to-even
-(2.345).round(2);          // 2.34 — half-to-even at the tie
-(10.0).div(3.0, 4);        // 3.3333 — explicit place count
+0.5 + 0.025; // 0.525  — exact
+1.2 * 0.5; // 0.6    — exact
+1.0 / 3.0; // 0.333…3 (28 digits), half-to-even
+(2.345).round(2); // 2.34 — half-to-even at the tie
+(10.0).div(3.0, 4); // 3.3333 — explicit place count
 ```
 
 Every integer converts to `Decimal` implicitly and exactly, and mixed
 integer/`Decimal` arithmetic produces `Decimal`:
 
 ```zirk
-3 / 4;     // 0.75: Decimal
-3 / 4.0;   // 0.75: Decimal
-1 + 0.5;   // 1.5: Decimal
+3 / 4; // 0.75: Decimal
+3 / 4.0; // 0.75: Decimal
+1 + 0.5; // 1.5: Decimal
 ```
 
 An explicit scalar conversion runs after the contained arithmetic:
 
 ```zirk
-Int32(3 / 4);     // 0: conversion of the completed Decimal quotient
-Float64((a + 1) / (b * 2)); // converts the completed Decimal quotient
+Int32(3 / 4); // 0: conversion of the completed Decimal quotient
+Float64((a + 1) /(b * 2)); // converts the completed Decimal quotient
 ```
 
 ## `Float` — IEEE 754 when you need it
@@ -57,7 +57,7 @@ Write a binary literal with an `f` suffix:
 
 ```zirk
 inmut fast: Float64 = 1.5f;
-inmut compact = 1.5f32;                 // Float32
+inmut compact = 1.5f32; // Float32
 inmut wide: Float128 = 1e-20f128;
 ```
 
@@ -122,11 +122,11 @@ replacement:
 
 ```zirk
 inmut price: Decimal = 19.99;
-inmut tax = price * 0.08;          // 1.5992 — exact
-inmut total = (price + tax).round(2);   // 21.59
+inmut tax = price * 0.08; // 1.5992 — exact
+inmut total =(price + tax).round(2); // 21.59
 
 inmut near = 1.0f - Float64.EPSILON;
-stdout.println(near.is_finite());  // true
+stdout.println(near.is_finite()); // true
 ```
 
 ---

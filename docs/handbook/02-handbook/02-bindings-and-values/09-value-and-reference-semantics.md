@@ -27,10 +27,10 @@ projection is deeply cloned and must satisfy `Clone`.
 
 ```zirk
 mut users = [User(name: "Ada")]
-mut alias = users              // shares the whole list
-mut first = users[0]           // independent projected User
-users[0].name = "Grace"        // place write changes users and alias
-stdout.println(first.name)     // Ada
+mut alias = users // shares the whole list
+mut first = users[0] // independent projected User
+users[0].name = "Grace" // place write changes users and alias
+stdout.println(first.name) // Ada
 ```
 
 The same expression can be a read or a place. On the left of assignment,

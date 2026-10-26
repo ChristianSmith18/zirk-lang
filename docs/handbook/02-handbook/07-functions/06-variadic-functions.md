@@ -14,7 +14,7 @@ Inside the function, `values` is an ordered, read-only iterable of `Int32`
 values. It supports `for ... in` and the ordinary `Iterable<T>` operations:
 
 ```zirk
-fn print_all(...values: String): Void {
+fn print_all(... values: String): Void {
     for value in values {
         stdout.println(value);
     }

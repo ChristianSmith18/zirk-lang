@@ -11,16 +11,16 @@ fn main(): Void {
     concurrent {
         inmut::strict values: List<Int32> = [1, 2, 3, 4];
         inmut job = spawn {
-        mut outcomes = Concurrent.each_settled(values,(value: Int32): Int32 => {
-            stdout.println("callback started");
-            try {
-                Timer.sleep(500ms);
-            } finally {
-                stdout.println("callback cleanup");
-            }
-            return value;
-        }, 2);
-        stdout.println("returned partial outcomes");
+            mut outcomes = Concurrent.each_settled(values,(value: Int32): Int32 => {
+                stdout.println("callback started");
+                try {
+                    Timer.sleep(500ms);
+                } finally {
+                    stdout.println("callback cleanup");
+                }
+                return value;
+            }, 2);
+            stdout.println("returned partial outcomes");
         };
         inmut cancelled: Boolean = cancel_and_report(job);
         _ = job;

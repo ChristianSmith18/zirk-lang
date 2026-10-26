@@ -28,7 +28,7 @@ cache entries, listeners, and other non-owning relationships.
 
 ```zirk
 mut cache = "expensive";
-mut weak = Weak.from(cache);
+mut weak = Weak.from (cache);
 
 match weak.upgrade() {
     null => stdout.println("gone"),
@@ -109,7 +109,7 @@ the referent is freed.
 
 ```zirk
 mut cache = "expensive";
-mut weak = Weak.from(cache);
+mut weak = Weak.from (cache);
 
 match weak.upgrade() {
     null => stdout.println("gone"),
@@ -134,7 +134,7 @@ lifetime integration is active work — members are `partial`/`specified`.
 
 ```zirk
 mut owner = List(1, 2, 3);
-mut view = owner.as_view();      // Dependent<List<Int32>> or similar
+mut view = owner.as_view(); // Dependent<List<Int32>> or similar
 // view cannot be returned or stored where owner is not also alive
 ```
 

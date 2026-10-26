@@ -804,7 +804,7 @@ match HTTPClient.create() {
         _ = client.enable_cookies();
         _ = client.close();
     }
-    Error(_) => {}
+    Error(_) => { }
 }
 ```
 

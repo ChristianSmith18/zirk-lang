@@ -22,8 +22,7 @@ class User {
 class Admin extends User {
     permissions: List<String>;
 
-    #override
-    label(): String {
+    #override label(): String {
         return "Admin: {this.name}";
     }
 }

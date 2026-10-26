@@ -91,9 +91,9 @@ captures `AssertionError`; outside a runner it remains an ordinary throwable.
 The minimum direct vocabulary includes:
 
 ```zirk
-assert.equal(actual, expected);          // `==`
+assert.equal(actual, expected); // `==`
 assert.not_equal(actual, unexpected);
-assert.identical(first, second);         // `is`
+assert.identical(first, second); // `is`
 assert.not_identical(first, second);
 assert.is_true(condition);
 assert.is_false(condition);

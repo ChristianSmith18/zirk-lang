@@ -543,7 +543,11 @@ unsafe fn dynamic_json_value(
     depth: usize,
     budget: &mut usize,
 ) -> Result<serde_json::Value, ()> {
-    if value.is_null() || depth > 256 || *budget == 0 {
+    if value.is_null()
+        || !crate::collector::is_managed_allocation(value)
+        || depth > 256
+        || *budget == 0
+    {
         return Err(());
     }
     *budget -= 1;
@@ -1164,6 +1168,18 @@ mod tests {
                 1,
             )
         }
+    }
+
+    #[test]
+    fn dynamic_json_rejects_unmanaged_misaligned_handles_before_dereferencing() {
+        let _guard = crate::collector::test_support::test_guard();
+        let invalid = 0x1004usize as *mut c_void;
+        let mut output = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { zirk_rt_json_stringify_dynamic(invalid, &mut output) },
+            1
+        );
+        assert!(output.is_null());
     }
 
     #[test]

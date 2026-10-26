@@ -46,7 +46,7 @@ to `TimeZone`.
 inmut chile = TimeZone("America/Santiago");
 inmut utc = TimeZone.UTC;
 inmut system = TimeZone.system();
-TimeZone("Mars/Olympus");   // InvalidTimeZone
+TimeZone("Mars/Olympus"); // InvalidTimeZone
 ```
 
 ---

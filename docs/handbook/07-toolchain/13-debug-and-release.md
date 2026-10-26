@@ -6,6 +6,10 @@ Profiles affect compilation strategy and observability, not arithmetic,
 bounds, permissions, cancellation, cleanup, equality, or exception semantics.
 A program cannot rely on debug-only overflow or race behavior.
 
+Versioned changes are summarized in the repository's
+[release notes](../../RELEASE_NOTES.md); current implementation boundaries
+remain in the [feature-status catalog](../../init/ZIRK_FEATURE_STATUS.md).
+
 Debug artifacts retain source maps, local/type metadata, expansion provenance,
 and assertions needed for development. Release artifacts default to optimized
 native code, dead-code elimination, target tuning allowed by the selected

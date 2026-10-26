@@ -83,6 +83,24 @@ fn compile_internal(
 
     let ir = zirk_ir::lower(&program, &checked);
 
+    if let Some((_, size_bytes, span)) = ir.oversized_union_payloads().into_iter().next() {
+        sink.emit(
+            Diagnostic::error(
+                codes::UNION_PAYLOAD_TOO_LARGE,
+                format!(
+                    "union payload is {size_bytes} bytes, exceeding the {}-byte inline limit",
+                    zirk_ir::MAX_INLINE_UNION_PAYLOAD_BYTES
+                ),
+            )
+            .at(sources.location(span))
+            .with_cause("large union payloads do not use an implicit boxed fallback")
+            .with_help(
+                "split the payload into smaller alternatives or pass it by managed reference",
+            ),
+        );
+        return Compilation::failed(sink);
+    }
+
     // A malformed IR is a compiler bug, not a user error. It is reported as
     // such so nobody wastes time looking for the mistake in their own code.
     if let Err(errors) = zirk_ir::verify(&ir) {

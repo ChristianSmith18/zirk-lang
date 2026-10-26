@@ -24,3 +24,5 @@ pub const INVALID_PROJECT: Code = Code::new("E0510");
 pub const PACKAGE_RESOLUTION: Code = Code::new("E0511");
 /// A local import or re-export escapes its authorized source root.
 pub const IMPORT_OUTSIDE_ROOT: Code = Code::new("E0512");
+/// A tagged union payload exceeds the initial bounded inline layout.
+pub const UNION_PAYLOAD_TOO_LARGE: Code = Code::new("E0513");

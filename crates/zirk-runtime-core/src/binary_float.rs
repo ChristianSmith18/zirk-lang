@@ -116,6 +116,39 @@ impl Float128 {
             .expect("an i128 always fits binary128")
     }
 
+    /// Converts a finite binary64 value exactly, preserving its binary value
+    /// rather than parsing a decimal display approximation.
+    pub fn from_f64(value: f64) -> Result<Self, Float128Error> {
+        if !value.is_finite() {
+            return Err(Float128Error::NonFinite);
+        }
+        let bits = value.to_bits();
+        let negative = bits >> 63 != 0;
+        let exponent = ((bits >> 52) & 0x7ff) as i32;
+        let fraction = bits & ((1_u64 << 52) - 1);
+        if exponent == 0 && fraction == 0 {
+            return Ok(Self::zero(negative));
+        }
+        let (significand, power) = if exponent == 0 {
+            (fraction, -1074)
+        } else {
+            ((1_u64 << 52) | fraction, exponent - 1023 - 52)
+        };
+        if power >= 0 {
+            Self::from_ratio(
+                negative,
+                BigUint::from(significand) << power as usize,
+                BigUint::one(),
+            )
+        } else {
+            Self::from_ratio(
+                negative,
+                BigUint::from(significand),
+                BigUint::one() << power.unsigned_abs() as usize,
+            )
+        }
+    }
+
     pub fn neg(self) -> Self {
         Self(self.0 ^ (1_u128 << 127))
     }
@@ -420,6 +453,21 @@ mod tests {
         assert_eq!(
             Float128::from_decimal("65504").unwrap().display_f64(),
             65504.0
+        );
+    }
+
+    #[test]
+    fn binary64_conversion_preserves_the_exact_source_value() {
+        let converted = Float128::from_f64(0.1).unwrap();
+        let exact_decimal = Float128::from_decimal("0.1").unwrap();
+        assert_eq!(converted.compare(exact_decimal), Ok(Ordering::Greater));
+        assert_eq!(
+            Float128::from_f64(1.5).unwrap(),
+            Float128::from_decimal("1.5").unwrap()
+        );
+        assert_eq!(
+            Float128::from_f64(f64::INFINITY),
+            Err(Float128Error::NonFinite)
         );
     }
 

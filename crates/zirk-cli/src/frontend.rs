@@ -5,6 +5,8 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use zirk_diagnostics::{Color, DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 
 /// Result of a successful frontend run.
@@ -95,6 +97,18 @@ pub fn run_frontend_ide_with_overlay(
     overlay: &std::collections::HashMap<PathBuf, String>,
     sink: &mut DiagnosticSink,
 ) -> Option<FrontendResult> {
+    run_frontend_ide_with_overlay_cancellable(path, overlay, None, sink)
+}
+
+/// Editor frontend that can abandon obsolete type checking when the document
+/// changes. Module loading is checked at phase boundaries; the semantic
+/// checker also polls the shared token during expression and statement walks.
+pub fn run_frontend_ide_with_overlay_cancellable(
+    path: &Path,
+    overlay: &std::collections::HashMap<PathBuf, String>,
+    cancellation: Option<Arc<AtomicBool>>,
+    sink: &mut DiagnosticSink,
+) -> Option<FrontendResult> {
     let mut loaded = if path.is_dir() || path.file_name().is_some_and(|name| name == ".zkinit") {
         crate::modules::load_project_with_overlay(path, overlay, sink)?
     } else if crate::project::discover(path).is_some() {
@@ -102,6 +116,12 @@ pub fn run_frontend_ide_with_overlay(
     } else {
         crate::modules::load_with_overlay(path, overlay, sink)?
     };
+    if cancellation
+        .as_ref()
+        .is_some_and(|token| token.load(Ordering::Relaxed))
+    {
+        return None;
+    }
     let only_unresolved_imports = sink
         .diagnostics()
         .iter()
@@ -116,7 +136,22 @@ pub fn run_frontend_ide_with_overlay(
 
     let program = merge(&mut loaded, sink);
     let globals = project_global_specs(loaded.project.as_ref());
-    let checked = zirk_sema::check_with_globals(&loaded.sources, &program, &globals, sink);
+    let checked = match &cancellation {
+        Some(token) => zirk_sema::check_with_globals_cancellable(
+            &loaded.sources,
+            &program,
+            &globals,
+            token.clone(),
+            sink,
+        )?,
+        None => zirk_sema::check_with_globals(&loaded.sources, &program, &globals, sink),
+    };
+    if cancellation
+        .as_ref()
+        .is_some_and(|token| token.load(Ordering::Relaxed))
+    {
+        return None;
+    }
     Some(FrontendResult {
         program,
         checked,
@@ -274,6 +309,7 @@ fn merge(loaded: &mut crate::modules::Crate, sink: &mut DiagnosticSink) -> zirk_
                 },
                 shared: true,
                 is_unsafe: false,
+                is_const: false,
                 span,
             });
             initializer_calls.push(zirk_ast::Stmt::Expr(zirk_ast::ExprStmt {
@@ -301,6 +337,7 @@ fn merge(loaded: &mut crate::modules::Crate, sink: &mut DiagnosticSink) -> zirk_
         },
         shared: false,
         is_unsafe: false,
+        is_const: false,
         span: entry_span,
     });
 

@@ -10,3 +10,4 @@ fn main(): Void {
     inmut runner: Runner<Int32> = { run: run_int };
     stdout.println(runner.run(41));
 }
+main();

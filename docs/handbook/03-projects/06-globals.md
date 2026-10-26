@@ -36,7 +36,7 @@ value is a no-op and does not publish a change.
 
 ```zirk
 inmut profile = Global.get("settings"); // inferred as Settings
-Global.set("retry_limit", 4);           // checked against UInt32
+Global.set("retry_limit", 4); // checked against UInt32
 
 mut changes = Global.watch("retry_limit");
 mut snapshot = changes.snapshot();

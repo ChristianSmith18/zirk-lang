@@ -172,11 +172,22 @@ unchanged, non-generic call site. Generic contracts remain.
   classes without a written constructor admit zero-argument construction and
   implicit subclass construction delegates to an accessible zero-argument base.
 - Generics with `from` (constraints).
-- Records, algebraic enums, unions.
+- Algebraic enums and transparent type aliases.
 - Casts (`as`, `<T>`, `unsafe` casts).
 
 **Output:** the object-oriented subset of the spec working, including basic
 generics.
+
+The separate native type-algebra work now supplies recursive n-ary unions and
+intersections, canonical singleton values and constant evaluation, structural
+type expressions, generic type operators, and flow narrowing. Semantic support
+is substantially broader than native lowering: scalar/string and enum-constant
+tagged unions have focused execution coverage, while structural shape values,
+some nominal/scalar combinations, cross-target runtime ABI execution, and
+several GC-storage boundaries remain open. See the current
+[feature-status](ZIRK_FEATURE_STATUS.md) and
+[limitations](../handbook/13-appendices/07-current-limitations.md) before
+assigning additional delivery work.
 
 ---
 
@@ -217,11 +228,13 @@ family, while interpolation needs Phase 3's contracts.
 
 ## Phase 4 — Failure, callable completion, and memory
 
-**Status: complete for its scoped delivery.** All sub-phases (4a–4e) now parse,
-type-check, lower, and run end-to-end. The remaining deliberately-out-of-scope
-items (volatile access, native unions, `Atomic<T>`, general slice provenance
-beyond the direct shape, `record`/`enum` `Clone` derivation) are
-tracked as Phase 5+ or follow-up work.
+**Status: complete for its original scoped delivery.** All sub-phases (4a–4e)
+parse, type-check, lower, and run end-to-end for their assigned features. Native
+tagged unions are now implemented separately for selected type families; this
+work does not imply complete alternative-family, target-runtime, or GC-boundary
+coverage. Remaining follow-up work includes volatile access, `Atomic<T>`,
+general slice provenance beyond the direct shape, and `record`/`enum` `Clone`
+derivation.
 
 ### Phase 4a — Expected errors
 
@@ -351,7 +364,7 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   deliberately left open for Phase 7's `Array<T>`/`List<T>` to register
   their own support later without further grammar changes. **Not**
   covered: `.read_volatile()`/`.write_volatile()`, untagged native-union
-  access (no union type exists), and general provenance tracking for a view's
+  access (distinct from Zirk's tagged type unions), and general provenance tracking for a view's
   known extent
   beyond the one syntactic shape recognized so far.
 - [x] Implement transactional write journals and rollback for managed/validated

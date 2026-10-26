@@ -28,6 +28,14 @@ the declaration, application, target, and expansion path. Toolchain failures
 identify the missing target component rather than collapsing into a generic
 linker message.
 
+Type-algebra diagnostics identify incompatible alternatives or conflicting
+structural properties, point to the source expression, and include a repair
+step when one is available. Ambiguous structural literals list viable shape
+candidates; impossible flow predicates explain the conflict between the tested
+type and the value's declared type. Constant-evaluation and type-relation
+budget failures use the stable `E0482` code and name the
+bounded operation. The compiler never returns a silently truncated type.
+
 ---
 
 **Previous:** [← LLVM Backend](06-llvm-backend.md) · **Next:** [ CLI](08-cli.md)

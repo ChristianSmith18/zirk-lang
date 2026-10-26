@@ -25,8 +25,8 @@ Values and declared types expose `type()` directly, so ordinary identity checks
 do not require importing a global reflection object:
 
 ```zirk
-inmut runtime_type = user.type();
-inmut declared_type = User.type();
+inmut runtime_type = user.type ();
+inmut declared_type = User.type ();
 ```
 
 `value.type()` returns the concrete runtime type. `T.type()` returns the
@@ -35,9 +35,9 @@ identity of the declared type `T`:
 ```zirk
 inmut account: Account = AdminAccount();
 
-account.type();      // AdminAccount.type()
-Account.type();      // TypeKind.Interface
-AdminAccount.type(); // TypeKind.Class
+account.type (); // AdminAccount.type()
+Account.type (); // TypeKind.Interface
+AdminAccount.type (); // TypeKind.Class
 ```
 
 This distinction supports interface-typed values without hiding their concrete
@@ -83,8 +83,8 @@ shop-api/
 the values are conceptually:
 
 ```zirk
-User.type().name;           // "User"
-User.type().qualified_name; // "shop-api::domain.user::User"
+User.type ().name; // "User"
+User.type ().qualified_name; // "shop-api::domain.user::User"
 ```
 
 The qualified form is diagnostic/reflection text, not import syntax. Source
@@ -125,10 +125,10 @@ The compiler derives the case from the declaration and constructed type; an
 application does not instantiate or assign a kind manually:
 
 ```zirk
-User.type().kind;       // TypeKind.Class
-Repository.type().kind; // TypeKind.Interface
-Point.type().kind;      // TypeKind.Record
-Status.type().kind;     // TypeKind.Enum
+User.type ().kind; // TypeKind.Class
+Repository.type ().kind; // TypeKind.Interface
+Point.type ().kind; // TypeKind.Record
+Status.type ().kind; // TypeKind.Enum
 ```
 
 Classification is intentionally broad. It is useful for diagnostics, tooling,

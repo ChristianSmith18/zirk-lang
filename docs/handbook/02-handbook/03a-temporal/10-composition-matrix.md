@@ -20,10 +20,10 @@ Readable methods mirror operators: `date.at(time)`, `datetime.in_zone(zone)`,
 Invalid combinations are compile-time errors:
 
 ```zirk
-date + duration;      // lacks clock and zone
-instant + period;     // lacks calendar/zone context
-zone + duration;      // zone rules are not a timeline point
-date + instant;       // unrelated meanings
+date + duration; // lacks clock and zone
+instant + period; // lacks calendar/zone context
+zone + duration; // zone rules are not a timeline point
+date + instant; // unrelated meanings
 ```
 
 The sealed Temporal family exists for shared contracts and generic APIs, not

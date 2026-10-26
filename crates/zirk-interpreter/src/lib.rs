@@ -1784,6 +1784,7 @@ impl<'module> Interpreter<'module> {
                 .get(index as usize)
                 .map(|element| format!("Set<{}>", self.debug_type_name(*element)))
                 .unwrap_or_else(|| format!("Set#{index}")),
+            IrType::Union(index) => format!("Union#{index}"),
         }
     }
 
@@ -2197,6 +2198,32 @@ impl<'module> Interpreter<'module> {
                         Some(_) => return self.internal("branch condition is not Boolean", None),
                         None => return self.internal("branch condition is unavailable", None),
                     }
+                }
+                Some(Terminator::UnionDispatch {
+                    value,
+                    union_id,
+                    targets,
+                }) => {
+                    let expected = self
+                        .module
+                        .union_types
+                        .get(union_id as usize)
+                        .and_then(|layout| layout.representation_layout);
+                    let value = self.frames[frame_index].values.get(&value.0).cloned();
+                    let Some(Value::Heap(id)) = value else {
+                        return self.internal("union dispatch value is unavailable", None);
+                    };
+                    let Some(HeapEntry::Enum {
+                        layout, variant, ..
+                    }) = self.heap.get(id)
+                    else {
+                        return self.internal("union dispatch reads a non-union value", None);
+                    };
+                    if Some(*layout) != expected || *variant as usize >= targets.len() {
+                        return self
+                            .internal("union dispatch encountered an invalid layout or tag", None);
+                    }
+                    self.enter_block(frame_index, targets[*variant as usize]);
                 }
                 Some(Terminator::Unreachable) => {
                     let span = self.module.functions[self.frames[frame_index].function].span;
@@ -4463,6 +4490,62 @@ impl<'module> Interpreter<'module> {
                     )
                     .map(|id| Some(Value::Heap(id)))
                     .map_err(ExecutionFault::Limit)
+            }
+            InstKind::UnionInject { union_id, alternative, payload } => {
+                let layout = self.module.union_types.get(*union_id as usize).ok_or_else(|| ExecutionFault::Internal("UnionInject references missing union layout".into()))?;
+                let enum_id = layout.representation_layout.ok_or_else(|| ExecutionFault::Internal("UnionInject references a non-executable union layout".into()))?;
+                if *alternative as usize >= layout.alternatives.len() {
+                    return Err(ExecutionFault::Internal("UnionInject references missing alternative".into()));
+                }
+                let payload = self.value(frame_index, *payload)?;
+                let bytes = std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>();
+                self.heap.allocate(HeapEntry::Enum { layout: enum_id, variant: *alternative, fields: vec![payload] }, bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id))).map_err(ExecutionFault::Limit)
+            }
+            InstKind::UnionTag(value) => {
+                let Value::Heap(id) = self.value(frame_index, *value)? else { return Err(ExecutionFault::Internal("UnionTag reads a non-union value".into())); };
+                let Some(HeapEntry::Enum { variant, .. }) = self.heap.get(id) else { return Err(ExecutionFault::Internal("UnionTag reads a value that is not a union".into())); };
+                Ok(Some(Value::Int(IntegerValue::from_literal(*variant as i128, IntWidth::U32).map_err(ExecutionFault::Internal)?)))
+            }
+            InstKind::UnionProject { value, union_id, alternative } => {
+                let union_layout = self
+                    .module
+                    .union_types
+                    .get(*union_id as usize)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(
+                            "UnionProject references missing union layout".into(),
+                        )
+                    })?;
+                let expected_layout = union_layout.representation_layout.ok_or_else(|| {
+                    ExecutionFault::Internal(
+                        "UnionProject references missing union representation".into(),
+                    )
+                })?;
+                let Value::Heap(id) = self.value(frame_index, *value)? else {
+                    return Err(ExecutionFault::Internal(
+                        "UnionProject reads a non-union value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Enum { layout, variant, fields }) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal(
+                        "UnionProject reads a value that is not a union".into(),
+                    ));
+                };
+                if *layout != expected_layout || *variant != *alternative || fields.len() != 1 {
+                    let aliases = if union_layout.source_aliases.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " (known source aliases: {})",
+                            union_layout.source_aliases.join(", ")
+                        )
+                    };
+                    return Err(ExecutionFault::Internal(format!(
+                        "UnionProject tag/layout mismatch{aliases}"
+                    )));
+                }
+                Ok(Some(fields[0].clone()))
             }
             InstKind::Discriminant(value) => {
                 let Value::Heap(id) = self.value(frame_index, *value)? else {
@@ -7898,7 +7981,8 @@ pub const fn type_support(ty: IrType) -> BrowserSupport {
         | IrType::Dynamic
         | IrType::Contract(_)
         | IrType::Value(_)
-        | IrType::Enum(_) => BrowserSupport::Direct,
+        | IrType::Enum(_)
+        | IrType::Union(_) => BrowserSupport::Direct,
         IrType::String
         | IrType::Regex
         | IrType::Char
@@ -7928,7 +8012,8 @@ pub const fn terminator_support(terminator: &Terminator) -> BrowserSupport {
         | Terminator::Cancel
         | Terminator::Unreachable
         | Terminator::Jump(_)
-        | Terminator::Branch { .. } => BrowserSupport::Direct,
+        | Terminator::Branch { .. }
+        | Terminator::UnionDispatch { .. } => BrowserSupport::Direct,
     }
 }
 
@@ -7942,6 +8027,9 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::BuildValue { .. }
         | InstKind::BuildEnum { .. }
         | InstKind::Discriminant(_)
+        | InstKind::UnionInject { .. }
+        | InstKind::UnionTag(_)
+        | InstKind::UnionProject { .. }
         | InstKind::Undefined
         | InstKind::Retype(_)
         | InstKind::IntCast(_)
@@ -8242,7 +8330,10 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zirk_ir::{Block, BlockId, Function, Instruction, IntWidth, Operand, Slot, SlotId};
+    use zirk_ir::{
+        Block, BlockId, EnumLayout, Function, Instruction, IntWidth, ObjectField, Operand, Slot,
+        SlotId, StringId, UnionTypeLayout,
+    };
 
     #[test]
     fn debugger_prepares_before_entry_and_captures_only_paused_live_locals() {
@@ -9995,6 +10086,508 @@ mod tests {
     }
 
     #[test]
+    fn interpreter_executes_union_injection_tag_projection_and_dispatch() {
+        fn run(payload_type: IrType, string_payload: bool) -> i128 {
+            let span = Span::empty(0);
+            let layout = UnionTypeLayout::new(vec![IrType::Int(IntWidth::I32), IrType::String])
+                .unwrap()
+                .with_representation_layout(0);
+            let alternative = layout
+                .alternatives
+                .iter()
+                .position(|ty| *ty == payload_type)
+                .unwrap() as u32;
+            let mut module = Module {
+                strings: if string_payload {
+                    vec!["ready".into()]
+                } else {
+                    vec![]
+                },
+                enums: vec![EnumLayout {
+                    name: "Value".into(),
+                    fields: layout
+                        .alternatives
+                        .iter()
+                        .enumerate()
+                        .map(|(index, ty)| ObjectField {
+                            name: format!("payload_{index}"),
+                            ty: *ty,
+                        })
+                        .collect(),
+                    variants: (0..layout.alternatives.len())
+                        .map(|index| vec![index as u32])
+                        .collect(),
+                    union_layout: None,
+                }],
+                union_types: vec![layout],
+                ..Module::default()
+            };
+            let descriptor = module.union_layout_descriptor(0).unwrap();
+            module.enums[0].union_layout = Some(descriptor);
+            let payload = if string_payload {
+                Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::ConstString(StringId(0)),
+                    ty: IrType::String,
+                    span,
+                }
+            } else {
+                Instruction {
+                    result: Some(ValueId(0)),
+                    kind: InstKind::ConstInt(42),
+                    ty: IrType::Int(IntWidth::I32),
+                    span,
+                }
+            };
+            let expected_tag = Instruction {
+                result: Some(ValueId(3)),
+                kind: InstKind::ConstInt(alternative as i128),
+                ty: IrType::Int(IntWidth::U32),
+                span,
+            };
+            let expected_payload = if string_payload {
+                Instruction {
+                    result: Some(ValueId(5)),
+                    kind: InstKind::ConstString(StringId(0)),
+                    ty: IrType::String,
+                    span,
+                }
+            } else {
+                Instruction {
+                    result: Some(ValueId(5)),
+                    kind: InstKind::ConstInt(42),
+                    ty: IrType::Int(IntWidth::I32),
+                    span,
+                }
+            };
+            let targets = module.union_types[0]
+                .alternatives
+                .iter()
+                .map(|ty| {
+                    if *ty == IrType::Int(IntWidth::I32) {
+                        BlockId(3)
+                    } else {
+                        BlockId(4)
+                    }
+                })
+                .collect();
+            module.functions.push(Function {
+                name: "main".into(),
+                params: vec![],
+                return_type: IrType::Int(IntWidth::I32),
+                slots: vec![Slot {
+                    name: "union".into(),
+                    ty: IrType::Union(0),
+                    span,
+                }],
+                blocks: vec![
+                    Block {
+                        id: BlockId(0),
+                        instructions: vec![
+                            payload,
+                            Instruction {
+                                result: Some(ValueId(1)),
+                                kind: InstKind::UnionInject {
+                                    union_id: 0,
+                                    alternative,
+                                    payload: Operand(ValueId(0)),
+                                },
+                                ty: IrType::Union(0),
+                                span,
+                            },
+                            Instruction {
+                                result: None,
+                                kind: InstKind::Store(SlotId(0), Operand(ValueId(1))),
+                                ty: IrType::Void,
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(2)),
+                                kind: InstKind::UnionTag(Operand(ValueId(1))),
+                                ty: IrType::Int(IntWidth::U32),
+                                span,
+                            },
+                            expected_tag,
+                            Instruction {
+                                result: Some(ValueId(4)),
+                                kind: InstKind::Binary {
+                                    op: BinaryOp::Eq,
+                                    left: Operand(ValueId(2)),
+                                    right: Operand(ValueId(3)),
+                                },
+                                ty: IrType::Boolean,
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Branch {
+                            condition: Operand(ValueId(4)),
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        }),
+                    },
+                    Block {
+                        id: BlockId(1),
+                        instructions: vec![
+                            Instruction {
+                                result: Some(ValueId(11)),
+                                kind: InstKind::Load(SlotId(0)),
+                                ty: IrType::Union(0),
+                                span,
+                            },
+                            Instruction {
+                                result: Some(ValueId(6)),
+                                kind: InstKind::UnionProject {
+                                    value: Operand(ValueId(11)),
+                                    union_id: 0,
+                                    alternative,
+                                },
+                                ty: payload_type,
+                                span,
+                            },
+                            expected_payload,
+                            Instruction {
+                                result: Some(ValueId(7)),
+                                kind: InstKind::Binary {
+                                    op: BinaryOp::Eq,
+                                    left: Operand(ValueId(6)),
+                                    right: Operand(ValueId(5)),
+                                },
+                                ty: IrType::Boolean,
+                                span,
+                            },
+                        ],
+                        terminator: Some(Terminator::Branch {
+                            condition: Operand(ValueId(7)),
+                            then_block: BlockId(5),
+                            else_block: BlockId(2),
+                        }),
+                    },
+                    Block {
+                        id: BlockId(2),
+                        instructions: vec![Instruction {
+                            result: Some(ValueId(8)),
+                            kind: InstKind::ConstInt(-1),
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        }],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(8))))),
+                    },
+                    Block {
+                        id: BlockId(3),
+                        instructions: vec![Instruction {
+                            result: Some(ValueId(9)),
+                            kind: InstKind::ConstInt(10),
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        }],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(9))))),
+                    },
+                    Block {
+                        id: BlockId(4),
+                        instructions: vec![Instruction {
+                            result: Some(ValueId(10)),
+                            kind: InstKind::ConstInt(20),
+                            ty: IrType::Int(IntWidth::I32),
+                            span,
+                        }],
+                        terminator: Some(Terminator::Return(Some(Operand(ValueId(10))))),
+                    },
+                    Block {
+                        id: BlockId(5),
+                        instructions: vec![Instruction {
+                            result: Some(ValueId(12)),
+                            kind: InstKind::Load(SlotId(0)),
+                            ty: IrType::Union(0),
+                            span,
+                        }],
+                        terminator: Some(Terminator::UnionDispatch {
+                            value: Operand(ValueId(12)),
+                            union_id: 0,
+                            targets,
+                        }),
+                    },
+                ],
+                entry: BlockId(0),
+                span,
+                gc_roots: vec![SlotId(0)],
+            });
+            let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+            match interpreter.run_main() {
+                ExecutionResult::Completed {
+                    value: Some(Value::Int(value)),
+                } => value.signed(),
+                result => panic!("unexpected interpreter result: {result:?}"),
+            }
+        }
+
+        assert_eq!(run(IrType::Int(IntWidth::I32), false), 10);
+        assert_eq!(run(IrType::String, true), 20);
+    }
+
+    #[test]
+    fn invalid_union_projection_reports_the_instruction_span_and_source_alias() {
+        let projection_span = Span {
+            file: FileId(9),
+            start: 40,
+            end: 53,
+        };
+        let layout = UnionTypeLayout::new(vec![IrType::Int(IntWidth::I32), IrType::String])
+            .unwrap()
+            .with_source_aliases(vec!["PublicValue".into()])
+            .with_representation_layout(0);
+        let integer_alternative = layout
+            .alternatives
+            .iter()
+            .position(|ty| *ty == IrType::Int(IntWidth::I32))
+            .unwrap() as u32;
+        let string_alternative = layout
+            .alternatives
+            .iter()
+            .position(|ty| *ty == IrType::String)
+            .unwrap() as u32;
+        let enum_layout = EnumLayout {
+            name: "$Union0".into(),
+            fields: layout
+                .alternatives
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| ObjectField {
+                    name: format!("payload_{index}"),
+                    ty: *ty,
+                })
+                .collect(),
+            variants: (0..layout.alternatives.len())
+                .map(|index| vec![index as u32])
+                .collect(),
+            union_layout: None,
+        };
+        let mut module = Module {
+            enums: vec![enum_layout],
+            union_types: vec![layout],
+            functions: vec![Function {
+                name: "main".into(),
+                params: Vec::new(),
+                return_type: IrType::String,
+                slots: Vec::new(),
+                blocks: vec![Block {
+                    id: BlockId(0),
+                    instructions: vec![
+                        Instruction {
+                            result: Some(ValueId(0)),
+                            kind: InstKind::ConstInt(7),
+                            ty: IrType::Int(IntWidth::I32),
+                            span: Span::empty(FileId::ENTRY.0),
+                        },
+                        Instruction {
+                            result: Some(ValueId(1)),
+                            kind: InstKind::UnionInject {
+                                union_id: 0,
+                                alternative: integer_alternative,
+                                payload: Operand(ValueId(0)),
+                            },
+                            ty: IrType::Union(0),
+                            span: Span::empty(FileId::ENTRY.0),
+                        },
+                        Instruction {
+                            result: Some(ValueId(2)),
+                            kind: InstKind::UnionProject {
+                                value: Operand(ValueId(1)),
+                                union_id: 0,
+                                alternative: string_alternative,
+                            },
+                            ty: IrType::String,
+                            span: projection_span,
+                        },
+                    ],
+                    terminator: Some(Terminator::Return(Some(Operand(ValueId(2))))),
+                }],
+                entry: BlockId(0),
+                span: Span::empty(FileId::ENTRY.0),
+                gc_roots: Vec::new(),
+            }],
+            ..Module::default()
+        };
+        let descriptor = module.union_layout_descriptor(0).unwrap();
+        module.enums[0].union_layout = Some(descriptor);
+
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let ExecutionResult::InternalFailure(failure) = interpreter.run_main() else {
+            panic!("an invalid projection must fail with source context");
+        };
+        assert_eq!(failure.span, Some(projection_span));
+        assert!(
+            failure.message.contains("PublicValue"),
+            "{}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn singleton_equality_uses_canonical_scalar_and_value_semantics() {
+        let module = Module::default();
+        let mut interpreter = Interpreter::new(&module, InterpreterLimits::default()).unwrap();
+        let equal = |interpreter: &Interpreter, left, right| {
+            assert_eq!(
+                interpreter.execute_binary(BinaryOp::Eq, left, right),
+                Ok(Value::Boolean(true))
+            );
+        };
+
+        for width in [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::I64,
+            IntWidth::I128,
+            IntWidth::U8,
+            IntWidth::U16,
+            IntWidth::U32,
+            IntWidth::U64,
+            IntWidth::U128,
+        ] {
+            equal(
+                &interpreter,
+                Value::Int(IntegerValue::from_literal(1, width).unwrap()),
+                Value::Int(IntegerValue::from_literal(1, width).unwrap()),
+            );
+        }
+        for width in [
+            FloatWidth::F16,
+            FloatWidth::F32,
+            FloatWidth::F64,
+            FloatWidth::F128,
+        ] {
+            equal(
+                &interpreter,
+                Value::Float {
+                    width,
+                    text: "-0".into(),
+                },
+                Value::Float {
+                    width,
+                    text: "0".into(),
+                },
+            );
+        }
+        equal(
+            &interpreter,
+            Value::Decimal("1.00".into()),
+            Value::Decimal("1".into()),
+        );
+        equal(&interpreter, Value::Boolean(true), Value::Boolean(true));
+        // Duration, Date, Time, and DateTime use their exact owner-defined
+        // integer scales in IR; equality compares the represented value.
+        for (width, value) in [
+            (IntWidth::I64, 86_400_000_000_000_i128),
+            (IntWidth::I128, 1_797_000_000_000_000_000_i128),
+        ] {
+            equal(
+                &interpreter,
+                Value::Int(IntegerValue::from_literal(value, width).unwrap()),
+                Value::Int(IntegerValue::from_literal(value, width).unwrap()),
+            );
+        }
+
+        let limits = InterpreterLimits::default();
+        let string_left = interpreter
+            .heap
+            .allocate(HeapEntry::String("e\u{301}".into()), 8, limits)
+            .unwrap();
+        let string_right = interpreter
+            .heap
+            .allocate(HeapEntry::String("é".into()), 8, limits)
+            .unwrap();
+        equal(
+            &interpreter,
+            Value::Heap(string_left),
+            Value::Heap(string_right),
+        );
+        let char_left = interpreter
+            .heap
+            .allocate(HeapEntry::Char("é".into()), 8, limits)
+            .unwrap();
+        let char_right = interpreter
+            .heap
+            .allocate(HeapEntry::Char("é".into()), 8, limits)
+            .unwrap();
+        equal(
+            &interpreter,
+            Value::Heap(char_left),
+            Value::Heap(char_right),
+        );
+        let tuple_left = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Tuple {
+                    layout: 0,
+                    fields: vec![Value::Boolean(true)],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        let tuple_right = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Tuple {
+                    layout: 0,
+                    fields: vec![Value::Boolean(true)],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        equal(
+            &interpreter,
+            Value::Heap(tuple_left),
+            Value::Heap(tuple_right),
+        );
+        let enum_left = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Enum {
+                    layout: 0,
+                    variant: 2,
+                    fields: vec![Value::Boolean(false)],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        let enum_right = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Enum {
+                    layout: 0,
+                    variant: 2,
+                    fields: vec![Value::Boolean(false)],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        equal(
+            &interpreter,
+            Value::Heap(enum_left),
+            Value::Heap(enum_right),
+        );
+        assert_eq!(
+            interpreter.execute_binary(
+                BinaryOp::Eq,
+                Value::Float {
+                    width: FloatWidth::F64,
+                    text: "NaN".into()
+                },
+                Value::Float {
+                    width: FloatWidth::F64,
+                    text: "NaN".into()
+                },
+            ),
+            Ok(Value::Boolean(false)),
+        );
+    }
+
+    #[test]
     fn virtual_and_contract_calls_use_the_runtime_layout_tables() {
         use zirk_ir::{ContractTable, ObjectLayout};
         let span = Span::empty(0);
@@ -10984,6 +11577,7 @@ mod tests {
                 name: "Choice".into(),
                 fields: vec![field],
                 variants: vec![vec![], vec![0]],
+                union_layout: None,
             }],
             ..Module::default()
         };

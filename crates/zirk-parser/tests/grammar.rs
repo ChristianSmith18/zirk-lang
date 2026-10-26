@@ -29,6 +29,109 @@ fn return_is_rejected_at_file_scope() {
     assert!(output.contains("not allowed at file scope"));
 }
 
+#[test]
+fn const_fn_modifier_is_parsed_only_in_function_declaration_position() {
+    let parsed = program(
+        "const fn increment(value: Int32): Int32 { return value + 1; } fn ordinary(): Int32 { return 1; } fn main(): Void { }",
+    );
+    assert!(parsed.functions[0].is_const);
+    assert!(!parsed.functions[1].is_const);
+    assert!(!parsed.functions[2].is_const);
+}
+
+#[test]
+fn full_type_expressions_are_preserved_in_casts_catches_and_type_defaults() {
+    let parsed = program(
+        "fn cast(value: Dynamic): Void { mut narrowed = <A | B>value; }\n\
+         fn catch_error(): Void { try { } catch A | B(error) { } }\n\
+         fn generic<T = A | B>(value: T): Void { }\n\
+         fn main(): Void { }",
+    );
+    let Stmt::Let(let_stmt) = &parsed.functions[0].body.statements[0] else {
+        panic!("local declaration expected");
+    };
+    let Expr::Cast(cast) = let_stmt.init.as_ref().expect("cast initializer") else {
+        panic!("prefix cast expected");
+    };
+    assert!(matches!(
+        cast.target.expression.as_deref(),
+        Some(TypeExpr::Union { members, .. }) if members.len() == 2
+    ));
+
+    let Stmt::Try(try_stmt) = &parsed.functions[1].body.statements[0] else {
+        panic!("try statement expected");
+    };
+    assert!(matches!(
+        try_stmt.catches[0].ty.expression.as_deref(),
+        Some(TypeExpr::Union { members, .. }) if members.len() == 2
+    ));
+    assert_eq!(
+        parsed.functions[2].type_params[0]
+            .default
+            .as_ref()
+            .unwrap()
+            .union_with
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn nested_types_parse_in_generic_callable_field_alias_constraint_and_throws_positions() {
+    let parsed = program(
+        "type Alias = A | B;\n\
+         class Holder { value: Box<A | B>; }\n\
+         fn apply<T from (A | B) = C | D>(callback: Fn(A | B) => C | D): A | B throws C | D { }\n\
+         fn main(): Void { }",
+    );
+    assert!(matches!(
+        parsed.type_aliases[0].target.expression.as_deref(),
+        Some(TypeExpr::Union { members, .. }) if members.len() == 2
+    ));
+    assert!(matches!(
+        parsed.classes[0].fields[0].ty.arguments[0].expression.as_deref(),
+        Some(TypeExpr::Union { members, .. }) if members.len() == 2
+    ));
+    let function = &parsed.functions[0];
+    assert_eq!(function.type_params[0].constraints.len(), 1);
+    assert!(function.type_params[0].constraints[0].grouped);
+    assert!(
+        function.type_params[0]
+            .default
+            .as_ref()
+            .unwrap()
+            .expression
+            .is_some()
+    );
+    let callable = function.params[0].ty.function.as_ref().unwrap();
+    assert!(callable.params[0].ty.expression.is_some());
+    assert!(callable.returns.expression.is_some());
+    assert!(function.return_type.as_ref().unwrap().expression.is_some());
+    assert!(function.throws.as_ref().unwrap().expression.is_some());
+}
+
+#[test]
+fn generic_type_alias_preserves_parameters_constraints_defaults_and_nested_target() {
+    let parsed = program(
+        "type Maybe<T from (A | B), U = String> = T | Box<U>;\n\
+         fn main(): Void { }",
+    );
+    let alias = &parsed.type_aliases[0];
+    assert_eq!(alias.type_params.len(), 2);
+    assert_eq!(alias.type_params[0].name.name, "T");
+    assert_eq!(alias.type_params[0].constraints.len(), 1);
+    assert!(alias.type_params[0].constraints[0].grouped);
+    assert_eq!(alias.type_params[1].name.name, "U");
+    assert_eq!(
+        alias.type_params[1].default.as_ref().unwrap().name,
+        "String"
+    );
+    assert!(matches!(
+        alias.target.expression.as_deref(),
+        Some(TypeExpr::Union { members, .. }) if members.len() == 2
+    ));
+}
+
 /// Parses expecting no errors.
 fn program(source_text: &str) -> Program {
     let source = SourceFile::new("test.zrk", source_text);
@@ -189,6 +292,7 @@ fn shape(e: &Expr) -> String {
             p.args.iter().map(shape).collect::<Vec<_>>().join(", ")
         ),
         Expr::Cast(c) => format!("({} as {})", shape(&c.expr), c.target.name),
+        Expr::Satisfies(s) => format!("({} satisfies {})", shape(&s.expr), s.target.name),
         Expr::Interpolated(s) => {
             let parts: Vec<_> = s
                 .parts
@@ -1397,6 +1501,16 @@ fn valid_postfix_cast() {
 }
 
 #[test]
+fn valid_satisfies_expression_preserves_source_and_target() {
+    let e = expression("value satisfies String | Null");
+    let Expr::Satisfies(satisfies) = e else {
+        panic!("expected a checked satisfies expression");
+    };
+    assert!(matches!(*satisfies.expr, Expr::Path(_)));
+    assert_eq!(satisfies.target.union_with.len(), 1);
+}
+
+#[test]
 fn valid_prefix_cast() {
     let e = expression("<String>value");
     let Expr::Cast(c) = &e else {
@@ -1558,6 +1672,9 @@ fn valid_union_type_on_a_parameter() {
     assert_eq!(ty.name, "String");
     assert_eq!(ty.union_with.len(), 1);
     assert_eq!(ty.union_with[0].name, "Int32");
+    assert!(
+        matches!(ty.expression.as_deref(), Some(TypeExpr::Union { members, .. }) if members.len() == 2)
+    );
 }
 
 #[test]
@@ -1565,6 +1682,265 @@ fn valid_union_type_with_several_alternatives() {
     let p = program("fn f(x: A | B | C): Void { }\nfn main(): Void { }");
     let ty = &p.functions[0].params[0].ty;
     assert_eq!(ty.union_with.len(), 2);
+}
+
+#[test]
+fn valid_intersection_binds_more_tightly_than_union() {
+    let p = program("fn f(x: A & B & E | C | D): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+
+    assert_eq!(ty.name, "A");
+    assert_eq!(ty.intersection_with.len(), 2);
+    assert_eq!(ty.intersection_with[0].name, "B");
+    assert_eq!(ty.intersection_with[1].name, "E");
+    assert_eq!(ty.union_with.len(), 2);
+    assert_eq!(ty.union_with[0].name, "C");
+    assert_eq!(ty.union_with[1].name, "D");
+}
+
+#[test]
+fn valid_parentheses_preserve_union_operands_inside_intersection() {
+    let p = program("fn f(x: (A | B) & (C | D)): Void { }\nfn main(): Void { }");
+    let ty = &p.functions[0].params[0].ty;
+
+    assert!(ty.grouped);
+    assert_eq!(ty.union_with.len(), 1);
+    assert_eq!(ty.union_with[0].name, "B");
+    assert_eq!(ty.intersection_with.len(), 1);
+    assert!(ty.intersection_with[0].grouped);
+    assert_eq!(ty.intersection_with[0].name, "C");
+    assert_eq!(ty.intersection_with[0].union_with[0].name, "D");
+}
+
+#[test]
+fn valid_recursive_type_ast_retains_grouped_union_before_outer_union() {
+    let p = program("type Example = (A | B) & C | D;\nfn main(): Void { }");
+    let TypeExpr::Union { members, .. } = p.type_aliases[0]
+        .target
+        .expression
+        .as_deref()
+        .expect("composite type expression is preserved")
+    else {
+        panic!("outer union should be the root type expression");
+    };
+    assert_eq!(members.len(), 2);
+    let TypeExpr::Intersection {
+        members: first_branch,
+        ..
+    } = &members[0]
+    else {
+        panic!("first union alternative should be an intersection");
+    };
+    let TypeExpr::Group { expression, .. } = &first_branch[0] else {
+        panic!("parenthesized union should remain grouped");
+    };
+    let TypeExpr::Union {
+        members: grouped_union,
+        ..
+    } = expression.as_ref()
+    else {
+        panic!("group should contain the original union: {expression:#?}");
+    };
+    assert_eq!(grouped_union.len(), 2);
+    assert!(matches!(&members[1], TypeExpr::Named { name, .. } if name == "D"));
+}
+
+#[test]
+fn valid_builtin_literal_singletons_preserve_exact_payloads_in_type_position() {
+    let source_text = "type Literal = true | false | 42 | -1 | 1.5f32 | 250ms | \"ready\" | 'x' | null;\n\
+         fn main(): Void { }";
+    let p = program(source_text);
+    let TypeExpr::Union { members, .. } = p.type_aliases[0]
+        .target
+        .expression
+        .as_deref()
+        .expect("literal union has recursive type syntax")
+    else {
+        panic!("literal alternatives should be one union");
+    };
+    assert_eq!(members.len(), 9);
+    let written_values = [
+        "true",
+        "false",
+        "42",
+        "-1",
+        "1.5f32",
+        "250ms",
+        "\"ready\"",
+        "'x'",
+        "null",
+    ];
+    for (member, spelling) in members.iter().zip(written_values) {
+        let TypeExpr::Value { span, .. } = member else {
+            panic!("literal alternative should retain its value node");
+        };
+        assert_eq!(
+            &source_text[span.start as usize..span.end as usize],
+            spelling,
+            "source span should retain the exact literal spelling"
+        );
+    }
+    assert!(matches!(
+        &members[0],
+        TypeExpr::Value {
+            value: TypeValue::Boolean(BoolLit { value: true, .. }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &members[2],
+        TypeExpr::Value {
+            value: TypeValue::Int(IntLit { value: 42, .. }),
+            ..
+        }
+    ));
+    assert!(matches!(
+        &members[3],
+        TypeExpr::Value {
+            value: TypeValue::Int(IntLit { value: -1, .. }),
+            ..
+        }
+    ));
+    assert!(
+        matches!(&members[4], TypeExpr::Value { value: TypeValue::Float(FloatLit { width: Some(width), .. }), .. } if width == "f32")
+    );
+    assert!(matches!(
+        &members[5],
+        TypeExpr::Value {
+            value: TypeValue::Duration(DurationLit {
+                nanos: 250_000_000,
+                ..
+            }),
+            ..
+        }
+    ));
+    assert!(
+        matches!(&members[6], TypeExpr::Value { value: TypeValue::String(StrLit { value, .. }), .. } if value == "ready")
+    );
+    assert!(
+        matches!(&members[7], TypeExpr::Value { value: TypeValue::Char(CharLit { value, .. }), .. } if value == "x")
+    );
+    assert!(matches!(
+        &members[8],
+        TypeExpr::Value {
+            value: TypeValue::Null(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn valid_constant_expression_and_structural_shape_preserve_source_and_modifiers() {
+    let p = program(
+        "type State = const(Date(2026, 12, 25));\n\
+         type User = { inmut id: String; name?: String; mut active: Boolean };\n\
+         fn main(): Void { }",
+    );
+    let TypeExpr::Constant {
+        source, expression, ..
+    } = p.type_aliases[0]
+        .target
+        .expression
+        .as_deref()
+        .expect("constant expression node is preserved")
+    else {
+        panic!("const(...) should produce a constant type node");
+    };
+    assert_eq!(source, "Date(2026, 12, 25)");
+    let Expr::Call(call) = expression.as_ref() else {
+        panic!("const expression should retain its parsed expression tree");
+    };
+    assert!(matches!(call.callee.as_ref(), Expr::Path(name) if name.name == "Date"));
+    assert_eq!(call.args.len(), 3);
+
+    let TypeExpr::Object { properties, .. } = p.type_aliases[1]
+        .target
+        .expression
+        .as_deref()
+        .expect("object shape node is preserved")
+    else {
+        panic!("object type syntax should produce a shape node");
+    };
+    assert_eq!(properties.len(), 3);
+    assert!(properties[0].readonly);
+    assert!(!properties[0].optional);
+    assert!(properties[1].optional);
+    assert!(!properties[1].readonly);
+    assert!(!properties[2].readonly);
+}
+
+#[test]
+fn invalid_structural_type_rejects_duplicate_property_names() {
+    let output = errors("type User = { id: String; id?: Int32 };\nfn main(): Void { }");
+    assert!(
+        output.contains("duplicate structural property `id`"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_structural_type_modifier_reports_its_position() {
+    let output = errors("type User = { inmut::shared id: String };\nfn main(): Void { }");
+    assert!(
+        output.contains("expected `strict` after `inmut::` in a type shape"),
+        "{output}"
+    );
+}
+
+#[test]
+fn invalid_constant_type_expression_reports_empty_malformed_and_incomplete_forms() {
+    let empty = errors("type Empty = const();\nfn main(): Void { }");
+    assert!(empty.contains("expected an expression"), "{empty}");
+
+    let malformed = errors("type Bad = const(Date(, 12, 25));\nfn main(): Void { }");
+    assert!(malformed.contains("expected an expression"), "{malformed}");
+
+    let incomplete = errors("type Open = const(Date(2026, 12, 25);\nfn main(): Void { }");
+    assert!(incomplete.contains("const(...)"), "{incomplete}");
+}
+
+#[test]
+fn invalid_incomplete_constant_type_recovers_at_the_next_declaration() {
+    let source = SourceFile::new(
+        "types.zrk",
+        "type Open = const(Date(2026, 12, 25);\nfn main(): Void { }",
+    );
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(&source, &mut sink);
+    let parsed = parse(&source, &tokens, &mut sink);
+
+    assert!(sink.has_errors());
+    assert!(
+        parsed
+            .functions
+            .iter()
+            .any(|function| function.name.name == "main"),
+        "an incomplete const type must not hide later declarations"
+    );
+    assert!(sink.render(RenderStyle::Human).contains("const(...)"));
+}
+
+#[test]
+fn invalid_nested_type_recovers_at_the_next_declaration() {
+    let source = SourceFile::new(
+        "types.zrk",
+        "type Open = List<{ active: true | false;\nfn preserved(): Void { }",
+    );
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(&source, &mut sink);
+    let parsed = parse(&source, &tokens, &mut sink);
+
+    assert!(
+        sink.has_errors(),
+        "the incomplete nested type must be diagnosed"
+    );
+    assert!(
+        parsed
+            .functions
+            .iter()
+            .any(|function| function.name.name == "preserved"),
+        "an incomplete nested type must not hide a later function declaration"
+    );
 }
 
 #[test]
@@ -1583,12 +1959,15 @@ fn invalid_union_type_missing_an_alternative() {
 }
 
 #[test]
-fn valid_generic_argument_does_not_admit_a_union() {
-    // Out of scope for now: a union inside `<...>` is not parsed as one.
+fn valid_generic_arguments_admit_recursive_type_expressions() {
     let p = program(
-        "class Box<T> { value: T; }\nclass Holder { b: Box<String>; }\nfn main(): Void { }",
+        "class Box<T> { value: T; }\n\
+         class Holder { b: Box<A | B>; c: Box<A & B>; }\n\
+         fn main(): Void { }",
     );
-    assert!(p.classes[1].fields[0].ty.arguments[0].union_with.is_empty());
+    let holder = &p.classes[1];
+    assert_eq!(holder.fields[0].ty.arguments[0].union_with.len(), 1);
+    assert_eq!(holder.fields[1].ty.arguments[0].intersection_with.len(), 1);
 }
 
 // --- Abstract classes ----------------------------------------------------------
@@ -1741,16 +2120,57 @@ fn valid_match_as_a_statement() {
 
 #[test]
 fn valid_patterns_cover_the_forms_of_this_phase() {
-    let e = expression("match x { 1 => a, \"s\" => b, true => c, null => d, other => e, _ => f }");
+    let e = expression(
+        "match x { 1 => a, \"s\" => b, 'x' => c, true => d, null => e, other => f, _ => g }",
+    );
     let Expr::Match(m) = &e else {
         panic!("expected a match");
     };
     assert!(matches!(m.arms[0].pattern, Pattern::Int(_)));
     assert!(matches!(m.arms[1].pattern, Pattern::Str(_)));
-    assert!(matches!(m.arms[2].pattern, Pattern::Bool(_)));
-    assert!(matches!(m.arms[3].pattern, Pattern::Null(_)));
-    assert!(matches!(m.arms[4].pattern, Pattern::Binding(_)));
-    assert!(matches!(m.arms[5].pattern, Pattern::Wildcard(_)));
+    assert!(matches!(m.arms[2].pattern, Pattern::Char(_)));
+    assert!(matches!(m.arms[3].pattern, Pattern::Bool(_)));
+    assert!(matches!(m.arms[4].pattern, Pattern::Null(_)));
+    assert!(matches!(m.arms[5].pattern, Pattern::Binding(_)));
+    assert!(matches!(m.arms[6].pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn valid_float_patterns_preserve_width_and_negative_spelling() {
+    let e = expression("match x { 1.5f32 => a, -0.0f64 => b, _ => c }");
+    let Expr::Match(m) = &e else {
+        panic!("expected a match");
+    };
+    let Pattern::Float(positive) = &m.arms[0].pattern else {
+        panic!("expected a Float pattern");
+    };
+    assert_eq!(positive.text, "1.5");
+    assert_eq!(positive.width.as_deref(), Some("f32"));
+    let Pattern::Float(negative_zero) = &m.arms[1].pattern else {
+        panic!("expected a negative Float pattern");
+    };
+    assert_eq!(negative_zero.text, "-0.0");
+    assert_eq!(negative_zero.width.as_deref(), Some("f64"));
+}
+
+#[test]
+fn valid_temporal_patterns_preserve_duration_and_constructor_expressions() {
+    let e = expression("match x { 250ms => a, Date(2026, 12, 25) => b, Time(9, 30) => c, _ => d }");
+    let Expr::Match(m) = &e else {
+        panic!("expected a match");
+    };
+    let Pattern::Duration(duration) = &m.arms[0].pattern else {
+        panic!("expected a Duration pattern");
+    };
+    assert_eq!(duration.nanos, 250_000_000);
+    let Pattern::Constant(date) = &m.arms[1].pattern else {
+        panic!("expected a deterministic constructor pattern");
+    };
+    assert!(matches!(date, Expr::Call(_)));
+    let Pattern::Constant(time) = &m.arms[2].pattern else {
+        panic!("expected a deterministic constructor pattern");
+    };
+    assert!(matches!(time, Expr::Call(_)));
 }
 
 #[test]
@@ -2021,6 +2441,21 @@ fn invalid_nesting_beyond_the_limit_is_reported_not_crashed() {
 }
 
 #[test]
+fn invalid_recursive_callable_type_nesting_is_reported_not_crashed() {
+    let mut nested = "Int32".to_owned();
+    for _ in 0..270 {
+        nested = format!("Fn({nested}) => Void");
+    }
+    let source = format!("type Deep = {nested};\nfn main(): Void {{ }}");
+    let output = errors(&source);
+    assert!(
+        output.contains(codes::NESTING_TOO_DEEP.as_str()),
+        "nested callable types must stop at the parser recursion limit: {}",
+        &output[..500.min(output.len())]
+    );
+}
+
+#[test]
 fn valid_float_literal_shapes() {
     assert_eq!(shape(&expression("1.5")), "1.5");
     assert_eq!(shape(&expression("6.02e23")), "6.02e23");
@@ -2035,6 +2470,10 @@ fn valid_duration_literal_becomes_nanoseconds() {
     }
     match expression("1.5s") {
         Expr::Duration(d) => assert_eq!(d.nanos, 1_500_000_000),
+        other => panic!("expected a duration literal, got {other:?}"),
+    }
+    match expression("0.25s") {
+        Expr::Duration(d) => assert_eq!(d.nanos, 250_000_000),
         other => panic!("expected a duration literal, got {other:?}"),
     }
     match expression("2h") {

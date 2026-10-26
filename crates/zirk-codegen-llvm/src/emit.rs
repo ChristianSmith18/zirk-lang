@@ -355,7 +355,7 @@ fn emit_inner<'ctx>(
             );
             let mut gc_paths: Vec<Vec<u32>> = Vec::new();
             for (index, field) in layout.fields.iter().enumerate() {
-                if field.ty.is_managed_reference(module) {
+                if field.ty.is_managed_reference(module) && direct_union_type(field.ty).is_none() {
                     let mut prefix = vec![index as u32 + OBJECT_HEADER_FIELDS];
                     gc_reference_paths(module, field.ty, &mut prefix, &mut gc_paths);
                 }
@@ -374,6 +374,7 @@ fn emit_inner<'ctx>(
             // reference list above; these per-field paths let a dynamically
             // read field preserve its references when boxed as `Dynamic`.
             fields.push(word.const_int(layout.fields.len() as u64, false).into());
+            let mut union_fields = Vec::new();
             for (field_index, field) in layout.fields.iter().enumerate() {
                 let key_bytes = context.const_string(field.name.as_bytes(), false);
                 let key_global = llvm.add_global(
@@ -396,12 +397,14 @@ fn emit_inner<'ctx>(
                 let field_path = vec![field_index as u32 + OBJECT_HEADER_FIELDS];
                 let field_offset = const_field_offset(context, struct_type, &field_path);
                 let mut reference_paths = Vec::new();
-                gc_reference_paths(
-                    module,
-                    field.ty,
-                    &mut field_path.clone(),
-                    &mut reference_paths,
-                );
+                if direct_union_type(field.ty).is_none() {
+                    gc_reference_paths(
+                        module,
+                        field.ty,
+                        &mut field_path.clone(),
+                        &mut reference_paths,
+                    );
+                }
 
                 fields.push(key_global.as_pointer_value().into());
                 fields.push(word.const_int(field.name.len() as u64, false).into());
@@ -421,6 +424,48 @@ fn emit_inner<'ctx>(
                     let reference_offset = const_field_offset(context, struct_type, path);
                     fields.push(reference_offset.const_sub(field_offset).into());
                 }
+
+                if let Some((representation, nullable)) = direct_union_type(field.ty)
+                    && let Some((union_id, _)) =
+                        module.union_type_for_representation(representation)
+                {
+                    let (union_value_offset, present_offset) = if nullable {
+                        let union_type = ir::IrType::Union(representation);
+                        let nullable_type = nullable_struct(
+                            context,
+                            union_type,
+                            &module.closures,
+                            &module.values,
+                            &module.enums,
+                        );
+                        (
+                            const_field_offset(context, nullable_type, &[1]),
+                            const_field_offset(context, nullable_type, &[0]),
+                        )
+                    } else {
+                        (word.const_zero(), word.const_int(u64::MAX, false))
+                    };
+                    union_fields.push((
+                        field_offset.const_add(union_value_offset),
+                        union_gc_descriptor(context, &llvm, module, union_id),
+                        if nullable {
+                            field_offset.const_add(present_offset)
+                        } else {
+                            word.const_int(u64::MAX, false)
+                        },
+                    ));
+                }
+            }
+
+            // Tag-aware union field roots follow the ordinary field metadata.
+            // Each record stores the active value offset, its static union
+            // descriptor, and either the nullable `present` offset or the
+            // non-nullable sentinel.
+            fields.push(word.const_int(union_fields.len() as u64, false).into());
+            for (value_offset, union_descriptor, present_offset) in union_fields {
+                fields.push(value_offset.into());
+                fields.push(union_descriptor.const_to_int(word).into());
+                fields.push(present_offset.into());
             }
 
             let descriptor = context.const_struct(&fields, false);
@@ -463,8 +508,47 @@ fn emit_inner<'ctx>(
             let payload_struct = context.struct_type(&payload_types, false);
 
             let mut gc_paths: Vec<Vec<u32>> = Vec::new();
+            let mut union_fields = Vec::new();
             for (capture_index, capture) in layout.captures.iter().enumerate() {
-                if capture.is_managed_reference(module) {
+                if let Some((representation, nullable)) = direct_union_type(*capture) {
+                    if let Some((union_id, _)) =
+                        module.union_type_for_representation(representation)
+                    {
+                        let (value_offset, present_offset) = if nullable {
+                            let union_type = ir::IrType::Union(representation);
+                            let nullable_type = nullable_struct(
+                                context,
+                                union_type,
+                                &module.closures,
+                                &module.values,
+                                &module.enums,
+                            );
+                            (
+                                const_field_offset(context, nullable_type, &[1]),
+                                const_field_offset(context, nullable_type, &[0]),
+                            )
+                        } else {
+                            (word.const_zero(), word.const_int(u64::MAX, false))
+                        };
+                        union_fields.push((
+                            const_field_offset(context, payload_struct, &[capture_index as u32])
+                                .const_add(value_offset)
+                                .const_add(
+                                    word.const_int(CAPTURE_BLOCK_HEADER_BYTES as u64, false),
+                                ),
+                            union_gc_descriptor(context, &llvm, module, union_id),
+                            if nullable {
+                                const_field_offset(context, payload_struct, &[capture_index as u32])
+                                    .const_add(present_offset)
+                                    .const_add(
+                                        word.const_int(CAPTURE_BLOCK_HEADER_BYTES as u64, false),
+                                    )
+                            } else {
+                                word.const_int(u64::MAX, false)
+                            },
+                        ));
+                    }
+                } else if capture.is_managed_reference(module) {
                     let mut prefix = vec![capture_index as u32];
                     gc_reference_paths(module, *capture, &mut prefix, &mut gc_paths);
                 }
@@ -488,6 +572,16 @@ fn emit_inner<'ctx>(
                 word.const_int(gc_offsets.len() as u64, false).into(),
             ];
             fields.extend(gc_offsets);
+            // Closure capture blocks share the class-descriptor tail consumed
+            // by the collector: zero declared-field metadata followed by
+            // tag-aware roots for captured union values.
+            fields.push(word.const_int(0, false).into());
+            fields.push(word.const_int(union_fields.len() as u64, false).into());
+            for (value_offset, union_descriptor, present_offset) in union_fields {
+                fields.push(value_offset.into());
+                fields.push(union_descriptor.const_to_int(word).into());
+                fields.push(present_offset.into());
+            }
 
             let placeholder = context.const_struct(&fields, false);
             let global = llvm.add_global(
@@ -780,6 +874,16 @@ fn llvm_type_in<'ctx>(
                 .expect("a verified module declares every enum layout");
             enum_struct(context, layout, closures, values, enums).into()
         }
+        ir::IrType::Union(id) => {
+            let layout = enums
+                .get(id as usize)
+                .expect("a verified module declares every union bridge layout");
+            let descriptor = layout
+                .union_layout
+                .as_ref()
+                .expect("a verified union bridge has physical layout metadata");
+            union_struct(context, descriptor).into()
+        }
         // A present flag next to the value. The flag comes first so the struct
         // has the same shape whatever the payload is.
         ir::IrType::Nullable(base) => {
@@ -905,6 +1009,51 @@ fn enum_struct<'ctx>(
         );
     }
     context.struct_type(&fields, false)
+}
+
+/// Compact internal representation for a source union: a 32-bit tag followed
+/// by one max-sized payload buffer. A zero-length alignment anchor gives the
+/// payload the descriptor's alignment without consuming bytes in the value.
+fn union_struct<'ctx>(
+    context: &'ctx Context,
+    descriptor: &ir::UnionLayoutDescriptor,
+) -> inkwell::types::StructType<'ctx> {
+    let payload_alignment_bytes = descriptor
+        .alternatives
+        .iter()
+        .map(|alternative| usize::from(alternative.payload_alignment_bits).div_ceil(8))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let payload_size_bytes = descriptor
+        .alternatives
+        .iter()
+        .map(|alternative| alternative.payload_size_bits.div_ceil(8) as usize)
+        .max()
+        .unwrap_or(0);
+    let payload_offset = 4usize.div_ceil(payload_alignment_bytes) * payload_alignment_bytes;
+    let padding = context.i8_type().array_type((payload_offset - 4) as u32);
+    let alignment_anchor: BasicTypeEnum = if payload_alignment_bytes <= 4 {
+        context.i32_type().array_type(0).into()
+    } else if payload_alignment_bytes <= 8 {
+        context.i64_type().array_type(0).into()
+    } else if payload_alignment_bytes <= 16 {
+        context.i64_type().vec_type(2).array_type(0).into()
+    } else {
+        panic!("unsupported union payload alignment: {payload_alignment_bytes} bytes")
+    };
+    context.struct_type(
+        &[
+            context.i32_type().into(),
+            padding.into(),
+            alignment_anchor,
+            context
+                .i8_type()
+                .array_type(payload_size_bytes as u32)
+                .into(),
+        ],
+        false,
+    )
 }
 
 /// Where a field sits inside an enum's struct, discriminant included.
@@ -1036,7 +1185,7 @@ fn gc_reference_paths(
         | ir::IrType::Range
         | ir::IrType::Map(_)
         | ir::IrType::Set(_) => out.push(prefix.clone()),
-        ir::IrType::Nullable(n) => {
+        ir::IrType::Nullable(n) if !matches!(n, ir::Nullable::Union(_)) => {
             let inner = n.inner();
             if inner.is_managed_reference(module) {
                 prefix.push(NULLABLE_HEADER_FIELDS);
@@ -1061,6 +1210,16 @@ fn gc_reference_paths(
                     prefix.pop();
                 }
             }
+        }
+        ir::IrType::Union(id) => {
+            // Tagged unions are traced by their active-tag descriptor. Flattening
+            // all alternatives into ordinary reference paths would treat inactive
+            // scalar bytes as pointers.
+            let _ = id;
+        }
+        ir::IrType::Nullable(ir::Nullable::Union(_)) => {
+            // Nullable tagged unions are likewise handled by a presence-aware
+            // union root, never by the legacy flattened enum path.
         }
         ir::IrType::Closure(id) => {
             for (index, capture) in module.closures[id as usize].captures.iter().enumerate() {
@@ -1090,6 +1249,208 @@ fn gc_reference_paths_of(module: &ir::Module, ty: ir::IrType) -> Vec<Vec<u32>> {
     let mut out = Vec::new();
     gc_reference_paths(module, ty, &mut Vec::new(), &mut out);
     out
+}
+
+fn direct_union_type(ty: ir::IrType) -> Option<(u32, bool)> {
+    match ty {
+        ir::IrType::Union(representation) => Some((representation, false)),
+        ir::IrType::Nullable(ir::Nullable::Union(representation)) => Some((representation, true)),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+struct NestedUnionPath {
+    representation: u32,
+    value_path: Vec<u32>,
+    present_path: Option<Vec<u32>>,
+    enum_guards: Vec<(Vec<u32>, u32)>,
+}
+
+/// Finds inline union values nested in aggregate alternatives. The returned
+/// field paths are interpreted against the LLVM type of the enclosing union
+/// alternative, so layout offsets stay target-derived.
+fn nested_union_paths(module: &ir::Module, ty: ir::IrType) -> Vec<NestedUnionPath> {
+    fn walk(
+        module: &ir::Module,
+        ty: ir::IrType,
+        path: &mut Vec<u32>,
+        enum_guards: &mut Vec<(Vec<u32>, u32)>,
+        out: &mut Vec<NestedUnionPath>,
+    ) {
+        match ty {
+            ir::IrType::Union(representation) => out.push(NestedUnionPath {
+                representation,
+                value_path: path.clone(),
+                present_path: None,
+                enum_guards: enum_guards.clone(),
+            }),
+            ir::IrType::Nullable(ir::Nullable::Union(representation)) => {
+                let prefix_len = path.len();
+                path.push(1);
+                out.push(NestedUnionPath {
+                    representation,
+                    value_path: path.clone(),
+                    present_path: Some({
+                        let mut present = path[..prefix_len].to_vec();
+                        present.push(0);
+                        present
+                    }),
+                    enum_guards: enum_guards.clone(),
+                });
+                path.pop();
+            }
+            ir::IrType::Value(id) => {
+                if let Some(layout) = module.values.get(id as usize) {
+                    for (index, field) in layout.fields.iter().enumerate() {
+                        path.push(index as u32);
+                        walk(module, field.ty, path, enum_guards, out);
+                        path.pop();
+                    }
+                }
+            }
+            ir::IrType::Enum(id) => {
+                if let Some(layout) = module.enums.get(id as usize) {
+                    for (variant, fields) in layout.variants.iter().enumerate() {
+                        enum_guards.push((
+                            path.iter().copied().chain(std::iter::once(0)).collect(),
+                            variant as u32,
+                        ));
+                        for field in fields {
+                            path.push(*field + ENUM_HEADER_FIELDS);
+                            walk(
+                                module,
+                                layout.fields[*field as usize].ty,
+                                path,
+                                enum_guards,
+                                out,
+                            );
+                            path.pop();
+                        }
+                        enum_guards.pop();
+                    }
+                }
+            }
+            ir::IrType::Closure(id) => {
+                if let Some(layout) = module.closures.get(id as usize) {
+                    for (index, capture) in layout.captures.iter().enumerate() {
+                        path.push(CLOSURE_HEADER_FIELDS + index as u32);
+                        walk(module, *capture, path, enum_guards, out);
+                        path.pop();
+                    }
+                }
+            }
+            ir::IrType::Nullable(nullable) => {
+                path.push(1);
+                walk(module, nullable.inner(), path, enum_guards, out);
+                path.pop();
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(module, ty, &mut Vec::new(), &mut Vec::new(), &mut out);
+    out
+}
+
+/// Emits a compiler-owned descriptor for a union's active-alternative GC
+/// roots. Each alternative stores its direct reference offsets followed by
+/// nested-union entries `(value_offset, descriptor, present_offset, guard_count, guards...)`.
+/// Each guard is `(enum_tag_offset, expected_tag)`; a `u64::MAX` presence
+/// offset denotes a non-nullable nested union.
+fn union_gc_descriptor<'ctx>(
+    context: &'ctx Context,
+    llvm: &LlvmModule<'ctx>,
+    module: &ir::Module,
+    union_id: u32,
+) -> PointerValue<'ctx> {
+    let name = format!("zk.union.gc.{union_id}");
+    if let Some(global) = llvm.get_global(&name) {
+        return global.as_pointer_value();
+    }
+    let layout = &module.union_types[union_id as usize];
+    let enum_id = layout
+        .representation_layout
+        .expect("verified executable union has an enum bridge");
+    let enum_layout = &module.enums[enum_id as usize];
+    let physical_layout = enum_layout
+        .union_layout
+        .as_ref()
+        .expect("verified union bridge has physical layout metadata");
+    let union_type = union_struct(context, physical_layout);
+    let payload_offset = const_field_offset(context, union_type, &[3]);
+    let i64_type = context.i64_type();
+    let mut words = vec![i64_type.const_int(layout.alternatives.len() as u64, false)];
+    for (alternative, fields) in enum_layout.variants.iter().enumerate() {
+        let field = fields[0];
+        let payload_type = enum_layout.fields[field as usize].ty;
+        let paths = gc_reference_paths_of(module, payload_type);
+        words.push(i64_type.const_int(paths.len() as u64, false));
+        for path in paths {
+            let nested_offset = if path.is_empty() {
+                i64_type.const_zero()
+            } else {
+                let payload = llvm_type_in(
+                    context,
+                    module.union_types[union_id as usize].alternatives[alternative],
+                    &module.closures,
+                    &module.values,
+                    &module.enums,
+                )
+                .expect("union payload has an LLVM representation")
+                .into_struct_type();
+                const_field_offset(context, payload, &path)
+            };
+            words.push(payload_offset.const_add(nested_offset));
+        }
+        let payload = llvm_type_in(
+            context,
+            layout.alternatives[alternative],
+            &module.closures,
+            &module.values,
+            &module.enums,
+        )
+        .expect("union payload has an LLVM representation");
+        let nested_unions = nested_union_paths(module, payload_type);
+        words.push(i64_type.const_int(nested_unions.len() as u64, false));
+        for nested in nested_unions {
+            let representation = nested.representation;
+            let (nested_id, _) = module
+                .union_type_for_representation(representation)
+                .expect("nested union representation is verified");
+            let nested_descriptor = union_gc_descriptor(context, llvm, module, nested_id);
+            let payload_type = payload.into_struct_type();
+            let value_offset = if nested.value_path.is_empty() {
+                i64_type.const_zero()
+            } else {
+                const_field_offset(context, payload_type, &nested.value_path)
+            };
+            let present_offset = nested.present_path.as_ref().map_or_else(
+                || i64_type.const_int(u64::MAX, false),
+                |path| const_field_offset(context, payload_type, path),
+            );
+            words.push(payload_offset.const_add(value_offset));
+            words.push(nested_descriptor.const_to_int(i64_type));
+            words.push(match nested.present_path {
+                Some(_) => payload_offset.const_add(present_offset),
+                None => i64_type.const_int(u64::MAX, false),
+            });
+            words.push(i64_type.const_int(nested.enum_guards.len() as u64, false));
+            for (tag_path, expected_tag) in nested.enum_guards {
+                let tag_offset = const_field_offset(context, payload_type, &tag_path);
+                words.push(payload_offset.const_add(tag_offset));
+                words.push(i64_type.const_int(expected_tag as u64, false));
+            }
+        }
+    }
+    let descriptor_type = i64_type.array_type(words.len() as u32);
+    let initializer = i64_type.const_array(&words);
+    let global = llvm.add_global(descriptor_type, None, &name);
+    global.set_initializer(&initializer);
+    global.set_constant(true);
+    global.set_linkage(Linkage::Private);
+    global.as_pointer_value()
 }
 
 /// The byte offset `path` (design D6, [`gc_reference_paths`]) reaches inside
@@ -1644,9 +2005,48 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         // is why the collector's own mark phase dereferences each entry
         // once more to reach the candidate object.
         let mut root_addrs: Vec<PointerValue> = Vec::new();
+        let mut union_roots: Vec<(PointerValue, PointerValue, PointerValue)> = Vec::new();
         for &slot_id in &function.gc_roots {
             let slot = &function.slots[slot_id.0 as usize];
             let base_ptr = self.slots[&slot_id];
+            let union_root = match slot.ty {
+                ir::IrType::Union(representation) => Some((
+                    representation,
+                    base_ptr,
+                    self.context.ptr_type(AddressSpace::default()).const_null(),
+                )),
+                ir::IrType::Nullable(ir::Nullable::Union(representation)) => {
+                    let union_type = ir::IrType::Union(representation);
+                    let nullable = nullable_struct(
+                        self.context,
+                        union_type,
+                        &self.module.closures,
+                        &self.module.values,
+                        &self.module.enums,
+                    );
+                    let present = self
+                        .builder
+                        .build_struct_gep(nullable, base_ptr, 0, "gc_union_present")
+                        .expect("nullable union present field");
+                    let union_value = self
+                        .builder
+                        .build_struct_gep(nullable, base_ptr, 1, "gc_nullable_union_value")
+                        .expect("nullable union value field");
+                    Some((representation, union_value, present))
+                }
+                _ => None,
+            };
+            if let Some((representation, union_value, present)) = union_root
+                && let Some((union_id, _)) =
+                    self.module.union_type_for_representation(representation)
+            {
+                union_roots.push((
+                    union_value,
+                    union_gc_descriptor(self.context, self.llvm, self.module, union_id),
+                    present,
+                ));
+                continue;
+            }
             for path in gc_reference_paths_of(self.module, slot.ty) {
                 root_addrs.push(self.apply_gc_path(base_ptr, slot.ty, &path));
             }
@@ -1697,6 +2097,59 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     "",
                 )
                 .expect("push the gc frame");
+        }
+        if !union_roots.is_empty() {
+            let root_type = self
+                .context
+                .struct_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+            let array_type = root_type.array_type(union_roots.len() as u32);
+            let roots = self
+                .builder
+                .build_alloca(array_type, "gc_union_roots")
+                .expect("allocate union GC roots");
+            for (index, (base, descriptor, present)) in union_roots.iter().enumerate() {
+                let mut root = root_type.const_zero();
+                root = self
+                    .builder
+                    .build_insert_value(root, *base, 0, "gc_union_root_base")
+                    .expect("insert union root base")
+                    .into_struct_value();
+                root = self
+                    .builder
+                    .build_insert_value(root, *descriptor, 1, "gc_union_root_descriptor")
+                    .expect("insert union root descriptor")
+                    .into_struct_value();
+                root = self
+                    .builder
+                    .build_insert_value(root, *present, 2, "gc_union_root_present")
+                    .expect("insert union root present pointer")
+                    .into_struct_value();
+                let entry = unsafe {
+                    self.builder.build_gep(
+                        array_type,
+                        roots,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_int(index as u64, false),
+                        ],
+                        "gc_union_root_entry",
+                    )
+                }
+                .expect("index union root array");
+                self.builder
+                    .build_store(entry, root)
+                    .expect("store union root entry");
+            }
+            self.builder
+                .build_call(
+                    self.runtime.push_union_roots,
+                    &[
+                        roots.into(),
+                        i64_type.const_int(union_roots.len() as u64, false).into(),
+                    ],
+                    "",
+                )
+                .expect("install tag-aware union roots");
         }
 
         // Parameters arrive as values and are stored into their slots, so
@@ -4030,7 +4483,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("gc value step");
                 self.apply_gc_path(next, field_ty, rest)
             }
-            ir::IrType::Enum(id) => {
+            ir::IrType::Enum(id) | ir::IrType::Union(id) => {
                 let layout = &self.module.enums[id as usize];
                 let struct_type = enum_struct(
                     self.context,
@@ -4217,7 +4670,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         index,
                     )
                 }
-                ir::IrType::Enum(id) => {
+                ir::IrType::Enum(id) | ir::IrType::Union(id) => {
                     let layout = &self.module.enums[id as usize];
                     let field = index
                         .checked_sub(ENUM_HEADER_FIELDS)
@@ -6558,6 +7011,140 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .into_struct_value();
                 }
                 Some(built.into())
+            }
+
+            ir::InstKind::UnionInject {
+                union_id,
+                alternative,
+                payload,
+            } => {
+                let layout = &self.module.union_types[*union_id as usize];
+                let enum_id = layout
+                    .representation_layout
+                    .expect("verified executable union");
+                let enum_layout = &self.module.enums[enum_id as usize];
+                let descriptor = enum_layout
+                    .union_layout
+                    .as_ref()
+                    .expect("verified union has physical layout metadata");
+                let struct_type = union_struct(self.context, descriptor);
+                let storage = self
+                    .builder
+                    .build_alloca(struct_type, "union.storage")
+                    .expect("allocate inline union construction storage");
+                self.builder
+                    .build_store(storage, struct_type.const_zero())
+                    .expect("zero-initialize union payload storage");
+                let payload_slot = self
+                    .builder
+                    .build_struct_gep(struct_type, storage, 3, "union.payload.slot")
+                    .expect("union payload buffer");
+                self.builder
+                    .build_store(payload_slot, self.operand(*payload))
+                    .expect("store union payload into aligned buffer");
+                let tag_slot = self
+                    .builder
+                    .build_struct_gep(struct_type, storage, 0, "union.tag.slot")
+                    .expect("union tag field");
+                self.builder
+                    .build_store(
+                        tag_slot,
+                        self.context
+                            .i32_type()
+                            .const_int(u64::from(*alternative), false),
+                    )
+                    .expect("publish union tag after payload");
+                Some(
+                    self.builder
+                        .build_load(struct_type, storage, "union.value")
+                        .expect("load constructed inline union"),
+                )
+            }
+            ir::InstKind::UnionTag(value) => Some(
+                self.builder
+                    .build_extract_value(self.operand(*value).into_struct_value(), 0, "union.tag")
+                    .expect("extract union tag"),
+            ),
+            ir::InstKind::UnionProject {
+                value,
+                union_id,
+                alternative,
+            } => {
+                let enum_id = self.module.union_types[*union_id as usize]
+                    .representation_layout
+                    .expect("verified executable union");
+                let enum_layout = &self.module.enums[enum_id as usize];
+                let descriptor = enum_layout
+                    .union_layout
+                    .as_ref()
+                    .expect("verified union has physical layout metadata");
+                let struct_type = union_struct(self.context, descriptor);
+                let aggregate = self.operand(*value).into_struct_value();
+                let tag = self
+                    .builder
+                    .build_extract_value(aggregate, 0, "union.project.tag")
+                    .expect("extract union projection tag")
+                    .into_int_value();
+                let expected = self
+                    .context
+                    .i32_type()
+                    .const_int(u64::from(*alternative), false);
+                let matches = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        tag,
+                        expected,
+                        "union.project.valid",
+                    )
+                    .expect("compare union projection tag");
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .expect("union projection block")
+                    .get_parent()
+                    .expect("union projection function");
+                let valid_block = self
+                    .context
+                    .append_basic_block(function, "union.project.valid");
+                let invalid_block = self
+                    .context
+                    .append_basic_block(function, "union.project.invalid");
+                self.builder
+                    .build_conditional_branch(matches, valid_block, invalid_block)
+                    .expect("guard union projection payload");
+                self.builder.position_at_end(invalid_block);
+                self.builder
+                    .build_call(self.runtime.invalid_union_tag, &[], "union.invalid.tag")
+                    .expect("report an invalid union tag");
+                self.builder
+                    .build_unreachable()
+                    .expect("invalid union tag handler does not return");
+                self.builder.position_at_end(valid_block);
+                let storage = self
+                    .builder
+                    .build_alloca(struct_type, "union.project.storage")
+                    .expect("allocate union projection storage");
+                self.builder
+                    .build_store(storage, aggregate)
+                    .expect("spill checked union for payload projection");
+                let payload_slot = self
+                    .builder
+                    .build_struct_gep(struct_type, storage, 3, "union.project.payload")
+                    .expect("union projection payload buffer");
+                let payload_type = llvm_type_in(
+                    self.context,
+                    self.module.union_types[*union_id as usize].alternatives[*alternative as usize],
+                    &self.module.closures,
+                    &self.module.values,
+                    &self.module.enums,
+                )
+                .expect("union alternative has a value representation");
+                Some(
+                    self.builder
+                        .build_load(payload_type, payload_slot, "union.payload")
+                        .expect("load union payload"),
+                )
             }
 
             ir::InstKind::Discriminant(operand) => Some(
@@ -15519,6 +16106,30 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             return self.emit_float_binary(op, left.into_float_value(), right.into_float_value());
         }
 
+        if left_ty == ir::IrType::Decimal
+            && matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq | Identical)
+        {
+            let ordering = self.emit_decimal_call(
+                "zirk_rt_decimal_cmp",
+                &[(left, ir::IrType::Decimal), (right, ir::IrType::Decimal)],
+                ir::IrType::Int(ir::IntWidth::I32),
+            );
+            let predicate = match op {
+                Eq | Identical => IntPredicate::EQ,
+                NotEq => IntPredicate::NE,
+                Lt => IntPredicate::SLT,
+                LtEq => IntPredicate::SLE,
+                Gt => IntPredicate::SGT,
+                GtEq => IntPredicate::SGE,
+                _ => unreachable!("guarded by decimal comparison operators"),
+            };
+            return self.compare(
+                predicate,
+                ordering.into_int_value(),
+                self.context.i32_type().const_zero(),
+            );
+        }
+
         let l = left.into_int_value();
         let r = right.into_int_value();
 
@@ -16101,6 +16712,52 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.blocks[else_block],
                     )
                     .expect("conditional branch");
+            }
+            ir::Terminator::UnionDispatch {
+                value,
+                union_id,
+                targets,
+            } => {
+                let layout = &self.module.union_types[*union_id as usize];
+                let enum_id = layout
+                    .representation_layout
+                    .expect("verified executable union");
+                let tag = self
+                    .builder
+                    .build_extract_value(
+                        self.operand(*value).into_struct_value(),
+                        0,
+                        "union.dispatch.tag",
+                    )
+                    .expect("extract union dispatch tag")
+                    .into_int_value();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .expect("dispatch block")
+                    .get_parent()
+                    .expect("dispatch function");
+                let invalid = self
+                    .context
+                    .append_basic_block(function, "invalid.union.tag");
+                let cases: Vec<_> = targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        (
+                            self.context.i32_type().const_int(index as u64, false),
+                            self.blocks[target],
+                        )
+                    })
+                    .collect();
+                self.builder
+                    .build_switch(tag, invalid, &cases)
+                    .expect("emit union dispatch switch");
+                self.builder.position_at_end(invalid);
+                self.builder
+                    .build_unreachable()
+                    .expect("invalid union tag is unreachable");
+                let _ = enum_id;
             }
         }
     }

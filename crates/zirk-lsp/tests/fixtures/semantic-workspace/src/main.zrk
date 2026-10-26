@@ -11,6 +11,7 @@ fn main(): Void {
     inmut user = User("Ada");
     inmut named: NamedValue = user;
     inmut name = keep(user.name());
+    inmut copied_user = keep(user);
 
     if total == 0 {
         inmut local = area(3);

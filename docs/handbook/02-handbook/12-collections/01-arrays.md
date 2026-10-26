@@ -11,8 +11,8 @@ inmut names: Array<String> = ["Ada", "Grace", "Linus"];
 
 inmut explicit: Array<Int32> = Array(1, 2, 3, 4);
 
-mut sized: String[8];                    // canonical explicit-size form
-mut also: Array<String>(8);              // supported alternative
+mut sized: String[8]; // canonical explicit-size form
+mut also: Array<String>(8); // supported alternative
 ```
 
 The literal `[...]` infers the fixed length. `T[n]` and `Array<T>(n)` allocate
@@ -21,8 +21,8 @@ The literal `[...]` infers the fixed length. `T[n]` and `Array<T>(n)` allocate
 Range elements expand before that length is fixed, preserving source order:
 
 ```zirk
-inmut values: Array<Int32> = [9, 0..3, 10];
-inmut also: Array<Int32> = Array(0..2);
+inmut values: Array<Int32> = [9, 0 .. 3, 10];
+inmut also: Array<Int32> = Array(0 .. 2);
 // values is [9, 0, 1, 2, 10]; also is [0, 1]
 ```
 
@@ -31,10 +31,10 @@ inmut also: Array<Int32> = Array(0..2);
 ```zirk
 mut values: Int32[4] = [10, 20, 30, 40];
 
-values[0];        // 10
-values[1] = 25;   // [10, 25, 30, 40]
-values[-1];       // 40
-values[10];       // error: index out of bounds
+values[0]; // 10
+values[1] = 25; // [10, 25, 30, 40]
+values[-1]; // 40
+values[10]; // error: index out of bounds
 ```
 
 Bounds are checked in safe code. A negative index counts from the end.
@@ -68,7 +68,7 @@ copy their elements so that `inmut::strict` sources remain protected:
 
 ```zirk
 inmut numbers: Int32[5] = [1, 2, 3, 4, 5];
-inmut middle = numbers[1:4];   // [2, 3, 4]
+inmut middle = numbers[1: 4]; // [2, 3, 4]
 
 middle[0] = 99;
 // numbers is still [1, 2, 3, 4, 5]

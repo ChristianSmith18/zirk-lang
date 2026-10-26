@@ -14,7 +14,7 @@ mut second = first;
 
 second.name = "Grace";
 stdout.println(first.name); // "Grace"
-first is second;            // true
+first is second; // true
 ```
 
 An explicit clone produces an independent logical object when the class

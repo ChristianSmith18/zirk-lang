@@ -7,13 +7,13 @@ may be omitted when its default is intended:
 
 ```zirk
 inmut values = [0, 1, 2, 3, 4, 5];
-values[1:4];   // 1, 2, 3
-values[::2];   // 0, 2, 4
-values[::-1];  // reverse order
+values[1: 4]; // 1, 2, 3
+values[::2]; // 0, 2, 4
+values[::- 1]; // reverse order
 
 inmut text = "Zirk language";
-text[0:4];     // "Zirk"
-text[::2];     // every second grapheme
+text[0: 4]; // "Zirk"
+text[::2]; // every second grapheme
 ```
 
 The end is exclusive. Negative indices count from the end, and a negative step

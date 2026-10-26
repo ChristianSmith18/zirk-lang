@@ -207,6 +207,14 @@ jobs:
           "$LLVM_SYS_201_PREFIX/bin/llvm-config" --version
           test -d "$LLVM_SYS_201_PREFIX/lib" || { echo "falta el directorio lib"; exit 1; }
 
+      - name: Verify Windows LLVM IR verifier
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $opt = Join-Path $env:LLVM_SYS_201_PREFIX 'bin/opt.exe'
+          if (-not (Test-Path $opt)) { throw "LLVM verifier was not found at $opt" }
+          & $opt --version
+
       # --- Rust ------------------------------------------------------------
       # La version sale de rust-toolchain.toml; rustup la instala solo.
       - name: Mostrar toolchain de Rust
@@ -373,6 +381,17 @@ jobs:
           cargo test -p zirk-runtime --features http3 --lib network_transport::tests::tls_ -- --test-threads=1
           cargo test -p zirk-runtime --features http3 --lib http3_transport::tests -- --test-threads=1
           cargo test -p zirk-runtime-core network_policy -- --test-threads=1
+
+      # Keep the type-algebra runtime contract visible as a focused signal on
+      # every native ABI runner, including Windows. The full workspace suite
+      # below remains authoritative for broader regressions.
+      - name: Union ABI and interpreter parity
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        shell: bash
+        run: |
+          cargo test -p zirk-codegen-llvm --test emission union -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end heterogeneous_union_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity union -- --test-threads=1
 
       - name: Tests
         if: inputs.test_filter == '' && inputs.runtime_test_filter == ''

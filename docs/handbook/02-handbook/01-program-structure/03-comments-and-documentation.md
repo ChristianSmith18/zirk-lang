@@ -7,7 +7,7 @@ Comments explain intent that names and structure cannot express. Zirk supports l
 inmut MAX_RETRIES = 3;
 
 /* Explain a constraint that spans
-   more than one line. */
+more than one line. */
 ```
 
 Documentation uses documentation-form multiline comments associated with declarations. Public API documentation should describe contracts: valid inputs, returned values, expected failures, permissions, cancellation, blocking, and resource ownership. Repeating a function's name is not useful documentation.

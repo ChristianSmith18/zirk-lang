@@ -57,8 +57,8 @@ and compound assignments.
 
 ```zirk
 2h + 30m; // 2h30m
-3 * 2h;   // 6h
-3h / 2;   // 1h30m
+3 * 2h; // 6h
+3h / 2; // 1h30m
 3h / 30m; // 6.0: Float
 65m % 1h; // 5m
 ```
@@ -124,8 +124,8 @@ if remaining.is_negative() {
 Duration(hours: 2, minutes: 30);
 Duration.parse("2h 30m");
 Duration("PT2H30M");
-(26h + 15m).days;        // 1 — normalized components (specified)
-(90m).total_hours();     // 1.5 (specified)
+(26h + 15m).days; // 1 — normalized components (specified)
+(90m).total_hours(); // 1.5 (specified)
 ```
 
 ## Printing
@@ -134,7 +134,7 @@ A `Duration` value prints through `to_string()`:
 
 ```zirk
 inmut timeout = 90s;
-stdout.println(timeout);       // "1m 30s" or an ISO-style rendering
+stdout.println(timeout); // "1m 30s" or an ISO-style rendering
 stdout.println("wait {timeout}");
 ```
 

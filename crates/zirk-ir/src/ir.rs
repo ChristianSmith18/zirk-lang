@@ -290,6 +290,11 @@ pub enum IrType {
     /// `Set<T>` (roadmap Phase 7): a hash set, held as an opaque runtime
     /// handle. The element type lives in `module.set_types`.
     Set(u32),
+    /// A canonical source union represented through a module-local compact
+    /// tag/payload layout. The ID addresses its enum-shaped alternative map;
+    /// canonical identity and physical layout live in `Module::union_types`
+    /// and the bridge's `union_layout` descriptor respectively.
+    Union(u32),
 }
 
 /// The types that have a nullable form.
@@ -318,6 +323,8 @@ pub enum Nullable {
     Array(u32),
     List(u32),
     Atomic(crate::AtomicKind),
+    /// A union whose complete tagged value may also be absent.
+    Union(u32),
 }
 
 impl Nullable {
@@ -337,6 +344,7 @@ impl Nullable {
             Nullable::Array(id) => IrType::Array(id),
             Nullable::List(id) => IrType::List(id),
             Nullable::Atomic(kind) => IrType::Atomic(kind),
+            Nullable::Union(id) => IrType::Union(id),
         }
     }
 
@@ -357,6 +365,7 @@ impl Nullable {
             IrType::Array(id) => Nullable::Array(id),
             IrType::List(id) => Nullable::List(id),
             IrType::Atomic(kind) => Nullable::Atomic(kind),
+            IrType::Union(id) => Nullable::Union(id),
             _ => return None,
         })
     }
@@ -385,6 +394,7 @@ impl IrType {
             IrType::List(id) => 0x9_0000 + id,
             IrType::Map(id) => 0xa_0000 + id,
             IrType::Set(id) => 0xb_0000 + id,
+            IrType::Union(id) => 0x10_0000 + id,
             IrType::Channel(id) => 0xc_0000 + id,
             IrType::Atomic(kind) => 0xd_0000 + kind as u32,
             IrType::Mutex(id) => 0xe_0000 + id,
@@ -449,6 +459,7 @@ impl IrType {
                 Nullable::Array(_) => "Array?",
                 Nullable::List(_) => "List?",
                 Nullable::Atomic(_) => "Atomic?",
+                Nullable::Union(_) => "union?",
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
@@ -461,6 +472,7 @@ impl IrType {
             IrType::List(_) => "List",
             IrType::Map(_) => "Map",
             IrType::Set(_) => "Set",
+            IrType::Union(_) => "union",
         }
     }
 
@@ -524,6 +536,10 @@ impl IrType {
                 .iter()
                 .any(|f| f.ty.is_managed_reference(module)),
             IrType::Enum(id) => module.enums[id as usize]
+                .fields
+                .iter()
+                .any(|f| f.ty.is_managed_reference(module)),
+            IrType::Union(id) => module.enums[id as usize]
                 .fields
                 .iter()
                 .any(|f| f.ty.is_managed_reference(module)),
@@ -601,6 +617,9 @@ pub struct Module {
     /// none of whose variants carry data, has no entry here: it stays
     /// `Int32` and is never addressed through this table.
     pub enums: Vec<EnumLayout>,
+    /// Canonical union alternatives and portable type fingerprints, indexed
+    /// by the future `IrType::Union` id (portable union task 9.1).
+    pub union_types: Vec<crate::UnionTypeLayout>,
     /// Interned `Pointer<T>` pointee types, indexed by the id
     /// [`IrType::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<IrType>,
@@ -788,6 +807,9 @@ pub struct EnumLayout {
     /// owns, in its own declared order. A traditional variant (no data) or
     /// one with none owns an empty slice.
     pub variants: Vec<Vec<u32>>,
+    /// Physical union metadata when this enum-shaped layout is a compiler
+    /// bridge for `IrType::Union`. Source enums leave this unset.
+    pub union_layout: Option<crate::UnionLayoutDescriptor>,
 }
 
 /// What one closure value holds and what its lifted function expects.
@@ -810,6 +832,83 @@ pub struct ClosureLayout {
 }
 
 impl Module {
+    /// Derives the target-independent tag, payload, alignment, and reference
+    /// map contract for one canonical source union.
+    pub fn union_layout_descriptor(
+        &self,
+        union_id: u32,
+    ) -> Result<crate::UnionLayoutDescriptor, crate::UnionMetadataError> {
+        crate::UnionLayoutDescriptor::derive(self, union_id)
+    }
+
+    /// Returns source-located diagnostics for any union whose largest
+    /// alternative exceeds the initial inline payload limit. The union
+    /// descriptor is canonical; source spans are selected from the first
+    /// operation or slot that materializes that same representation.
+    pub fn oversized_union_payloads(&self) -> Vec<(u32, u64, Span)> {
+        self.union_types
+            .iter()
+            .enumerate()
+            .filter_map(|(union_id, layout)| {
+                let size_bytes = match self.union_layout_descriptor(union_id as u32) {
+                    Err(crate::UnionMetadataError::InlinePayloadTooLarge(size)) => size,
+                    _ => return None,
+                };
+                let union_id = union_id as u32;
+                let span = self
+                    .functions
+                    .iter()
+                    .flat_map(|function| {
+                        function.blocks.iter().flat_map(move |block| {
+                            block.instructions.iter().filter_map(move |instruction| {
+                                let refers_to_union = match &instruction.kind {
+                                    InstKind::UnionInject { union_id: id, .. }
+                                    | InstKind::UnionProject { union_id: id, .. } => {
+                                        *id == union_id
+                                    }
+                                    _ => false,
+                                };
+                                refers_to_union.then_some(instruction.span)
+                            })
+                        })
+                    })
+                    .next()
+                    .or_else(|| {
+                        let representation = layout.representation_layout?;
+                        self.functions.iter().find_map(|function| {
+                            function
+                                .slots
+                                .iter()
+                                .find(|slot| slot.ty == IrType::Union(representation))
+                                .map(|slot| slot.span)
+                        })
+                    })
+                    .or_else(|| self.functions.first().map(|function| function.span))?;
+                Some((union_id, size_bytes, span))
+            })
+            .collect()
+    }
+
+    /// Portable ABI metadata for unions exposed by this compiled package.
+    /// Module-local enum layout IDs are deliberately omitted from the
+    /// package envelope; only canonical alias/fingerprint pairs cross links.
+    pub fn union_package_metadata(
+        &self,
+    ) -> Result<crate::UnionPackageMetadata, crate::UnionMetadataError> {
+        crate::UnionPackageMetadata::current(self.union_types.clone())
+    }
+
+    pub fn union_type_for_representation(
+        &self,
+        representation_layout: u32,
+    ) -> Option<(u32, &crate::UnionTypeLayout)> {
+        self.union_types
+            .iter()
+            .enumerate()
+            .find(|(_, layout)| layout.representation_layout == Some(representation_layout))
+            .map(|(id, layout)| (id as u32, layout))
+    }
+
     pub fn function(&self, name: &str) -> Option<&Function> {
         self.functions.iter().find(|f| f.name == name)
     }
@@ -832,6 +931,49 @@ impl Module {
         }
         self.strings.push(value.to_string());
         StringId(self.strings.len() as u32 - 1)
+    }
+
+    /// Adds a canonical union layout to this module, reusing an existing
+    /// entry when its logical alternatives and module-local references match.
+    pub fn intern_union_type(
+        &mut self,
+        layout: crate::UnionTypeLayout,
+    ) -> Result<u32, crate::UnionMetadataError> {
+        layout.validate()?;
+        if let Some(representation) = layout.representation_layout
+            && self.union_types.iter().any(|existing| {
+                existing.representation_layout == Some(representation)
+                    && existing.canonical_alternatives != layout.canonical_alternatives
+            })
+        {
+            return Err(crate::UnionMetadataError::CanonicalIdentityCollision);
+        }
+        if let Some((index, existing)) = self
+            .union_types
+            .iter_mut()
+            .enumerate()
+            .find(|(_, existing)| existing.canonical_alternatives == layout.canonical_alternatives)
+        {
+            if existing.alternatives != layout.alternatives
+                || existing.representation_layout != layout.representation_layout
+            {
+                return Err(crate::UnionMetadataError::CanonicalIdentityCollision);
+            }
+            let mut aliases = existing.source_aliases.clone();
+            aliases.extend(layout.source_aliases);
+            aliases.sort();
+            aliases.dedup();
+            if aliases.len() > 256 {
+                return Err(crate::UnionMetadataError::TooManySourceAliases);
+            }
+            existing.source_aliases = aliases;
+            return u32::try_from(index)
+                .map_err(|_| crate::UnionMetadataError::TooManyAlternatives);
+        }
+        let index = u32::try_from(self.union_types.len())
+            .map_err(|_| crate::UnionMetadataError::TooManyAlternatives)?;
+        self.union_types.push(layout);
+        Ok(index)
     }
 
     /// Interns a `Pointer<T>` pointee type, returning the id
@@ -1267,6 +1409,20 @@ pub enum InstKind {
         enum_id: u32,
         variant: u32,
         fields: Vec<Operand>,
+    },
+    /// Injects an exactly typed payload into a canonical source union.
+    UnionInject {
+        union_id: u32,
+        alternative: u32,
+        payload: Operand,
+    },
+    /// Reads the active source-union tag as UInt32.
+    UnionTag(Operand),
+    /// Validates the active tag and projects the selected alternative.
+    UnionProject {
+        value: Operand,
+        union_id: u32,
+        alternative: u32,
     },
     /// Reads the discriminant of an algebraic enum value (roadmap task
     /// 11.3) — a traditional enum's own `Int32` value already is one, so
@@ -3006,6 +3162,12 @@ pub enum Terminator {
         then_block: BlockId,
         else_block: BlockId,
     },
+    /// Exhaustively dispatches to one block per canonical union alternative.
+    UnionDispatch {
+        value: Operand,
+        union_id: u32,
+        targets: Vec<BlockId>,
+    },
 }
 
 impl Terminator {
@@ -3019,6 +3181,7 @@ impl Terminator {
                 else_block,
                 ..
             } => vec![*then_block, *else_block],
+            Terminator::UnionDispatch { targets, .. } => targets.clone(),
         }
     }
 }

@@ -17,8 +17,8 @@ This is callable compatibility, not traditional overload resolution.
 ## Signature components
 
 ```zirk
-inmut decode: Fn(source: String, radix?: Int, ...flags: String)
-    => Result<Int, ParseError>
+inmut decode: Fn(source: String, radix?: Int, ... flags: String)
+=> Result<Int, ParseError>
 ```
 
 Labels participate in named calls. `?` records optionality and `...` records a

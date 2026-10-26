@@ -49,11 +49,11 @@ methods; put domain behavior in an external function or `class` and select cases
 with exhaustive `match`.
 
 ```zirk
-Direction.keys();       // ["North", "South", "East", "West"]
-Direction.values();     // [Direction.North, Direction.South, Direction.East, Direction.West]
-Direction.count;        // 4
-Direction.from_name("North");  // Ok(Direction.North) or Err
-ExitCode.from_value(0);        // Ok(ExitCode.Success)
+Direction.keys(); // ["North", "South", "East", "West"]
+Direction.values(); // [Direction.North, Direction.South, Direction.East, Direction.West]
+Direction.count; // 4
+Direction.from_name("North"); // Ok(Direction.North) or Err
+ExitCode.from_value(0); // Ok(ExitCode.Success)
 
 // Generic helper when the enum type is not known statically.
 Enums.keys(Direction);

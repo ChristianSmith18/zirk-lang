@@ -388,6 +388,8 @@ pub mod symbols {
     /// Reports a checked cast whose runtime type does not match and
     /// terminates.
     pub const INVALID_CAST: &str = "zirk_rt_invalid_cast";
+    /// Reports a corrupt compiler-generated union tag and terminates.
+    pub const INVALID_UNION_TAG: &str = "zirk_rt_invalid_union_tag";
     /// Reports a `Float` operation that would produce `NaN` and terminates
     /// (roadmap Phase 3b, design decision D2: `Float` prohibits `NaN` in the
     /// type, not after the fact — an infinite result is a valid value,
@@ -424,6 +426,8 @@ pub mod symbols {
     /// entry, after every reference-typed slot has been zero-initialized
     /// (design D5).
     pub const PUSH_FRAME: &str = "zirk_rt_push_frame";
+    /// Adds tag-aware union payloads to the current shadow-stack frame.
+    pub const PUSH_UNION_ROOTS: &str = "zirk_rt_push_union_roots";
     /// Pops the shadow-stack frame [`PUSH_FRAME`] pushed — called immediately
     /// before every `Terminator::Return` lowers to `ret` (design D2).
     pub const POP_FRAME: &str = "zirk_rt_pop_frame";
@@ -859,6 +863,7 @@ pub struct Runtime<'ctx> {
     pub str_repeat: FunctionValue<'ctx>,
     pub check_cast: FunctionValue<'ctx>,
     pub invalid_cast: FunctionValue<'ctx>,
+    pub invalid_union_tag: FunctionValue<'ctx>,
     pub fatal_error: FunctionValue<'ctx>,
     pub throw: FunctionValue<'ctx>,
     pub stack_trace: FunctionValue<'ctx>,
@@ -869,6 +874,7 @@ pub struct Runtime<'ctx> {
     pub is_instance: FunctionValue<'ctx>,
     pub uncaught_exception: FunctionValue<'ctx>,
     pub push_frame: FunctionValue<'ctx>,
+    pub push_union_roots: FunctionValue<'ctx>,
     pub pop_frame: FunctionValue<'ctx>,
     /// The WeakCell sentinel descriptor's own address (`fase-4e-weak`,
     /// design D2) — a global, not a function, unlike everything else here.
@@ -3106,6 +3112,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let invalid_cast =
         module.add_function(symbols::INVALID_CAST, void.fn_type(&[], false), external);
+    let invalid_union_tag = module.add_function(
+        symbols::INVALID_UNION_TAG,
+        void.fn_type(&[], false),
+        external,
+    );
     let float_nan = module.add_function(symbols::FLOAT_NAN, void.fn_type(&[], false), external);
     let fatal_error = module.add_function(
         symbols::FATAL_ERROR,
@@ -3161,6 +3172,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         void.fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
+    let push_union_roots = module.add_function(
+        symbols::PUSH_UNION_ROOTS,
+        void.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
     let pop_frame = module.add_function(symbols::POP_FRAME, void.fn_type(&[], false), external);
 
     // Both globals (`fase-4e-weak`, design D2 and its risk mitigation): an
@@ -3180,6 +3196,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         missing_contract,
         invalid_repeat,
         invalid_cast,
+        invalid_union_tag,
         invalid_shift,
         float_nan,
         fatal_error,
@@ -3421,6 +3438,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_repeat,
         check_cast,
         invalid_cast,
+        invalid_union_tag,
         fatal_error,
         throw,
         stack_trace,
@@ -3431,6 +3449,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         is_instance,
         uncaught_exception,
         push_frame,
+        push_union_roots,
         pop_frame,
         weak_cell_descriptor: weak_cell_descriptor.as_pointer_value(),
         weak_cell_ever_allocated: weak_cell_ever_allocated.as_pointer_value(),

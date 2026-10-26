@@ -23,9 +23,12 @@ This is a lookup index, not a substitute for each explanatory chapter. Propertie
 | `Channel<T>` | `is_closed`, `capacity`, `length` | `send()`, `receive()`, `try_send()`, `try_receive()`, `close()` | [Channels](../02-handbook/18-concurrency/07-channels.md) |
 | synchronization | type-specific | scoped lock access, permits/barriers/once, supported atomic operations | [`std.sync`](../04-standard-library/10-std-sync.md) |
 | tuples | `length` | constant `[N]` indexing, destructuring, `to_string()`, derived capabilities | [Tuples](../02-handbook/10-data-types/00-tuples.md) |
+| union and intersection types | compatible members common to every union alternative; members proven by all intersection constituents | narrowing, exhaustive `match`, canonical value tests | [Unions](../02-handbook/10-data-types/07-union-types.md), [intersections](../02-handbook/10-data-types/09-intersection-types.md) |
+| singleton and constant types | — | compile-time value evaluation; no runtime type operator | [Literals](04-literals.md) |
+| generic type operators | — | erased `keyof`, indexed access, conditional/`infer`, mapped and finite template types | [Generic Type Operators](../02-handbook/11-generics/09-type-operators.md) |
 | domain values | `type` plus declared attributes | declared methods and satisfied contract members | [Data Types](../02-handbook/10-data-types/README.md) |
 
-Members such as equality, hashing, ordering, iteration, indexing, arithmetic, and cloning are capability-gated. Their presence must not be inferred merely from `Object`.
+Members such as equality, hashing, ordering, iteration, indexing, arithmetic, and cloning are capability-gated. Their presence must not be inferred merely from `Object`. Type operators are compile-time transformations and do not add runtime members.
 
 > **Delivery note:** most members in this index are implemented. Per-member
 > delivery is tracked in each linked chapter's `Status` column — a member

@@ -3,7 +3,7 @@
 Zirk provides both the traditional counter form and `for ... in` iteration.
 
 ```zirk
-for mut index = 0; index < 10; index++ {
+for mut index = 0; index < 10; index ++ {
     process(index);
 }
 ```
@@ -15,7 +15,7 @@ needs explicit state or a non-range update.
 For an ordinary progression, prefer a range:
 
 ```zirk
-for index in 0..10:2 {
+for index in 0 .. 10: 2 {
     process(index);
 }
 ```

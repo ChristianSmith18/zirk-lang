@@ -617,6 +617,16 @@ pub fn run(request: contract::Request) -> contract::Response {
         response.completion = None;
         return response;
     }
+    if module.function("main").is_none() {
+        response.failure = Some(Failure {
+            kind: FailureKind::Capability,
+            code: "ZB004".into(),
+            message: "file-body entrypoints are unavailable in the browser runtime".into(),
+            limit: None,
+        });
+        response.completion = None;
+        return response;
+    }
     let limits = zirk_interpreter::InterpreterLimits {
         instructions: response.limits.instructions,
         call_depth: response.limits.call_depth,
@@ -1388,6 +1398,55 @@ mod tests {
         let (result, diagnostics) = check_source("fn main(): Void {}", "playground.zrk");
         assert!(diagnostics.is_empty());
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn interpreter_executes_scalar_singleton_union_matches() {
+        let response = run(Request {
+            api_version: API_VERSION,
+            source: "import { stdout } from std.io;\n\
+                type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+                type Wait = 250ms | 1s;\n\
+                type ClockTime = const(Time(9, 30)) | const(Time(17, 0));\n\
+                type Moment = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
+                type CivilOrClock = const(Date(2026, 12, 25)) | const(Time(9, 30));\n\
+                type Number = const(1) | const(2);\n\
+                type Word = const(\"one\") | const(\"two\");\n\
+                type Letter = const('a') | const('b');\n\
+                type Ratio = const(1.5f64) | const(2.5f64);\n\
+                type Money = const(1.25) | const(2.5);\n\
+                type Flag = true | false;\n\
+                fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
+                fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
+                fn clock_time(value: ClockTime): String { return match value { Time(9, 30) => \"morning\"; Time(17, 0) => \"evening\"; }; }\n\
+                fn moment(value: Moment): String { return match value { DateTime(Date(2026, 12, 25), Time(9, 30)) => \"holiday\"; DateTime(Date(2027, 1, 1), Time(0, 0)) => \"new year\"; }; }\n\
+                fn civil_or_clock(value: CivilOrClock): String { return match value { Date(2026, 12, 25) => \"date\"; Time(9, 30) => \"time\"; }; }\n\
+                fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
+                fn word(value: Word): String { return match value { \"one\" => \"first\"; \"two\" => \"second\"; }; }\n\
+                fn letter(value: Letter): String { return match value { 'a' => \"first\"; 'b' => \"second\"; }; }\n\
+                fn ratio(value: Ratio): String { return match value { 1.5f64 => \"first\"; 2.5f64 => \"second\"; }; }\n\
+                fn money(value: Money): String { return match value { 1.25 => \"first\"; 2.5 => \"second\"; }; }\n\
+                fn flag(value: Flag): String { return match value { true => \"yes\"; false => \"no\"; }; }\n\
+                fn main(): Void { stdout.println(day(Date(2026, 12, 25))); stdout.println(wait(1s)); stdout.println(clock_time(Time(17, 0))); stdout.println(moment(DateTime(Date(2027, 1, 1), Time(0, 0)))); stdout.println(civil_or_clock(Time(9, 30))); stdout.println(number(2)); stdout.println(word(\"two\")); stdout.println(letter('b')); stdout.println(ratio(2.5f64)); stdout.println(money(2.5)); stdout.println(flag(true)); }\n\
+                main();\n".into(),
+            virtual_name: "singleton-unions.zrk".into(),
+            limits: None,
+            trace: None,
+        });
+        assert!(response.failure.is_none(), "{:?}", response.failure);
+        assert!(
+            response.diagnostics.is_empty(),
+            "{:?}",
+            response.diagnostics
+        );
+        assert_eq!(
+            response
+                .output
+                .iter()
+                .map(|event| event.text.as_str())
+                .collect::<String>(),
+            "holiday\nlong\nevening\nnew year\ntime\ntwo\nsecond\nsecond\nsecond\nsecond\nyes\n"
+        );
     }
 
     #[test]

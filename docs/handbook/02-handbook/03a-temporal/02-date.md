@@ -103,9 +103,9 @@ match Date.parse("2026-08-15") {
     Error(error) => stderr.println(error);
 }
 
-release.day_of_week;                       // Int32 ISO: 1 = Monday … 7 = Sunday
-release + 5h;                              // DateTime(2026, 8, 15, 5:00) — Date promotes
-Date(2026, 2, 29);                         // InvalidDateError
+release.day_of_week; // Int32 ISO: 1 = Monday … 7 = Sunday
+release + 5h; // DateTime(2026, 8, 15, 5:00) — Date promotes
+Date(2026, 2, 29); // InvalidDateError
 ```
 
 ---

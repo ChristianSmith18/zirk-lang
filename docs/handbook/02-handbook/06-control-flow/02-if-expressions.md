@@ -26,7 +26,7 @@ An effect-only `if` may govern the immediately following statement without brace
 if connection.closed return;
 
 if needs_refresh
-    refresh();
+refresh();
 ```
 
 Only that one statement is conditional. Use braces whenever a branch contains

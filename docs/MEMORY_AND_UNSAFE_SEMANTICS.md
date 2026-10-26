@@ -94,7 +94,7 @@ belongs to `Pointer<T>`.
 `Weak<T>` observes a managed reference without keeping it alive:
 
 ```zirk
-mut weak = Weak.from(service);
+mut weak = Weak.from (service);
 
 match weak.upgrade() {
     Some(live) => live.refresh(),

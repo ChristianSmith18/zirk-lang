@@ -44,10 +44,10 @@ requiring `Clone` when reference-backed.
 class Session { token: String; active: Boolean; }
 
 mut a = Session(token: "t", active: true);
-mut b = a;                 // shares
-a is b;                    // true
-mut c = a.clone();         // deep independent graph
-a is c;                    // false
+mut b = a; // shares
+a is b; // true
+mut c = a.clone(); // deep independent graph
+a is c; // false
 ```
 
 ---

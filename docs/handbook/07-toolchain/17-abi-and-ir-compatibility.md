@@ -22,6 +22,14 @@ Compatibility errors identify the layer, producer/consumer versions, affected
 package, and supported remediation such as rebuilding or selecting a compatible
 dependency.
 
+Union layouts use versioned portable metadata and a canonical logical-layout
+fingerprint. The validator rejects unsupported package/IR schema versions and
+fingerprint mismatches with a rebuild diagnostic. Its encoder and validator
+have crate-level round-trip tests, but the current source-based dependency
+loader has no compiled-package linker boundary yet; cross-package rejection
+before link remains incomplete. See [Portable IR](../09-packages/03-portable-ir.md)
+for the exact metadata contract.
+
 ---
 
 **Previous:** [← Cross-Compilation](16-cross-compilation.md) · **Next:** [ Performance Goals](18-performance-goals.md)

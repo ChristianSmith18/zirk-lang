@@ -568,6 +568,13 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             IrType::Enum(id) | IrType::Nullable(Nullable::Enum(id)) => {
                 id < module.enums.len() as u32
             }
+            IrType::Nullable(Nullable::Union(id)) => {
+                id < module.enums.len() as u32
+                    && module
+                        .union_types
+                        .iter()
+                        .any(|layout| layout.representation_layout == Some(id))
+            }
             IrType::Pointer(id) => id < module.pointer_types.len() as u32,
             IrType::Weak(id) => id < module.weak_types.len() as u32,
             IrType::NativeSlice(id) => id < module.native_slice_types.len() as u32,
@@ -583,6 +590,13 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             IrType::Atomic(_) | IrType::Nullable(Nullable::Atomic(_)) => true,
             IrType::Map(id) => id < module.map_types.len() as u32,
             IrType::Set(id) => id < module.set_types.len() as u32,
+            IrType::Union(id) => {
+                id < module.enums.len() as u32
+                    && module
+                        .union_types
+                        .iter()
+                        .any(|layout| layout.representation_layout == Some(id))
+            }
             IrType::Nullable(Nullable::Contract(_)) => true,
             IrType::ObjectAny
             | IrType::Dynamic
@@ -652,6 +666,99 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
                 field.ty,
                 &format!("value layout {index} field `{}`", field.name),
             );
+        }
+    }
+    let mut union_representations = HashSet::new();
+    for (index, layout) in module.union_types.iter().enumerate() {
+        if layout.validate().is_err() {
+            module_error(
+                errors,
+                format!(
+                    "union layout {index} has noncanonical alternatives or an invalid fingerprint"
+                ),
+            );
+        }
+        for ty in &layout.alternatives {
+            check_type(
+                module,
+                errors,
+                *ty,
+                &format!("union layout {index} alternative"),
+            );
+        }
+        if let Some(enum_id) = layout.representation_layout {
+            if !union_representations.insert(enum_id) {
+                module_error(
+                    errors,
+                    format!("union layout {index} reuses bridge enum layout {enum_id}"),
+                );
+            }
+            match module.enums.get(enum_id as usize) {
+                None => module_error(
+                    errors,
+                    format!("union layout {index} references missing bridge enum layout {enum_id}"),
+                ),
+                Some(enum_layout) => {
+                    match module.union_layout_descriptor(index as u32) {
+                        Ok(expected) if enum_layout.union_layout.as_ref() != Some(&expected) => {
+                            module_error(
+                                errors,
+                                format!(
+                                    "union layout {index} bridge enum has missing or inconsistent physical layout metadata"
+                                ),
+                            );
+                        }
+                        Err(crate::UnionMetadataError::InlinePayloadTooLarge(_))
+                            if enum_layout.union_layout.is_some() =>
+                        {
+                            module_error(
+                                errors,
+                                format!(
+                                    "union layout {index} oversized bridge enum must not carry an inline layout descriptor"
+                                ),
+                            );
+                        }
+                        Err(crate::UnionMetadataError::InlinePayloadTooLarge(_)) => {}
+                        Err(error) => module_error(
+                            errors,
+                            format!("union layout {index} physical layout is invalid: {error}"),
+                        ),
+                        _ => {}
+                    }
+                    if enum_layout.variants.len() != layout.alternatives.len() {
+                        module_error(
+                            errors,
+                            format!(
+                                "union layout {index} bridge enum has {} variants for {} alternatives",
+                                enum_layout.variants.len(),
+                                layout.alternatives.len()
+                            ),
+                        );
+                    }
+                    for (alternative, expected) in layout.alternatives.iter().enumerate() {
+                        let Some(fields) = enum_layout.variants.get(alternative) else {
+                            continue;
+                        };
+                        if fields.len() != 1
+                            || enum_layout
+                                .fields
+                                .get(fields[0] as usize)
+                                .is_none_or(|field| field.ty != *expected)
+                        {
+                            module_error(
+                                errors,
+                                format!(
+                                    "union layout {index} alternative {alternative} does not match its bridge enum payload: expected {expected:?}, got {:?}",
+                                    fields
+                                        .first()
+                                        .and_then(|field| enum_layout.fields.get(*field as usize))
+                                        .map(|field| field.ty)
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     for (index, layout) in module.enums.iter().enumerate() {
@@ -1128,7 +1235,7 @@ fn verify_function(
             }
         }
 
-        verify_terminator(function, block, terminator, &values, &mut report);
+        verify_terminator(module, function, block, terminator, &values, &mut report);
 
         if !open_borrows.is_empty() {
             let mut regions: Vec<_> = open_borrows.values().copied().collect();
@@ -1256,7 +1363,7 @@ fn verify_mutex_lock_dataflow(
         }
         for successor in successors {
             if !blocks.contains_key(&successor) {
-                continue;
+                return;
             }
             match incoming.get(&successor) {
                 None => {
@@ -2356,6 +2463,100 @@ fn verify_instruction(
             },
         },
 
+        InstKind::UnionInject {
+            union_id,
+            alternative,
+            payload,
+        } => {
+            let Some(layout) = module.union_types.get(*union_id as usize) else {
+                report(format!(
+                    "{position}: injects into missing union layout {union_id}"
+                ));
+                return;
+            };
+            let Some(representation) = layout.representation_layout else {
+                report(format!(
+                    "{position}: union layout {union_id} has no executable representation"
+                ));
+                return;
+            };
+            expect(
+                inst.ty,
+                IrType::Union(representation),
+                position,
+                "UnionInject",
+                report,
+            );
+            match layout.alternatives.get(*alternative as usize) {
+                None => report(format!(
+                    "{position}: union layout {union_id} has no alternative {alternative}"
+                )),
+                Some(expected) => {
+                    if let Some(actual) = type_of(payload)
+                        && actual != *expected
+                    {
+                        report(format!(
+                            "{position}: union alternative {alternative} expects {}, got {}",
+                            expected.as_str(),
+                            actual.as_str()
+                        ));
+                    }
+                }
+            }
+        }
+        InstKind::UnionTag(value) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "UnionTag",
+                report,
+            );
+            match type_of(value) {
+                Some(IrType::Union(representation))
+                    if module
+                        .union_type_for_representation(representation)
+                        .is_some() => {}
+                Some(actual) => report(format!(
+                    "{position}: UnionTag reads {}, expected a union",
+                    actual.as_str()
+                )),
+                None => {}
+            }
+        }
+        InstKind::UnionProject {
+            value,
+            union_id,
+            alternative,
+        } => {
+            let Some(layout) = module.union_types.get(*union_id as usize) else {
+                report(format!(
+                    "{position}: projects from missing union layout {union_id}"
+                ));
+                return;
+            };
+            let Some(representation) = layout.representation_layout else {
+                report(format!(
+                    "{position}: union layout {union_id} has no executable representation"
+                ));
+                return;
+            };
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Union(representation)
+            {
+                report(format!(
+                    "{position}: UnionProject reads {}, expected this union layout",
+                    actual.as_str()
+                ));
+            }
+            match layout.alternatives.get(*alternative as usize) {
+                None => report(format!(
+                    "{position}: union layout {union_id} has no alternative {alternative}"
+                )),
+                Some(expected) => expect(inst.ty, *expected, position, "UnionProject", report),
+            }
+        }
+
         InstKind::Discriminant(operand) => {
             expect(
                 inst.ty,
@@ -2425,7 +2626,8 @@ fn verify_instruction(
             };
             if !reachable {
                 report(format!(
-                    "{position}: calls method {index} of contract {contract} through something that does not satisfy it"
+                    "{position}: calls method {index} of contract {contract} through {:?}, which does not satisfy it",
+                    type_of(object)
                 ));
             }
         }
@@ -2769,7 +2971,18 @@ fn verify_instruction(
             // checker never requires it to match the shifted value's
             // (roadmap Phase 3b, task 4.4); every other operator still
             // requires both sides to agree.
-            let shares_type = matches!(op, BinaryOp::Shl | BinaryOp::Shr) || left_ty == right_ty;
+            let shared_object_representation = matches!(op, BinaryOp::Identical)
+                && matches!(
+                    left_ty,
+                    IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+                )
+                && matches!(
+                    right_ty,
+                    IrType::Object(_) | IrType::Contract(_) | IrType::ObjectAny
+                );
+            let shares_type = matches!(op, BinaryOp::Shl | BinaryOp::Shr)
+                || left_ty == right_ty
+                || shared_object_representation;
             if !shares_type {
                 report(format!(
                     "{position}: {op:?} between {} and {}",
@@ -8076,6 +8289,7 @@ fn verify_atomic_order(
 }
 
 fn verify_terminator(
+    module: &Module,
     function: &Function,
     block: &Block,
     terminator: &Terminator,
@@ -8136,6 +8350,39 @@ fn verify_terminator(
         },
 
         Terminator::Jump(_) => {}
+
+        Terminator::UnionDispatch {
+            value,
+            union_id,
+            targets,
+        } => match values.get(&value.0) {
+            None => report(format!(
+                "{position}: dispatches on undefined value {:?}",
+                value.0
+            )),
+            Some((_, IrType::Union(representation))) => {
+                match module.union_types.get(*union_id as usize) {
+                    None => report(format!(
+                        "{position}: dispatches with missing union layout {union_id}"
+                    )),
+                    Some(layout) if layout.representation_layout != Some(*representation) => {
+                        report(format!(
+                            "{position}: dispatch value does not match union layout {union_id}"
+                        ))
+                    }
+                    Some(layout) if targets.len() != layout.alternatives.len() => report(format!(
+                        "{position}: union dispatch has {} targets for {} alternatives",
+                        targets.len(),
+                        layout.alternatives.len()
+                    )),
+                    Some(_) => {}
+                }
+            }
+            Some((_, ty)) => report(format!(
+                "{position}: dispatches on {}, expected a union",
+                ty.as_str()
+            )),
+        },
     }
 }
 
@@ -8319,6 +8566,8 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::ObjectConform { object, .. } => vec![*object],
         InstKind::BuildValue { fields, .. } => fields.clone(),
         InstKind::BuildEnum { fields, .. } => fields.clone(),
+        InstKind::UnionInject { payload, .. } => vec![*payload],
+        InstKind::UnionTag(value) | InstKind::UnionProject { value, .. } => vec![*value],
         InstKind::Discriminant(operand) => vec![*operand],
         InstKind::CheckedCast { object, .. } => vec![*object],
         InstKind::IsInstance { object, .. } => vec![*object],

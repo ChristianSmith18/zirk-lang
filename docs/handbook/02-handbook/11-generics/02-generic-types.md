@@ -23,9 +23,9 @@ class Box<T = Int32> {
     get(): T { return this.value; }
 }
 
-inmut b = Box(7);            // T defaults to Int32
+inmut b = Box(7); // T defaults to Int32
 inmut s: Box<String> = Box("ok");
-inmut d: Box<> = Box(5);     // explicit request for the default
+inmut d: Box<> = Box(5); // explicit request for the default
 ```
 
 The default is still checked against any `from` constraint on the parameter.

@@ -54,7 +54,7 @@ arithmetic, ordering, or conversion from numbers or text.
 
 ```zirk
 inmut ready: Boolean = items.length > 0;
-ready.to_string();              // "true" or "false"
+ready.to_string(); // "true" or "false"
 if user != null && user.is_active { }
 ```
 

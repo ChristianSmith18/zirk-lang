@@ -20,8 +20,8 @@ comparison and compound assignment all preserve the concrete width unless an
 explicit wider context applies.
 
 ```zirk
--byte;       // error: UInt8 is not Negatable
-UInt8(0)-1;  // controlled underflow
+-byte; // error: UInt8 is not Negatable
+UInt8(0) - 1; // controlled underflow
 ```
 
 Shift counts must be non-negative and less than the width. Ordinary overflow
@@ -74,9 +74,9 @@ Identical to the signed table above, with these differences:
 
 ```zirk
 inmut byte: UInt8 = 255;
-byte.bit_count();               // 8
-UInt8(0).checked_sub(1);        // Error(OverflowError)
-UInt8(0) - 1;                   // controlled underflow error
+byte.bit_count(); // 8
+UInt8(0).checked_sub(1); // Error(OverflowError)
+UInt8(0) - 1; // controlled underflow error
 
 inmut signed: Int32 = -1;
 inmut converted = UInt32(signed); // controlled range failure

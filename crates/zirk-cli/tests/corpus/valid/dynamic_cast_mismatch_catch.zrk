@@ -9,3 +9,4 @@ fn main(): Void {
         stdout.println("dynamic cast mismatch caught");
     }
 }
+main();

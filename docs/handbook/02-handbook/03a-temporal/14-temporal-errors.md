@@ -18,10 +18,10 @@ wrap an Instant, or guess a DST policy silently.
 Examples:
 
 ```zirk
-Date(2026, 2, 29);       // InvalidDate
-Time(25, 0);             // InvalidTime
+Date(2026, 2, 29); // InvalidDate
+Time(25, 0); // InvalidTime
 TimeZone("Mars/Olympus"); // InvalidTimeZone
-task.sleep(-2s);         // non-negative API contract error
+task.sleep(-2s); // non-negative API contract error
 ```
 
 Parsing APIs return typed expected failures; programmer-constructed invalid

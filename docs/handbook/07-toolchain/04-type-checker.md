@@ -4,16 +4,17 @@ After names resolve, the semantic frontend validates what values and effects
 each expression can produce and how facts change along control-flow paths. It
 generates typed information for portable IR; it does not choose native layout.
 
-> **Implementation status:** the current checker covers the implemented scalar
-> subset, inference, nullability basics, assignments, calls/named arguments,
-> returns, definite initialization, loops, match foundations, lambdas/captures,
-> enums, classes, constructors, visibility, inheritance, method calls, generics
-> with `from` constraints, interfaces/traits, `Result<T,E>`'s seven structural
-> methods, `throw`/`try`/`catch`/`finally` with "capture or declare" effect
-> analysis, and `Resource<E>`/`match with` closing on a single acquisition.
-> `Result`'s generic combinators (`map`, `and_then`, …), catch variant patterns,
-> grouped resource acquisition, `Fn` type annotations, strict immutability,
-> concurrency, and later standard types remain staged work.
+> **Implementation status:** the checker supports recursive unions and
+> intersections, canonical singleton values and constant evaluation, generic
+> aliases and type operators, structural shapes, common-member checking,
+> branch narrowing, and bounded relation solving. Native lowering and runtime
+> support vary by type family: scalar/string, enum-constant, and narrowed
+> nominal class-reference unions have end-to-end native/interpreter coverage,
+> while structural shape values and some nominal/scalar combinations remain
+> unsupported. See the
+> [feature-status catalog](../../init/ZIRK_FEATURE_STATUS.md) and
+> [current limitations](../13-appendices/07-current-limitations.md) for the
+> evidence by compiler stage.
 
 ## Inputs and output
 
@@ -32,15 +33,26 @@ Local inference begins from initializers and contextual expectations. It is not
 dynamic typing:
 
 ```zirk
-mut count = 1;       // inferred Int
-count = 2;           // valid
-count = "two";       // type mismatch
+mut count = 1; // inferred Int
+count = 2; // valid
+count = "two"; // type mismatch
 ```
 
 Numeric promotion, casts, final-result scalar conversion, nullable widening, class
 subtyping, generics, unions, callable variance, and protocol conformance use the
 rules owned by their type-system chapters. The checker never inserts an
 undocumented implicit conversion merely to make a call succeed.
+
+Unions and intersections are normalized before relations are solved. The
+checker checks every source-union alternative, accepts a destination union when
+one member fits, and requires every destination-intersection member. Singleton
+values widen only when the inference context permits it; contextual object
+literals use required properties and literal discriminants to select exactly
+one viable structural alternative. Generic `keyof`, indexed access,
+conditional/`infer`, mapped, finite template, and utility types are resolved at
+check time and erased before runtime. Constant evaluation and type relations
+have explicit budgets; exhaustion is a source-located `E0482`, never a partial
+type.
 
 Named arguments bind by declared name; shorthand `url:` means `url: url`.
 Candidate selection checks names, arity, optional/default/variadic positions,

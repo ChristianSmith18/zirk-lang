@@ -54,10 +54,10 @@ class Label {
 ```
 
 ```zirk
-stdout.print("count", 2);  // count 2
+stdout.print("count", 2); // count 2
 stdout.println();
 match stderr.flush() {
-    Ok(_) => {},
+    Ok(_) => { },
     Error(error) => stdout.println(error),
 }
 ```

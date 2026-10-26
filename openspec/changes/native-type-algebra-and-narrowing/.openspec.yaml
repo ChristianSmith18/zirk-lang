@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-10-26
+goal: Deliver a sound, efficient, fully lowered native type system for
+  expressive Zirk unions, intersections, literal values, and intelligent
+  inference comparable in everyday capability to TypeScript.

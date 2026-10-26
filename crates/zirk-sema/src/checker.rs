@@ -7,6 +7,8 @@
 //! derived ones.
 
 use crate::codes;
+use crate::constant_value::{CanonicalConst, ConstValue};
+use crate::flow::{FlowPath, FlowState};
 use crate::ide::{
     ReferenceRole, SemanticIndex, SemanticSymbolData, SemanticSymbolKind, SemanticVisibility,
     UnresolvedSemanticReference,
@@ -15,14 +17,208 @@ use crate::scope::{Binding, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractProperty, ContractType, EnumType,
     EnumVariantInfo, FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance,
-    GenericInstance, IntWidth, MapType, MethodInfo, TupleType, Type, TypeNames, TypeParamInfo,
-    VariantMapping, describe, is_ffi_safe, pending_type,
+    GenericInstance, IntWidth, MapType, MethodInfo, StructuralProperty, StructuralType, TupleType,
+    Type, TypeNames, TypeParamInfo, VariantMapping, describe, is_ffi_safe, pending_type,
 };
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fmt::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
+
+fn substitute_alias_type_ref(reference: &TypeRef, bindings: &HashMap<String, TypeRef>) -> TypeRef {
+    if reference.arguments.is_empty()
+        && reference.union_with.is_empty()
+        && reference.intersection_with.is_empty()
+        && reference.expression.is_none()
+        && reference.value.is_none()
+        && let Some(binding) = bindings.get(&reference.name)
+    {
+        let mut binding = binding.clone();
+        binding.nullable |= reference.nullable;
+        binding.span = reference.span;
+        return binding;
+    }
+    let mut result = reference.clone();
+    result.arguments = reference
+        .arguments
+        .iter()
+        .map(|argument| substitute_alias_type_ref(argument, bindings))
+        .collect();
+    result.union_with = reference
+        .union_with
+        .iter()
+        .map(|member| substitute_alias_type_ref(member, bindings))
+        .collect();
+    result.intersection_with = reference
+        .intersection_with
+        .iter()
+        .map(|member| substitute_alias_type_ref(member, bindings))
+        .collect();
+    result.expression = reference
+        .expression
+        .as_deref()
+        .map(|expression| Box::new(substitute_alias_type_expr(expression, bindings)));
+    result.function = reference.function.as_deref().map(|function| {
+        Box::new(FnTypeRef {
+            params: function
+                .params
+                .iter()
+                .map(|param| FnTypeParamRef {
+                    ty: substitute_alias_type_ref(&param.ty, bindings),
+                    ..param.clone()
+                })
+                .collect(),
+            returns: Box::new(substitute_alias_type_ref(&function.returns, bindings)),
+        })
+    });
+    result
+}
+
+fn substitute_alias_type_expr(
+    expression: &TypeExpr,
+    bindings: &HashMap<String, TypeRef>,
+) -> TypeExpr {
+    match expression {
+        TypeExpr::Named {
+            name,
+            arguments,
+            nullable,
+            function,
+            fixed_size,
+            span,
+        } => {
+            let mut reference = TypeRef::new(name.clone(), *span);
+            reference.arguments = arguments.clone();
+            reference.nullable = *nullable;
+            reference.function = function.clone();
+            reference.fixed_size = fixed_size.clone();
+            substitute_alias_type_ref(&reference, bindings).to_type_expr()
+        }
+        TypeExpr::Union { members, span } => TypeExpr::Union {
+            members: members
+                .iter()
+                .map(|member| substitute_alias_type_expr(member, bindings))
+                .collect(),
+            span: *span,
+        },
+        TypeExpr::Intersection { members, span } => TypeExpr::Intersection {
+            members: members
+                .iter()
+                .map(|member| substitute_alias_type_expr(member, bindings))
+                .collect(),
+            span: *span,
+        },
+        TypeExpr::Group { expression, span } => TypeExpr::Group {
+            expression: Box::new(substitute_alias_type_expr(expression, bindings)),
+            span: *span,
+        },
+        TypeExpr::Value { .. } | TypeExpr::Constant { .. } => expression.clone(),
+        TypeExpr::Object { properties, span } => TypeExpr::Object {
+            properties: properties
+                .iter()
+                .map(|property| TypeShapeProperty {
+                    ty: substitute_alias_type_ref(&property.ty, bindings),
+                    ..property.clone()
+                })
+                .collect(),
+            span: *span,
+        },
+    }
+}
+
+fn type_ref_has_guarded_alias_cycle(
+    reference: &TypeRef,
+    origin: &str,
+    aliases: &HashMap<String, TypeRef>,
+) -> bool {
+    fn visit_ref(
+        reference: &TypeRef,
+        origin: &str,
+        aliases: &HashMap<String, TypeRef>,
+        guarded: bool,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        let guarded = guarded
+            || matches!(
+                reference.expression.as_deref(),
+                Some(TypeExpr::Object { .. })
+            );
+        if reference.expression.is_none() {
+            if reference.name == origin {
+                return guarded;
+            }
+            if visiting.len() < 256
+                && let Some(target) = aliases.get(&reference.name)
+                && visiting.insert(reference.name.clone())
+            {
+                let found = visit_ref(target, origin, aliases, guarded, visiting);
+                visiting.remove(&reference.name);
+                if found {
+                    return true;
+                }
+            }
+        }
+        reference
+            .arguments
+            .iter()
+            .chain(&reference.union_with)
+            .chain(&reference.intersection_with)
+            .any(|nested| visit_ref(nested, origin, aliases, guarded, visiting))
+            || reference.expression.as_deref().is_some_and(|expression| {
+                visit_expr(expression, origin, aliases, guarded, visiting)
+            })
+            || reference.function.as_deref().is_some_and(|function| {
+                function
+                    .params
+                    .iter()
+                    .any(|parameter| visit_ref(&parameter.ty, origin, aliases, guarded, visiting))
+                    || visit_ref(&function.returns, origin, aliases, guarded, visiting)
+            })
+    }
+
+    fn visit_expr(
+        expression: &TypeExpr,
+        origin: &str,
+        aliases: &HashMap<String, TypeRef>,
+        guarded: bool,
+        visiting: &mut HashSet<String>,
+    ) -> bool {
+        match expression {
+            TypeExpr::Named {
+                name,
+                arguments,
+                nullable,
+                function,
+                fixed_size,
+                span,
+            } => {
+                let mut reference = TypeRef::new(name.clone(), *span);
+                reference.arguments = arguments.clone();
+                reference.nullable = *nullable;
+                reference.function = function.clone();
+                reference.fixed_size = fixed_size.clone();
+                visit_ref(&reference, origin, aliases, guarded, visiting)
+            }
+            TypeExpr::Union { members, .. } | TypeExpr::Intersection { members, .. } => members
+                .iter()
+                .any(|member| visit_expr(member, origin, aliases, guarded, visiting)),
+            TypeExpr::Group { expression, .. } => {
+                visit_expr(expression, origin, aliases, guarded, visiting)
+            }
+            TypeExpr::Object { properties, .. } => properties
+                .iter()
+                .any(|property| visit_ref(&property.ty, origin, aliases, true, visiting)),
+            TypeExpr::Value { .. } | TypeExpr::Constant { .. } => false,
+        }
+    }
+
+    visit_ref(reference, origin, aliases, false, &mut HashSet::new())
+}
 
 const BORROWED_VIEW_ESCAPE_CODE: Code = Code::new("E0485");
 
@@ -281,6 +477,10 @@ pub struct CheckedProgram {
     pub project_global_calls: HashMap<Span, ProjectGlobalCallInfo>,
     /// Compiler-resolved methods on the manifest-backed subscription type.
     pub project_global_subscription_calls: HashMap<Span, ProjectGlobalSubscriptionCallInfo>,
+    /// Canonical singleton alternative selected by each value pattern.
+    /// Lowering uses this to preserve the semantic tag when multiple
+    /// alternatives share one physical scalar representation.
+    pub pattern_singletons: HashMap<Span, u32>,
     /// Conservative suspension effect for each checked top-level function,
     /// keyed by the function-name span. An incomplete summary always has
     /// `may_suspend == true`; consumers must never treat it as non-suspending.
@@ -361,6 +561,12 @@ pub struct CheckedProgram {
     /// Lowering compares against a discriminant for enums and against the value
     /// itself otherwise, and that choice is made here.
     pub matches: HashMap<Span, Type>,
+    /// Narrowed scrutinee type selected for each `match` arm pattern.
+    /// Lowering uses this to preserve union alternative provenance while
+    /// building tag dispatch and payload projections.
+    pub match_arm_types: HashMap<Span, Type>,
+    /// Type names used as the right operand of `value is Type` tests.
+    pub type_test_targets: HashMap<Span, Type>,
     /// Member accesses that turned out to be enum variants, by their span.
     ///
     /// `Direction.North` and `user.name` are the same shape to the parser, and
@@ -414,6 +620,19 @@ pub struct CheckedProgram {
     pub enum_instances: Vec<GenericEnumInstance>,
     /// Interned unions, indexed by the id their [`Base::Union`] carries.
     pub unions: Vec<Vec<Base>>,
+    /// Source aliases that resolve to each canonical union, sorted and
+    /// deduplicated. This provenance is diagnostic metadata and does not
+    /// participate in semantic identity or the union ABI fingerprint.
+    pub union_aliases: HashMap<u32, Vec<String>>,
+    /// Interned intersections, indexed by their `Base::Intersection` ids.
+    pub intersections: Vec<Vec<Base>>,
+    /// Canonical anonymous structural object types.
+    pub structural_types: Vec<StructuralType>,
+    /// Names of recursive shape placeholders, used to stop recursive type
+    /// rendering at the alias boundary.
+    pub recursive_shape_names: HashMap<u32, String>,
+    /// Canonical singleton values; `Base::Singleton` stores an index here.
+    pub singleton_values: Vec<CanonicalConst>,
     /// Interned `Pointer<T>` pointee types, indexed by the id their
     /// [`Base::Pointer`] carries (roadmap Phase 4e, design D1).
     pub pointer_types: Vec<Type>,
@@ -599,6 +818,11 @@ impl CheckedProgram {
                 contract_instances: &self.contract_instances,
                 enum_instances: &self.enum_instances,
                 unions: &self.unions,
+                union_aliases: &self.union_aliases,
+                intersections: &self.intersections,
+                structural_types: &self.structural_types,
+                recursive_shape_names: &self.recursive_shape_names,
+                singleton_values: &self.singleton_values,
                 pointer_types: &self.pointer_types,
                 weak_types: &self.weak_types,
                 native_slice_types: &self.native_slice_types,
@@ -656,6 +880,8 @@ struct OwnershipDeriver<'a> {
     range_types: &'a [Type],
     channel_types: &'a [Type],
     unions: &'a [Vec<Base>],
+    intersections: &'a [Vec<Base>],
+    structural_types: &'a [StructuralType],
     markers: OwnershipMarkers,
     memo: HashMap<(u8, u32, Vec<Type>), OwnershipProperties>,
     active: HashMap<(u8, u32), Vec<Type>>,
@@ -676,6 +902,8 @@ impl<'a> OwnershipDeriver<'a> {
             range_types: &program.range_types,
             channel_types: &program.channel_types,
             unions: &program.unions,
+            intersections: &program.intersections,
+            structural_types: &program.structural_types,
             markers: program.ownership_markers,
             memo: HashMap::new(),
             active: HashMap::new(),
@@ -696,6 +924,8 @@ impl<'a> OwnershipDeriver<'a> {
             range_types: &checker.range_types,
             channel_types: &checker.channel_types,
             unions: &checker.unions,
+            intersections: &checker.intersections,
+            structural_types: &checker.structural_types,
             markers: OwnershipMarkers {
                 resource: checker.native_resource.map(|resource| resource.resource),
                 transferable_resource: checker.native_transferable,
@@ -838,6 +1068,17 @@ impl<'a> OwnershipDeriver<'a> {
                 .get(id as usize)
                 .map(|members| self.all(members.iter().copied().map(Type::of), subst))
                 .unwrap_or(no),
+            Base::Intersection(id) => self
+                .intersections
+                .get(id as usize)
+                .map(|members| self.all(members.iter().copied().map(Type::of), subst))
+                .unwrap_or(no),
+            Base::Shape(id) => self
+                .structural_types
+                .get(id as usize)
+                .map(|shape| self.all(shape.properties.iter().map(|property| property.ty), subst))
+                .unwrap_or(no),
+            Base::Singleton(_) => no,
             // Channel endpoints are runtime-synchronized. Their payload still
             // must be safely movable through the queue before sharing is sound.
             Base::Channel(id) => self
@@ -1207,6 +1448,27 @@ pub fn check_with_globals(
     Checker::with_project_globals(sources, sink, globals).run(program)
 }
 
+/// Checks a project while allowing an editor to stop obsolete type work.
+/// Cancellation is cooperative: expression and statement traversal observe
+/// the shared flag and return `Never`. A cancelled analysis yields `None` so
+/// callers cannot accidentally publish its partial snapshot.
+pub fn check_with_globals_cancellable(
+    sources: &SourceMap,
+    program: &Program,
+    globals: &[ProjectGlobalSpec],
+    cancellation: Arc<AtomicBool>,
+    sink: &mut DiagnosticSink,
+) -> Option<CheckedProgram> {
+    let checked = Checker::with_project_globals_and_cancellation(
+        sources,
+        sink,
+        globals,
+        cancellation.clone(),
+    )
+    .run(program);
+    (!cancellation.load(AtomicOrdering::Relaxed)).then_some(checked)
+}
+
 /// Names types for diagnostics, given the checker's tables.
 struct Names<'t> {
     enums: &'t [EnumType],
@@ -1222,6 +1484,11 @@ struct Names<'t> {
     contract_instances: &'t [GenericContractInstance],
     enum_instances: &'t [GenericEnumInstance],
     unions: &'t [Vec<Base>],
+    union_aliases: &'t HashMap<u32, Vec<String>>,
+    intersections: &'t [Vec<Base>],
+    structural_types: &'t [StructuralType],
+    recursive_shape_names: &'t HashMap<u32, String>,
+    singleton_values: &'t [CanonicalConst],
     pointer_types: &'t [Type],
     weak_types: &'t [Type],
     native_slice_types: &'t [Type],
@@ -1336,7 +1603,57 @@ impl TypeNames for Names<'_> {
             .iter()
             .map(|&base| describe(Type::of(base), self))
             .collect();
-        names.join(" | ")
+        let expanded = names.join(" | ");
+        self.union_aliases
+            .get(&id)
+            .map_or(expanded.clone(), |aliases| {
+                if aliases.is_empty() {
+                    expanded
+                } else {
+                    format!("{} ({expanded})", aliases.join(", "))
+                }
+            })
+    }
+
+    fn intersection_name(&self, id: u32) -> String {
+        let Some(members) = self.intersections.get(id as usize) else {
+            return "<intersection>".into();
+        };
+        members
+            .iter()
+            .map(|&base| describe(Type::of(base), self))
+            .collect::<Vec<_>>()
+            .join(" & ")
+    }
+
+    fn shape_name(&self, id: u32) -> String {
+        if let Some(name) = self.recursive_shape_names.get(&id) {
+            return name.clone();
+        }
+        let Some(shape) = self.structural_types.get(id as usize) else {
+            return "<object shape>".into();
+        };
+        let properties = shape
+            .properties
+            .iter()
+            .map(|property| {
+                format!(
+                    "{}{}{}: {}",
+                    if property.readonly { "inmut " } else { "" },
+                    property.name,
+                    if property.optional { "?" } else { "" },
+                    describe(property.ty, self)
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("{{ {} }}", properties.join(", "))
+    }
+
+    fn singleton_name(&self, id: u32) -> String {
+        self.singleton_values
+            .get(id as usize)
+            .map(canonical_singleton_name)
+            .unwrap_or_else(|| "<singleton>".into())
     }
 
     fn pointer_element(&self, id: u32) -> Type {
@@ -1436,14 +1753,26 @@ struct Checker<'a> {
     sources: &'a SourceMap,
     sink: &'a mut DiagnosticSink,
     project_global_specs: Vec<ProjectGlobalSpec>,
+    cancellation: Option<Arc<AtomicBool>>,
     project_globals: HashMap<String, ProjectGlobalInfo>,
     project_global_calls: HashMap<Span, ProjectGlobalCallInfo>,
     project_global_subscription_calls: HashMap<Span, ProjectGlobalSubscriptionCallInfo>,
     scopes: Scopes,
+    flow_state: FlowState,
+    /// Safe, body-verified predicates inferred from functions whose sole
+    /// return expression is a direct `parameter is Type` test.
+    type_predicate_functions: HashMap<String, (usize, Type)>,
     resolved_semantic_references: Vec<UnresolvedSemanticReference>,
     semantic_owners: HashMap<Span, Span>,
     pattern_binding_spans: HashSet<Span>,
+    pattern_singletons: HashMap<Span, u32>,
     functions: HashMap<String, Signature>,
+    const_functions: HashMap<String, crate::const_eval::ConstFunction>,
+    relation_memo: RefCell<HashMap<(Type, Type), bool>>,
+    conditional_memo: RefCell<HashMap<(Type, String, bool), Type>>,
+    template_memo: RefCell<HashMap<String, Type>>,
+    mapped_memo: RefCell<HashMap<String, Type>>,
+    keyof_memo: RefCell<HashMap<(Type, Option<Type>, Option<u32>), Type>>,
     current_function: Option<Span>,
     direct_function_calls: HashMap<Span, HashSet<Span>>,
     capability_function_calls: HashMap<Span, HashSet<Span>>,
@@ -1476,6 +1805,9 @@ struct Checker<'a> {
     first_plans: HashMap<Span, SettledPlan>,
     concurrent_each_plans: HashMap<Span, ConcurrentEachPlan>,
     matches: HashMap<Span, Type>,
+    match_arm_types: HashMap<Span, Type>,
+    type_test_targets: HashMap<Span, Type>,
+    checked_cast_targets: HashMap<Span, Type>,
     variant_accesses: std::collections::HashSet<Span>,
     scalar_static_accesses: std::collections::HashSet<Span>,
     static_class_accesses: HashMap<Span, u32>,
@@ -1546,6 +1878,9 @@ struct Checker<'a> {
     /// from leaking the outer `Result<Int32,String>` into the inner
     /// construction's own inference.
     expected_type: Option<Type>,
+    /// Alias spelling for the explicit expected type at a declaration's
+    /// initializer mismatch. The canonical `Type` remains unchanged.
+    expected_alias_display: Option<(Type, String)>,
     /// The class whose body is being checked, if any. It is what `this` names.
     this_type: Option<Type>,
     /// Declaring class for the current member body, including `static` methods
@@ -1644,14 +1979,24 @@ struct Checker<'a> {
     /// resolving a reference to it just resolves `target` instead, lazily,
     /// the same way a forward-referenced class does.
     type_aliases: HashMap<String, TypeRef>,
+    type_alias_params: HashMap<String, Vec<TypeParam>>,
     type_alias_spans: HashMap<String, Span>,
     /// Aliases currently being resolved, to catch `type A = B; type B = A;`
     /// before it recurses forever.
     resolving_aliases: Vec<String>,
+    recursive_alias_shapes: HashMap<String, u32>,
+    recursive_alias_types: HashMap<String, Type>,
     /// Interned unions, indexed by the id their [`Base::Union`] carries —
     /// already normalized: sorted, deduplicated, subsumed alternatives
     /// removed.
     unions: Vec<Vec<Base>>,
+    /// Alias names that resolve to each interned union.
+    union_aliases: HashMap<u32, Vec<String>>,
+    /// Interned intersection members, sorted and deduplicated on insertion.
+    intersections: Vec<Vec<Base>>,
+    structural_types: Vec<StructuralType>,
+    recursive_shape_names: HashMap<u32, String>,
+    singleton_values: Vec<CanonicalConst>,
     /// See [`CheckedProgram::generic_constructions`].
     generic_constructions: HashMap<Span, u32>,
     /// Ids of the language's own `Iterable<T>` and `Iterator<T>` contracts
@@ -1942,6 +2287,152 @@ pub struct NativeChannels {
     pub receive_outcome: u32,
 }
 
+const MAX_SINGLETON_DISPLAY_BYTES: usize = 160;
+const MAX_DIAGNOSTIC_TYPE_DISPLAY_BYTES: usize = 180;
+
+struct BoundedDebugWriter {
+    output: String,
+    capacity: usize,
+    truncated: bool,
+}
+
+impl Write for BoundedDebugWriter {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let remaining = self.capacity.saturating_sub(self.output.len());
+        if value.len() <= remaining {
+            self.output.push_str(value);
+            return Ok(());
+        }
+
+        let mut end = remaining.min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.output.push_str(&value[..end]);
+        self.truncated = true;
+        Err(fmt::Error)
+    }
+}
+
+fn canonical_singleton_name(value: &CanonicalConst) -> String {
+    const ELLIPSIS: &str = "...";
+    let mut writer = BoundedDebugWriter {
+        output: String::with_capacity(MAX_SINGLETON_DISPLAY_BYTES),
+        capacity: MAX_SINGLETON_DISPLAY_BYTES - ELLIPSIS.len(),
+        truncated: false,
+    };
+    let _ = write!(writer, "{}(", value.type_identity);
+    let _ = write_const_value(&mut writer, &value.value);
+    let _ = writer.write_str(")");
+    if writer.truncated {
+        writer.output.push_str(ELLIPSIS);
+    }
+    writer.output
+}
+
+fn bound_diagnostic_type_name(mut rendered: String) -> String {
+    const ELLIPSIS: &str = "...";
+    if rendered.len() <= MAX_DIAGNOSTIC_TYPE_DISPLAY_BYTES {
+        return rendered;
+    }
+    let mut end = MAX_DIAGNOSTIC_TYPE_DISPLAY_BYTES - ELLIPSIS.len();
+    while !rendered.is_char_boundary(end) {
+        end -= 1;
+    }
+    rendered.truncate(end);
+    rendered.push_str(ELLIPSIS);
+    rendered
+}
+
+fn write_const_value(
+    writer: &mut impl Write,
+    value: &crate::constant_value::ConstValue,
+) -> fmt::Result {
+    use crate::constant_value::ConstValue;
+    match value {
+        ConstValue::Boolean(value) => write!(writer, "{value}"),
+        // The outer canonical display already writes the resolved type
+        // identity. Keep the payload here type-free to avoid rendering
+        // redundant forms such as `Int32(Int32(1))`.
+        ConstValue::Integer { value, .. } => write!(writer, "{value}"),
+        ConstValue::BigUnsigned { value, .. } => write!(writer, "{value}"),
+        ConstValue::Decimal { coefficient, scale } => {
+            write!(writer, "coefficient={coefficient}, scale={scale}")
+        }
+        ConstValue::Float { bits, .. } => write!(writer, "bits=0x{bits:x}"),
+        ConstValue::String(value) => write!(writer, "{value:?}"),
+        ConstValue::Char(value) => write!(writer, "{value:?}"),
+        ConstValue::Null => writer.write_str("null"),
+        ConstValue::Duration(value) => write!(writer, "{value}ns"),
+        ConstValue::Date(value) => write!(writer, "epoch-day:{value}"),
+        ConstValue::Time(value) => write!(writer, "midnight-ns:{value}"),
+        ConstValue::DateTime(value) => write!(writer, "civil-epoch-ns:{value}"),
+        ConstValue::Instant(value) => write!(writer, "unix-ns:{value}"),
+        ConstValue::TimeZone {
+            identifier,
+            rule_data,
+        } => {
+            write!(writer, "{identifier}, tzdb={rule_data}")
+        }
+        ConstValue::ZonedDateTime {
+            instant_nanos,
+            identifier,
+            rule_data,
+        } => {
+            write!(
+                writer,
+                "unix-ns:{instant_nanos}, zone={identifier}, tzdb={rule_data}"
+            )
+        }
+        ConstValue::Period {
+            years,
+            months,
+            weeks,
+            days,
+        } => {
+            write!(
+                writer,
+                "years={years}, months={months}, weeks={weeks}, days={days}"
+            )
+        }
+        ConstValue::Enum {
+            enum_identity,
+            variant_identity,
+            fields,
+        } => {
+            write!(writer, "{enum_identity}::{variant_identity}")?;
+            write_const_children(writer, fields)
+        }
+        ConstValue::Tuple { elements, .. } => write_const_children(writer, elements),
+        ConstValue::Aggregate { fields, .. } => {
+            writer.write_str("{")?;
+            for (index, (name, value)) in fields.iter().enumerate() {
+                if index > 0 {
+                    writer.write_str(", ")?;
+                }
+                write!(writer, "{name}: ")?;
+                write!(writer, "{}(", value.type_identity)?;
+                write_const_value(writer, &value.value)?;
+                writer.write_str(")")?;
+            }
+            writer.write_str("}")
+        }
+    }
+}
+
+fn write_const_children(writer: &mut impl Write, values: &[CanonicalConst]) -> fmt::Result {
+    writer.write_str("(")?;
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            writer.write_str(", ")?;
+        }
+        write!(writer, "{}(", value.type_identity)?;
+        write_const_value(writer, &value.value)?;
+        writer.write_str(")")?;
+    }
+    writer.write_str(")")
+}
+
 impl<'a> Checker<'a> {
     fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
         Self::with_project_globals(sources, sink, &[])
@@ -1952,19 +2443,38 @@ impl<'a> Checker<'a> {
         sink: &'a mut DiagnosticSink,
         project_global_specs: &[ProjectGlobalSpec],
     ) -> Self {
+        Self::with_project_globals_and_cancellation(sources, sink, project_global_specs, None)
+    }
+
+    fn with_project_globals_and_cancellation(
+        sources: &'a SourceMap,
+        sink: &'a mut DiagnosticSink,
+        project_global_specs: &[ProjectGlobalSpec],
+        cancellation: impl Into<Option<Arc<AtomicBool>>>,
+    ) -> Self {
         let mut checker = Self {
             sources,
             sink,
             project_global_specs: project_global_specs.to_vec(),
+            cancellation: cancellation.into(),
             project_globals: HashMap::new(),
             project_global_calls: HashMap::new(),
             project_global_subscription_calls: HashMap::new(),
             scopes: Scopes::new(),
+            flow_state: FlowState::default(),
+            type_predicate_functions: HashMap::new(),
             resolved_semantic_references: Vec::new(),
             semantic_owners: HashMap::new(),
             pattern_binding_spans: HashSet::new(),
+            pattern_singletons: HashMap::new(),
             type_alias_spans: HashMap::new(),
             functions: HashMap::new(),
+            const_functions: HashMap::new(),
+            relation_memo: RefCell::new(HashMap::new()),
+            conditional_memo: RefCell::new(HashMap::new()),
+            template_memo: RefCell::new(HashMap::new()),
+            mapped_memo: RefCell::new(HashMap::new()),
+            keyof_memo: RefCell::new(HashMap::new()),
             current_function: None,
             direct_function_calls: HashMap::new(),
             capability_function_calls: HashMap::new(),
@@ -1993,6 +2503,9 @@ impl<'a> Checker<'a> {
             first_plans: HashMap::new(),
             concurrent_each_plans: HashMap::new(),
             matches: HashMap::new(),
+            match_arm_types: HashMap::new(),
+            type_test_targets: HashMap::new(),
+            checked_cast_targets: HashMap::new(),
             variant_accesses: std::collections::HashSet::new(),
             scalar_static_accesses: std::collections::HashSet::new(),
             static_class_accesses: HashMap::new(),
@@ -2021,6 +2534,7 @@ impl<'a> Checker<'a> {
             aliases: HashMap::new(),
             current_return: Type::VOID,
             expected_type: None,
+            expected_alias_display: None,
             this_type: None,
             current_class_body: None,
             in_constructor: false,
@@ -2044,8 +2558,16 @@ impl<'a> Checker<'a> {
             contract_instances: Vec::new(),
             enum_instances: Vec::new(),
             type_aliases: HashMap::new(),
+            type_alias_params: HashMap::new(),
             resolving_aliases: Vec::new(),
+            recursive_alias_shapes: HashMap::new(),
+            recursive_alias_types: HashMap::new(),
             unions: Vec::new(),
+            union_aliases: HashMap::new(),
+            intersections: Vec::new(),
+            structural_types: Vec::new(),
+            recursive_shape_names: HashMap::new(),
+            singleton_values: Vec::new(),
             generic_constructions: HashMap::new(),
             native_iteration: None,
             native_result: None,
@@ -2104,6 +2626,137 @@ impl<'a> Checker<'a> {
         };
         checker.register_regex_match_class();
         checker
+    }
+
+    fn register_const_functions(&mut self, program: &Program) {
+        for function in program
+            .functions
+            .iter()
+            .filter(|function| function.is_const)
+        {
+            let fail = |checker: &mut Self, reason: &str| {
+                checker.error(
+                    codes::INVALID_CONSTANT_TYPE,
+                    function.span,
+                    format!("invalid const function `{}`", function.name.name),
+                    reason,
+                    Some("const functions currently require a pure scalar signature and one return expression".into()),
+                );
+            };
+            if function.is_unsafe || function.type_params.len() > 0 || function.throws.is_some() {
+                fail(
+                    self,
+                    "const functions cannot be unsafe, generic, or declare throws",
+                );
+                continue;
+            }
+            let simple_type = |ty: &TypeRef| {
+                ty.arguments.is_empty()
+                    && ty.union_with.is_empty()
+                    && ty.intersection_with.is_empty()
+                    && !ty.nullable
+                    && ty.expression.is_none()
+                    && matches!(
+                        ty.name.as_str(),
+                        "Boolean"
+                            | "Int8"
+                            | "Int16"
+                            | "Int32"
+                            | "Int64"
+                            | "Int128"
+                            | "UInt8"
+                            | "UInt16"
+                            | "UInt32"
+                            | "UInt64"
+                            | "UInt128"
+                            | "Float16"
+                            | "Float32"
+                            | "Float64"
+                            | "Float128"
+                            | "Decimal"
+                            | "String"
+                            | "Char"
+                            | "Duration"
+                            | "Date"
+                            | "Time"
+                            | "DateTime"
+                    )
+            };
+            let Some(return_type) = function.return_type.as_ref().filter(|ty| simple_type(ty))
+            else {
+                fail(
+                    self,
+                    "a const function must declare a supported scalar return type",
+                );
+                continue;
+            };
+            if function.params.iter().any(|param| {
+                !simple_type(&param.ty)
+                    || param.optional
+                    || param.default.is_some()
+                    || param.variadic
+                    || param.promoted.is_some()
+            }) {
+                fail(
+                    self,
+                    "const function parameters must have required scalar types",
+                );
+                continue;
+            }
+            let [
+                Stmt::Return(ReturnStmt {
+                    value: Some(body), ..
+                }),
+            ] = function.body.statements.as_slice()
+            else {
+                fail(
+                    self,
+                    "const function bodies must contain exactly one `return expression` statement",
+                );
+                continue;
+            };
+            self.const_functions.insert(
+                function.name.name.clone(),
+                crate::const_eval::ConstFunction {
+                    parameter_names: function
+                        .params
+                        .iter()
+                        .map(|param| param.name.name.clone())
+                        .collect(),
+                    parameter_types: function
+                        .params
+                        .iter()
+                        .map(|param| param.ty.name.clone())
+                        .collect(),
+                    return_type: return_type.name.clone(),
+                    body: body.clone(),
+                },
+            );
+        }
+        let const_names: std::collections::HashSet<String> =
+            self.const_functions.keys().cloned().collect();
+        let invalid_bodies: Vec<_> = program
+            .functions
+            .iter()
+            .filter(|function| function.is_const)
+            .filter_map(|function| {
+                self.const_functions
+                    .get(&function.name.name)
+                    .and_then(|metadata| {
+                        crate::const_eval::validate_const_function(metadata, &const_names).err()
+                    })
+                    .map(|error| (function.name.name.clone(), error))
+            })
+            .collect();
+        for (name, error) in invalid_bodies {
+            self.error(
+                codes::INVALID_CONSTANT_TYPE,
+                error.span,
+                format!("const function `{name}` is not eligible for compile-time evaluation: {:?}", error.kind),
+                "const function bodies must use only parameters, deterministic scalar operations, constant constructors, and other verified const functions",
+                Some("remove the effect or move it outside the const function".into()),
+            );
+        }
     }
 
     /// Registers the compiler-known `RegexMatch` record class used by
@@ -2473,6 +3126,7 @@ impl<'a> Checker<'a> {
             if effects.is_none_or(|effects| {
                 !effects.complete
                     || effects.may_suspend
+                    || effects.may_block
                     || effects.may_spawn
                     || effects.uses_channel
             }) {
@@ -2647,7 +3301,7 @@ impl<'a> Checker<'a> {
 
     /// Renders a type for a diagnostic.
     fn name(&self, ty: Type) -> String {
-        describe(
+        bound_diagnostic_type_name(describe(
             ty,
             &Names {
                 enums: &self.enums,
@@ -2663,6 +3317,11 @@ impl<'a> Checker<'a> {
                 contract_instances: &self.contract_instances,
                 enum_instances: &self.enum_instances,
                 unions: &self.unions,
+                union_aliases: &self.union_aliases,
+                intersections: &self.intersections,
+                structural_types: &self.structural_types,
+                recursive_shape_names: &self.recursive_shape_names,
+                singleton_values: &self.singleton_values,
                 pointer_types: &self.pointer_types,
                 weak_types: &self.weak_types,
                 native_slice_types: &self.native_slice_types,
@@ -2676,12 +3335,13 @@ impl<'a> Checker<'a> {
                 map_types: &self.map_types,
                 set_types: &self.set_types,
             },
-        )
+        ))
     }
 
     // --- Program ----------------------------------------------------------
 
     fn run(mut self, program: &Program) -> CheckedProgram {
+        self.register_const_functions(program);
         self.register_native_iteration_contracts();
         self.register_native_clone_contract();
         self.register_native_functions();
@@ -2770,6 +3430,15 @@ impl<'a> Checker<'a> {
 
         self.infer_return_types(program);
         self.verify_pending_signatures();
+        self.collect_verified_type_predicates(program);
+        // Declarations, conformance, and inferred signatures are now fixed.
+        // From this point the relation cache belongs to the immutable
+        // semantic snapshot used while checking bodies and can be reused.
+        self.relation_memo.borrow_mut().clear();
+        self.conditional_memo.borrow_mut().clear();
+        self.template_memo.borrow_mut().clear();
+        self.mapped_memo.borrow_mut().clear();
+        self.keyof_memo.borrow_mut().clear();
 
         // Record named callbacks and their exact parameter spans before any
         // body is checked, so declaration order cannot authorize ready().
@@ -2842,6 +3511,7 @@ impl<'a> Checker<'a> {
             project_globals: self.project_globals,
             project_global_calls: self.project_global_calls,
             project_global_subscription_calls: self.project_global_subscription_calls,
+            pattern_singletons: self.pattern_singletons,
             suspend_summaries,
             standard_stream_source_modules: self.standard_stream_source_modules,
             native_stringifiable: self.native_stringifiable,
@@ -2864,6 +3534,8 @@ impl<'a> Checker<'a> {
             concurrent_each_plans: self.concurrent_each_plans,
             thread_run_calls: self.thread_run_calls,
             matches: self.matches,
+            match_arm_types: self.match_arm_types,
+            type_test_targets: self.type_test_targets,
             variant_accesses: self.variant_accesses,
             scalar_static_accesses: self.scalar_static_accesses,
             static_class_accesses: self.static_class_accesses,
@@ -2888,6 +3560,11 @@ impl<'a> Checker<'a> {
             contract_instances: self.contract_instances,
             enum_instances: self.enum_instances,
             unions: self.unions,
+            union_aliases: self.union_aliases,
+            intersections: self.intersections,
+            structural_types: self.structural_types,
+            recursive_shape_names: self.recursive_shape_names,
+            singleton_values: self.singleton_values,
             generic_constructions: self.generic_constructions,
             inner_constructions: self.inner_constructions,
             resolved_constructions: self.resolved_constructions,
@@ -3742,7 +4419,14 @@ impl<'a> Checker<'a> {
             );
         }
 
-        SemanticIndex::from_facts(declarations, semantic_references)
+        SemanticIndex::from_facts(
+            declarations,
+            semantic_references,
+            self.expr_types
+                .iter()
+                .map(|(span, ty)| (*span, self.name(*ty)))
+                .collect(),
+        )
     }
 
     /// `fn(a: Int32, b: Int32): Void` — the rendered signature type-map
@@ -4002,6 +4686,8 @@ impl<'a> Checker<'a> {
                 Some("rename this declaration, or read the outer value before it is hidden".into()),
             );
         }
+        self.flow_state
+            .declare(FlowPath::local(binding.span), binding.ty);
         self.scopes.declare(binding);
     }
 
@@ -4277,6 +4963,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4296,6 +4983,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4315,6 +5003,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4470,6 +5159,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4477,6 +5167,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "E".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4525,6 +5216,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -4603,6 +5295,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "T".into(),
             constraints: Vec::new(),
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -5092,6 +5785,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "E".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -5183,6 +5877,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "BodyError".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -5191,6 +5886,7 @@ impl<'a> Checker<'a> {
         self.type_params.push(TypeParamInfo {
             name: "CloseError".into(),
             constraints: vec![Type::of(Base::Class(native_exceptions.error))],
+            variance: Variance::Invariant,
             default: None,
             span: at,
         });
@@ -5545,7 +6241,7 @@ impl<'a> Checker<'a> {
                                 self.contracts[i as usize].span,
                                 format!("contracts `{first}` and `{second}` have incompatible property `{}`", property.name),
                                 "a contract implementing both must expose one compatible property shape",
-                                None,
+                                Some("make both contracts declare compatible property types and mutability, or implement only one contract".into()),
                             );
                         }
                     } else {
@@ -6532,6 +7228,7 @@ impl<'a> Checker<'a> {
                 self.type_params.push(TypeParamInfo {
                     name: p.name.name.clone(),
                     constraints: Vec::new(),
+                    variance: p.variance,
                     default: None,
                     span: p.span,
                 });
@@ -6713,8 +7410,15 @@ impl<'a> Checker<'a> {
             match p.variance {
                 Variance::Invariant => continue,
                 Variance::Out => {
-                    if inputs.iter().any(|t| self.type_uses_param(*t, id))
-                        || mutables.iter().any(|t| self.type_uses_param(*t, id))
+                    if inputs
+                        .iter()
+                        .any(|t| self.type_has_wrong_variance(*t, id, -1, 1, &mut HashSet::new()))
+                        || outputs.iter().any(|t| {
+                            self.type_has_wrong_variance(*t, id, 1, 1, &mut HashSet::new())
+                        })
+                        || mutables.iter().any(|t| {
+                            self.type_has_wrong_variance(*t, id, 0, 1, &mut HashSet::new())
+                        })
                     {
                         self.error(
                             codes::INVALID_VARIANCE,
@@ -6726,8 +7430,15 @@ impl<'a> Checker<'a> {
                     }
                 }
                 Variance::In => {
-                    if outputs.iter().any(|t| self.type_uses_param(*t, id))
-                        || mutables.iter().any(|t| self.type_uses_param(*t, id))
+                    if inputs
+                        .iter()
+                        .any(|t| self.type_has_wrong_variance(*t, id, -1, -1, &mut HashSet::new()))
+                        || outputs.iter().any(|t| {
+                            self.type_has_wrong_variance(*t, id, 1, -1, &mut HashSet::new())
+                        })
+                        || mutables.iter().any(|t| {
+                            self.type_has_wrong_variance(*t, id, 0, -1, &mut HashSet::new())
+                        })
                     {
                         self.error(
                             codes::INVALID_VARIANCE,
@@ -6742,12 +7453,189 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Whether `ty` is the exact type parameter `id`, ignoring nullability.
-    ///
-    /// Nested generic arguments and function types are not walked: their own
-    /// variance rules apply (in particular, `Fn` keeps its intrinsic variance).
-    fn type_uses_param(&self, ty: Type, id: u32) -> bool {
-        ty.base == Base::Param(id)
+    /// Reports a use of `id` whose composed polarity differs from `expected`.
+    /// Positive is covariant, negative contravariant, and zero invariant.
+    fn type_has_wrong_variance(
+        &self,
+        ty: Type,
+        id: u32,
+        polarity: i8,
+        expected: i8,
+        visiting: &mut HashSet<Base>,
+    ) -> bool {
+        if ty.base == Base::Param(id) {
+            return polarity != expected;
+        }
+        if !visiting.insert(ty.base) {
+            return false;
+        }
+        let found = match ty.base {
+            Base::Function(function) => {
+                self.fn_types
+                    .get(function as usize)
+                    .is_some_and(|function| {
+                        function.params.iter().any(|param| {
+                            self.type_has_wrong_variance(*param, id, -polarity, expected, visiting)
+                        }) || self.type_has_wrong_variance(
+                            function.returns,
+                            id,
+                            polarity,
+                            expected,
+                            visiting,
+                        )
+                    })
+            }
+            Base::Shape(shape) => self
+                .structural_types
+                .get(shape as usize)
+                .is_some_and(|shape| {
+                    shape.properties.iter().any(|property| {
+                        self.type_has_wrong_variance(
+                            property.ty,
+                            id,
+                            if property.readonly { polarity } else { 0 },
+                            expected,
+                            visiting,
+                        )
+                    })
+                }),
+            Base::Instance(instance) => {
+                self.generic_instances
+                    .get(instance as usize)
+                    .is_some_and(|instance| {
+                        self.classes
+                            .get(instance.class as usize)
+                            .is_some_and(|class| {
+                                self.generic_args_have_wrong_variance(
+                                    &class.type_params,
+                                    &instance.args,
+                                    id,
+                                    polarity,
+                                    expected,
+                                    visiting,
+                                )
+                            })
+                    })
+            }
+            Base::ContractInstance(instance) => self
+                .contract_instances
+                .get(instance as usize)
+                .is_some_and(|instance| {
+                    self.contracts
+                        .get(instance.contract as usize)
+                        .is_some_and(|contract| {
+                            self.generic_args_have_wrong_variance(
+                                &contract.type_params,
+                                &instance.args,
+                                id,
+                                polarity,
+                                expected,
+                                visiting,
+                            )
+                        })
+                }),
+            Base::EnumInstance(instance) => {
+                self.enum_instances
+                    .get(instance as usize)
+                    .is_some_and(|instance| {
+                        self.enums
+                            .get(instance.enum_id as usize)
+                            .is_some_and(|enumeration| {
+                                self.generic_args_have_wrong_variance(
+                                    &enumeration.type_params,
+                                    &instance.args,
+                                    id,
+                                    polarity,
+                                    expected,
+                                    visiting,
+                                )
+                            })
+                    })
+            }
+            Base::Tuple(tuple) => self.tuple_types.get(tuple as usize).is_some_and(|tuple| {
+                tuple
+                    .elements
+                    .iter()
+                    .any(|ty| self.type_has_wrong_variance(*ty, id, polarity, expected, visiting))
+            }),
+            Base::Union(union) => self.unions.get(union as usize).is_some_and(|members| {
+                members.iter().any(|base| {
+                    self.type_has_wrong_variance(Type::of(*base), id, polarity, expected, visiting)
+                })
+            }),
+            Base::Intersection(intersection) => self
+                .intersections
+                .get(intersection as usize)
+                .is_some_and(|members| {
+                    members.iter().any(|base| {
+                        self.type_has_wrong_variance(
+                            Type::of(*base),
+                            id,
+                            polarity,
+                            expected,
+                            visiting,
+                        )
+                    })
+                }),
+            Base::Job(job) => self.job_types.get(job as usize).is_some_and(|ty| {
+                self.type_has_wrong_variance(*ty, id, polarity, expected, visiting)
+            }),
+            Base::Channel(channel) => self
+                .channel_types
+                .get(channel as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::Array(array) => self
+                .array_types
+                .get(array as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::List(list) => self
+                .list_types
+                .get(list as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::Set(set) => self
+                .set_types
+                .get(set as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::Map(map) => self.map_types.get(map as usize).is_some_and(|map| {
+                self.type_has_wrong_variance(map.key, id, 0, expected, visiting)
+                    || self.type_has_wrong_variance(map.value, id, 0, expected, visiting)
+            }),
+            Base::Atomic(value) => self
+                .atomic_types
+                .get(value as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::Mutex(value) => self
+                .mutex_types
+                .get(value as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            _ => false,
+        };
+        visiting.remove(&ty.base);
+        found
+    }
+
+    fn generic_args_have_wrong_variance(
+        &self,
+        params: &[u32],
+        args: &[Type],
+        id: u32,
+        polarity: i8,
+        expected: i8,
+        visiting: &mut HashSet<Base>,
+    ) -> bool {
+        params.iter().zip(args).any(|(&parameter, argument)| {
+            let nested_polarity = match self
+                .type_params
+                .get(parameter as usize)
+                .map(|parameter| parameter.variance)
+                .unwrap_or(Variance::Invariant)
+            {
+                Variance::Out => polarity,
+                Variance::In => -polarity,
+                Variance::Invariant => 0,
+            };
+            self.type_has_wrong_variance(*argument, id, nested_polarity, expected, visiting)
+        })
     }
 
     /// Resolves every `extends`, rejecting a base that is not a class and any
@@ -7021,7 +7909,7 @@ impl<'a> Checker<'a> {
         self.class_id(&resolved).or_else(|| {
             self.type_aliases
                 .contains_key(&resolved)
-                .then(|| self.resolve_type_alias(&resolved, at))
+                .then(|| self.resolve_type_alias(&TypeRef::new(resolved.clone(), at), &resolved))
                 .and_then(|ty| match ty.base {
                     Base::Class(id) => Some(id),
                     _ => None,
@@ -7057,19 +7945,20 @@ impl<'a> Checker<'a> {
 
     /// Fills in fields, constructors and methods, bases before subclasses.
     fn declare_members(&mut self, program: &Program) {
-        for decl in self.in_hierarchy_order(program) {
-            self.declare_class_members(decl);
-        }
-
-        // Enums have no base/`implements` hierarchy to order against, so
-        // declaration order relative to `program.enums` (or relative to the
-        // class loop above) does not matter here — every class and every
-        // enum is already registered by this point (`register_class` and
-        // `register_enum` both ran ahead of this pass), which is exactly
-        // what lets a variant's associated field name any of them, in
-        // either declaration order, including the enum's own type.
+        // Complete enum variant metadata before class fields resolve const
+        // singleton expressions. Every class and enum name is registered by
+        // this point, so variant payload types can still refer to classes and
+        // to enums declared later in source.
         for e in &program.enums {
             self.declare_enum_variants(e);
+        }
+
+        // Classes have a base hierarchy, which determines the declaration
+        // order required for inherited fields and methods. Their fields may
+        // now also evaluate enum singleton constants with checked payload
+        // metadata available.
+        for decl in self.in_hierarchy_order(program) {
+            self.declare_class_members(decl);
         }
 
         // `fase-3-recursive-enums` lets a variant's associated field name
@@ -7849,6 +8738,72 @@ impl<'a> Checker<'a> {
             return false;
         }
 
+        if let Base::Singleton(id) = actual.base {
+            let Some(value) = self.singleton_values.get(id as usize) else {
+                return false;
+            };
+            if let Base::Int(destination) = expected.base {
+                let fits = match &value.value {
+                    crate::constant_value::ConstValue::Integer { value, .. } => {
+                        let (minimum, maximum) = destination.literal_range();
+                        (minimum..=maximum).contains(value)
+                    }
+                    crate::constant_value::ConstValue::BigUnsigned { value, .. } => {
+                        let maximum = match destination {
+                            IntWidth::U8 => u8::MAX as u128,
+                            IntWidth::U16 => u16::MAX as u128,
+                            IntWidth::U32 => u32::MAX as u128,
+                            IntWidth::U64 => u64::MAX as u128,
+                            IntWidth::U128 => u128::MAX,
+                            IntWidth::I8
+                            | IntWidth::I16
+                            | IntWidth::I32
+                            | IntWidth::I64
+                            | IntWidth::I128 => return false,
+                        };
+                        *value <= maximum
+                    }
+                    _ => false,
+                };
+                if fits {
+                    return true;
+                }
+            }
+            if let (
+                Base::Float(destination),
+                crate::constant_value::ConstValue::Float { width: source, .. },
+            ) = (expected.base, &value.value)
+                && destination.bits() >= source.bits()
+            {
+                // Every finite value and signed infinity in a binary Float
+                // format is exactly representable in any wider binary format.
+                // `ConstValue::float` already canonicalizes both zero signs
+                // and rejects NaN, so this agrees with singleton equality.
+                return true;
+            }
+            let expected_identity = match expected.base {
+                Base::Int(width) => Some(width.name()),
+                Base::Float(width) => Some(width.name()),
+                Base::Decimal => Some("Decimal"),
+                Base::Char => Some("Char"),
+                Base::Boolean => Some("Boolean"),
+                Base::String => Some("String"),
+                Base::Duration => Some("Duration"),
+                Base::Date => Some("Date"),
+                Base::Time => Some("Time"),
+                Base::DateTime => Some("DateTime"),
+                Base::Null => Some("Null"),
+                Base::Enum(id) => self
+                    .enums
+                    .get(id as usize)
+                    .map(|enum_ty| enum_ty.name.as_str()),
+                _ => None,
+            };
+            if expected_identity == Some(value.type_identity.as_str()) {
+                return true;
+            }
+        }
+
         let (current, subst) = match actual.base {
             Base::Class(id) => (id, Vec::new()),
             Base::Instance(id) => {
@@ -8043,25 +8998,687 @@ impl<'a> Checker<'a> {
         self.enum_instances[target as usize].enum_id == actual_id
     }
 
-    /// Whether a value fits where a union is expected: it matches, or is a
-    /// subclass of, at least one alternative.
-    ///
-    /// `Type::accepts` alone cannot answer this: a union's member list lives
-    /// in the checker's table, not in the two bytes a bare `Type` carries.
-    fn accepts_into_union(&self, expected: Type, actual: Type) -> bool {
-        let Base::Union(id) = expected.base else {
-            return false;
+    fn assignable_relation(
+        &self,
+        expected: Type,
+        actual: Type,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        self.assignable_relation_inner(
+            expected,
+            actual,
+            &mut crate::type_budget::TypeComputationBudget::default(),
+            &mut HashSet::new(),
+        )
+    }
+
+    fn assignable_relation_inner(
+        &self,
+        expected: Type,
+        actual: Type,
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        active: &mut HashSet<(Type, Type)>,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        let pair = (expected, actual);
+        if let Some(result) = self.relation_memo.borrow().get(&pair).copied() {
+            return Ok(result);
+        }
+        if !active.insert(pair) {
+            // A recursive proof cycle is not evidence of assignability.
+            return Ok(false);
+        }
+        budget
+            .charge(crate::type_budget::BudgetKind::RelationPairVisits, 1)
+            .map_err(|error| error)?;
+        let result = budget.with_depth(crate::type_budget::BudgetKind::RelationDepth, |budget| {
+            self.assignable_relation_inner_body(expected, actual, budget, active)
+        });
+        active.remove(&pair);
+        let result = match result {
+            Ok(value) => value,
+            Err(crate::type_budget::DepthBudgetError::Exceeded(error)) => return Err(error),
+            Err(crate::type_budget::DepthBudgetError::Operation(error)) => return Err(error),
+            Err(crate::type_budget::DepthBudgetError::InvalidDimension(_)) => {
+                unreachable!("relation depth is a supported type-budget dimension")
+            }
         };
-        if actual.is_unknown() {
-            return true;
+        self.relation_memo.borrow_mut().insert(pair, result);
+        Ok(result)
+    }
+
+    fn assignable_relation_inner_body(
+        &self,
+        expected: Type,
+        actual: Type,
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        active: &mut HashSet<(Type, Type)>,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        if expected.borrowed_scope() != actual.borrowed_scope() {
+            return Ok(false);
         }
+        if expected.accepts(actual)
+            || (actual.base == Base::Object
+                && matches!(expected.base, Base::Contract(_) | Base::ContractInstance(_))
+                && (!actual.nullable || expected.nullable))
+            || self.is_subclass_of(actual, expected)
+            || self.bare_enum_matches_instance(actual, expected)
+        {
+            return Ok(true);
+        }
+
+        // A constant singleton is a refinement of its declared value type.
+        // It remains distinct from other singleton values, but it must be
+        // assignable to the primitive/nominal type that carries the value;
+        // this is also what lets a literal pattern select one alternative of
+        // a normalized union during `match` checking.
+        if let Base::Singleton(id) = actual.base
+            && !matches!(expected.base, Base::Singleton(_) | Base::Union(_))
+            && let Some(value) = self.singleton_values.get(id as usize)
+            && let Some(mut underlying) = Type::from_name(&value.type_identity)
+        {
+            underlying.nullable = actual.nullable;
+            underlying.borrowed_scope = actual.borrowed_scope;
+            return self.assignable_relation_inner(expected, underlying, budget, active);
+        }
+
+        if let (Base::Function(expected_id), Base::Function(actual_id)) =
+            (expected.base, actual.base)
+        {
+            return self.callable_signature_relation(expected_id, actual_id, budget, active);
+        }
+
+        if let (Base::Instance(expected_id), Base::Instance(actual_id)) =
+            (expected.base, actual.base)
+        {
+            let Some(expected_instance) = self.generic_instances.get(expected_id as usize) else {
+                return Ok(false);
+            };
+            let Some(actual_instance) = self.generic_instances.get(actual_id as usize) else {
+                return Ok(false);
+            };
+            if expected_instance.class != actual_instance.class
+                || expected_instance.args.len() != actual_instance.args.len()
+            {
+                return Ok(false);
+            }
+            let Some(class) = self.classes.get(expected_instance.class as usize) else {
+                return Ok(false);
+            };
+            return self.generic_arguments_assignable(
+                &class.type_params,
+                &expected_instance.args,
+                &actual_instance.args,
+                budget,
+                active,
+            );
+        }
+        if let (Base::ContractInstance(expected_id), Base::ContractInstance(actual_id)) =
+            (expected.base, actual.base)
+        {
+            let Some(expected_instance) = self.contract_instances.get(expected_id as usize) else {
+                return Ok(false);
+            };
+            let Some(actual_instance) = self.contract_instances.get(actual_id as usize) else {
+                return Ok(false);
+            };
+            if expected_instance.contract != actual_instance.contract
+                || expected_instance.args.len() != actual_instance.args.len()
+            {
+                return Ok(false);
+            }
+            let Some(contract) = self.contracts.get(expected_instance.contract as usize) else {
+                return Ok(false);
+            };
+            return self.generic_arguments_assignable(
+                &contract.type_params,
+                &expected_instance.args,
+                &actual_instance.args,
+                budget,
+                active,
+            );
+        }
+        if let (Base::EnumInstance(expected_id), Base::EnumInstance(actual_id)) =
+            (expected.base, actual.base)
+        {
+            let Some(expected_instance) = self.enum_instances.get(expected_id as usize) else {
+                return Ok(false);
+            };
+            let Some(actual_instance) = self.enum_instances.get(actual_id as usize) else {
+                return Ok(false);
+            };
+            if expected_instance.enum_id != actual_instance.enum_id
+                || expected_instance.args.len() != actual_instance.args.len()
+            {
+                return Ok(false);
+            }
+            let Some(enumeration) = self.enums.get(expected_instance.enum_id as usize) else {
+                return Ok(false);
+            };
+            return self.generic_arguments_assignable(
+                &enumeration.type_params,
+                &expected_instance.args,
+                &actual_instance.args,
+                budget,
+                active,
+            );
+        }
+
         if actual.nullable && !expected.nullable {
-            return false;
+            return Ok(false);
         }
-        let actual = actual.without_null();
-        self.unions[id as usize].iter().any(|&member| {
-            let member = Type::of(member);
-            member.accepts(actual) || self.is_subclass_of(actual, member)
+
+        if let Base::Union(id) = actual.base {
+            let Some(members) = self.unions.get(id as usize) else {
+                return Ok(false);
+            };
+            for &member in members {
+                let mut member_type = Type::of(member);
+                member_type.borrowed_scope = actual.borrowed_scope();
+                if !self.assignable_relation_inner(expected, member_type, budget, active)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
+        if let Base::Union(id) = expected.base {
+            let Some(members) = self.unions.get(id as usize) else {
+                return Ok(false);
+            };
+            for &member in members {
+                let mut member_type = Type::of(member);
+                member_type.nullable = expected.nullable;
+                member_type.borrowed_scope = expected.borrowed_scope();
+                if self.assignable_relation_inner(member_type, actual, budget, active)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+
+        if let Base::Shape(expected_id) = expected.base {
+            let Some(required) = self.structural_types.get(expected_id as usize) else {
+                return Ok(false);
+            };
+            let Some(provided) = self.structural_properties_for_relation(actual) else {
+                return Ok(false);
+            };
+            return self.structural_property_sets_assignable(
+                &required.properties,
+                &provided,
+                budget,
+                active,
+            );
+        }
+
+        if matches!(expected.base, Base::Contract(_) | Base::ContractInstance(_))
+            && matches!(
+                actual.base,
+                Base::Shape(_) | Base::Contract(_) | Base::ContractInstance(_)
+            )
+        {
+            let expected_id = match expected.base {
+                Base::Contract(id) => id,
+                Base::ContractInstance(id) => self.contract_instances[id as usize].contract,
+                _ => unreachable!(),
+            };
+            let Some(contract) = self.contracts.get(expected_id as usize) else {
+                return Ok(false);
+            };
+            // Contract operations are not represented as structural callable
+            // properties yet. Do not prove a shape relation by ignoring them.
+            if !contract.methods.is_empty() {
+                return Ok(false);
+            }
+            let required = self.structural_properties_for_relation(expected);
+            let Some(required) = required else {
+                return Ok(false);
+            };
+            let Some(provided) = self.structural_properties_for_relation(actual) else {
+                return Ok(false);
+            };
+            return self.structural_property_sets_assignable(&required, &provided, budget, active);
+        }
+
+        if let Base::Intersection(id) = expected.base {
+            let Some(members) = self.intersections.get(id as usize) else {
+                return Ok(false);
+            };
+            for &member in members {
+                let mut member_type = Type::of(member);
+                member_type.borrowed_scope = actual.borrowed_scope();
+                if !self.assignable_relation_inner(member_type, actual, budget, active)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
+        if let Base::Intersection(id) = actual.base {
+            let Some(members) = self.intersections.get(id as usize) else {
+                return Ok(false);
+            };
+            for &member in members {
+                let mut member_type = Type::of(member);
+                member_type.borrowed_scope = actual.borrowed_scope();
+                if self.assignable_relation_inner(expected, member_type, budget, active)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn generic_arguments_assignable(
+        &self,
+        parameter_ids: &[u32],
+        expected: &[Type],
+        actual: &[Type],
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        active: &mut HashSet<(Type, Type)>,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        for ((&parameter_id, &expected_arg), &actual_arg) in
+            parameter_ids.iter().zip(expected).zip(actual)
+        {
+            let variance = self
+                .type_params
+                .get(parameter_id as usize)
+                .map(|parameter| parameter.variance)
+                .unwrap_or(Variance::Invariant);
+            let compatible = match variance {
+                Variance::Out => {
+                    self.assignable_relation_inner(expected_arg, actual_arg, budget, active)?
+                }
+                Variance::In => {
+                    self.assignable_relation_inner(actual_arg, expected_arg, budget, active)?
+                }
+                Variance::Invariant => {
+                    self.assignable_relation_inner(expected_arg, actual_arg, budget, active)?
+                        && self.assignable_relation_inner(
+                            actual_arg,
+                            expected_arg,
+                            budget,
+                            active,
+                        )?
+                }
+            };
+            if !compatible {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn callable_signature_relation(
+        &self,
+        expected_id: u32,
+        actual_id: u32,
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        active: &mut HashSet<(Type, Type)>,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        let Some(expected) = self.fn_types.get(expected_id as usize) else {
+            return Ok(false);
+        };
+        let Some(actual) = self.fn_types.get(actual_id as usize) else {
+            return Ok(false);
+        };
+        if expected.params.len() != actual.params.len() {
+            return Ok(false);
+        }
+        // Function inputs are contravariant: an implementation must accept
+        // every input promised by the target. Results are covariant.
+        for (expected_param, actual_param) in expected.params.iter().zip(&actual.params) {
+            if !self.assignable_relation_inner(*actual_param, *expected_param, budget, active)? {
+                return Ok(false);
+            }
+        }
+        self.assignable_relation_inner(expected.returns, actual.returns, budget, active)
+    }
+
+    /// Returns the members a value statically exposes for structural width
+    /// checks. Nominal class identity remains unchanged; a class only fits a
+    /// shape when its public instance fields provide the required members.
+    fn structural_properties_for_relation(&self, actual: Type) -> Option<Vec<StructuralProperty>> {
+        match actual.base {
+            Base::Shape(id) => self
+                .structural_types
+                .get(id as usize)
+                .map(|shape| shape.properties.clone()),
+            Base::Intersection(id) => {
+                let members = self.intersections.get(id as usize)?;
+                let mut combined: Vec<StructuralProperty> = Vec::new();
+                for &member in members {
+                    let properties = self.structural_properties_for_relation(Type::of(member))?;
+                    for property in properties {
+                        if let Some(existing) = combined
+                            .iter_mut()
+                            .find(|existing| existing.name == property.name)
+                        {
+                            if existing.ty != property.ty {
+                                // Until property types can carry their own
+                                // intersection, do not invent a compatibility
+                                // proof for conflicting declarations.
+                                return None;
+                            }
+                            existing.optional &= property.optional;
+                            existing.readonly |= property.readonly;
+                        } else {
+                            combined.push(property);
+                        }
+                    }
+                }
+                Some(combined)
+            }
+            Base::Contract(id) => {
+                let contract = self.contracts.get(id as usize)?;
+                Some(
+                    contract
+                        .properties
+                        .iter()
+                        .map(|property| StructuralProperty {
+                            name: property.name.clone(),
+                            ty: property.ty,
+                            optional: false,
+                            readonly: property.mutability != Mutability::Mutable,
+                        })
+                        .collect(),
+                )
+            }
+            Base::ContractInstance(id) => {
+                let instance = self.contract_instances.get(id as usize)?;
+                let contract = self.contracts.get(instance.contract as usize)?;
+                let substitutions: Vec<_> = contract
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                contract
+                    .properties
+                    .iter()
+                    .map(|property| {
+                        Some(StructuralProperty {
+                            name: property.name.clone(),
+                            ty: self.substitute_relation_type(property.ty, &substitutions)?,
+                            optional: false,
+                            readonly: property.mutability != Mutability::Mutable,
+                        })
+                    })
+                    .collect()
+            }
+            Base::Class(_) | Base::Instance(_) => {
+                let (class_id, args) = match actual.base {
+                    Base::Class(id) => (id, Vec::new()),
+                    Base::Instance(id) => {
+                        let instance = self.generic_instances.get(id as usize)?;
+                        (instance.class, instance.args.clone())
+                    }
+                    _ => unreachable!(),
+                };
+                let class = self.classes.get(class_id as usize)?;
+                let substitutions: Vec<_> = class.type_params.iter().copied().zip(args).collect();
+                class
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        field.visibility == zirk_ast::Visibility::Public && !field.is_static
+                    })
+                    .map(|field| {
+                        Some(StructuralProperty {
+                            name: field.name.clone(),
+                            ty: self.substitute_relation_type(field.ty, &substitutions)?,
+                            optional: false,
+                            readonly: field.mutability != Mutability::Mutable,
+                        })
+                    })
+                    .collect()
+            }
+            _ => None,
+        }
+    }
+
+    fn structural_property_sets_assignable(
+        &self,
+        required: &[StructuralProperty],
+        provided: &[StructuralProperty],
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        active: &mut HashSet<(Type, Type)>,
+    ) -> Result<bool, crate::type_budget::BudgetExceeded> {
+        for required_property in required {
+            let Some(provided_property) = provided
+                .iter()
+                .find(|property| property.name == required_property.name)
+            else {
+                if required_property.optional {
+                    continue;
+                }
+                return Ok(false);
+            };
+            if provided_property.optional && !required_property.optional {
+                return Ok(false);
+            }
+            if !self.assignable_relation_inner(
+                required_property.ty,
+                provided_property.ty,
+                budget,
+                active,
+            )? {
+                return Ok(false);
+            }
+            if !required_property.readonly
+                && (provided_property.readonly
+                    || !self.assignable_relation_inner(
+                        provided_property.ty,
+                        required_property.ty,
+                        budget,
+                        active,
+                    )?)
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Applies a generic class instantiation to a property type without
+    /// mutating or growing the checker's canonical type tables. Composite
+    /// views are returned only when their concrete instantiation is already
+    /// interned in this analysis snapshot.
+    fn substitute_relation_type(&self, ty: Type, subst: &[(u32, Type)]) -> Option<Type> {
+        if let Base::Param(id) = ty.base
+            && let Some((_, replacement)) = subst.iter().find(|(parameter, _)| *parameter == id)
+        {
+            let mut replacement = if ty.nullable {
+                replacement.as_nullable()
+            } else {
+                replacement.without_null()
+            };
+            replacement.borrowed_scope = ty.borrowed_scope();
+            return Some(replacement);
+        }
+
+        let mut nullable = ty.nullable;
+        let base = match ty.base {
+            Base::Shape(id) => {
+                let shape = self.structural_types.get(id as usize)?;
+                let properties: Vec<_> = shape
+                    .properties
+                    .iter()
+                    .map(|property| {
+                        Some(StructuralProperty {
+                            ty: self.substitute_relation_type(property.ty, subst)?,
+                            ..property.clone()
+                        })
+                    })
+                    .collect::<Option<_>>()?;
+                Base::Shape(
+                    self.structural_types
+                        .iter()
+                        .position(|candidate| candidate.properties == properties)?
+                        as u32,
+                )
+            }
+            Base::Instance(id) => {
+                let instance = self.generic_instances.get(id as usize)?;
+                let args: Vec<_> = instance
+                    .args
+                    .iter()
+                    .map(|argument| self.substitute_relation_type(*argument, subst))
+                    .collect::<Option<_>>()?;
+                Base::Instance(self.generic_instances.iter().position(|candidate| {
+                    candidate.class == instance.class && candidate.args == args
+                })? as u32)
+            }
+            Base::ContractInstance(id) => {
+                let instance = self.contract_instances.get(id as usize)?;
+                let args: Vec<_> = instance
+                    .args
+                    .iter()
+                    .map(|argument| self.substitute_relation_type(*argument, subst))
+                    .collect::<Option<_>>()?;
+                Base::ContractInstance(self.contract_instances.iter().position(|candidate| {
+                    candidate.contract == instance.contract && candidate.args == args
+                })? as u32)
+            }
+            Base::EnumInstance(id) => {
+                let instance = self.enum_instances.get(id as usize)?;
+                let args: Vec<_> = instance
+                    .args
+                    .iter()
+                    .map(|argument| self.substitute_relation_type(*argument, subst))
+                    .collect::<Option<_>>()?;
+                Base::EnumInstance(self.enum_instances.iter().position(|candidate| {
+                    candidate.enum_id == instance.enum_id && candidate.args == args
+                })? as u32)
+            }
+            Base::Array(id) => {
+                let element =
+                    self.substitute_relation_type(*self.array_types.get(id as usize)?, subst)?;
+                Base::Array(
+                    self.array_types
+                        .iter()
+                        .position(|candidate| *candidate == element)? as u32,
+                )
+            }
+            Base::List(id) => {
+                let element =
+                    self.substitute_relation_type(*self.list_types.get(id as usize)?, subst)?;
+                Base::List(
+                    self.list_types
+                        .iter()
+                        .position(|candidate| *candidate == element)? as u32,
+                )
+            }
+            Base::Set(id) => {
+                let element =
+                    self.substitute_relation_type(*self.set_types.get(id as usize)?, subst)?;
+                Base::Set(
+                    self.set_types
+                        .iter()
+                        .position(|candidate| *candidate == element)? as u32,
+                )
+            }
+            Base::Map(id) => {
+                let map = self.map_types.get(id as usize)?;
+                let key = self.substitute_relation_type(map.key, subst)?;
+                let value = self.substitute_relation_type(map.value, subst)?;
+                Base::Map(
+                    self.map_types
+                        .iter()
+                        .position(|candidate| candidate.key == key && candidate.value == value)?
+                        as u32,
+                )
+            }
+            Base::Tuple(id) => {
+                let tuple = self.tuple_types.get(id as usize)?;
+                let elements: Vec<_> = tuple
+                    .elements
+                    .iter()
+                    .map(|element| self.substitute_relation_type(*element, subst))
+                    .collect::<Option<_>>()?;
+                Base::Tuple(
+                    self.tuple_types
+                        .iter()
+                        .position(|candidate| candidate.elements == elements)?
+                        as u32,
+                )
+            }
+            Base::Function(id) => {
+                let function = self.fn_types.get(id as usize)?;
+                let params: Vec<_> = function
+                    .params
+                    .iter()
+                    .map(|parameter| self.substitute_relation_type(*parameter, subst))
+                    .collect::<Option<_>>()?;
+                let returns = self.substitute_relation_type(function.returns, subst)?;
+                Base::Function(self.fn_types.iter().position(|candidate| {
+                    candidate.params == params && candidate.returns == returns
+                })? as u32)
+            }
+            Base::Union(id) => {
+                let mut members = Vec::new();
+                for &member in self.unions.get(id as usize)? {
+                    let member = self.substitute_relation_type(Type::of(member), subst)?;
+                    nullable |= member.nullable;
+                    match member.base {
+                        Base::Null => nullable = true,
+                        Base::Never => {}
+                        Base::Union(nested) => {
+                            members.extend(self.unions.get(nested as usize)?.iter().copied());
+                        }
+                        base if !members.contains(&base) => members.push(base),
+                        _ => {}
+                    }
+                }
+                match members.len() {
+                    0 => Base::Null,
+                    1 => members[0],
+                    _ => {
+                        Self::sort_bases(&mut members);
+                        Base::Union(
+                            self.unions
+                                .iter()
+                                .position(|candidate| *candidate == members)?
+                                as u32,
+                        )
+                    }
+                }
+            }
+            Base::Intersection(id) => {
+                let mut members = Vec::new();
+                for &member in self.intersections.get(id as usize)? {
+                    let member = self.substitute_relation_type(Type::of(member), subst)?;
+                    if member.nullable {
+                        return None;
+                    }
+                    match member.base {
+                        Base::Intersection(nested) => {
+                            members
+                                .extend(self.intersections.get(nested as usize)?.iter().copied());
+                        }
+                        base if !members.contains(&base) => members.push(base),
+                        _ => {}
+                    }
+                }
+                match members.len() {
+                    0 => Base::Never,
+                    1 => members[0],
+                    _ => {
+                        Self::sort_bases(&mut members);
+                        Base::Intersection(
+                            self.intersections
+                                .iter()
+                                .position(|candidate| *candidate == members)?
+                                as u32,
+                        )
+                    }
+                }
+            }
+            other => other,
+        };
+        Some(Type {
+            base,
+            nullable,
+            ..ty
         })
     }
 
@@ -8133,7 +9750,10 @@ impl<'a> Checker<'a> {
         for field in &decl.fields {
             if let Some(default) = &field.default {
                 let expected = self.resolve_type(&field.ty);
+                let previous_expected = self.expected_type;
+                self.expected_type = Some(expected);
                 let actual = self.check_expr(default);
+                self.expected_type = previous_expected;
                 if !actual.is_unknown() {
                     self.expect_assignable(expected, actual, default.span(), "the default value");
                 }
@@ -8246,7 +9866,10 @@ impl<'a> Checker<'a> {
         for param in params {
             if let Some(default) = &param.default {
                 let info = self.resolve_param(param);
+                let previous_expected = self.expected_type;
+                self.expected_type = Some(info.ty);
                 let actual = self.check_expr(default);
+                self.expected_type = previous_expected;
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
         }
@@ -8388,8 +10011,6 @@ impl<'a> Checker<'a> {
     /// every other type name already tolerates.
     fn declare_type_aliases(&mut self, program: &Program) {
         for decl in &program.type_aliases {
-            self.type_alias_spans
-                .insert(decl.name.name.clone(), decl.name.span);
             if self.type_aliases.contains_key(&decl.name.name) {
                 self.error(
                     codes::DUPLICATE_DECLARATION,
@@ -8400,8 +10021,135 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             }
+            self.type_alias_spans
+                .insert(decl.name.name.clone(), decl.name.span);
             self.type_aliases
                 .insert(decl.name.name.clone(), decl.target.clone());
+            self.type_alias_params
+                .insert(decl.name.name.clone(), decl.type_params.clone());
+        }
+        for decl in &program.type_aliases {
+            for parameter in &decl.type_params {
+                if parameter.variance == Variance::Invariant {
+                    continue;
+                }
+                let expected = if parameter.variance == Variance::Out {
+                    1
+                } else {
+                    -1
+                };
+                let mut uses = Vec::new();
+                Self::collect_type_ref_polarities(&decl.target, &parameter.name.name, 1, &mut uses);
+                if uses.iter().any(|polarity| *polarity != expected) {
+                    self.error(
+                        codes::INVALID_VARIANCE,
+                        parameter.span,
+                        format!("`{} {}` is used in an incompatible position in type alias `{}`", if expected > 0 { "out" } else { "in" }, parameter.name.name, decl.name.name),
+                        "declared variance must agree with every use through nested types and callable positions",
+                        Some("remove the variance annotation or change the alias target".into()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn collect_type_ref_polarities(
+        reference: &TypeRef,
+        parameter: &str,
+        polarity: i8,
+        uses: &mut Vec<i8>,
+    ) {
+        if reference.name == parameter {
+            uses.push(polarity);
+        }
+        if reference.name == "keyof"
+            || reference.name == "indexed"
+            || reference.name.starts_with("mapped:")
+        {
+            for argument in &reference.arguments {
+                Self::collect_type_ref_polarities(argument, parameter, 0, uses);
+            }
+        } else {
+            let variances = if matches!(
+                reference.name.as_str(),
+                "Array" | "List" | "Set" | "Map" | "Atomic" | "Mutex" | "Channel"
+            ) {
+                vec![Variance::Invariant; reference.arguments.len()]
+            } else {
+                vec![Variance::Invariant; reference.arguments.len()]
+            };
+            for (argument, variance) in reference.arguments.iter().zip(variances) {
+                let nested = match variance {
+                    Variance::Out => polarity,
+                    Variance::In => -polarity,
+                    Variance::Invariant => 0,
+                };
+                Self::collect_type_ref_polarities(argument, parameter, nested, uses);
+            }
+        }
+        for member in reference
+            .union_with
+            .iter()
+            .chain(&reference.intersection_with)
+        {
+            Self::collect_type_ref_polarities(member, parameter, polarity, uses);
+        }
+        if let Some(function) = reference.function.as_deref() {
+            for argument in &function.params {
+                Self::collect_type_ref_polarities(&argument.ty, parameter, -polarity, uses);
+            }
+            Self::collect_type_ref_polarities(&function.returns, parameter, polarity, uses);
+        }
+        if let Some(expression) = reference.expression.as_deref() {
+            Self::collect_type_expr_polarities(expression, parameter, polarity, uses);
+        }
+    }
+
+    fn collect_type_expr_polarities(
+        expression: &TypeExpr,
+        parameter: &str,
+        polarity: i8,
+        uses: &mut Vec<i8>,
+    ) {
+        match expression {
+            TypeExpr::Named {
+                name,
+                arguments,
+                function,
+                ..
+            } => {
+                if name == parameter {
+                    uses.push(polarity);
+                }
+                for argument in arguments {
+                    Self::collect_type_ref_polarities(argument, parameter, 0, uses);
+                }
+                if let Some(function) = function.as_deref() {
+                    for argument in &function.params {
+                        Self::collect_type_ref_polarities(&argument.ty, parameter, -polarity, uses);
+                    }
+                    Self::collect_type_ref_polarities(&function.returns, parameter, polarity, uses);
+                }
+            }
+            TypeExpr::Union { members, .. } | TypeExpr::Intersection { members, .. } => {
+                for member in members {
+                    Self::collect_type_expr_polarities(member, parameter, polarity, uses);
+                }
+            }
+            TypeExpr::Group { expression, .. } => {
+                Self::collect_type_expr_polarities(expression, parameter, polarity, uses)
+            }
+            TypeExpr::Object { properties, .. } => {
+                for property in properties {
+                    Self::collect_type_ref_polarities(
+                        &property.ty,
+                        parameter,
+                        if property.readonly { polarity } else { 0 },
+                        uses,
+                    );
+                }
+            }
+            TypeExpr::Value { .. } | TypeExpr::Constant { .. } => {}
         }
     }
 
@@ -8711,12 +10459,17 @@ impl<'a> Checker<'a> {
                 let ty = self.resolve_type(&p.ty);
                 if !ty.is_unknown() && !is_ffi_safe(ty, &self.pointer_types) {
                     let name = self.name(ty);
+                    let guidance = if matches!(ty.base, Base::Union(_)) {
+                        "tagged unions use Zirk's internal representation, which has no stable C ABI; expose an ABI-stable wrapper function and marshal the selected alternative explicitly"
+                    } else {
+                        "pass an ABI-stable type, or marshal it manually through Pointer<Byte>"
+                    };
                     self.error(
                         codes::NOT_FFI_SAFE,
                         p.ty.span,
                         format!("`{name}` cannot appear in an `extern \"C\" fn` signature"),
                         "only Boolean, fixed-width integers, Float32/64, and Pointer<T> have a stable C-ABI layout",
-                        Some("pass an ABI-stable type, or marshal it manually through Pointer<Byte>".into()),
+                        Some(guidance.into()),
                     );
                 }
                 ty
@@ -8729,12 +10482,17 @@ impl<'a> Checker<'a> {
             && !is_ffi_safe(returns, &self.pointer_types)
         {
             let name = self.name(returns);
+            let guidance = if matches!(returns.base, Base::Union(_)) {
+                "tagged unions use Zirk's internal representation, which has no stable C ABI; return an ABI-stable wrapper and marshal the selected alternative explicitly"
+            } else {
+                "use an ABI-stable return type or marshal the value through an explicit wrapper"
+            };
             self.error(
                 codes::NOT_FFI_SAFE,
                 f.return_type.span,
                 format!("`{name}` cannot be an `extern \"C\" fn`'s return type"),
                 "only Void, Boolean, fixed-width integers, Float32/64, and Pointer<T> have a stable C-ABI layout",
-                None,
+                Some(guidance.into()),
             );
         }
 
@@ -8813,6 +10571,7 @@ impl<'a> Checker<'a> {
                     self.type_params.push(TypeParamInfo {
                         name: p.name.name.clone(),
                         constraints: Vec::new(),
+                        variance: p.variance,
                         default: None,
                         span: p.span,
                     });
@@ -8871,10 +10630,808 @@ impl<'a> Checker<'a> {
     /// A type reference, admitting `A | B | ...` — see [`Self::resolve_union`]
     /// — before resolving one alternative on its own.
     fn resolve_type(&mut self, reference: &TypeRef) -> Type {
+        if let Some(expression) = reference.expression.as_deref() {
+            match expression {
+                TypeExpr::Union { members, span } => {
+                    return self.resolve_union_expression(members, *span);
+                }
+                TypeExpr::Intersection { members, span } => {
+                    return self.resolve_intersection_expression(members, *span);
+                }
+                TypeExpr::Group { expression, .. } => {
+                    return self.resolve_type_expression(expression);
+                }
+                TypeExpr::Object { properties, span } => {
+                    return self.resolve_structural_type(properties, *span);
+                }
+                TypeExpr::Value { value, span } => {
+                    return self.resolve_singleton_literal(value, *span);
+                }
+                TypeExpr::Constant {
+                    expression, span, ..
+                } => {
+                    return self.resolve_constant_expression(expression, *span);
+                }
+                TypeExpr::Named { .. } => {}
+            }
+        }
+        if reference.name == "keyof" {
+            return self.resolve_keyof_type_ref(reference);
+        }
+        if reference.name == "indexed" {
+            return self.resolve_indexed_access_type_ref(reference);
+        }
+        if reference.name == "conditional" || reference.name == "conditional-distributive" {
+            return self.resolve_conditional_type_ref(reference);
+        }
+        if reference.name.starts_with("mapped:") {
+            return self.resolve_mapped_type_ref(reference);
+        }
+        if reference.name.starts_with("template:") {
+            return self.resolve_template_literal_type_ref(reference);
+        }
+        if let Some(utility) = self.resolve_standard_type_utility(reference) {
+            return utility;
+        }
+        let value = (reference.union_with.is_empty() && reference.intersection_with.is_empty())
+            .then(|| reference.value.as_ref())
+            .flatten()
+            .or_else(|| {
+                if let Some(TypeExpr::Value { value, .. }) = reference.expression.as_deref() {
+                    Some(value)
+                } else {
+                    None
+                }
+            });
+        if let Some(value) = value {
+            return self.resolve_singleton_literal(value, reference.span);
+        }
+        if let Some(TypeExpr::Constant { expression, .. }) = reference.expression.as_deref() {
+            return self.resolve_constant_expression(expression, reference.span);
+        }
+        if let Some(TypeExpr::Object { properties, .. }) = reference.expression.as_deref()
+            && reference.union_with.is_empty()
+            && reference.intersection_with.is_empty()
+        {
+            return self.resolve_structural_type(properties, reference.span);
+        }
+        let legacy_expression =
+            reference
+                .expression
+                .as_deref()
+                .is_some_and(|expression| match expression {
+                    TypeExpr::Named { .. } => false,
+                    TypeExpr::Union { members, .. } => {
+                        members.len() == reference.union_with.len() + 1
+                            && reference.intersection_with.is_empty()
+                            && members
+                                .iter()
+                                .all(|member| matches!(member, TypeExpr::Named { .. }))
+                    }
+                    TypeExpr::Group { expression, .. } => match expression.as_ref() {
+                        TypeExpr::Named { .. } => reference.union_with.is_empty(),
+                        TypeExpr::Union { members, .. } => {
+                            members.len() == reference.union_with.len() + 1
+                                && reference.intersection_with.is_empty()
+                                && members
+                                    .iter()
+                                    .all(|member| matches!(member, TypeExpr::Named { .. }))
+                        }
+                        _ => false,
+                    },
+                    TypeExpr::Intersection { .. } => false,
+                    TypeExpr::Value { .. }
+                    | TypeExpr::Constant { .. }
+                    | TypeExpr::Object { .. } => false,
+                });
+        let unsupported_expression =
+            reference.value.is_some() || (reference.expression.is_some() && !legacy_expression);
+        let has_intersection = !reference.intersection_with.is_empty()
+            || reference
+                .union_with
+                .iter()
+                .any(|member| !member.intersection_with.is_empty())
+            || reference
+                .expression
+                .as_deref()
+                .is_some_and(Self::type_expr_has_intersection);
+        let simple_intersection = reference.union_with.is_empty()
+            && reference.intersection_with.len() >= 1
+            && reference.expression.as_deref().is_some_and(|expression| {
+                matches!(expression, TypeExpr::Intersection { members, .. }
+                    if members.len() == reference.intersection_with.len() + 1
+                        && members.iter().all(|member| matches!(member, TypeExpr::Named { .. })))
+            });
+        if simple_intersection {
+            return self.resolve_intersection(reference);
+        }
+        if unsupported_expression || has_intersection {
+            let kind = if has_intersection {
+                "an intersection type"
+            } else {
+                "a grouped or nested type expression"
+            };
+            let guidance = if has_intersection {
+                "intersection types are parsed but are not executable yet"
+            } else {
+                "nested algebraic type expressions are parsed but are not executable yet"
+            };
+            self.not_lowered(reference.span, kind, guidance);
+            return Type::UNKNOWN;
+        }
         if !reference.union_with.is_empty() {
             return self.resolve_union(reference);
         }
         self.resolve_type_atom(reference)
+    }
+
+    /// Resolves a flat intersection into an interned semantic node. Object
+    /// intersections are erased to the same reference representation by IR;
+    /// the checker retains the full member set for static lookup.
+    fn resolve_intersection(&mut self, reference: &TypeRef) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        if !self.charge_normalization_work(
+            &mut budget,
+            reference.intersection_with.len() as u64 + 1,
+            reference.span,
+        ) {
+            return Type::UNKNOWN;
+        }
+        let mut members = Vec::with_capacity(reference.intersection_with.len() + 1);
+        for member in std::iter::once(reference).chain(reference.intersection_with.iter()) {
+            let resolved = if let Some(value) = &member.value {
+                self.resolve_singleton_literal(value, member.span)
+            } else {
+                self.resolve_type_atom(member)
+            };
+            if resolved.is_unknown() {
+                return Type::UNKNOWN;
+            }
+            if resolved.nullable {
+                self.not_lowered(
+                    reference.span,
+                    "an intersection type",
+                    "nullable intersection members remain unsupported",
+                );
+                return Type::UNKNOWN;
+            }
+            if !members.contains(&resolved.base) {
+                if resolved.base == Base::Never {
+                    return Type::of(Base::Never);
+                }
+                members.push(resolved.base);
+            }
+        }
+        if members.iter().enumerate().any(|(index, left)| {
+            members[index + 1..]
+                .iter()
+                .any(|right| self.known_disjoint_types(*left, *right))
+        }) {
+            return Type::of(Base::Never);
+        }
+        self.remove_intersection_supertypes(&mut members);
+        Self::sort_bases(&mut members);
+        if members.len() > 1 && !self.intersection_has_object_representation(&members) {
+            self.not_lowered(
+                reference.span,
+                "an intersection type",
+                "runtime intersection views currently require class or contract reference members",
+            );
+        }
+        match members.len() {
+            0 => Type::UNKNOWN,
+            1 => Type::of(members[0]),
+            _ => {
+                let id = self.intern_intersection(members);
+                Type::of(Base::Intersection(id))
+            }
+        }
+    }
+
+    fn resolve_type_expression(&mut self, expression: &TypeExpr) -> Type {
+        match expression {
+            TypeExpr::Named {
+                name,
+                arguments,
+                nullable,
+                function,
+                fixed_size,
+                span,
+            } => {
+                let mut reference = TypeRef::new(name.clone(), *span);
+                reference.arguments = arguments.clone();
+                reference.nullable = *nullable;
+                reference.function = function.clone();
+                reference.fixed_size = fixed_size.clone();
+                self.resolve_type(&reference)
+            }
+            TypeExpr::Value { value, span } => self.resolve_singleton_literal(value, *span),
+            TypeExpr::Constant {
+                expression, span, ..
+            } => self.resolve_constant_expression(expression, *span),
+            TypeExpr::Object { properties, span } => {
+                self.resolve_structural_type(properties, *span)
+            }
+            TypeExpr::Union { members, span } => self.resolve_union_expression(members, *span),
+            TypeExpr::Intersection { members, span } => {
+                self.resolve_intersection_expression(members, *span)
+            }
+            TypeExpr::Group { expression, .. } => self.resolve_type_expression(expression),
+        }
+    }
+
+    fn type_expression_span(expression: &TypeExpr) -> Span {
+        match expression {
+            TypeExpr::Named { span, .. }
+            | TypeExpr::Union { span, .. }
+            | TypeExpr::Intersection { span, .. }
+            | TypeExpr::Group { span, .. }
+            | TypeExpr::Value { span, .. }
+            | TypeExpr::Constant { span, .. }
+            | TypeExpr::Object { span, .. } => *span,
+        }
+    }
+
+    fn resolve_union_expression(&mut self, expressions: &[TypeExpr], span: Span) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let mut nullable = false;
+        let mut bases = Vec::new();
+        for expression in expressions {
+            if !self
+                .charge_normalization_member(&mut budget, Self::type_expression_span(expression))
+            {
+                return Type::UNKNOWN;
+            }
+            let resolved = self.resolve_type_expression(expression);
+            if resolved.nullable {
+                nullable = true;
+            }
+            if resolved.is_unknown() {
+                continue;
+            }
+            match resolved.base {
+                Base::Null => nullable = true,
+                Base::Never => {}
+                Base::Union(id) => {
+                    if let Some(members) = self.unions.get(id as usize).cloned() {
+                        for member in members {
+                            if !self.charge_normalization_member(&mut budget, span) {
+                                return Type::UNKNOWN;
+                            }
+                            if member == Base::Null {
+                                nullable = true;
+                            } else if !bases.contains(&member) {
+                                bases.push(member);
+                            }
+                        }
+                    }
+                }
+                base if !bases.contains(&base) => bases.push(base),
+                _ => {}
+            }
+        }
+
+        // The complete Boolean value domain is exactly `{true, false}`.
+        // Keep a lone Boolean singleton precise, but canonicalize the pair
+        // to Boolean and absorb Boolean singletons when the primitive is
+        // already present.
+        let boolean_values: Vec<bool> = bases
+            .iter()
+            .filter_map(|base| match *base {
+                Base::Singleton(id) => self.singleton_values.get(id as usize).and_then(|value| {
+                    if value.type_identity == "Boolean" {
+                        match value.value {
+                            crate::constant_value::ConstValue::Boolean(value) => Some(value),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .collect();
+        if bases.contains(&Base::Boolean)
+            || (boolean_values.contains(&true) && boolean_values.contains(&false))
+        {
+            bases.retain(|base| {
+                !matches!(base, Base::Singleton(id) if self.singleton_values.get(*id as usize).is_some_and(|value| value.type_identity == "Boolean"))
+            });
+            if !bases.contains(&Base::Boolean) {
+                bases.push(Base::Boolean);
+            }
+        }
+
+        let snapshot = bases.clone();
+        bases.retain(|&candidate| {
+            !snapshot.iter().any(|&other| {
+                other != candidate
+                    && (Type::of(other).accepts(Type::of(candidate))
+                        || self.is_subclass_of(Type::of(candidate), Type::of(other)))
+            })
+        });
+        Self::sort_bases(&mut bases);
+        let base = match bases.len() {
+            0 => Base::Null,
+            1 => bases[0],
+            _ => {
+                let before = self.unions.len();
+                let id = self.intern_union(bases);
+                if id as usize == before && !self.union_layout_prototype_supported(id) {
+                    self.not_lowered(
+                        span,
+                        "a union type",
+                        "narrow it into one alternative before using it; runtime union lowering is pending",
+                    );
+                }
+                Base::Union(id)
+            }
+        };
+        Type {
+            base,
+            nullable,
+            borrowed_scope: None,
+        }
+    }
+
+    fn resolve_intersection_expression(&mut self, expressions: &[TypeExpr], span: Span) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let mut members = Vec::new();
+        for expression in expressions {
+            if !self
+                .charge_normalization_member(&mut budget, Self::type_expression_span(expression))
+            {
+                return Type::UNKNOWN;
+            }
+            let resolved = self.resolve_type_expression(expression);
+            if resolved.is_unknown() {
+                return Type::UNKNOWN;
+            }
+            if resolved.nullable {
+                self.not_lowered(
+                    span,
+                    "an intersection type",
+                    "nullable intersection members remain unsupported",
+                );
+                return Type::UNKNOWN;
+            }
+            if resolved.base == Base::Never {
+                return Type::of(Base::Never);
+            }
+            match resolved.base {
+                Base::Intersection(id) => {
+                    if let Some(nested) = self.intersections.get(id as usize).cloned() {
+                        for member in nested {
+                            if !self.charge_normalization_member(&mut budget, span) {
+                                return Type::UNKNOWN;
+                            }
+                            if !members.contains(&member) {
+                                members.push(member);
+                            }
+                        }
+                    }
+                }
+                base if !members.contains(&base) => members.push(base),
+                _ => {}
+            }
+        }
+        if members.iter().enumerate().any(|(index, left)| {
+            members[index + 1..]
+                .iter()
+                .any(|right| self.known_disjoint_types(*left, *right))
+        }) {
+            return Type::of(Base::Never);
+        }
+        self.remove_intersection_supertypes(&mut members);
+        Self::sort_bases(&mut members);
+        if members.len() > 1 && !self.intersection_has_object_representation(&members) {
+            self.not_lowered(
+                span,
+                "an intersection type",
+                "runtime intersection views currently require class or contract reference members",
+            );
+        }
+        match members.len() {
+            0 => Type::UNKNOWN,
+            1 => Type::of(members[0]),
+            _ => {
+                let id = self.intern_intersection(members);
+                Type::of(Base::Intersection(id))
+            }
+        }
+    }
+
+    /// Proves emptiness only for closed built-in value domains, different
+    /// nominal enum identities, or unequal singleton values of the same
+    /// owning type. Class intersections remain conservative because a class
+    /// may implement a contract or inherit another class.
+    fn known_disjoint_types(&self, left: Base, right: Base) -> bool {
+        let left_singleton = match left {
+            Base::Singleton(id) => self.singleton_values.get(id as usize),
+            _ => None,
+        };
+        let right_singleton = match right {
+            Base::Singleton(id) => self.singleton_values.get(id as usize),
+            _ => None,
+        };
+        if let (Some(left), Some(right)) = (left_singleton, right_singleton) {
+            return left.type_identity == right.type_identity && left != right;
+        }
+
+        let identity = |base: Base| -> Option<String> {
+            match base {
+                Base::Int(width) => Some(width.name().to_string()),
+                Base::Float(width) => Some(width.name().to_string()),
+                Base::Decimal => Some("Decimal".into()),
+                Base::Char => Some("Char".into()),
+                Base::Boolean => Some("Boolean".into()),
+                Base::String => Some("String".into()),
+                Base::Duration => Some("Duration".into()),
+                Base::Date => Some("Date".into()),
+                Base::Time => Some("Time".into()),
+                Base::DateTime => Some("DateTime".into()),
+                Base::Null => Some("Null".into()),
+                Base::Enum(id) => self.enums.get(id as usize).map(|ty| ty.name.clone()),
+                _ => None,
+            }
+        };
+        let (left_identity, right_identity) = match (left_singleton, right_singleton) {
+            (Some(value), None) => (Some(value.type_identity.clone()), identity(right)),
+            (None, Some(value)) => (identity(left), Some(value.type_identity.clone())),
+            _ => (identity(left), identity(right)),
+        };
+        let (Some(left_identity), Some(right_identity)) = (left_identity, right_identity) else {
+            return false;
+        };
+        if left_identity == right_identity {
+            return false;
+        }
+        let is_numeric = |name: &str| {
+            name.starts_with("Int")
+                || name.starts_with("UInt")
+                || name.starts_with("Float")
+                || name == "Decimal"
+        };
+        !(is_numeric(&left_identity) && is_numeric(&right_identity))
+    }
+
+    fn charge_normalization_work(
+        &mut self,
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        amount: u64,
+        span: Span,
+    ) -> bool {
+        if let Err(error) =
+            budget.charge(crate::type_budget::BudgetKind::NormalizationMembers, amount)
+        {
+            self.error(
+                codes::TYPE_COMPUTATION_LIMIT,
+                span,
+                error.to_string(),
+                "type normalization exceeded its deterministic member budget",
+                Some("split the type into smaller named aliases".into()),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn charge_normalization_member(
+        &mut self,
+        budget: &mut crate::type_budget::TypeComputationBudget,
+        span: Span,
+    ) -> bool {
+        self.charge_normalization_work(budget, 1, span)
+    }
+
+    fn remove_intersection_supertypes(&self, members: &mut Vec<Base>) {
+        let snapshot = members.clone();
+        members.retain(|&candidate| {
+            !snapshot.iter().any(|&other| {
+                other != candidate && self.is_subclass_of(Type::of(other), Type::of(candidate))
+            })
+        });
+    }
+
+    fn intern_intersection(&mut self, members: Vec<Base>) -> u32 {
+        if let Some(index) = self
+            .intersections
+            .iter()
+            .position(|existing| *existing == members)
+        {
+            return index as u32;
+        }
+        self.intersections.push(members);
+        (self.intersections.len() - 1) as u32
+    }
+
+    fn intersection_has_object_representation(&self, members: &[Base]) -> bool {
+        if members.iter().any(|member| {
+            !matches!(
+                member,
+                Base::Class(_)
+                    | Base::Instance(_)
+                    | Base::Contract(_)
+                    | Base::ContractInstance(_)
+                    | Base::Object
+            )
+        }) {
+            return false;
+        }
+        let classes = members
+            .iter()
+            .filter(|member| matches!(member, Base::Class(_) | Base::Instance(_)))
+            .copied()
+            .collect::<Vec<_>>();
+        if classes.len() > 1 {
+            return false;
+        }
+        let Some(class) = classes.first().copied() else {
+            return true;
+        };
+        members.iter().all(|member| {
+            matches!(member, Base::Class(_) | Base::Instance(_) | Base::Object)
+                || self.is_subclass_of(Type::of(class), Type::of(*member))
+        })
+    }
+
+    fn resolve_structural_type(&mut self, properties: &[TypeShapeProperty], _span: Span) -> Type {
+        let mut resolved = Vec::with_capacity(properties.len());
+        for property in properties {
+            let ty = self.resolve_type(&property.ty);
+            if ty.is_unknown() {
+                return Type::UNKNOWN;
+            }
+            resolved.push(StructuralProperty {
+                name: property.name.name.clone(),
+                ty,
+                optional: property.optional,
+                readonly: property.readonly,
+            });
+        }
+        resolved.sort_by(|left, right| left.name.cmp(&right.name));
+        let shape = StructuralType {
+            properties: resolved,
+        };
+        let id = self.intern_structural_type(shape);
+        Type::of(Base::Shape(id))
+    }
+
+    fn resolve_singleton_literal(&mut self, value: &TypeValue, span: Span) -> Type {
+        let expression = match value {
+            TypeValue::Int(value) => Expr::Int(value.clone()),
+            TypeValue::Float(value) => Expr::Float(value.clone()),
+            TypeValue::Duration(value) => Expr::Duration(value.clone()),
+            TypeValue::String(value) => Expr::Str(value.clone()),
+            TypeValue::Char(value) => Expr::Char(value.clone()),
+            TypeValue::Boolean(value) => Expr::Bool(value.clone()),
+            TypeValue::Null(value) => Expr::Null(value.clone()),
+        };
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let enum_variants = self.const_enum_variants();
+        match crate::const_eval::evaluate_with_enum_variants(
+            &expression,
+            &mut budget,
+            &self.const_functions,
+            &enum_variants,
+        ) {
+            Ok(value) => self.resolve_singleton_value(value, span),
+            Err(error) => {
+                self.report_const_type_error(error);
+                Type::UNKNOWN
+            }
+        }
+    }
+
+    fn resolve_pattern_singleton_literal(&mut self, value: &TypeValue, _span: Span) -> Type {
+        let expression = match value {
+            TypeValue::Int(value) => Expr::Int(value.clone()),
+            TypeValue::Float(value) => Expr::Float(value.clone()),
+            TypeValue::Duration(value) => Expr::Duration(value.clone()),
+            TypeValue::String(value) => Expr::Str(value.clone()),
+            TypeValue::Char(value) => Expr::Char(value.clone()),
+            TypeValue::Boolean(value) => Expr::Bool(value.clone()),
+            TypeValue::Null(value) => Expr::Null(value.clone()),
+        };
+        self.evaluate_pattern_constant(&expression)
+    }
+
+    fn resolve_constant_pattern(&mut self, expression: &Expr, _span: Span) -> Type {
+        self.evaluate_pattern_constant(expression)
+    }
+
+    fn evaluate_pattern_constant(&mut self, expression: &Expr) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let enum_variants = self.const_enum_variants();
+        match crate::const_eval::evaluate_with_enum_variants(
+            expression,
+            &mut budget,
+            &self.const_functions,
+            &enum_variants,
+        ) {
+            Ok(value) => self.intern_singleton_value(value),
+            Err(error) => {
+                self.report_const_type_error(error);
+                Type::UNKNOWN
+            }
+        }
+    }
+
+    fn resolve_constant_expression(&mut self, expression: &Expr, span: Span) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let enum_variants = self.const_enum_variants();
+        match crate::const_eval::evaluate_with_enum_variants(
+            expression,
+            &mut budget,
+            &self.const_functions,
+            &enum_variants,
+        ) {
+            Ok(value) => self.resolve_singleton_value(value, span),
+            Err(crate::const_eval::ConstEvalError {
+                kind: crate::const_eval::ConstEvalErrorKind::UnsupportedExpression,
+                ..
+            }) => {
+                self.not_lowered(
+                    span,
+                    "a constant singleton type",
+                    "the expression is not part of the bounded constant-evaluation subset",
+                );
+                Type::UNKNOWN
+            }
+            Err(error) => {
+                self.report_const_type_error(error);
+                Type::UNKNOWN
+            }
+        }
+    }
+
+    fn const_enum_variants(&self) -> HashMap<String, crate::const_eval::ConstEnumVariant> {
+        let mut variants = HashMap::new();
+        for enumeration in &self.enums {
+            // Generic enum payloads require type substitution and must not be
+            // assigned a guessed canonical identity in constant evaluation.
+            if !enumeration.type_params.is_empty() {
+                continue;
+            }
+            for variant in &enumeration.variants {
+                let key = format!("{}.{}", enumeration.name, variant.name);
+                variants.insert(
+                    key,
+                    crate::const_eval::ConstEnumVariant {
+                        enum_identity: enumeration.name.clone(),
+                        variant_identity: format!("{}::{}", enumeration.name, variant.name),
+                        payload_types: variant
+                            .associated
+                            .iter()
+                            .map(|field| self.name(field.ty))
+                            .collect(),
+                    },
+                );
+            }
+        }
+        variants
+    }
+
+    fn resolve_singleton_value(&mut self, value: CanonicalConst, span: Span) -> Type {
+        if let Err(reason) = value.verify_immutable_value() {
+            self.error(
+                codes::INVALID_CONSTANT_TYPE,
+                span,
+                format!("constant value failed immutable-value verification: {reason}"),
+                "mutable identity or aliased state cannot be used as a singleton value",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let (singleton, is_new) = self.intern_singleton_value_with_status(value.clone());
+        let runtime_scalar = matches!(
+            value.value,
+            crate::constant_value::ConstValue::Boolean(_)
+                | crate::constant_value::ConstValue::Integer { .. }
+                | crate::constant_value::ConstValue::BigUnsigned { .. }
+                | crate::constant_value::ConstValue::Decimal { .. }
+                | crate::constant_value::ConstValue::Float { .. }
+                | crate::constant_value::ConstValue::String(_)
+                | crate::constant_value::ConstValue::Char(_)
+                | crate::constant_value::ConstValue::Duration(_)
+                | crate::constant_value::ConstValue::Date(_)
+                | crate::constant_value::ConstValue::Time(_)
+                | crate::constant_value::ConstValue::DateTime(_)
+        ) || matches!(
+            &value.value,
+            crate::constant_value::ConstValue::Enum { fields, .. } if fields.is_empty()
+        );
+        if is_new && !runtime_scalar {
+            self.not_lowered(
+                span,
+                "a singleton value type",
+                "this canonical value has no supported scalar runtime representation yet",
+            );
+        }
+        singleton
+    }
+
+    fn intern_singleton_value(&mut self, value: CanonicalConst) -> Type {
+        self.intern_singleton_value_with_status(value).0
+    }
+
+    fn intern_singleton_value_with_status(&mut self, value: CanonicalConst) -> (Type, bool) {
+        let before = self.singleton_values.len();
+        let id = if let Some(index) = self
+            .singleton_values
+            .iter()
+            .position(|existing| *existing == value)
+        {
+            index as u32
+        } else {
+            self.singleton_values.push(value);
+            (self.singleton_values.len() - 1) as u32
+        };
+        (Type::of(Base::Singleton(id)), id as usize == before)
+    }
+
+    fn report_const_type_error(&mut self, error: crate::const_eval::ConstEvalError) {
+        let (code, message, cause) = match error.kind {
+            crate::const_eval::ConstEvalErrorKind::BudgetExceeded(limit) => (
+                codes::TYPE_COMPUTATION_LIMIT,
+                limit.to_string(),
+                "constant type evaluation exceeded its deterministic budget",
+            ),
+            other => (
+                codes::INVALID_CONSTANT_TYPE,
+                format!("constant type expression failed: {other:?}"),
+                "the expression is not a valid deterministic value of its resolved type",
+            ),
+        };
+        let help = match code {
+            codes::TYPE_COMPUTATION_LIMIT => Some(
+                "simplify the constant type expression or split it into smaller declarations"
+                    .into(),
+            ),
+            _ => Some(
+                "use a supported immutable constant expression whose value matches the declared type"
+                    .into(),
+            ),
+        };
+        self.error(code, error.span, message, cause, help);
+    }
+
+    fn intern_structural_type(&mut self, shape: StructuralType) -> u32 {
+        if let Some(index) = self
+            .structural_types
+            .iter()
+            .position(|existing| *existing == shape)
+        {
+            return index as u32;
+        }
+        self.structural_types.push(shape);
+        (self.structural_types.len() - 1) as u32
+    }
+
+    fn type_expr_has_intersection(expression: &TypeExpr) -> bool {
+        match expression {
+            TypeExpr::Named { arguments, .. } => arguments.iter().any(|argument| {
+                argument.intersection_with.len() > 0
+                    || argument
+                        .expression
+                        .as_deref()
+                        .is_some_and(Self::type_expr_has_intersection)
+            }),
+            TypeExpr::Union { members, .. } | TypeExpr::Intersection { members, .. } => {
+                matches!(expression, TypeExpr::Intersection { .. })
+                    || members.iter().any(Self::type_expr_has_intersection)
+            }
+            TypeExpr::Group { expression, .. } => Self::type_expr_has_intersection(expression),
+            TypeExpr::Object { properties, .. } => properties.iter().any(|property| {
+                !property.ty.intersection_with.is_empty()
+                    || property
+                        .ty
+                        .expression
+                        .as_deref()
+                        .is_some_and(Self::type_expr_has_intersection)
+            }),
+            TypeExpr::Value { .. } | TypeExpr::Constant { .. } => false,
+        }
     }
 
     /// `String | Int32`: resolves each alternative, folds a bare `Null` one
@@ -8887,6 +11444,14 @@ impl<'a> Checker<'a> {
     /// implemented: a union type exists and type-checks, but nothing can be
     /// read from a value of one yet.
     fn resolve_union(&mut self, reference: &TypeRef) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        if !self.charge_normalization_work(
+            &mut budget,
+            reference.union_with.len() as u64 + 1,
+            reference.span,
+        ) {
+            return Type::UNKNOWN;
+        }
         let atoms: Vec<&TypeRef> = std::iter::once(reference)
             .chain(reference.union_with.iter())
             .collect();
@@ -8898,15 +11463,36 @@ impl<'a> Checker<'a> {
                 nullable = true;
                 continue;
             }
-            let resolved = self.resolve_type_atom(atom);
+            let resolved = if let Some(value) = &atom.value {
+                self.resolve_singleton_literal(value, atom.span)
+            } else {
+                self.resolve_type_atom(atom)
+            };
             if resolved.nullable {
                 nullable = true;
             }
             if resolved.is_unknown() {
                 continue;
             }
-            if !bases.contains(&resolved.base) {
-                bases.push(resolved.base);
+            match resolved.base {
+                Base::Null => nullable = true,
+                Base::Never => {}
+                Base::Union(id) => {
+                    if let Some(members) = self.unions.get(id as usize).cloned() {
+                        for member in members {
+                            if !self.charge_normalization_member(&mut budget, atom.span) {
+                                return Type::UNKNOWN;
+                            }
+                            if member == Base::Null {
+                                nullable = true;
+                            } else if !bases.contains(&member) {
+                                bases.push(member);
+                            }
+                        }
+                    }
+                }
+                base if !bases.contains(&base) => bases.push(base),
+                _ => {}
             }
         }
 
@@ -8916,7 +11502,9 @@ impl<'a> Checker<'a> {
         let snapshot = bases.clone();
         bases.retain(|&candidate| {
             !snapshot.iter().any(|&other| {
-                other != candidate && self.is_subclass_of(Type::of(candidate), Type::of(other))
+                other != candidate
+                    && (Type::of(other).accepts(Type::of(candidate))
+                        || self.is_subclass_of(Type::of(candidate), Type::of(other)))
             })
         });
 
@@ -8928,12 +11516,9 @@ impl<'a> Checker<'a> {
             _ => {
                 let before = self.unions.len();
                 let id = self.intern_union(bases);
-                // Reported once, the first time this exact normalized union
-                // is interned: the grammar and this normalization are real,
-                // but nothing lowers a union yet (roadmap task 11.x), and
-                // nothing reads a member of one before narrowing either
-                // (`Self::member_type`'s union branch says so directly).
-                if id as usize == before {
+                // Keep the lowering gate for every union except the first
+                // vertical tagged-union prototype (Int32 | String).
+                if id as usize == before && !self.union_layout_prototype_supported(id) {
                     self.not_lowered(
                         reference.span,
                         "a union type",
@@ -8991,6 +11576,9 @@ impl<'a> Checker<'a> {
                 Base::ContractInstance(id) => (16, id),
                 Base::EnumInstance(id) => (17, id),
                 Base::Union(id) => (18, id),
+                Base::Intersection(id) => (41, id),
+                Base::Shape(id) => (42, id),
+                Base::Singleton(id) => (43, id),
                 Base::Pointer(id) => (19, id),
                 Base::Weak(id) => (20, id),
                 Base::NativeSlice(id) => (21, id),
@@ -9019,6 +11607,52 @@ impl<'a> Checker<'a> {
         bases.sort_by_key(key);
     }
 
+    fn union_layout_prototype_supported(&self, id: u32) -> bool {
+        let Some(members) = self.unions.get(id as usize) else {
+            return false;
+        };
+        members.len() >= 2
+            && members.iter().all(|member| match *member {
+                Base::Int(_)
+                | Base::Float(_)
+                | Base::Decimal
+                | Base::Boolean
+                | Base::String
+                | Base::Char
+                | Base::Duration
+                | Base::Date
+                | Base::Time
+                | Base::DateTime
+                | Base::Regex
+                | Base::Enum(_)
+                | Base::Class(_) => true,
+                // Generic signatures are checked before substitution. Keep
+                // the symbolic parameter in the union so specialization can
+                // re-run this capability check with concrete alternatives.
+                Base::Shape(_) | Base::Param(_) => true,
+                Base::Singleton(id) => {
+                    self.singleton_values.get(id as usize).is_some_and(|value| {
+                        matches!(
+                            value.value,
+                            crate::constant_value::ConstValue::Boolean(_)
+                                | crate::constant_value::ConstValue::Integer { .. }
+                                | crate::constant_value::ConstValue::BigUnsigned { .. }
+                                | crate::constant_value::ConstValue::Decimal { .. }
+                                | crate::constant_value::ConstValue::Float { .. }
+                                | crate::constant_value::ConstValue::String(_)
+                                | crate::constant_value::ConstValue::Char(_)
+                                | crate::constant_value::ConstValue::Duration(_)
+                                | crate::constant_value::ConstValue::Date(_)
+                                | crate::constant_value::ConstValue::Time(_)
+                                | crate::constant_value::ConstValue::DateTime(_)
+                                | crate::constant_value::ConstValue::Enum { .. }
+                        )
+                    })
+                }
+                _ => false,
+            })
+    }
+
     /// Interns a normalized union, returning the id its [`Base::Union`]
     /// carries.
     fn intern_union(&mut self, bases: Vec<Base>) -> u32 {
@@ -9027,6 +11661,163 @@ impl<'a> Checker<'a> {
         }
         self.unions.push(bases);
         (self.unions.len() - 1) as u32
+    }
+
+    /// Canonical join used for values readable through every branch of a
+    /// union. Keep nullability separate and flatten nested unions so member
+    /// access does not create a second, non-canonical route into the type
+    /// algebra.
+    fn join_types(&mut self, types: Vec<Type>, span: Span) -> Type {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let mut nullable = false;
+        let mut bases = Vec::new();
+        for ty in types {
+            if !self.charge_normalization_member(&mut budget, span) {
+                return Type::UNKNOWN;
+            }
+            nullable |= ty.nullable;
+            match ty.base {
+                Base::Null => nullable = true,
+                Base::Never => {}
+                Base::Union(id) => {
+                    if let Some(members) = self.unions.get(id as usize) {
+                        for &member in members {
+                            if member == Base::Null {
+                                nullable = true;
+                            } else if !bases.contains(&member) {
+                                bases.push(member);
+                            }
+                        }
+                    }
+                }
+                base if !bases.contains(&base) => bases.push(base),
+                _ => {}
+            }
+        }
+        let boolean_values: Vec<bool> = bases
+            .iter()
+            .filter_map(|base| match *base {
+                Base::Singleton(id) => self.singleton_values.get(id as usize).and_then(|value| {
+                    if value.type_identity == "Boolean" {
+                        match value.value {
+                            crate::constant_value::ConstValue::Boolean(value) => Some(value),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            })
+            .collect();
+        if bases.contains(&Base::Boolean)
+            || (boolean_values.contains(&true) && boolean_values.contains(&false))
+        {
+            bases.retain(|base| {
+                !matches!(base, Base::Singleton(id) if self.singleton_values.get(*id as usize).is_some_and(|value| value.type_identity == "Boolean"))
+            });
+            if !bases.contains(&Base::Boolean) {
+                bases.push(Base::Boolean);
+            }
+        }
+        let snapshot = bases.clone();
+        bases.retain(|&candidate| {
+            !snapshot.iter().any(|&other| {
+                other != candidate
+                    && (Type::of(other).accepts(Type::of(candidate))
+                        || self.is_subclass_of(Type::of(candidate), Type::of(other)))
+            })
+        });
+        Self::sort_bases(&mut bases);
+        let base = match bases.as_slice() {
+            [] => Base::Null,
+            [base] => *base,
+            _ => Base::Union(self.intern_union(bases)),
+        };
+        Type {
+            base,
+            nullable,
+            borrowed_scope: None,
+        }
+    }
+
+    /// Computes a conservative meet for a value that must be accepted by
+    /// every branch (a union write target or a shared callable parameter).
+    fn intersect_types(&mut self, types: Vec<Type>, span: Span) -> Type {
+        let mut members = Vec::new();
+        let mut nullable = !types.is_empty();
+        let borrowed_scope = types.first().and_then(|ty| ty.borrowed_scope);
+        if types.iter().any(|ty| ty.borrowed_scope != borrowed_scope) {
+            return Type::UNKNOWN;
+        }
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        for ty in types {
+            if !self.charge_normalization_member(&mut budget, span) {
+                return Type::UNKNOWN;
+            }
+            nullable &= ty.nullable;
+            match ty.base {
+                Base::Never if !ty.nullable => return Type::of(Base::Never),
+                Base::Never => {}
+                Base::Intersection(id) => {
+                    let flattened = self
+                        .intersections
+                        .get(id as usize)
+                        .cloned()
+                        .unwrap_or_default();
+                    for member in flattened {
+                        if !self.charge_normalization_member(&mut budget, span) {
+                            return Type::UNKNOWN;
+                        }
+                        if !members.contains(&member) {
+                            members.push(member);
+                        }
+                    }
+                }
+                base if !members.contains(&base) => members.push(base),
+                _ => {}
+            }
+        }
+        if members.iter().enumerate().any(|(index, left)| {
+            members[index + 1..]
+                .iter()
+                .any(|right| self.known_disjoint_types(*left, *right))
+        }) {
+            return if nullable {
+                Type::of(Base::Null)
+            } else {
+                Type::of(Base::Never)
+            };
+        }
+        self.remove_intersection_supertypes(&mut members);
+        Self::sort_bases(&mut members);
+        match members.len() {
+            0 if nullable => Type::of(Base::Null),
+            0 => Type::UNKNOWN,
+            1 => Type {
+                base: members[0],
+                nullable,
+                borrowed_scope,
+                ..Type::UNKNOWN
+            },
+            _ => {
+                let before = self.intersections.len();
+                let id = self.intern_intersection(members);
+                if id as usize == before {
+                    self.not_lowered(
+                        span,
+                        "a common union write or callable parameter",
+                        "the intersection type is represented semantically but is not executable yet",
+                    );
+                }
+                Type {
+                    base: Base::Intersection(id),
+                    nullable,
+                    borrowed_scope,
+                    ..Type::UNKNOWN
+                }
+            }
+        }
     }
 
     /// `Fn(P...) => R` / `Function(P...) => R` (roadmap Phase 4d): resolves
@@ -9970,8 +12761,7 @@ impl<'a> Checker<'a> {
                 if let Some(span) = self.type_alias_spans.get(&resolved).copied() {
                     self.record_semantic_reference(reference.span, span, ReferenceRole::TypeUse);
                 }
-                self.reject_type_arguments(reference);
-                Some(self.resolve_type_alias(&resolved, reference.span))
+                Some(self.resolve_type_alias(reference, &resolved))
             } else if let Some(index) = self.enums.iter().position(|e| e.name == resolved) {
                 let declared = self.enums[index].span;
                 let shared = self.enums[index].shared;
@@ -10060,9 +12850,984 @@ impl<'a> Checker<'a> {
         Type::UNKNOWN
     }
 
+    fn resolve_keyof_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                "`keyof` takes exactly one type operand",
+                format!("received {} operands", reference.arguments.len()),
+                Some("write `keyof SomeType`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let operand = self.resolve_type(&reference.arguments[0]);
+        if operand.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        if operand.base == Base::Dynamic {
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[0].span,
+                "`keyof` cannot inspect `Dynamic`",
+                "runtime-only properties do not form a finite static key set",
+                Some("use a declared structural type or narrow the value to a known type".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let cache_key = (operand, self.this_type, self.current_class_body);
+        if let Some(cached) = self.keyof_memo.borrow().get(&cache_key).copied() {
+            return cached;
+        }
+
+        let mut keys = self.keyof_member_names(operand, &mut HashSet::new());
+        keys.sort();
+        keys.dedup();
+        if keys.len() > crate::type_budget::BudgetKind::NormalizationMembers.limit() as usize {
+            self.error(
+                codes::TYPE_COMPUTATION_LIMIT,
+                reference.span,
+                "keyof expansion limit exceeded",
+                format!(
+                    "{} keys exceed the deterministic limit of {}",
+                    keys.len(),
+                    crate::type_budget::BudgetKind::NormalizationMembers.limit()
+                ),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let mut members = Vec::with_capacity(keys.len());
+        for key in keys {
+            let constant = CanonicalConst {
+                type_identity: "String".into(),
+                value: ConstValue::String(key),
+            };
+            members.push(self.intern_singleton_value(constant).base);
+        }
+        let result = match members.len() {
+            0 => Type::of(Base::Never),
+            1 => Type::of(members[0]),
+            _ => {
+                Self::sort_bases(&mut members);
+                Type::of(Base::Union(self.intern_union(members)))
+            }
+        };
+        self.keyof_memo.borrow_mut().insert(cache_key, result);
+        result
+    }
+
+    fn keyof_member_names(&self, ty: Type, visiting: &mut HashSet<Base>) -> Vec<String> {
+        if ty.nullable || ty.base == Base::Null {
+            return Vec::new();
+        }
+        if !visiting.insert(ty.base) {
+            return Vec::new();
+        }
+        let mut names = match ty.base {
+            Base::Union(id) => {
+                let Some(members) = self.unions.get(id as usize) else {
+                    return Vec::new();
+                };
+                let mut alternatives = members
+                    .iter()
+                    .map(|member| self.keyof_member_names(Type::of(*member), visiting));
+                let Some(first) = alternatives.next() else {
+                    return Vec::new();
+                };
+                let mut common = first;
+                for alternative in alternatives {
+                    common.retain(|name| alternative.contains(name));
+                }
+                common
+            }
+            Base::Intersection(id) => self
+                .intersections
+                .get(id as usize)
+                .into_iter()
+                .flatten()
+                .flat_map(|member| self.keyof_member_names(Type::of(*member), visiting))
+                .collect(),
+            Base::Tuple(id) => self
+                .tuple_types
+                .get(id as usize)
+                .map(|tuple| {
+                    let mut names = (0..tuple.elements.len())
+                        .map(|index| index.to_string())
+                        .collect::<Vec<_>>();
+                    names.push("length".into());
+                    names
+                })
+                .unwrap_or_default(),
+            Base::Shape(_) => self
+                .structural_properties_for_relation(ty)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|property| property.name)
+                .collect(),
+            Base::Class(_) | Base::Instance(_) => {
+                let class_id = match ty.base {
+                    Base::Class(id) => id,
+                    Base::Instance(id) => self
+                        .generic_instances
+                        .get(id as usize)
+                        .map(|instance| instance.class)
+                        .unwrap_or(u32::MAX),
+                    _ => unreachable!(),
+                };
+                self.classes
+                    .get(class_id as usize)
+                    .map(|class| {
+                        let mut names = class
+                            .fields
+                            .iter()
+                            .filter(|field| {
+                                self.can_access(field.visibility, field.owner) && !field.is_static
+                            })
+                            .map(|field| field.name.clone())
+                            .chain(
+                                class
+                                    .methods
+                                    .iter()
+                                    .filter(|method| {
+                                        self.can_access(method.visibility, method.owner)
+                                    })
+                                    .map(|method| method.name.clone()),
+                            )
+                            .collect::<Vec<_>>();
+                        names.sort();
+                        names.dedup();
+                        names
+                    })
+                    .unwrap_or_default()
+            }
+            Base::Contract(_) | Base::ContractInstance(_) => {
+                let contract_id = match ty.base {
+                    Base::Contract(id) => id,
+                    Base::ContractInstance(id) => self
+                        .contract_instances
+                        .get(id as usize)
+                        .map(|instance| instance.contract)
+                        .unwrap_or(u32::MAX),
+                    _ => unreachable!(),
+                };
+                self.contracts
+                    .get(contract_id as usize)
+                    .map(|contract| {
+                        contract
+                            .properties
+                            .iter()
+                            .map(|property| property.name.clone())
+                            .chain(
+                                contract
+                                    .methods
+                                    .iter()
+                                    .filter(|method| !method.is_static)
+                                    .map(|method| method.name.clone()),
+                            )
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            // Open Object values expose no statically enumerable properties.
+            // Dynamic was diagnosed by the caller because its accesses are
+            // runtime-resolved rather than an empty finite set.
+            Base::Object | Base::Null | Base::Never => Vec::new(),
+            _ => Vec::new(),
+        };
+        visiting.remove(&ty.base);
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn resolve_indexed_access_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 2 {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                "indexed access takes a receiver type and a key type",
+                format!("received {} operands", reference.arguments.len()),
+                Some("write `Receiver[Key]`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let receiver = self.resolve_type(&reference.arguments[0]);
+        let key_type = self.resolve_type(&reference.arguments[1]);
+        if receiver.is_unknown() || key_type.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        let Some(keys) = self.indexed_key_names(key_type) else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.arguments[1].span,
+                "indexed access requires finite String singleton keys",
+                format!("found `{}`", self.name(key_type)),
+                Some("use a literal key or a finite union produced by `keyof`".into()),
+            );
+            return Type::UNKNOWN;
+        };
+        let receiver_nullable = receiver.nullable;
+        let receiver = receiver.without_null();
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some(value_type) = self.indexed_property_type(receiver, &key, reference.span)
+            else {
+                let receiver_name = self.name(receiver);
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    reference.arguments[1].span,
+                    format!("`{receiver_name}` has no visible property `{key}`"),
+                    "indexed access must resolve every requested key on every receiver alternative",
+                    Some("check the key with `keyof Receiver` before indexing".into()),
+                );
+                return Type::UNKNOWN;
+            };
+            results.push(value_type);
+        }
+        let mut result = self.join_types(results, reference.span);
+        if receiver_nullable {
+            result = result.as_nullable();
+        }
+        result
+    }
+
+    fn resolve_conditional_type_ref(&mut self, reference: &TypeRef) -> Type {
+        if reference.arguments.len() != 4 {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                "conditional type requires check, constraint, true branch, and false branch",
+                format!("received {} operands", reference.arguments.len()),
+                Some("write `Check extends Constraint ? Yes : No`".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        let check = self.resolve_type(&reference.arguments[0]);
+        if check.is_unknown() {
+            return Type::UNKNOWN;
+        }
+        let distributive = reference.name == "conditional-distributive";
+        let checks = if distributive {
+            match check.base {
+                Base::Union(id) => self
+                    .unions
+                    .get(id as usize)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Type::of)
+                    .collect(),
+                _ => vec![check],
+            }
+        } else {
+            vec![check]
+        };
+        let mut results = Vec::with_capacity(checks.len());
+        let mut conditional_budget = crate::type_budget::TypeComputationBudget::default();
+        for candidate in checks {
+            if conditional_budget
+                .charge(crate::type_budget::BudgetKind::NormalizationMembers, 1)
+                .is_err()
+            {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    reference.span,
+                    "conditional distribution limit exceeded",
+                    "conditional type distribution exceeded its deterministic member budget",
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+            let mut inferred = HashMap::new();
+            let constraint_ref = &reference.arguments[1];
+            let matches = if Self::type_ref_contains_infer(constraint_ref) {
+                self.match_infer_pattern(constraint_ref, candidate, &mut inferred, 0)
+            } else {
+                let constraint = self.resolve_type(constraint_ref);
+                !constraint.is_unknown()
+                    && self
+                        .assignable_relation(constraint, candidate)
+                        .unwrap_or(false)
+            };
+            let branch = if matches {
+                substitute_alias_type_ref(&reference.arguments[2], &inferred)
+            } else {
+                reference.arguments[3].clone()
+            };
+            let key = (candidate, format!("{branch:?}"), matches);
+            if let Some(cached) = self.conditional_memo.borrow().get(&key).copied() {
+                results.push(cached);
+                continue;
+            }
+            let result = self.resolve_type(&branch);
+            self.conditional_memo.borrow_mut().insert(key, result);
+            results.push(result);
+        }
+        self.join_types(results, reference.span)
+    }
+
+    fn type_ref_contains_infer(reference: &TypeRef) -> bool {
+        reference.name == "infer"
+            || reference
+                .arguments
+                .iter()
+                .any(Self::type_ref_contains_infer)
+            || reference
+                .union_with
+                .iter()
+                .any(Self::type_ref_contains_infer)
+            || reference
+                .intersection_with
+                .iter()
+                .any(Self::type_ref_contains_infer)
+    }
+
+    fn resolve_mapped_type_ref(&mut self, reference: &TypeRef) -> Type {
+        let cache_key = format!(
+            "{reference:?}|{:?}|{:?}",
+            self.this_type, self.current_class_body
+        );
+        if let Some(cached) = self.mapped_memo.borrow().get(&cache_key).copied() {
+            return cached;
+        }
+        if reference.arguments.len() != 3 {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                "mapped type requires keys, remapping, and value operands",
+                format!("received {}", reference.arguments.len()),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let resolved_keys = self.resolve_type(&reference.arguments[0]);
+        let key_names = match self.indexed_key_names(resolved_keys) {
+            Some(keys) => keys,
+            None => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    reference.arguments[0].span,
+                    "mapped type keys must be a finite singleton union",
+                    "the key domain is not statically enumerable",
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+        };
+        let mut mapped_parts = reference.name.split(':');
+        let _ = mapped_parts.next();
+        let variable = mapped_parts.next().unwrap_or("");
+        let readonly_mode = mapped_parts
+            .next()
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(0);
+        let optional_mode = mapped_parts
+            .next()
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or(0);
+        let source_shape = if reference.arguments[0].name == "keyof" {
+            reference.arguments[0]
+                .arguments
+                .first()
+                .map(|source| self.resolve_type(source))
+        } else {
+            None
+        };
+        let source_properties =
+            source_shape.and_then(|source| self.structural_properties_for_relation(source));
+        let mut properties = Vec::new();
+        let mut mapped_budget = crate::type_budget::TypeComputationBudget::default();
+        for key in key_names {
+            if mapped_budget
+                .charge(crate::type_budget::BudgetKind::NormalizationMembers, 1)
+                .is_err()
+            {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    reference.span,
+                    "mapped key expansion limit exceeded",
+                    "mapped type exceeded its deterministic key budget",
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+            let key_type = TypeRef::literal(
+                TypeValue::String(StrLit {
+                    value: key.clone(),
+                    span: reference.span,
+                }),
+                reference.span,
+            );
+            let bindings = HashMap::from([(variable.to_string(), key_type)]);
+            let remap = substitute_alias_type_ref(&reference.arguments[1], &bindings);
+            let output_names = if remap.name == "<same-key>" {
+                vec![key.clone()]
+            } else {
+                let remapped = self.resolve_type(&remap);
+                let Some(names) = self.indexed_key_names(remapped) else {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        remap.span,
+                        "mapped key remapping must produce finite String singleton keys",
+                        "the remapped key is not statically enumerable",
+                        None,
+                    );
+                    return Type::UNKNOWN;
+                };
+                names
+            };
+            let value_ref = substitute_alias_type_ref(&reference.arguments[2], &bindings);
+            let value_type = self.resolve_type(&value_ref);
+            if value_type.is_unknown() {
+                return Type::UNKNOWN;
+            }
+            let original = source_properties
+                .as_ref()
+                .and_then(|properties| properties.iter().find(|property| property.name == key));
+            for output_name in output_names {
+                if properties
+                    .iter()
+                    .any(|property: &StructuralProperty| property.name == output_name)
+                {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        reference.span,
+                        "mapped type produced a duplicate key",
+                        format!("key `{output_name}` is emitted more than once"),
+                        Some("change the remapping so each output key is unique".into()),
+                    );
+                    return Type::UNKNOWN;
+                }
+                properties.push(StructuralProperty {
+                    name: output_name,
+                    ty: value_type,
+                    optional: match optional_mode {
+                        1 => true,
+                        2 => false,
+                        _ => original.is_some_and(|property| property.optional),
+                    },
+                    readonly: match readonly_mode {
+                        1 => true,
+                        2 => false,
+                        _ => original.is_some_and(|property| property.readonly),
+                    },
+                });
+            }
+        }
+        properties.sort_by(|left, right| left.name.cmp(&right.name));
+        let result = Type::of(Base::Shape(
+            self.intern_structural_type(StructuralType { properties }),
+        ));
+        self.mapped_memo.borrow_mut().insert(cache_key, result);
+        result
+    }
+
+    fn resolve_template_literal_type_ref(&mut self, reference: &TypeRef) -> Type {
+        let cache_key = format!("{reference:?}");
+        if let Some(cached) = self.template_memo.borrow().get(&cache_key).copied() {
+            return cached;
+        }
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        if budget
+            .charge(
+                crate::type_budget::BudgetKind::TemplateSourceBytes,
+                reference.name.len() as u64,
+            )
+            .is_err()
+        {
+            self.error(
+                codes::TYPE_COMPUTATION_LIMIT,
+                reference.span,
+                "template source size limit exceeded",
+                "template type source exceeds its deterministic size budget",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let mut alternatives = vec![String::new()];
+        let mut cursor = "template:".len();
+        let bytes = reference.name.as_bytes();
+        while cursor < bytes.len() {
+            let marker = bytes[cursor] as char;
+            cursor += 1;
+            let number_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            let Ok(number) = std::str::from_utf8(&bytes[number_start..cursor])
+                .unwrap_or("")
+                .parse::<usize>()
+            else {
+                return Type::UNKNOWN;
+            };
+            if marker == 'L' {
+                if cursor >= bytes.len() || bytes[cursor] != b':' {
+                    return Type::UNKNOWN;
+                }
+                cursor += 1;
+                let end = cursor.saturating_add(number);
+                if end > bytes.len() {
+                    return Type::UNKNOWN;
+                }
+                let Ok(literal) = std::str::from_utf8(&bytes[cursor..end]) else {
+                    return Type::UNKNOWN;
+                };
+                for value in &mut alternatives {
+                    value.push_str(literal);
+                }
+                cursor = end;
+            } else if marker == 'P' {
+                if cursor >= bytes.len() || bytes[cursor] != b';' {
+                    return Type::UNKNOWN;
+                }
+                cursor += 1;
+                let Some(argument) = reference.arguments.get(number) else {
+                    return Type::UNKNOWN;
+                };
+                let ty = self.resolve_type(argument);
+                let Some(values) = self.template_string_values(ty) else {
+                    self.error(codes::TYPE_MISMATCH, argument.span, "template interpolation requires a finite singleton string-convertible type", format!("found `{}`", self.name(ty)), None);
+                    return Type::UNKNOWN;
+                };
+                let expanded_count = alternatives.len().saturating_mul(values.len());
+                if budget
+                    .charge(
+                        crate::type_budget::BudgetKind::TemplateMembers,
+                        expanded_count as u64,
+                    )
+                    .is_err()
+                {
+                    self.error(
+                        codes::TYPE_COMPUTATION_LIMIT,
+                        reference.span,
+                        "template literal expansion limit exceeded",
+                        format!(
+                            "expansion exceeds the deterministic limit of {} alternatives",
+                            crate::type_budget::BudgetKind::TemplateMembers.limit()
+                        ),
+                        Some("reduce the number of finite interpolated alternatives".into()),
+                    );
+                    return Type::UNKNOWN;
+                }
+                alternatives = alternatives
+                    .iter()
+                    .flat_map(|prefix| values.iter().map(move |value| format!("{prefix}{value}")))
+                    .collect();
+            } else {
+                return Type::UNKNOWN;
+            }
+        }
+        let mut members = alternatives
+            .into_iter()
+            .map(|value| {
+                self.intern_singleton_value(CanonicalConst {
+                    type_identity: "String".into(),
+                    value: ConstValue::String(value),
+                })
+                .base
+            })
+            .collect::<Vec<_>>();
+        Self::sort_bases(&mut members);
+        members.dedup();
+        let result = match members.len() {
+            0 => Type::of(Base::Never),
+            1 => Type::of(members[0]),
+            _ => Type::of(Base::Union(self.intern_union(members))),
+        };
+        self.template_memo.borrow_mut().insert(cache_key, result);
+        result
+    }
+
+    fn template_string_values(&self, ty: Type) -> Option<Vec<String>> {
+        match ty.base {
+            Base::Boolean => Some(vec!["false".into(), "true".into()]),
+            Base::Union(id) => {
+                let mut values = Vec::new();
+                for member in self.unions.get(id as usize)? {
+                    values.extend(self.template_string_values(Type::of(*member))?);
+                }
+                values.sort();
+                values.dedup();
+                Some(values)
+            }
+            Base::Singleton(id) => {
+                let value = &self.singleton_values.get(id as usize)?.value;
+                Some(vec![match value {
+                    ConstValue::String(value) | ConstValue::Char(value) => value.clone(),
+                    ConstValue::Boolean(value) => value.to_string(),
+                    ConstValue::Integer { value, .. } => value.to_string(),
+                    ConstValue::BigUnsigned { value, .. } => value.to_string(),
+                    ConstValue::Duration(value) => format!("{value}ns"),
+                    ConstValue::Date(value) => format!("epoch-day:{value}"),
+                    ConstValue::Time(value) => format!("midnight-ns:{value}"),
+                    ConstValue::DateTime(value) => format!("civil-epoch-ns:{value}"),
+                    ConstValue::Instant(value) => format!("unix-ns:{value}"),
+                    ConstValue::Null => "null".into(),
+                    _ => return None,
+                }])
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_standard_type_utility(&mut self, reference: &TypeRef) -> Option<Type> {
+        let name = reference.name.as_str();
+        let recognized = matches!(
+            name,
+            "Partial"
+                | "Required"
+                | "Readonly"
+                | "Pick"
+                | "Omit"
+                | "Record"
+                | "Exclude"
+                | "Extract"
+                | "NonNullable"
+                | "Parameters"
+                | "ReturnType"
+                | "Awaited"
+        );
+        if !recognized {
+            return None;
+        }
+        let expected = match name {
+            "Partial" | "Required" | "Readonly" | "NonNullable" | "Parameters" | "ReturnType"
+            | "Awaited" => 1,
+            "Pick" | "Omit" | "Record" | "Exclude" | "Extract" => 2,
+            _ => 0,
+        };
+        if reference.arguments.len() != expected {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!("{name} utility has the wrong number of type arguments"),
+                format!(
+                    "expected {expected}, received {}",
+                    reference.arguments.len()
+                ),
+                None,
+            );
+            return Some(Type::UNKNOWN);
+        }
+        let first = self.resolve_type(&reference.arguments[0]);
+        if first.is_unknown() {
+            return Some(Type::UNKNOWN);
+        }
+        match name {
+            "NonNullable" => Some(first.without_null()),
+            "Exclude" | "Extract" => {
+                let excluded = self.resolve_type(&reference.arguments[1]);
+                let members = match first.base {
+                    Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+                    base => vec![base],
+                };
+                let filtered = members
+                    .into_iter()
+                    .filter(|member| {
+                        let matches = self
+                            .assignable_relation(excluded, Type::of(*member))
+                            .unwrap_or(false);
+                        matches == (name == "Extract")
+                    })
+                    .collect::<Vec<_>>();
+                Some(match filtered.len() {
+                    0 => Type::of(Base::Never),
+                    1 => Type::of(filtered[0]),
+                    _ => Type::of(Base::Union(self.intern_union(filtered))),
+                })
+            }
+            "Parameters" => match first.base {
+                Base::Function(id) => {
+                    let Some(function) = self.fn_types.get(id as usize).cloned() else {
+                        return Some(Type::UNKNOWN);
+                    };
+                    Some(Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
+                        elements: function.params,
+                    }))))
+                }
+                _ => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        reference.arguments[0].span,
+                        "Parameters requires a callable type",
+                        format!("found `{}`", self.name(first)),
+                        None,
+                    );
+                    Some(Type::UNKNOWN)
+                }
+            },
+            "ReturnType" => match first.base {
+                Base::Function(id) => self
+                    .fn_types
+                    .get(id as usize)
+                    .map(|function| function.returns)
+                    .or(Some(Type::UNKNOWN)),
+                _ => {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        reference.arguments[0].span,
+                        "ReturnType requires a callable type",
+                        format!("found `{}`", self.name(first)),
+                        None,
+                    );
+                    Some(Type::UNKNOWN)
+                }
+            },
+            "Awaited" => match first.base {
+                Base::Job(id) => Some(
+                    self.job_types
+                        .get(id as usize)
+                        .copied()
+                        .unwrap_or(Type::UNKNOWN),
+                ),
+                _ => Some(first),
+            },
+            "Partial" | "Required" | "Readonly" | "Pick" | "Omit" | "Record" => {
+                let keys_or_values = if expected == 2 && name != "Record" {
+                    Some(self.resolve_type(&reference.arguments[1]))
+                } else {
+                    None
+                };
+                let selected_keys = if matches!(name, "Pick" | "Omit") {
+                    keys_or_values
+                        .and_then(|ty| self.indexed_key_names(ty))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let properties = if name == "Record" {
+                    let Some(keys) = self.indexed_key_names(first) else {
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            reference.arguments[0].span,
+                            "Record keys must be a finite singleton union",
+                            "the record key domain is not statically enumerable",
+                            None,
+                        );
+                        return Some(Type::UNKNOWN);
+                    };
+                    let value = self.resolve_type(&reference.arguments[1]);
+                    keys.into_iter()
+                        .map(|key| StructuralProperty {
+                            name: key,
+                            ty: value,
+                            optional: false,
+                            readonly: false,
+                        })
+                        .collect()
+                } else {
+                    let Some(mut properties) = self.structural_properties_for_relation(first)
+                    else {
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            reference.arguments[0].span,
+                            format!("{name} requires a structural type"),
+                            format!("found `{}`", self.name(first)),
+                            None,
+                        );
+                        return Some(Type::UNKNOWN);
+                    };
+                    properties.retain(|property| match name {
+                        "Pick" => selected_keys.contains(&property.name),
+                        "Omit" => !selected_keys.contains(&property.name),
+                        _ => true,
+                    });
+                    for property in &mut properties {
+                        match name {
+                            "Partial" => property.optional = true,
+                            "Required" => property.optional = false,
+                            "Readonly" => property.readonly = true,
+                            _ => {}
+                        }
+                    }
+                    properties
+                };
+                Some(Type::of(Base::Shape(
+                    self.intern_structural_type(StructuralType { properties }),
+                )))
+            }
+            _ => Some(Type::UNKNOWN),
+        }
+    }
+
+    fn match_infer_pattern(
+        &mut self,
+        pattern: &TypeRef,
+        actual: Type,
+        bindings: &mut HashMap<String, TypeRef>,
+        depth: usize,
+    ) -> bool {
+        if depth > 128 {
+            return false;
+        }
+        if pattern.name == "infer" {
+            let Some(variable) = pattern.arguments.first() else {
+                return false;
+            };
+            let mut inferred = TypeRef::new(self.name(actual.without_null()), variable.span);
+            inferred.nullable = actual.nullable;
+            if let Some(constraint) = pattern.arguments.get(1) {
+                let constraint = substitute_alias_type_ref(constraint, bindings);
+                let constraint = self.resolve_type(&constraint);
+                if constraint.is_unknown()
+                    || !self
+                        .assignable_relation(constraint, actual)
+                        .unwrap_or(false)
+                {
+                    return false;
+                }
+            }
+            if let Some(existing) = bindings.get(&variable.name) {
+                let existing_ty = self.resolve_type(existing);
+                return self
+                    .assignable_relation(existing_ty, actual)
+                    .unwrap_or(false)
+                    && self
+                        .assignable_relation(actual, existing_ty)
+                        .unwrap_or(false);
+            }
+            bindings.insert(variable.name.clone(), inferred);
+            return true;
+        }
+        if pattern.arguments.is_empty() {
+            let expected = self.resolve_type(pattern);
+            return !expected.is_unknown()
+                && self.assignable_relation(expected, actual).unwrap_or(false);
+        }
+        let actual_args = match actual.base {
+            Base::Instance(id) => self
+                .generic_instances
+                .get(id as usize)
+                .filter(|instance| {
+                    self.classes
+                        .get(instance.class as usize)
+                        .is_some_and(|class| class.name == pattern.name)
+                })
+                .map(|instance| instance.args.clone()),
+            Base::ContractInstance(id) => self
+                .contract_instances
+                .get(id as usize)
+                .filter(|instance| {
+                    self.contracts
+                        .get(instance.contract as usize)
+                        .is_some_and(|decl| decl.name == pattern.name)
+                })
+                .map(|instance| instance.args.clone()),
+            Base::EnumInstance(id) => self
+                .enum_instances
+                .get(id as usize)
+                .filter(|instance| {
+                    self.enums
+                        .get(instance.enum_id as usize)
+                        .is_some_and(|decl| decl.name == pattern.name)
+                })
+                .map(|instance| instance.args.clone()),
+            Base::Array(id) if pattern.name == "Array" => self
+                .array_types
+                .get(id as usize)
+                .copied()
+                .map(|ty| vec![ty]),
+            Base::List(id) if pattern.name == "List" => {
+                self.list_types.get(id as usize).copied().map(|ty| vec![ty])
+            }
+            Base::Set(id) if pattern.name == "Set" => {
+                self.set_types.get(id as usize).copied().map(|ty| vec![ty])
+            }
+            Base::Map(id) if pattern.name == "Map" => self
+                .map_types
+                .get(id as usize)
+                .map(|ty| vec![ty.key, ty.value]),
+            _ => None,
+        };
+        let Some(actual_args) = actual_args else {
+            return false;
+        };
+        if actual_args.len() != pattern.arguments.len() {
+            return false;
+        }
+        pattern
+            .arguments
+            .iter()
+            .zip(actual_args)
+            .all(|(p, a)| self.match_infer_pattern(p, a, bindings, depth + 1))
+    }
+
+    fn indexed_key_names(&self, ty: Type) -> Option<Vec<String>> {
+        let mut keys = match ty.base {
+            Base::Singleton(id) => match self.singleton_values.get(id as usize)?.value.clone() {
+                ConstValue::String(value) => vec![value],
+                _ => return None,
+            },
+            Base::Union(id) => {
+                let mut keys = Vec::new();
+                for member in self.unions.get(id as usize)? {
+                    let nested = self.indexed_key_names(Type::of(*member))?;
+                    keys.extend(nested);
+                }
+                keys
+            }
+            _ => return None,
+        };
+        keys.sort();
+        keys.dedup();
+        Some(keys)
+    }
+
+    fn indexed_property_type(&mut self, receiver: Type, key: &str, span: Span) -> Option<Type> {
+        if receiver.nullable || receiver.base == Base::Null {
+            return None;
+        }
+        if let Base::Union(id) = receiver.base {
+            let members = self.unions.get(id as usize)?.clone();
+            let mut values = Vec::with_capacity(members.len());
+            for member in members {
+                values.push(self.indexed_property_type(Type::of(member), key, span)?);
+            }
+            return Some(self.join_types(values, span));
+        }
+        if let Base::Tuple(id) = receiver.base {
+            let tuple = self.tuple_types.get(id as usize)?;
+            if key == "length" {
+                return Some(Type::of(Base::Int(IntWidth::I32)));
+            }
+            let index = key.parse::<usize>().ok()?;
+            return tuple.elements.get(index).copied();
+        }
+        let property = self
+            .structural_properties_for_relation(receiver)?
+            .into_iter()
+            .find(|property| property.name == key)?;
+        Some(if property.optional {
+            property.ty.as_nullable()
+        } else {
+            property.ty
+        })
+    }
+
     /// Resolves a `type` alias by resolving what it names, catching a cycle
     /// (`type A = B; type B = A;`) rather than recursing forever.
-    fn resolve_type_alias(&mut self, name: &str, at: Span) -> Type {
+    fn resolve_type_alias(&mut self, reference: &TypeRef, name: &str) -> Type {
+        let at = reference.span;
+        if let Some(ty) = self.recursive_alias_types.get(name).copied() {
+            return ty;
+        }
+        if let Some(id) = self.recursive_alias_shapes.get(name).copied() {
+            return Type::of(Base::Shape(id));
+        }
+        const MAX_ALIAS_UNFOLDING_DEPTH: usize = 256;
+        if self.resolving_aliases.len() >= MAX_ALIAS_UNFOLDING_DEPTH {
+            self.error(
+                codes::TYPE_COMPUTATION_LIMIT,
+                at,
+                "type computation limit exceeded",
+                format!(
+                    "alias unfolding exceeded the configured depth of {MAX_ALIAS_UNFOLDING_DEPTH}"
+                ),
+                Some("split the alias chain or reduce its recursive depth".into()),
+            );
+            return Type::UNKNOWN;
+        }
         if self.resolving_aliases.contains(&name.to_string()) {
             let chain = self.resolving_aliases.join(" -> ");
             self.error(
@@ -10075,10 +13840,111 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        let target = self.type_aliases[name].clone();
+        let params = self
+            .type_alias_params
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        if params.is_empty() && !reference.arguments.is_empty() {
+            self.reject_type_arguments(reference);
+            return Type::UNKNOWN;
+        }
+        if reference.arguments.len() > params.len() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                reference.span,
+                format!("too many type arguments for `{name}`"),
+                format!("alias expects {} type arguments", params.len()),
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+        let mut substitutions = HashMap::new();
+        for (index, param) in params.iter().enumerate() {
+            let argument = if let Some(argument) = reference.arguments.get(index) {
+                argument.clone()
+            } else if let Some(default) = &param.default {
+                substitute_alias_type_ref(default, &substitutions)
+            } else {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    reference.span,
+                    format!("missing type argument for `{name}`"),
+                    format!("alias requires a type argument for `{}`", param.name.name),
+                    Some(format!("provide `{}`", params[index].name.name)),
+                );
+                return Type::UNKNOWN;
+            };
+            let argument_type = self.resolve_type(&argument);
+            for constraint in &param.constraints {
+                let constraint = substitute_alias_type_ref(constraint, &substitutions);
+                let required = self.resolve_type(&constraint);
+                if !self.satisfies_constraint(argument_type, required) {
+                    let actual_name = self.name(argument_type);
+                    let required_name = self.name(required);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        argument.span,
+                        format!(
+                            "`{actual_name}` does not satisfy alias parameter `{}`",
+                            param.name.name
+                        ),
+                        format!("parameter `{}` requires `{required_name}`", param.name.name),
+                        None,
+                    );
+                }
+            }
+            substitutions.insert(param.name.name.clone(), argument);
+        }
+        let target = substitute_alias_type_ref(&self.type_aliases[name], &substitutions);
+        // Reserve a shape identity before resolving its fields. A self
+        // reference below this object boundary can then point back to the
+        // placeholder, producing a finite recursive type graph. Unguarded
+        // alias cycles have no such placeholder and remain diagnostics.
+        let recursive_shape = if params.is_empty()
+            && matches!(target.expression.as_deref(), Some(TypeExpr::Object { .. }))
+            && type_ref_has_guarded_alias_cycle(&target, name, &self.type_aliases)
+        {
+            let id = self.structural_types.len() as u32;
+            self.structural_types.push(StructuralType {
+                // Source identifiers cannot contain NUL, so this temporary
+                // member cannot collide with a real canonical empty shape.
+                properties: vec![StructuralProperty {
+                    name: "\0zirk-recursive-alias-placeholder".into(),
+                    ty: Type::UNKNOWN,
+                    optional: false,
+                    readonly: true,
+                }],
+            });
+            self.recursive_alias_shapes.insert(name.to_string(), id);
+            self.recursive_shape_names.insert(id, name.to_string());
+            Some(id)
+        } else {
+            None
+        };
         self.resolving_aliases.push(name.to_string());
-        let ty = self.resolve_type(&target);
+        let mut ty = self.resolve_type(&target);
         self.resolving_aliases.pop();
+        if let Some(placeholder) = recursive_shape {
+            if let Base::Shape(resolved) = ty.base
+                && let Some(shape) = self.structural_types.get(resolved as usize).cloned()
+            {
+                self.structural_types[placeholder as usize] = shape;
+                ty = Type::of(Base::Shape(placeholder));
+                self.recursive_alias_types.insert(name.to_string(), ty);
+            }
+            self.recursive_alias_shapes.remove(name);
+        }
+        if let Base::Union(id) = ty.base {
+            let aliases = self.union_aliases.entry(id).or_default();
+            if !aliases.iter().any(|alias| alias == name) {
+                aliases.push(name.to_string());
+                aliases.sort();
+            }
+        }
+        if reference.nullable {
+            ty = ty.as_nullable();
+        }
         ty
     }
 
@@ -10524,17 +14390,9 @@ impl<'a> Checker<'a> {
         if expected_id == actual_id {
             return true;
         }
-        let expected = &self.fn_types[expected_id as usize];
-        let actual = &self.fn_types[actual_id as usize];
-        if expected.params.len() != actual.params.len() {
-            return false;
-        }
-        expected
-            .params
-            .iter()
-            .zip(&actual.params)
-            .all(|(e, a)| a.accepts(*e))
-            && expected.returns.accepts(actual.returns)
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        self.callable_signature_relation(expected_id, actual_id, &mut budget, &mut HashSet::new())
+            .unwrap_or(false)
     }
 
     /// [`Self::fn_shapes_compatible`], applied to two full [`Type`]s rather
@@ -10593,6 +14451,55 @@ impl<'a> Checker<'a> {
     /// Checks a function's body; returns whether every path through it
     /// returns (or diverges), which [`Self::infer_fn`] reads to tell an
     /// always-diverging `Never` body apart from an ordinary `Void` one.
+    fn collect_verified_type_predicates(&mut self, program: &Program) {
+        for function in &program.functions {
+            if !function.type_params.is_empty() || function.body.statements.len() != 1 {
+                continue;
+            }
+            let [
+                Stmt::Return(ReturnStmt {
+                    value: Some(Expr::Binary(test)),
+                    ..
+                }),
+            ] = function.body.statements.as_slice()
+            else {
+                continue;
+            };
+            let (Expr::Path(parameter), Expr::Path(target_name)) = (&*test.left, &*test.right)
+            else {
+                continue;
+            };
+            if test.op != BinaryOp::Is {
+                continue;
+            }
+            let Some(parameter_index) = function
+                .params
+                .iter()
+                .position(|candidate| candidate.name.name == parameter.name)
+            else {
+                continue;
+            };
+            let Some(signature) = self.functions.get(&function.name.name) else {
+                continue;
+            };
+            if signature.returns != Type::BOOLEAN || parameter_index >= signature.params.len() {
+                continue;
+            }
+            let source = signature.params[parameter_index].ty;
+            let target =
+                self.resolve_type(&TypeRef::new(target_name.name.clone(), target_name.span));
+            let related = source.base == Base::Dynamic
+                || target.base == Base::Dynamic
+                || self.assignable_relation(source, target).unwrap_or(false)
+                || self.assignable_relation(target, source).unwrap_or(false)
+                || self.casts_are_related(source, target);
+            if related {
+                self.type_predicate_functions
+                    .insert(function.name.name.clone(), (parameter_index, target));
+            }
+        }
+    }
+
     fn check_function(&mut self, f: &FnDecl) -> bool {
         let enclosing_function = self.current_function.replace(f.name.span);
         let previous_mode = std::mem::replace(&mut self.allow_generic_function_params, true);
@@ -10621,7 +14528,10 @@ impl<'a> Checker<'a> {
             // The default is evaluated at the call site, but it is checked here
             // where the declared type is known.
             if let Some(default) = &param.default {
+                let previous_expected = self.expected_type;
+                self.expected_type = Some(info.ty);
                 let actual = self.check_expr(default);
+                self.expected_type = previous_expected;
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
 
@@ -10766,6 +14676,9 @@ impl<'a> Checker<'a> {
         self.local_class_marks.push(locals_at_entry);
         let mut always_returns = false;
         for stmt in statements {
+            if self.is_cancelled() {
+                break;
+            }
             if self.check_stmt(stmt) {
                 always_returns = true;
             }
@@ -10779,6 +14692,9 @@ impl<'a> Checker<'a> {
 
     /// Returns `true` when the statement guarantees the function has returned.
     fn check_stmt(&mut self, stmt: &Stmt) -> bool {
+        if self.is_cancelled() {
+            return true;
+        }
         match stmt {
             Stmt::Let(s) => {
                 self.check_let(s);
@@ -12079,6 +15995,7 @@ impl<'a> Checker<'a> {
                 LambdaBody::Block(b) => self.stmts_mutate_receiver(ctx, &b.statements, aliases),
             },
             Expr::Cast(c) => self.expr_mutates_receiver(ctx, &c.expr, aliases),
+            Expr::Satisfies(s) => self.expr_mutates_receiver(ctx, &s.expr, aliases),
             Expr::Interpolated(i) => i.parts.iter().any(|p| match p {
                 InterpolatedPart::Expr(e) => self.expr_mutates_receiver(ctx, e, aliases),
                 InterpolatedPart::Literal(_) => false,
@@ -12153,9 +16070,11 @@ impl<'a> Checker<'a> {
         // (design D5). It also isolates `loop_depth`, which is correct here:
         // `break`/`continue` cannot reach past a `parallel` region into a
         // loop outside it.
+        let outer_flow = self.flow_state.checkpoint();
         let enclosing_depth = self.begin_capture_scope();
         let returns = self.check_block(&stmt.body);
         let captures = self.finish_capture_scope(enclosing_depth);
+        self.flow_state.restore(outer_flow);
         self.check_parallel_boundary(stmt.span, &captures);
 
         // Registered for `zirk-ir` (task 6.1) the same way a `spawn`/
@@ -12189,9 +16108,11 @@ impl<'a> Checker<'a> {
     fn check_parallel_expr(&mut self, e: &ParallelBlock) -> Type {
         self.check_parallel_options(&e.options);
         self.parallel_depth += 1;
+        let outer_flow = self.flow_state.checkpoint();
         let enclosing_depth = self.begin_capture_scope();
         let ty = self.check_block_value(&e.body);
         let captures = self.finish_capture_scope(enclosing_depth);
+        self.flow_state.restore(outer_flow);
         self.check_parallel_boundary(e.span, &captures);
         self.check_concurrent_result(e.span, "`parallel`", ty, false);
         self.parallel_depth -= 1;
@@ -12499,7 +16420,16 @@ impl<'a> Checker<'a> {
                 if literal_captures && self.accepts_capturing_literal(declared, actual) {
                     actual
                 } else {
+                    let previous_alias = std::mem::replace(
+                        &mut self.expected_alias_display,
+                        stmt.ty.as_ref().and_then(|written| {
+                            self.type_aliases
+                                .contains_key(&written.name)
+                                .then(|| (declared, written.name.clone()))
+                        }),
+                    );
                     self.expect_assignable(declared, actual, span, "the initial value");
+                    self.expected_alias_display = previous_alias;
                     declared
                 }
             }
@@ -12667,7 +16597,16 @@ impl<'a> Checker<'a> {
                 if !(i == 0 && annotated.is_none()) {
                     self.expected_type = annotated;
                     let actual = self.check_expr(&stmt.inits[i]);
+                    let previous_alias = std::mem::replace(
+                        &mut self.expected_alias_display,
+                        stmt.ty.as_ref().and_then(|written| {
+                            self.type_aliases
+                                .contains_key(&written.name)
+                                .then(|| (ty, written.name.clone()))
+                        }),
+                    );
                     self.expect_assignable(ty, actual, stmt.inits[i].span(), "the initial value");
+                    self.expected_alias_display = previous_alias;
                 }
                 self.check_strict_alias(&stmt.inits[i], ty, stmt.mutability, &name.name, name.span);
             }
@@ -13206,6 +17145,35 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // Flow facts describe the value currently stored at a path. Rebinding
+        // a local or mutating through a projection makes that fact stale.
+        match target {
+            AssignTarget::Name(name) => {
+                if let Some(binding) = self.scopes.resolve(&name.name) {
+                    self.flow_state
+                        .invalidate(&FlowPath::local(binding.binding.span));
+                }
+            }
+            AssignTarget::Field(field) => {
+                if let Some(path) = self.flow_path_for_expr(&field.object) {
+                    let object_type = self.flow_state.current(&path);
+                    let stable = object_type
+                        .and_then(|ty| self.structural_properties_for_relation(ty))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|property| property.readonly)
+                        .map(|property| path.project(property.name))
+                        .collect::<Vec<_>>();
+                    self.flow_state.invalidate_preserving(&path.root(), &stable);
+                }
+            }
+            AssignTarget::Index(index) => {
+                if let Some(path) = self.flow_path_for_expr(&index.receiver) {
+                    self.flow_state.invalidate(&path);
+                }
+            }
+        }
+
         let AssignTarget::Name(name) = target else {
             let target_ty = match target {
                 AssignTarget::Field(field) => {
@@ -13434,6 +17402,44 @@ impl<'a> Checker<'a> {
     /// `Self::root_binding_mutability`).
     fn check_writable_field(&mut self, field: &FieldExpr) -> Type {
         let object = self.check_expr(&field.object);
+        if let Base::Union(id) = object.base {
+            let alternatives = self.unions.get(id as usize).cloned().unwrap_or_default();
+            let mut destination_types = Vec::new();
+            let mut writable = !alternatives.is_empty();
+            for alternative in alternatives {
+                let property = self
+                    .structural_properties_for_relation(Type::of(alternative))
+                    .and_then(|properties| {
+                        properties
+                            .into_iter()
+                            .find(|property| property.name == field.name.name)
+                    });
+                let Some(property) = property else {
+                    writable = false;
+                    break;
+                };
+                if property.readonly {
+                    writable = false;
+                    break;
+                }
+                destination_types.push(property.ty);
+            }
+            if writable {
+                return self.intersect_types(destination_types, field.name.span);
+            }
+            let union_name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!(
+                    "`{union_name}` has no safely writable common field `{}`",
+                    field.name.name
+                ),
+                "every union alternative must expose a mutable field with a compatible destination type",
+                Some("narrow the union before writing this field".into()),
+            );
+            return Type::UNKNOWN;
+        }
         let ty = self.member_type(object, &field.name, field.object.span(), false);
         let contract_property = match object.base {
             Base::Contract(id) => self.contracts[id as usize]
@@ -13451,6 +17457,21 @@ impl<'a> Checker<'a> {
             }
             _ => None,
         };
+        if let Base::Shape(id) = object.base
+            && let Some(property) = self.structural_types[id as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == field.name.name)
+            && property.readonly
+        {
+            self.error(
+                codes::ASSIGN_TO_IMMUTABLE,
+                field.name.span,
+                format!("cannot assign to `{}`", field.name.name),
+                "the structural property is read-only",
+                Some("remove `inmut` from the property if this view should allow writes".into()),
+            );
+        }
         if let Some((mutability, declaration)) = contract_property {
             if mutability == Mutability::Immutable {
                 let line = self.sources.location(declaration).line;
@@ -13627,24 +17648,444 @@ impl<'a> Checker<'a> {
         self.expect_boolean(condition, stmt.condition.span(), "the condition of an `if`");
 
         let incoming = self.scopes.move_snapshot();
+        let incoming_flow = self.flow_state.checkpoint();
+        self.apply_condition_refinement(&stmt.condition, true);
         let then_returns = self.check_block(&stmt.then_branch);
         let then_moves = self.scopes.move_snapshot();
+        let then_flow = self.flow_state.checkpoint();
         self.scopes.restore_moves(&incoming);
+        self.flow_state.restore(incoming_flow.clone());
 
         // A conditional only guarantees a return when both branches do.
-        let (returns, else_moves) = match &stmt.else_branch {
+        let (returns, else_moves, else_returns, else_flow) = match &stmt.else_branch {
             Some(ElseBranch::Block(b)) => {
-                let returns = then_returns & self.check_block(b);
-                (returns, self.scopes.move_snapshot())
+                self.apply_condition_refinement(&stmt.condition, false);
+                let else_returns = self.check_block(b);
+                let else_flow = self.flow_state.checkpoint();
+                (
+                    then_returns & else_returns,
+                    self.scopes.move_snapshot(),
+                    else_returns,
+                    else_flow,
+                )
             }
             Some(ElseBranch::If(nested)) => {
-                let returns = then_returns & self.check_if(nested);
-                (returns, self.scopes.move_snapshot())
+                self.apply_condition_refinement(&stmt.condition, false);
+                let else_returns = self.check_if(nested);
+                let else_flow = self.flow_state.checkpoint();
+                (
+                    then_returns & else_returns,
+                    self.scopes.move_snapshot(),
+                    else_returns,
+                    else_flow,
+                )
             }
-            None => (false, incoming.clone()),
+            None => {
+                self.apply_condition_refinement(&stmt.condition, false);
+                let else_flow = self.flow_state.checkpoint();
+                (false, incoming.clone(), false, else_flow)
+            }
         };
         self.scopes.join_moves(&[then_moves, else_moves]);
+        // Preserve facts from the sole reachable successor when the other
+        // branch always returns, throws, or diverges. When both successors
+        // continue, the general type join is handled by the next flow task.
+        if then_returns && !else_returns {
+            self.flow_state.restore(else_flow);
+        } else if !then_returns && else_returns {
+            self.flow_state.restore(then_flow);
+        } else if !then_returns && !else_returns {
+            self.join_flow_states(&incoming_flow, &[then_flow, else_flow], stmt.span);
+        } else {
+            self.flow_state.restore(incoming_flow);
+        }
         returns
+    }
+
+    fn apply_condition_refinement(&mut self, condition: &Expr, truthy: bool) {
+        match condition {
+            Expr::Unary(unary) if unary.op == UnaryOp::Not => {
+                self.apply_condition_refinement(&unary.operand, !truthy);
+            }
+            Expr::Binary(binary) if matches!(binary.op, BinaryOp::And | BinaryOp::Or) => {
+                let sequential = (binary.op == BinaryOp::And && truthy)
+                    || (binary.op == BinaryOp::Or && !truthy);
+                if sequential {
+                    self.apply_condition_refinement(&binary.left, binary.op == BinaryOp::And);
+                    self.apply_condition_refinement(&binary.right, truthy);
+                } else {
+                    let incoming = self.flow_state.checkpoint();
+                    let mut alternatives = Vec::with_capacity(2);
+                    let first_truth = binary.op == BinaryOp::Or;
+                    self.apply_condition_refinement(&binary.left, first_truth);
+                    alternatives.push(self.flow_state.checkpoint());
+                    self.flow_state.restore(incoming.clone());
+                    self.apply_condition_refinement(&binary.left, !first_truth);
+                    self.apply_condition_refinement(&binary.right, truthy);
+                    alternatives.push(self.flow_state.checkpoint());
+                    self.join_flow_states(&incoming, &alternatives, binary.span);
+                }
+            }
+            Expr::Binary(binary) if matches!(binary.op, BinaryOp::Eq | BinaryOp::NotEq) => {
+                let equals = (binary.op == BinaryOp::Eq) == truthy;
+                let checked_cast = match &*binary.left {
+                    Expr::Cast(cast)
+                        if cast.optional && matches!(&*binary.right, Expr::Null(_)) =>
+                    {
+                        self.checked_cast_targets
+                            .get(&cast.span)
+                            .copied()
+                            .map(|target| (self.flow_path_for_expr(&cast.expr), target))
+                    }
+                    _ => None,
+                };
+                if let Some((Some(path), target)) = checked_cast {
+                    self.apply_type_test_refinement(path, target, !equals, binary.span);
+                } else if let Some(path) = self.flow_path_for_expr(&binary.left)
+                    && let Some(literal) = self.condition_literal_type(&binary.right)
+                {
+                    self.apply_literal_refinement(path, literal, equals, binary.span);
+                } else if let Some(path) = self.flow_path_for_expr(&binary.right)
+                    && let Some(literal) = self.condition_literal_type(&binary.left)
+                {
+                    self.apply_literal_refinement(path, literal, equals, binary.span);
+                }
+            }
+            Expr::Binary(binary) if binary.op == BinaryOp::Is => {
+                if let Some(target) = self.type_test_targets.get(&binary.span).copied()
+                    && let Some(path) = self.flow_path_for_expr(&binary.left)
+                {
+                    self.apply_type_test_refinement(path, target, truthy, binary.span);
+                }
+            }
+            Expr::Binary(binary) if binary.op == BinaryOp::In => {
+                if let Expr::Str(key) = &*binary.left
+                    && let Some(path) = self.flow_path_for_expr(&binary.right)
+                {
+                    self.apply_property_presence_refinement(path, &key.value, truthy, binary.span);
+                }
+            }
+            Expr::Call(call) => {
+                let Expr::Path(function_name) = &*call.callee else {
+                    return;
+                };
+                let Some((parameter_index, target)) = self
+                    .type_predicate_functions
+                    .get(&function_name.name)
+                    .copied()
+                else {
+                    return;
+                };
+                let Some(argument) = call.args.get(parameter_index) else {
+                    return;
+                };
+                if let Some(path) = self.flow_path_for_expr(&argument.value) {
+                    self.apply_type_test_refinement(path, target, truthy, call.span);
+                }
+            }
+            Expr::Path(_) | Expr::Field(_) => {
+                if let Some(path) = self.flow_path_for_expr(condition)
+                    && let Some(current) = self.flow_state.current(&path)
+                    && Type::BOOLEAN.accepts(current)
+                    && let Some(true_value) = self.boolean_singleton(true, condition.span())
+                {
+                    self.apply_literal_refinement(path, true_value, truthy, condition.span());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn join_flow_states(&mut self, base: &FlowState, alternatives: &[FlowState], span: Span) {
+        let paths = alternatives
+            .iter()
+            .flat_map(FlowState::paths)
+            .collect::<std::collections::BTreeSet<_>>();
+        self.flow_state.restore(base.clone());
+        for path in paths {
+            let declared = base
+                .declared(&path)
+                .or_else(|| alternatives.iter().find_map(|state| state.declared(&path)));
+            let types = alternatives
+                .iter()
+                .filter_map(|state| state.current(&path).or(declared))
+                .collect::<Vec<_>>();
+            if types.is_empty() {
+                continue;
+            }
+            let joined = self.join_types(types, span);
+            if base.current(&path) != Some(joined) {
+                self.flow_state.refine(path, joined);
+            }
+        }
+    }
+
+    fn condition_literal_type(&mut self, expression: &Expr) -> Option<Type> {
+        if matches!(expression, Expr::Null(_)) {
+            return Some(Type::of(Base::Null));
+        }
+        let value = self.evaluate_candidate_constant(expression)?;
+        Some(self.intern_singleton_value(value))
+    }
+
+    fn boolean_singleton(&mut self, value: bool, span: Span) -> Option<Type> {
+        let expression = Expr::Bool(BoolLit { value, span });
+        let constant = self.evaluate_candidate_constant(&expression)?;
+        Some(self.intern_singleton_value(constant))
+    }
+
+    fn apply_literal_refinement(&mut self, path: FlowPath, literal: Type, equal: bool, span: Span) {
+        let Some(current) = self.flow_state.current(&path) else {
+            return;
+        };
+        let narrowed = if literal.base == Base::Null {
+            if equal {
+                if current.nullable || current.base == Base::Null {
+                    Type::of(Base::Null)
+                } else {
+                    Type::of(Base::Never)
+                }
+            } else if current.base == Base::Null {
+                Type::of(Base::Never)
+            } else {
+                current.without_null()
+            }
+        } else if equal {
+            if self
+                .assignable_relation(current.without_null(), literal)
+                .unwrap_or(false)
+            {
+                literal
+            } else {
+                Type::of(Base::Never)
+            }
+        } else {
+            let mut alternatives = match current.without_null().base {
+                Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+                base => vec![base],
+            };
+            let literal_value = match literal.base {
+                Base::Singleton(id) => self.singleton_values.get(id as usize).cloned(),
+                _ => None,
+            };
+            let mut kept = Vec::new();
+            for alternative in alternatives.drain(..) {
+                let alternative_type = Type::of(alternative);
+                let exact_match = match (alternative, literal_value.as_ref()) {
+                    (Base::Singleton(id), Some(value)) => {
+                        self.singleton_values.get(id as usize) == Some(value)
+                    }
+                    _ => false,
+                };
+                if exact_match {
+                    continue;
+                }
+                if alternative == Base::Boolean
+                    && let Some(crate::constant_value::ConstValue::Boolean(value)) =
+                        literal_value.as_ref().map(|value| &value.value)
+                    && let Some(opposite) = self.boolean_singleton(!value, span)
+                {
+                    kept.push(opposite);
+                    continue;
+                }
+                kept.push(alternative_type);
+            }
+            if current.nullable {
+                kept.push(Type::of(Base::Null));
+            }
+            if kept.is_empty() {
+                Type::of(Base::Never)
+            } else {
+                self.join_types(kept, span)
+            }
+        };
+        self.flow_state.refine(path.clone(), narrowed);
+
+        // A literal test on a projected member also discriminates the root
+        // structural union when every alternative declares that member.
+        if let Some(member) = path.last_member() {
+            let root = path.root();
+            if let Some(root_type) = self.flow_state.current(&root)
+                && let Base::Union(id) = root_type.without_null().base
+            {
+                let alternatives = self.unions.get(id as usize).cloned().unwrap_or_default();
+                let literal_value = match literal.base {
+                    Base::Singleton(id) => self.singleton_values.get(id as usize).cloned(),
+                    _ => None,
+                };
+                let mut kept = Vec::new();
+                for alternative in alternatives {
+                    let props = self.structural_properties_for_relation(Type::of(alternative));
+                    let Some(property) =
+                        props.and_then(|props| props.into_iter().find(|p| p.name == member))
+                    else {
+                        kept.push(Type::of(alternative));
+                        continue;
+                    };
+                    let property_type = property.ty;
+                    if equal {
+                        if self
+                            .assignable_relation(literal, property_type)
+                            .unwrap_or(false)
+                        {
+                            kept.push(Type::of(alternative));
+                        }
+                    } else {
+                        let exact = !property.optional
+                            && match (property_type.base, literal_value.as_ref()) {
+                                (Base::Singleton(id), Some(value)) => {
+                                    self.singleton_values.get(id as usize) == Some(value)
+                                }
+                                _ => false,
+                            };
+                        if !exact {
+                            kept.push(Type::of(alternative));
+                        }
+                    }
+                }
+                if root_type.nullable {
+                    kept.push(Type::of(Base::Null));
+                }
+                let narrowed_root = if kept.is_empty() {
+                    Type::of(Base::Never)
+                } else {
+                    self.join_types(kept, span)
+                };
+                self.flow_state.refine(root, narrowed_root);
+            }
+        }
+    }
+
+    fn apply_property_presence_refinement(
+        &mut self,
+        path: FlowPath,
+        key: &str,
+        present: bool,
+        span: Span,
+    ) {
+        let Some(current) = self.flow_state.current(&path) else {
+            return;
+        };
+        let alternatives = match current.without_null().base {
+            Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+            base => vec![base],
+        };
+        let mut kept = Vec::new();
+        for alternative in alternatives {
+            let ty = Type::of(alternative);
+            match self.structural_properties_for_relation(ty) {
+                Some(properties) => match properties.iter().find(|property| property.name == key) {
+                    Some(property) if property.optional => kept.push(ty),
+                    Some(_) if present => kept.push(ty),
+                    Some(_) => {}
+                    None if !present => kept.push(ty),
+                    None => {}
+                },
+                // Open Object, Dynamic, and nominal types without a complete
+                // structural view remain possible on either branch.
+                None => kept.push(ty),
+            }
+        }
+        if current.nullable {
+            kept.push(Type::of(Base::Null));
+        }
+        let narrowed = if kept.is_empty() {
+            Type::of(Base::Never)
+        } else {
+            self.join_types(kept, span)
+        };
+        self.flow_state.refine(path, narrowed);
+    }
+
+    fn apply_type_test_refinement(
+        &mut self,
+        path: FlowPath,
+        target: Type,
+        matches: bool,
+        span: Span,
+    ) {
+        let Some(current) = self.flow_state.current(&path) else {
+            return;
+        };
+        let current_type = current.without_null();
+        let narrowed = if matches {
+            if current_type.base == Base::Dynamic {
+                target
+            } else if let Base::Union(id) = current_type.base {
+                let members = self.unions.get(id as usize).cloned().unwrap_or_default();
+                let possible = members
+                    .into_iter()
+                    .filter_map(|member| {
+                        let member_type = Type::of(member);
+                        let member_is_target = self
+                            .assignable_relation(target, member_type)
+                            .unwrap_or(false);
+                        let target_fits_member = self
+                            .assignable_relation(member_type, target)
+                            .unwrap_or(false);
+                        (member_is_target
+                            || target_fits_member
+                            || self.casts_are_related(member_type, target))
+                        .then_some(if member_is_target {
+                            member_type
+                        } else {
+                            target
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if possible.is_empty() {
+                    Type::of(Base::Never)
+                } else {
+                    self.join_types(possible, span)
+                }
+            } else if self
+                .assignable_relation(target, current_type)
+                .unwrap_or(false)
+            {
+                current_type
+            } else if self
+                .assignable_relation(current_type, target)
+                .unwrap_or(false)
+                || self.casts_are_related(current_type, target)
+            {
+                target
+            } else {
+                Type::of(Base::Never)
+            }
+        } else if current_type.base == Base::Dynamic {
+            current
+        } else if let Base::Union(id) = current_type.base {
+            let members = self.unions.get(id as usize).cloned().unwrap_or_default();
+            let mut remaining = members
+                .into_iter()
+                .filter(|member| {
+                    !self
+                        .assignable_relation(target, Type::of(*member))
+                        .unwrap_or(false)
+                })
+                .map(Type::of)
+                .collect::<Vec<_>>();
+            if current.nullable {
+                remaining.push(Type::of(Base::Null));
+            }
+            if remaining.is_empty() {
+                Type::of(Base::Never)
+            } else {
+                self.join_types(remaining, span)
+            }
+        } else if self
+            .assignable_relation(target, current_type)
+            .unwrap_or(false)
+        {
+            if current.nullable {
+                Type::of(Base::Null)
+            } else {
+                Type::of(Base::Never)
+            }
+        } else {
+            current
+        };
+        self.flow_state.refine(path, narrowed);
     }
 
     /// `while`, `loop` and the three-clause `for`, which share a node.
@@ -13656,6 +18097,7 @@ impl<'a> Checker<'a> {
         if let Some(init) = &stmt.init {
             self.check_stmt(init);
         }
+        let loop_entry_flow = self.flow_state.checkpoint();
 
         // Conditions are re-evaluated on every iteration, just like the body
         // and the step clause. They therefore share the loop transfer gate.
@@ -13664,6 +18106,10 @@ impl<'a> Checker<'a> {
             let ty = self.check_expr(condition);
             let context = format!("the condition of a `{}`", stmt.kind.as_str());
             self.expect_boolean(ty, condition.span(), &context);
+            self.flow_state.restore(loop_entry_flow.clone());
+            if stmt.kind != LoopKind::DoWhile {
+                self.apply_condition_refinement(condition, true);
+            }
         }
 
         let body_returns = self.check_block(&stmt.body);
@@ -13671,14 +18117,73 @@ impl<'a> Checker<'a> {
         if let Some(step) = &stmt.step {
             self.check_stmt(step);
         }
+        let body_flow = self.flow_state.checkpoint();
         self.loop_depth -= 1;
+
+        let has_break = self.contains_break(&stmt.body);
+        if let Some(condition) = &stmt.condition {
+            if stmt.kind == LoopKind::DoWhile && body_returns {
+                self.flow_state.restore(loop_entry_flow.clone());
+            } else {
+                let mut header = if stmt.kind == LoopKind::DoWhile {
+                    body_flow.clone()
+                } else {
+                    loop_entry_flow.clone()
+                };
+                let mut budget = crate::type_budget::TypeComputationBudget::default();
+                let mut converged = false;
+                loop {
+                    if budget
+                        .charge(crate::type_budget::BudgetKind::FlowIterations, 1)
+                        .is_err()
+                    {
+                        self.error(
+                            codes::TYPE_COMPUTATION_LIMIT,
+                            stmt.span,
+                            "loop flow analysis did not converge within its budget",
+                            "the control-flow facts changed for too many fixed-point iterations",
+                            Some("simplify the loop condition or split the type refinement into smaller loops".into()),
+                        );
+                        break;
+                    }
+                    let mut predecessors = vec![header.clone()];
+                    if !body_returns {
+                        predecessors.push(body_flow.clone());
+                    }
+                    self.join_flow_states(&loop_entry_flow, &predecessors, stmt.span);
+                    let next = self.flow_state.checkpoint();
+                    if next == header {
+                        converged = true;
+                        header = next;
+                        break;
+                    }
+                    header = next;
+                }
+                if !converged && !body_returns {
+                    // Keep the last computed safe over-approximation after
+                    // reporting deterministic budget exhaustion.
+                    self.flow_state.restore(header.clone());
+                }
+                self.flow_state.restore(header);
+                self.apply_condition_refinement(condition, false);
+                let mut exits = vec![self.flow_state.checkpoint()];
+                if has_break {
+                    exits.push(body_flow);
+                }
+                self.join_flow_states(&loop_entry_flow, &exits, stmt.span);
+            }
+        } else if has_break {
+            self.join_flow_states(&loop_entry_flow, &[body_flow], stmt.span);
+        } else {
+            self.flow_state.restore(loop_entry_flow.clone());
+        }
 
         self.scopes.pop();
 
         // Only a `loop` with no exit guarantees the code after it is
         // unreachable, which is what lets a function end on one without a
         // `return`. A conditional loop may run zero times.
-        stmt.condition.is_none() && !self.contains_break(&stmt.body) && body_returns
+        stmt.condition.is_none() && !has_break && body_returns
     }
 
     /// Whether a block can leave its loop through `break`.
@@ -13912,11 +18417,20 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        if !self.current_return.accepts(actual)
-            && !self.is_subclass_of(actual, self.current_return)
-            && !self.bare_enum_matches_instance(actual, self.current_return)
-            && !self.callable_assignable(self.current_return, actual)
-        {
+        let assignable = match self.assignable_relation(self.current_return, actual) {
+            Ok(assignable) => assignable || self.callable_assignable(self.current_return, actual),
+            Err(limit) => {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    stmt.value.as_ref().map(|e| e.span()).unwrap_or(stmt.span),
+                    limit.to_string(),
+                    "return type checking exceeded its deterministic type-relation budget",
+                    None,
+                );
+                return;
+            }
+        };
+        if !assignable {
             let expected = self.name(self.current_return);
             let found = self.name(actual);
             self.error(
@@ -13991,12 +18505,18 @@ impl<'a> Checker<'a> {
         // both the entry state and the completed body state as possibilities
         // for each catch, then join all normal and handled exits below.
         let incoming_moves = self.scopes.move_snapshot();
+        let incoming_flow = self.flow_state.checkpoint();
 
         let outer_pending = std::mem::take(&mut self.pending_throws);
         let body_always_returns = self.check_block(&stmt.body);
+        let body_flow = self.flow_state.checkpoint();
         let body_moves = self.scopes.move_snapshot();
         let body_escapees = std::mem::replace(&mut self.pending_throws, outer_pending);
         let mut exit_moves = vec![body_moves.clone()];
+        let mut exit_flows = Vec::new();
+        if !body_always_returns {
+            exit_flows.push(body_flow.clone());
+        }
 
         // Every path out of the `try` as a whole guarantees a return only
         // when the body does *and* every `catch` does too — a `catch` that
@@ -14044,11 +18564,20 @@ impl<'a> Checker<'a> {
             self.scopes.restore_moves(&incoming_moves);
             self.scopes
                 .join_moves(&[incoming_moves.clone(), body_moves.clone()]);
+            self.join_flow_states(
+                &incoming_flow,
+                &[incoming_flow.clone(), body_flow.clone()],
+                catch.span,
+            );
             let previous_catch = self.catch_type.replace(ty);
             let catch_always_returns = self.check_block(&catch.body);
+            let catch_flow = self.flow_state.checkpoint();
             self.catch_type = previous_catch;
             self.scopes.pop();
             exit_moves.push(self.scopes.move_snapshot());
+            if !catch_always_returns {
+                exit_flows.push(catch_flow);
+            }
             if !catch_always_returns {
                 catches_always_return = false;
             }
@@ -14057,6 +18586,11 @@ impl<'a> Checker<'a> {
         }
 
         self.scopes.join_moves(&exit_moves);
+        if exit_flows.is_empty() {
+            self.flow_state.restore(incoming_flow.clone());
+        } else {
+            self.join_flow_states(&incoming_flow, &exit_flows, stmt.span);
+        }
 
         // Whatever the body could throw that no catch here covers keeps
         // propagating, exactly like an ordinary `throws` call's own type
@@ -14122,12 +18656,42 @@ impl<'a> Checker<'a> {
     // --- Expressions ------------------------------------------------------
 
     fn check_expr(&mut self, expr: &Expr) -> Type {
+        if self.is_cancelled() {
+            return Type::of(Base::Never);
+        }
         // Single-shot: whatever the immediate caller set, this expression —
         // and only this one — sees it. A nested `check_expr` this dispatch
         // recurses into (an operand, an argument, …) starts fresh at `None`
         // unless something explicitly sets it again first. See
         // `expected_type`'s own doc comment for why that matters.
-        let expected = self.expected_type.take();
+        let mut expected = self.expected_type.take();
+        let contextual_union_member = expected
+            .filter(|ty| matches!(ty.without_null().base, Base::Union(_)))
+            .and_then(|ty| self.expected_union_constant_member(expr, ty));
+        let contextual_singleton = expected
+            .filter(|ty| matches!(ty.without_null().base, Base::Singleton(_)))
+            .and_then(|ty| {
+                let Base::Singleton(id) = ty.without_null().base else {
+                    unreachable!()
+                };
+                (self.evaluate_candidate_constant(expr).as_ref()
+                    == self.singleton_values.get(id as usize))
+                .then_some(ty.without_null())
+            });
+        if matches!(
+            expected.map(Type::without_null).map(|ty| ty.base),
+            Some(Base::Union(_))
+        ) {
+            match expr {
+                Expr::Object(_) | Expr::Tuple(_) | Expr::Collection(_) => {}
+                // Constant scalar and constructor expressions are checked
+                // normally, then their proven alternative is restored below.
+                _ => expected = None,
+            }
+        }
+        if contextual_singleton.is_some() && !matches!(expr, Expr::Object(_)) {
+            expected = None;
+        }
         let ty = match expr {
             Expr::Int(lit) => self.check_int_literal(lit, expected),
             Expr::Float(lit) => self.check_float_literal(lit, expected),
@@ -14170,7 +18734,40 @@ impl<'a> Checker<'a> {
             Expr::Path(ident) => self.check_path(ident),
             Expr::Unary(e) => self.check_unary(e, expected),
             Expr::Binary(e) => self.check_binary(e, expected),
-            Expr::Call(e) => self.check_call(e, expected),
+            Expr::Call(e) => {
+                let ty = self.check_call(e, expected);
+                // Calls may retain or mutate values passed across the call
+                // boundary. Invalidate only paths that actually escape into
+                // the call; unrelated locals keep their refinements.
+                for argument in &e.args {
+                    if let Some(path) = self.flow_path_for_expr(&argument.value) {
+                        self.flow_state.invalidate(&path);
+                    }
+                }
+                if let Expr::Path(callee) = &*e.callee
+                    && let Some(binding) = self.scopes.resolve(&callee.name)
+                    && let Base::Function(function_id) = binding.binding.ty.base
+                {
+                    let captures = self
+                        .lambdas
+                        .values()
+                        .find(|lambda| lambda.fn_type == function_id)
+                        .map(|lambda| lambda.captures.clone());
+                    if let Some(captures) = captures {
+                        for capture in captures {
+                            if let Some(resolved) = self.scopes.resolve(&capture.name) {
+                                self.flow_state
+                                    .invalidate(&FlowPath::local(resolved.binding.span));
+                            }
+                        }
+                    } else {
+                        // An unknown function value may close over any local
+                        // visible at this call site; forget its flow facts.
+                        self.flow_state.clear_refinements();
+                    }
+                }
+                ty
+            }
             // `a..b` is a `Range<T>` value (roadmap Phase 7) — stored,
             // passed, reversed, sliced; `for ... in` still iterates it.
             Expr::Range(e) => self.check_range(e, expected),
@@ -14242,6 +18839,7 @@ impl<'a> Checker<'a> {
                 Type::VOID
             }
             Expr::Cast(e) => self.check_cast(e),
+            Expr::Satisfies(e) => self.check_satisfies(e),
             Expr::Interpolated(e) => self.check_interpolated(e),
             Expr::Unsafe(e) => self.check_unsafe_expr(e),
             Expr::Commit(e) => self.check_commit_expr(e),
@@ -14336,8 +18934,66 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let ty = contextual_union_member
+            .or(contextual_singleton)
+            .unwrap_or(ty);
         self.expr_types.insert(expr.span(), ty);
         ty
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.load(AtomicOrdering::Relaxed))
+    }
+
+    /// Selects the exact literal alternative supplied by an expected finite
+    /// union. This preserves precision for function arguments and assignments
+    /// such as `const(1) | const(2)` while leaving non-constant expressions to
+    /// ordinary assignability checking.
+    fn expected_union_constant_member(&mut self, expr: &Expr, expected: Type) -> Option<Type> {
+        let Base::Union(union_id) = expected.without_null().base else {
+            return None;
+        };
+        let enum_variant = match expr {
+            Expr::Variant(variant) => Some((
+                self.resolved_name(&variant.enum_name.name, variant.enum_name.span),
+                variant.variant.name.as_str(),
+            )),
+            Expr::Field(field) => match &*field.object {
+                Expr::Path(owner) => Some((
+                    self.resolved_name(&owner.name, owner.span),
+                    field.name.name.as_str(),
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((enum_name, variant_name)) = enum_variant {
+            return self.unions.get(union_id as usize)?.iter().find_map(|member| {
+                let Base::Singleton(id) = member else { return None };
+                self.singleton_values.get(*id as usize).and_then(|value| {
+                    matches!(&value.value, crate::constant_value::ConstValue::Enum { enum_identity: owner, variant_identity: found, fields }
+                        if owner == &enum_name && found.ends_with(&format!("::{variant_name}")) && fields.is_empty())
+                    .then_some(Type::of(*member))
+                })
+            });
+        }
+        let value = self.evaluate_candidate_constant(expr)?;
+        let members = self.unions.get(union_id as usize)?.clone();
+        for member in &members {
+            if let Base::Singleton(id) = member
+                && self.singleton_values.get(*id as usize) == Some(&value)
+            {
+                return Some(Type::of(*member));
+            }
+        }
+        let owner = Type::from_name(&value.type_identity)?;
+        members
+            .iter()
+            .find(|member| **member == owner.base)
+            .copied()
+            .map(Type::of)
     }
 
     /// Returns `Result<T,E>`'s resolved payload types for the compiler-native
@@ -14419,6 +19075,7 @@ impl<'a> Checker<'a> {
         }
 
         let enclosing_return = self.current_return;
+        let outer_flow = self.flow_state.checkpoint();
         let enclosing_depth = self.begin_capture_scope();
         // A branch's unhandled exception is caught by its scope
         // (`concurrent-scopes`, "Structured failure"), not by the enclosing
@@ -14442,6 +19099,7 @@ impl<'a> Checker<'a> {
         self.inferred_returns = outer_inferred;
         self.pending_throws = outer_pending;
         let captures = self.finish_capture_scope(enclosing_depth);
+        self.flow_state.restore(outer_flow);
         self.current_function = enclosing_function;
         if let Some(parent) = enclosing_function {
             self.capability_function_calls
@@ -14488,9 +19146,43 @@ impl<'a> Checker<'a> {
     ///
     /// Not lowered yet: nothing runs the checked failure a cast that turns
     /// out wrong needs at runtime (roadmap task 11.6).
+    fn check_satisfies(&mut self, expr: &SatisfiesExpr) -> Type {
+        let actual = self.check_expr(&expr.expr);
+        let expected = self.resolve_type(&expr.target);
+        if actual.is_unknown() || expected.is_unknown() {
+            return actual;
+        }
+        let assignable = match self.assignable_relation(expected, actual) {
+            Ok(assignable) => assignable,
+            Err(limit) => {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    expr.span,
+                    limit.to_string(),
+                    "satisfies checking exceeded its deterministic type-relation budget",
+                    None,
+                );
+                return actual;
+            }
+        };
+        if !assignable {
+            let found = self.name(actual);
+            let target = self.name(expected);
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!("`{found}` does not satisfy `{target}`"),
+                format!("the expression has type `{found}`, which is not assignable to `{target}`"),
+                None,
+            );
+        }
+        actual
+    }
+
     fn check_cast(&mut self, expr: &CastExpr) -> Type {
         let actual = self.check_expr(&expr.expr);
         let target = self.resolve_type(&expr.target);
+        self.checked_cast_targets.insert(expr.span, target);
 
         if actual.is_unknown() || target.is_unknown() {
             return target;
@@ -15176,7 +19868,17 @@ impl<'a> Checker<'a> {
             self.record_capture(&resolved.binding);
         }
 
-        resolved.binding.ty
+        let path = FlowPath::local(resolved.binding.span);
+        if resolved.captured {
+            // A closure or concurrent body may run after the enclosing
+            // refinement has changed. Captures therefore start from their
+            // stable declared type; local flow facts are not closure facts.
+            self.flow_state
+                .declared(&path)
+                .unwrap_or(resolved.binding.ty)
+        } else {
+            self.flow_state.read(&path, resolved.binding.ty)
+        }
     }
 
     fn record_capture(&mut self, binding: &Binding) {
@@ -15357,6 +20059,14 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn is_resolvable_type_name(&self, name: &str) -> bool {
+        Type::from_name(name).is_some()
+            || self.classes.iter().any(|class| class.name == name)
+            || self.contracts.iter().any(|contract| contract.name == name)
+            || self.enums.iter().any(|enum_type| enum_type.name == name)
+            || self.type_aliases.contains_key(name)
+    }
+
     fn check_binary(&mut self, expr: &BinaryExpr, outer_expected: Option<Type>) -> Type {
         // For arithmetic, propagate the expected result type down into operands
         // so that `mut x: Int8 = 1 + 2;` can infer the literals as `Int8` and
@@ -15393,7 +20103,28 @@ impl<'a> Checker<'a> {
                 .then(|| numeric_hint(left))
                 .flatten()
         });
-        let right = self.check_expr(&expr.right);
+        let type_test_target = if expr.op == BinaryOp::Is
+            && let Expr::Path(type_name) = &*expr.right
+            && self.scopes.lookup(&type_name.name).is_none()
+            && self.is_resolvable_type_name(&type_name.name)
+        {
+            let reference = TypeRef::new(type_name.name.clone(), type_name.span);
+            Some(self.resolve_type(&reference))
+        } else {
+            None
+        };
+        if let Some(target) = type_test_target {
+            self.type_test_targets.insert(expr.span, target);
+        }
+        let logical_flow =
+            matches!(expr.op, BinaryOp::And | BinaryOp::Or).then(|| self.flow_state.checkpoint());
+        if logical_flow.is_some() {
+            self.apply_condition_refinement(&expr.left, expr.op == BinaryOp::And);
+        }
+        let right = type_test_target.unwrap_or_else(|| self.check_expr(&expr.right));
+        if let Some(checkpoint) = logical_flow {
+            self.flow_state.restore(checkpoint);
+        }
 
         if operand_expected.is_none()
             && is_num_literal(&expr.left)
@@ -15430,11 +20161,48 @@ impl<'a> Checker<'a> {
                 Type::BOOLEAN
             }
 
+            In => {
+                self.expect_assignable(Type::STRING, left, expr.left.span(), "a property name");
+                if !right.is_unknown()
+                    && !matches!(
+                        right.without_null().base,
+                        Base::Object
+                            | Base::Dynamic
+                            | Base::Class(_)
+                            | Base::Instance(_)
+                            | Base::Contract(_)
+                            | Base::ContractInstance(_)
+                            | Base::Shape(_)
+                            | Base::Union(_)
+                            | Base::Intersection(_)
+                    )
+                {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.right.span(),
+                        "the right operand of `in` must expose properties",
+                        format!("found `{}`", self.name(right)),
+                        Some("test a property-bearing value".into()),
+                    );
+                }
+                Type::BOOLEAN
+            }
+
             // Equality is structural and requires both sides to share a type.
             // `is` asks about identity, so it needs types with identity and
             // nothing else: no contract, no structure, no content.
             Is => {
-                self.expect_same(left, right, expr);
+                if let Some(target) = self.type_test_targets.get(&expr.span).copied() {
+                    self.check_type_test(left, target, expr);
+                    return Type::BOOLEAN;
+                }
+                let intersection_view_comparison = (matches!(left.base, Base::Intersection(_))
+                    || matches!(right.base, Base::Intersection(_)))
+                    && (self.assignable_relation(left, right).unwrap_or(false)
+                        || self.assignable_relation(right, left).unwrap_or(false));
+                if left.unify(right).is_none() && !intersection_view_comparison {
+                    self.expect_same(left, right, expr);
+                }
                 let has_identity = match left.base {
                     Base::Class(_) => true,
                     // A closure's identity is its whole value — function
@@ -15445,6 +20213,18 @@ impl<'a> Checker<'a> {
                     // is comparing two values of the *same* callable shape,
                     // not deciding cross-shape compatibility.
                     Base::Contract(_) | Base::Object | Base::String | Base::Function(_) => true,
+                    Base::Intersection(id) => {
+                        self.intersections[id as usize].iter().all(|member| {
+                            matches!(
+                                member,
+                                Base::Class(_)
+                                    | Base::Instance(_)
+                                    | Base::Contract(_)
+                                    | Base::ContractInstance(_)
+                                    | Base::Object
+                            )
+                        })
+                    }
                     _ => false,
                 };
                 if !has_identity && !left.is_unknown() {
@@ -15461,10 +20241,18 @@ impl<'a> Checker<'a> {
             }
 
             Eq | NotEq => {
-                self.expect_same(left, right, expr);
-                self.reject_nullable_comparison(left, right, expr);
-                self.reject_closure_comparison(left, right, expr);
-                self.reject_unstructured_comparison(left, expr);
+                let null_check = left.base == Base::Null || right.base == Base::Null;
+                if !null_check {
+                    if left.unify(right).is_none()
+                        && !self.assignable_relation(left, right).unwrap_or(false)
+                        && !self.assignable_relation(right, left).unwrap_or(false)
+                    {
+                        self.expect_same(left, right, expr);
+                    }
+                    self.reject_nullable_comparison(left, right, expr);
+                    self.reject_closure_comparison(left, right, expr);
+                    self.reject_unstructured_comparison(left, expr);
+                }
                 Type::BOOLEAN
             }
 
@@ -15582,6 +20370,49 @@ impl<'a> Checker<'a> {
                     left
                 }
             }
+        }
+    }
+
+    fn check_type_test(&mut self, actual: Type, target: Type, expression: &BinaryExpr) {
+        let target_is_testable = matches!(
+            target.without_null().base,
+            Base::Class(_)
+                | Base::Instance(_)
+                | Base::Contract(_)
+                | Base::ContractInstance(_)
+                | Base::Enum(_)
+                | Base::EnumInstance(_)
+        );
+        if !target_is_testable {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expression.op_span,
+                "a type test requires a nominal type",
+                format!("`{}` has no runtime type tag to test", self.name(target)),
+                Some("test a class, contract, or enum value".into()),
+            );
+            return;
+        }
+        let possible = actual.base == Base::Dynamic
+            || match actual.base {
+                Base::Union(id) => self.unions.get(id as usize).is_some_and(|members| {
+                    members
+                        .iter()
+                        .any(|member| self.casts_are_related(Type::of(*member), target))
+                }),
+                _ => self.casts_are_related(actual, target),
+            };
+        if !possible {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expression.op_span,
+                format!(
+                    "type test against `{}` can never succeed",
+                    self.name(target)
+                ),
+                format!("the value has type `{}`", self.name(actual)),
+                Some("change the tested type or widen the value's declared type so the test can succeed".into()),
+            );
         }
     }
 
@@ -15982,6 +20813,35 @@ impl<'a> Checker<'a> {
         literal: &ObjectLiteralExpr,
         expected: Option<Type>,
     ) -> Type {
+        if let Some(singleton_type) = expected.map(Type::without_null)
+            && let Base::Singleton(id) = singleton_type.base
+        {
+            let actual = self.evaluate_candidate_constant(&Expr::Object(literal.clone()));
+            if actual.as_ref() != self.singleton_values.get(id as usize) {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    "object literal does not equal the expected immutable value",
+                    format!("expected `{}`", self.name(singleton_type)),
+                    None,
+                );
+            }
+            for element in &literal.elements {
+                match element {
+                    ObjectLiteralElement::Spread(spread) => {
+                        self.check_expr(&spread.expr);
+                    }
+                    ObjectLiteralElement::Field(field) => {
+                        if let Some(key) = &field.dynamic_key {
+                            self.check_expr(key);
+                        }
+                        self.check_expr(&field.value);
+                    }
+                }
+            }
+            return singleton_type;
+        }
+
         if let Some(expected_contract) = expected.map(Type::without_null)
             && matches!(
                 expected_contract.base,
@@ -15990,6 +20850,19 @@ impl<'a> Checker<'a> {
         {
             self.check_object_literal_contract(literal, expected_contract);
             return Type::OBJECT;
+        }
+
+        if let Some(expected_union) = expected.map(Type::without_null)
+            && let Base::Union(union_id) = expected_union.base
+        {
+            return self.check_object_literal_union(literal, union_id);
+        }
+
+        if let Some(expected_shape) = expected.map(Type::without_null)
+            && let Base::Shape(shape_id) = expected_shape.base
+        {
+            self.check_object_literal_shape(literal, shape_id);
+            return expected_shape;
         }
 
         if expected.is_none_or(|ty| ty.without_null().base == Base::Object) {
@@ -16043,6 +20916,685 @@ impl<'a> Checker<'a> {
             Some("use a class constructor when nominal class identity is required".into()),
         );
         Type::UNKNOWN
+    }
+
+    fn check_object_literal_union(&mut self, literal: &ObjectLiteralExpr, union_id: u32) -> Type {
+        let candidates = self
+            .unions
+            .get(union_id as usize)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|base| {
+                matches!(
+                    base,
+                    Base::Shape(_)
+                        | Base::Contract(_)
+                        | Base::ContractInstance(_)
+                        | Base::Intersection(_)
+                )
+            })
+            .filter(|base| self.object_literal_candidate_matches(literal, Type::of(*base)))
+            .collect::<Vec<_>>();
+
+        let selected = match candidates.as_slice() {
+            [candidate] => *candidate,
+            [] => {
+                let expected = self.name(Type::of(Base::Union(union_id)));
+                let (span, mismatches) = self.zero_candidate_mismatches(literal, union_id);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    span,
+                    "object literal matches no alternative of the expected union",
+                    format!("no structural alternative in `{expected}` accepts this literal: {mismatches}"),
+                    Some("check the candidate-specific property requirements shown above".into()),
+                );
+                for element in &literal.elements {
+                    if let ObjectLiteralElement::Field(field) = element {
+                        self.check_expr(&field.value);
+                    }
+                }
+                return Type::UNKNOWN;
+            }
+            _ => {
+                let mut names = candidates
+                    .iter()
+                    .map(|base| self.name(Type::of(*base)))
+                    .collect::<Vec<_>>();
+                names.sort();
+                names.dedup();
+                let names = names.join(" | ");
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    "object literal is ambiguous between union alternatives",
+                    format!("the known fields remain compatible with: {names}"),
+                    Some("add a required distinguishing field, or assign the literal to a value explicitly annotated with the intended alternative (for example, `let value: Left = { ... }`)".into()),
+                );
+                for element in &literal.elements {
+                    if let ObjectLiteralElement::Field(field) = element {
+                        self.check_expr(&field.value);
+                    }
+                }
+                return Type::UNKNOWN;
+            }
+        };
+
+        match selected {
+            Base::Shape(shape_id) => self.check_object_literal_shape(literal, shape_id),
+            Base::Contract(_) | Base::ContractInstance(_) => {
+                self.check_object_literal_contract(literal, Type::of(selected));
+            }
+            Base::Intersection(id) => {
+                let Some(properties) = self.structural_properties_for_relation(Type::of(selected))
+                else {
+                    return Type::UNKNOWN;
+                };
+                let shape_id = self.intern_structural_type(StructuralType { properties });
+                self.check_object_literal_shape(literal, shape_id);
+                for member in self
+                    .intersections
+                    .get(id as usize)
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    if matches!(member, Base::Contract(_) | Base::ContractInstance(_)) {
+                        self.check_object_literal_contract(literal, Type::of(member));
+                    }
+                }
+            }
+            _ => unreachable!("candidate collection admits only structural union members"),
+        }
+        Type::of(selected)
+    }
+
+    /// Performs a diagnostic-free candidate pass. It uses only statically
+    /// known keys, source property types, simple literal values, and nested
+    /// object structure; unknown expressions remain viable until the chosen
+    /// candidate supplies their contextual type in the real checker pass.
+    fn object_literal_candidate_matches(
+        &self,
+        literal: &ObjectLiteralExpr,
+        expected: Type,
+    ) -> bool {
+        if let Base::Union(id) = expected.base {
+            return self.unions.get(id as usize).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|base| self.object_literal_candidate_matches(literal, Type::of(*base)))
+            });
+        }
+        let Some(required) = self.structural_properties_for_relation(expected) else {
+            return false;
+        };
+        let mut provided = HashMap::<String, (Type, bool)>::new();
+        for element in &literal.elements {
+            match element {
+                ObjectLiteralElement::Spread(spread) => {
+                    let Expr::Path(name) = &spread.expr else {
+                        continue;
+                    };
+                    let Some(binding) = self.scopes.lookup(&name.name) else {
+                        continue;
+                    };
+                    if let Some(properties) = self.structural_properties_for_relation(binding.ty) {
+                        for property in properties {
+                            provided
+                                .entry(property.name)
+                                .or_insert((property.ty, property.optional));
+                        }
+                    }
+                }
+                ObjectLiteralElement::Field(field) => {
+                    if field.dynamic_key.is_some() {
+                        continue;
+                    }
+                    let Some(property) = required.iter().find(|p| p.name == field.name.name) else {
+                        return false;
+                    };
+                    provided.insert(field.name.name.clone(), (property.ty, false));
+                    if !self.literal_candidate_matches(property.ty, &field.value) {
+                        return false;
+                    }
+                }
+            }
+        }
+        required.iter().all(|property| {
+            let Some((provided_type, optional)) = provided.get(&property.name) else {
+                return property.optional;
+            };
+            if *optional && !property.optional {
+                return false;
+            }
+            self.assignable_relation(property.ty, *provided_type)
+                .unwrap_or(true)
+        })
+    }
+
+    fn zero_candidate_mismatches(
+        &self,
+        literal: &ObjectLiteralExpr,
+        union_id: u32,
+    ) -> (Span, String) {
+        let alternatives = self
+            .unions
+            .get(union_id as usize)
+            .cloned()
+            .unwrap_or_default();
+        let mut reports = Vec::new();
+        let mut closest: Option<(usize, Span, String)> = None;
+        for alternative in alternatives {
+            let ty = Type::of(alternative);
+            if !matches!(
+                alternative,
+                Base::Shape(_)
+                    | Base::Contract(_)
+                    | Base::ContractInstance(_)
+                    | Base::Intersection(_)
+            ) {
+                continue;
+            }
+            let name = self.name(ty);
+            let failures = self.object_literal_candidate_mismatches(literal, ty, literal.span, 0);
+            let summary = if failures.is_empty() {
+                "candidate has no statically provable mismatch".to_string()
+            } else {
+                failures
+                    .iter()
+                    .map(|(_, message)| message.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            reports.push(format!("`{name}`: {summary}"));
+            if let Some((span, message)) = failures.first()
+                && closest
+                    .as_ref()
+                    .is_none_or(|(count, _, _)| failures.len() < *count)
+            {
+                closest = Some((
+                    failures.len(),
+                    *span,
+                    format!("closest candidate `{name}` requires {message}"),
+                ));
+            }
+        }
+        let reports = if reports.is_empty() {
+            "the union has no structural alternatives".to_string()
+        } else {
+            reports.join("; ")
+        };
+        match closest {
+            Some((_, span, closest)) => (span, format!("{reports}; {closest}")),
+            None => (literal.span, reports),
+        }
+    }
+
+    fn object_literal_candidate_mismatches(
+        &self,
+        literal: &ObjectLiteralExpr,
+        expected: Type,
+        missing_span: Span,
+        depth: usize,
+    ) -> Vec<(Span, String)> {
+        if depth >= 64 {
+            return vec![(
+                missing_span,
+                "nested object candidate exceeded the depth limit".into(),
+            )];
+        }
+        if let Base::Union(id) = expected.base {
+            let mut candidates = self
+                .unions
+                .get(id as usize)
+                .into_iter()
+                .flatten()
+                .map(|base| {
+                    self.object_literal_candidate_mismatches(
+                        literal,
+                        Type::of(*base),
+                        missing_span,
+                        depth + 1,
+                    )
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(Vec::len);
+            return candidates.into_iter().next().unwrap_or_default();
+        }
+        let Some(required) = self.structural_properties_for_relation(expected) else {
+            return vec![(missing_span, "expected a structural object type".into())];
+        };
+        let mut provided = HashMap::<String, bool>::new();
+        let mut mismatches = Vec::new();
+        for element in &literal.elements {
+            match element {
+                ObjectLiteralElement::Spread(spread) => {
+                    if let Expr::Path(name) = &spread.expr
+                        && let Some(binding) = self.scopes.lookup(&name.name)
+                        && let Some(properties) =
+                            self.structural_properties_for_relation(binding.ty)
+                    {
+                        for property in properties {
+                            provided.entry(property.name).or_insert(property.optional);
+                        }
+                    }
+                }
+                ObjectLiteralElement::Field(field) => {
+                    if field.dynamic_key.is_some() {
+                        continue;
+                    }
+                    let Some(property) = required.iter().find(|item| item.name == field.name.name)
+                    else {
+                        mismatches.push((
+                            field.name.span,
+                            format!("unexpected property `{}`", field.name.name),
+                        ));
+                        continue;
+                    };
+                    provided.insert(field.name.name.clone(), false);
+                    if !self.literal_candidate_matches(property.ty, &field.value) {
+                        let nested_expected = matches!(
+                            property.ty.base,
+                            Base::Shape(_)
+                                | Base::Contract(_)
+                                | Base::ContractInstance(_)
+                                | Base::Intersection(_)
+                                | Base::Union(_)
+                        );
+                        let nested = if nested_expected && let Expr::Object(object) = &field.value {
+                            self.object_literal_candidate_mismatches(
+                                object,
+                                property.ty,
+                                field.name.span,
+                                depth + 1,
+                            )
+                        } else {
+                            Vec::new()
+                        };
+                        if nested.is_empty() {
+                            mismatches.push((
+                                field.value.span(),
+                                format!(
+                                    "property `{}` has a value incompatible with `{}`",
+                                    field.name.name,
+                                    self.name(property.ty)
+                                ),
+                            ));
+                        } else {
+                            mismatches.extend(nested);
+                        }
+                    }
+                }
+            }
+        }
+        for property in required {
+            match provided.get(&property.name) {
+                None if !property.optional => mismatches.push((
+                    missing_span,
+                    format!("missing required property `{}`", property.name),
+                )),
+                Some(true) if !property.optional => mismatches.push((
+                    missing_span,
+                    format!(
+                        "optional property `{}` cannot satisfy a required property",
+                        property.name
+                    ),
+                )),
+                _ => {}
+            }
+        }
+        mismatches
+    }
+
+    fn literal_candidate_matches(&self, expected: Type, expression: &Expr) -> bool {
+        if let Base::Union(id) = expected.base {
+            return self.unions.get(id as usize).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|base| self.literal_candidate_matches(Type::of(*base), expression))
+            });
+        }
+        if let Base::Singleton(id) = expected.base {
+            let Some(singleton) = self.singleton_values.get(id as usize) else {
+                return true;
+            };
+            if let Some(actual) = self.evaluate_candidate_constant(expression) {
+                return actual == *singleton;
+            }
+            if let Expr::Path(name) = expression
+                && let Some(binding) = self.scopes.lookup(&name.name)
+            {
+                return self
+                    .assignable_relation(expected, binding.ty)
+                    .unwrap_or(true);
+            }
+            return match (&singleton.value, expression) {
+                (crate::constant_value::ConstValue::Boolean(expected), Expr::Bool(actual)) => {
+                    *expected == actual.value
+                }
+                (crate::constant_value::ConstValue::String(expected), Expr::Str(actual)) => {
+                    expected == &actual.value
+                }
+                (crate::constant_value::ConstValue::Char(expected), Expr::Char(actual)) => {
+                    expected == &actual.value
+                }
+                (crate::constant_value::ConstValue::Integer { value, .. }, Expr::Int(actual)) => {
+                    *value == actual.value
+                }
+                (crate::constant_value::ConstValue::Duration(expected), Expr::Duration(actual)) => {
+                    *expected == actual.nanos
+                }
+                _ => true,
+            };
+        }
+        if let Expr::Lambda(lambda) = expression {
+            return self.lambda_candidate_matches(expected, lambda);
+        }
+        if let (Base::Int(width), Expr::Int(literal)) = (expected.base, expression) {
+            let (minimum, maximum) = width.literal_range();
+            return (minimum..=maximum).contains(&literal.value);
+        }
+        let family = match expression {
+            Expr::Bool(_) => Some(Type::BOOLEAN),
+            Expr::Int(_) => Some(Type::INT32),
+            Expr::Float(_) => Some(Type::FLOAT64),
+            Expr::Str(_) => Some(Type::STRING),
+            Expr::Char(_) => Some(Type::of(Base::Char)),
+            Expr::Duration(_) => Some(Type::DURATION),
+            Expr::Null(_) => Some(Type::of(Base::Null)),
+            Expr::Object(nested) => return self.object_literal_candidate_matches(nested, expected),
+            Expr::Path(name) => {
+                return self.scopes.lookup(&name.name).is_none_or(|binding| {
+                    self.assignable_relation(expected, binding.ty)
+                        .unwrap_or(true)
+                });
+            }
+            _ => None,
+        };
+        let Some(family) = family else { return true };
+        match self.assignable_relation(expected, family) {
+            Ok(compatible) => compatible,
+            Err(_) => true,
+        }
+    }
+
+    fn evaluate_candidate_constant(&self, expression: &Expr) -> Option<CanonicalConst> {
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let enum_variants = self.const_enum_variants();
+        crate::const_eval::evaluate_with_enum_variants(
+            expression,
+            &mut budget,
+            &self.const_functions,
+            &enum_variants,
+        )
+        .ok()
+    }
+
+    fn lambda_candidate_matches(&self, expected: Type, lambda: &LambdaExpr) -> bool {
+        if let Base::Union(id) = expected.base {
+            return self.unions.get(id as usize).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|base| self.lambda_candidate_matches(Type::of(*base), lambda))
+            });
+        }
+        if expected.nullable {
+            return false;
+        }
+        let Base::Function(id) = expected.base else {
+            return false;
+        };
+        let Some(function) = self.fn_types.get(id as usize) else {
+            return false;
+        };
+        if lambda.params.len() != function.params.len() {
+            return false;
+        }
+        let Some(lambda_return) = self.simple_type_ref(&lambda.return_type) else {
+            return true;
+        };
+        if !self
+            .assignable_relation(function.returns, lambda_return)
+            .unwrap_or(true)
+        {
+            return false;
+        }
+        lambda
+            .params
+            .iter()
+            .zip(&function.params)
+            .all(|(parameter, expected)| {
+                self.simple_type_ref(&parameter.ty).is_none_or(|actual| {
+                    self.assignable_relation(actual, *expected).unwrap_or(true)
+                })
+            })
+    }
+
+    /// Resolves the simple, non-generic annotation forms used by a lambda
+    /// candidate probe without emitting diagnostics or mutating type tables.
+    fn simple_type_ref(&self, reference: &TypeRef) -> Option<Type> {
+        if !reference.arguments.is_empty()
+            || !reference.union_with.is_empty()
+            || !reference.intersection_with.is_empty()
+            || reference.expression.is_some()
+            || reference.value.is_some()
+        {
+            return None;
+        }
+        let mut ty = Type::from_name(&reference.name).or_else(|| {
+            self.classes
+                .iter()
+                .position(|class| class.name == reference.name)
+                .map(|id| Type::of(Base::Class(id as u32)))
+                .or_else(|| {
+                    self.contracts
+                        .iter()
+                        .position(|contract| contract.name == reference.name)
+                        .map(|id| Type::of(Base::Contract(id as u32)))
+                })
+                .or_else(|| {
+                    self.enums
+                        .iter()
+                        .position(|enum_type| enum_type.name == reference.name)
+                        .map(|id| Type::of(Base::Enum(id as u32)))
+                })
+        })?;
+        if reference.nullable {
+            ty = ty.as_nullable();
+        }
+        Some(ty)
+    }
+
+    fn contextual_literal_type(&self, expected: Type, expression: &Expr) -> Option<Type> {
+        if let Base::Singleton(_) = expected.base {
+            return self
+                .literal_candidate_matches(expected, expression)
+                .then_some(expected);
+        }
+        if let (Base::Int(width), Expr::Int(literal)) = (expected.base, expression) {
+            let (minimum, maximum) = width.literal_range();
+            return (minimum..=maximum)
+                .contains(&literal.value)
+                .then_some(expected);
+        }
+        if let Base::Union(id) = expected.base {
+            let viable = self
+                .unions
+                .get(id as usize)?
+                .iter()
+                .filter_map(|base| self.contextual_literal_type(Type::of(*base), expression))
+                .collect::<Vec<_>>();
+            return if viable.len() == 1 {
+                viable.first().copied()
+            } else {
+                None
+            };
+        }
+        None
+    }
+
+    fn check_object_literal_shape(&mut self, literal: &ObjectLiteralExpr, shape_id: u32) {
+        let Some(shape) = self.structural_types.get(shape_id as usize).cloned() else {
+            return;
+        };
+        let mut provided = HashMap::<String, StructuralProperty>::new();
+
+        for element in &literal.elements {
+            match element {
+                ObjectLiteralElement::Spread(spread) => {
+                    let source = self.check_expr(&spread.expr);
+                    if !matches!(
+                        source.without_null().base,
+                        Base::Object
+                            | Base::Class(_)
+                            | Base::Instance(_)
+                            | Base::Contract(_)
+                            | Base::ContractInstance(_)
+                            | Base::Shape(_)
+                    ) {
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            spread.span,
+                            "object spread requires an object value",
+                            format!("found `{}`", self.name(source)),
+                            None,
+                        );
+                        continue;
+                    }
+                    if let Some(properties) = self.structural_properties_for_relation(source) {
+                        for property in properties {
+                            provided.entry(property.name.clone()).or_insert(property);
+                        }
+                    }
+                }
+                ObjectLiteralElement::Field(field) => {
+                    if let Some(dynamic_key) = &field.dynamic_key {
+                        let key_type = self.check_expr(dynamic_key);
+                        if !Type::STRING.accepts(key_type) {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                dynamic_key.span(),
+                                "an interpolated object key must produce a String",
+                                format!("found `{}`", self.name(key_type)),
+                                None,
+                            );
+                        }
+                        self.check_expr(&field.value);
+                        continue;
+                    }
+
+                    let name = field.name.name.clone();
+                    let required = shape
+                        .properties
+                        .iter()
+                        .find(|property| property.name == name);
+                    if required.is_none() {
+                        self.check_expr(&field.value);
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            field.name.span,
+                            format!("object literal has unknown property `{name}`"),
+                            "remove the property or add it to the structural type",
+                            None,
+                        );
+                        continue;
+                    }
+
+                    let previous_expected = self.expected_type;
+                    self.expected_type = required.map(|property| property.ty);
+                    let actual = self.check_expr(&field.value);
+                    self.expected_type = previous_expected;
+                    let actual = required
+                        .and_then(|property| {
+                            self.contextual_literal_type(property.ty, &field.value)
+                        })
+                        .unwrap_or(actual);
+                    provided.insert(
+                        name.clone(),
+                        StructuralProperty {
+                            name,
+                            ty: actual,
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
+                }
+            }
+        }
+
+        for required in &shape.properties {
+            let Some(actual) = provided.get(&required.name) else {
+                if !required.optional {
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        literal.span,
+                        format!(
+                            "object literal is missing required property `{}`",
+                            required.name
+                        ),
+                        "provide the required property or make it optional in the structural type",
+                        None,
+                    );
+                }
+                continue;
+            };
+            if actual.optional && !required.optional {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    format!(
+                        "optional property `{}` cannot satisfy a required property",
+                        required.name
+                    ),
+                    "make the source property required or the target property optional",
+                    None,
+                );
+                continue;
+            }
+            let value_compatible = match self.assignable_relation(required.ty, actual.ty) {
+                Ok(compatible) => compatible,
+                Err(limit) => {
+                    self.error(
+                        codes::TYPE_COMPUTATION_LIMIT,
+                        literal.span,
+                        limit.to_string(),
+                        "structural property checking exceeded its deterministic type-relation budget",
+                        None,
+                    );
+                    continue;
+                }
+            };
+            let write_compatible = if required.readonly {
+                true
+            } else if actual.readonly {
+                false
+            } else {
+                match self.assignable_relation(actual.ty, required.ty) {
+                    Ok(compatible) => compatible,
+                    Err(limit) => {
+                        self.error(
+                            codes::TYPE_COMPUTATION_LIMIT,
+                            literal.span,
+                            limit.to_string(),
+                            "structural write-capability checking exceeded its deterministic type-relation budget",
+                            None,
+                        );
+                        continue;
+                    }
+                }
+            };
+            if !value_compatible || !write_compatible {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    literal.span,
+                    format!(
+                        "property `{}` has an incompatible type or mutability",
+                        required.name
+                    ),
+                    format!("expected `{}`", self.name(required.ty)),
+                    None,
+                );
+            }
+        }
     }
 
     /// Check the statically visible portion of an object literal against a
@@ -16659,6 +22211,8 @@ impl<'a> Checker<'a> {
         self.preserve_result_exprs.insert(expr.scrutinee.span());
         let scrutinee = self.check_expr(&expr.scrutinee);
         self.matches.insert(expr.span, scrutinee);
+        let incoming_flow = self.flow_state.checkpoint();
+        let scrutinee_path = self.flow_path_for_expr(&expr.scrutinee);
         let incoming_moves = self.scopes.move_snapshot();
         let mut arm_moves = Vec::with_capacity(expr.arms.len() + 1);
         // If exhaustiveness is not proven below, the unmatched path retains
@@ -16671,9 +22225,11 @@ impl<'a> Checker<'a> {
         }
 
         let mut arm_types: Vec<(Type, Span)> = Vec::new();
+        let mut arm_flows = Vec::new();
         let mut covered: Vec<String> = Vec::new();
         let mut has_wildcard = false;
         let mut resource_binding_found = false;
+        let mut seen_patterns: Vec<Pattern> = Vec::new();
 
         // A `null` arm already took the only case in which the scrutinee is
         // absent, so every other arm sees a value that cannot be — the same
@@ -16683,22 +22239,67 @@ impl<'a> Checker<'a> {
             .arms
             .iter()
             .any(|arm| matches!(arm.pattern, Pattern::Null(_)));
+        let mut remaining = if has_null_arm {
+            scrutinee.without_null()
+        } else {
+            scrutinee
+        };
 
         for arm in &expr.arms {
-            let arm_scrutinee = if has_null_arm && !matches!(arm.pattern, Pattern::Null(_)) {
-                scrutinee.without_null()
-            } else {
-                scrutinee
-            };
+            self.flow_state.restore(incoming_flow.clone());
+            let arm_scrutinee = self.match_arm_scrutinee(&arm.pattern, remaining, scrutinee);
+            self.match_arm_types
+                .insert(arm.pattern.span(), arm_scrutinee);
+            if arm_scrutinee.base != Base::Never
+                && let Some(path) = &scrutinee_path
+            {
+                self.flow_state.refine(path.clone(), arm_scrutinee);
+            }
+            let repeated_pattern = seen_patterns.contains(&arm.pattern);
+            seen_patterns.push(arm.pattern.clone());
+            let covered_before = covered.clone();
 
             let mut bindings = Vec::new();
             self.check_pattern(
                 &arm.pattern,
-                arm_scrutinee,
+                if arm_scrutinee.base == Base::Never {
+                    scrutinee
+                } else {
+                    arm_scrutinee
+                },
                 &mut covered,
                 &mut has_wildcard,
                 &mut bindings,
             );
+            let covered_new_case = covered.iter().any(|case| !covered_before.contains(case));
+            let fully_covered_pattern = self.pattern_covers_complete_case(&arm.pattern);
+            if repeated_pattern
+                || arm_scrutinee.base == Base::Never
+                || (fully_covered_pattern && !covered_new_case)
+            {
+                self.error(
+                    codes::UNREACHABLE_PATTERN,
+                    arm.pattern.span(),
+                    "this match arm is unreachable",
+                    if repeated_pattern {
+                        "an earlier arm has the same source pattern"
+                    } else if arm_scrutinee.base == Base::Never {
+                        "the narrowed scrutinee has no alternative compatible with this pattern"
+                    } else {
+                        "an earlier arm already covered these canonical cases"
+                    },
+                    Some("remove the duplicate/impossible arm or change its pattern".into()),
+                );
+            }
+            remaining = if has_wildcard {
+                Type::of(Base::Never)
+            } else if matches!(arm.pattern, Pattern::Null(_)) {
+                remaining.without_null()
+            } else if let Pattern::Object(object) = &arm.pattern {
+                self.subtract_matched_structural_alternatives(remaining, object, arm.pattern.span())
+            } else {
+                self.subtract_covered_singletons(remaining, &covered, arm.pattern.span())
+            };
 
             if let Some(with_binding) = &expr.with_binding
                 && let Some(resource) = bindings.iter().find(|b| b.name == with_binding.name)
@@ -16714,7 +22315,7 @@ impl<'a> Checker<'a> {
                 self.declare_local(binding);
             }
 
-            let ty = match &arm.body {
+            let (ty, arm_returns) = match &arm.body {
                 ArmBody::Expr(e) => {
                     // A value-producing match first joins its arm values, then
                     // the match expression itself is projected if its caller
@@ -16729,7 +22330,7 @@ impl<'a> Checker<'a> {
                         expected.filter(|ty| self.result_type_arguments(*ty).is_some());
                     let ty = self.check_expr(e);
                     self.expected_type = saved_expected;
-                    ty
+                    (ty, ty.base == Base::Never)
                 }
                 ArmBody::Block(b) if as_value => {
                     if let Some(Stmt::Expr(tail)) = b.statements.last() {
@@ -16740,20 +22341,36 @@ impl<'a> Checker<'a> {
                         expected.filter(|ty| self.result_type_arguments(*ty).is_some());
                     let ty = self.check_block_value(b);
                     self.expected_type = saved_expected;
-                    ty
+                    (ty, ty.base == Base::Never)
                 }
                 ArmBody::Block(b) => {
-                    self.check_block(b);
-                    Type::VOID
+                    let returns = self.check_block(b);
+                    (Type::VOID, returns)
                 }
             };
             self.scopes.pop();
             arm_moves.push(self.scopes.move_snapshot());
+            if !arm_returns {
+                arm_flows.push(self.flow_state.checkpoint());
+            }
 
             arm_types.push((ty, arm.body.span()));
         }
 
         self.scopes.join_moves(&arm_moves);
+
+        let exhaustive = has_wildcard
+            || self
+                .finite_match_cases(scrutinee)
+                .is_some_and(|cases| cases.iter().all(|(key, _)| covered.contains(key)));
+        if !exhaustive {
+            arm_flows.push(incoming_flow.clone());
+        }
+        if arm_flows.is_empty() {
+            self.flow_state.restore(incoming_flow.clone());
+        } else {
+            self.join_flow_states(&incoming_flow, &arm_flows, expr.span);
+        }
 
         if let Some(with_binding) = &expr.with_binding
             && !resource_binding_found
@@ -16797,6 +22414,348 @@ impl<'a> Checker<'a> {
         }
 
         result
+    }
+
+    fn match_arm_scrutinee(&mut self, pattern: &Pattern, remaining: Type, original: Type) -> Type {
+        match pattern {
+            Pattern::Null(_) => {
+                if original.admits_null() || original.is_unknown() {
+                    Type::of(Base::Null)
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Binding(_) | Pattern::Wildcard(_) => remaining,
+            Pattern::Bool(literal) => {
+                let ty = self
+                    .boolean_singleton(literal.value, literal.span)
+                    .unwrap_or(Type::BOOLEAN);
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Object(object) => {
+                let alternatives = match remaining.base {
+                    Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+                    base => vec![base],
+                };
+                let candidates = alternatives
+                    .into_iter()
+                    .filter(|alternative| {
+                        match self.structural_properties_for_relation(Type::of(*alternative)) {
+                            Some(properties) => object.fields.iter().all(|field| {
+                                properties
+                                    .iter()
+                                    .any(|property| property.name == field.name.name)
+                            }),
+                            None => matches!(alternative, Base::Object | Base::Dynamic),
+                        }
+                    })
+                    .map(Type::of)
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    Type::of(Base::Never)
+                } else {
+                    self.join_types(candidates, object.span)
+                }
+            }
+            Pattern::Variant(variant) => {
+                let resolved = self.resolved_name(&variant.enum_name.name, variant.enum_name.span);
+                let Some(enum_id) = self.enums.iter().position(|item| item.name == resolved) else {
+                    return Type::of(Base::Never);
+                };
+                let alternatives = match remaining.base {
+                    Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+                    base => vec![base],
+                };
+                let candidates = alternatives
+                    .into_iter()
+                    .filter(|alternative| match alternative {
+                        Base::Enum(id) => *id == enum_id as u32,
+                        Base::EnumInstance(id) => self
+                            .enum_instances
+                            .get(*id as usize)
+                            .is_some_and(|instance| instance.enum_id == enum_id as u32),
+                        Base::Singleton(id) => self.singleton_values.get(*id as usize).is_some_and(|value| {
+                            matches!(&value.value, crate::constant_value::ConstValue::Enum { enum_identity, variant_identity, fields }
+                                if enum_identity == &self.enums[enum_id].name
+                                    && variant_identity.ends_with(&format!("::{}", variant.variant.name))
+                                    && fields.is_empty())
+                        }),
+                        _ => false,
+                    })
+                    .map(Type::of)
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    Type::of(Base::Never)
+                } else {
+                    self.join_types(candidates, variant.span)
+                }
+            }
+            Pattern::Int(literal) => {
+                let ty = self.resolve_pattern_singleton_literal(
+                    &TypeValue::Int(literal.clone()),
+                    literal.span,
+                );
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Float(literal) => {
+                let ty = self.resolve_pattern_singleton_literal(
+                    &TypeValue::Float(literal.clone()),
+                    literal.span,
+                );
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Duration(literal) => {
+                let ty = self.resolve_pattern_singleton_literal(
+                    &TypeValue::Duration(literal.clone()),
+                    literal.span,
+                );
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Str(literal) => {
+                let ty = self.resolve_pattern_singleton_literal(
+                    &TypeValue::String(literal.clone()),
+                    literal.span,
+                );
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Char(literal) => {
+                let ty = self.resolve_pattern_singleton_literal(
+                    &TypeValue::Char(literal.clone()),
+                    literal.span,
+                );
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, literal.span);
+                }
+                if self.assignable_relation(ty, remaining).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            Pattern::Constant(expression) => {
+                let ty = self.resolve_constant_pattern(expression, expression.span());
+                if matches!(remaining.base, Base::Union(_)) {
+                    return self.match_union_members(remaining, ty, expression.span());
+                }
+                if self.assignable_relation(ty, remaining).unwrap_or(false) {
+                    ty
+                } else {
+                    Type::of(Base::Never)
+                }
+            }
+            // Literal and variant patterns keep their established validation;
+            // the next binding arm still receives the remaining finite values.
+            _ => original,
+        }
+    }
+
+    /// Keep only the members a value pattern can actually select from a
+    /// normalized union. Checking the whole union against a literal singleton
+    /// incorrectly rejected finite literal unions such as `1 | 2`.
+    fn match_union_members(&mut self, remaining: Type, pattern: Type, span: Span) -> Type {
+        let Base::Union(id) = remaining.base else {
+            return Type::of(Base::Never);
+        };
+        let members = self.unions.get(id as usize).cloned().unwrap_or_default();
+        let mut candidates = Vec::new();
+        for member in members {
+            let source = Type::of(member);
+            let singleton_enum_matches = if let Base::Singleton(id) = member {
+                self.singleton_values.get(id as usize).is_some_and(|value| {
+                    let crate::constant_value::ConstValue::Enum {
+                        enum_identity,
+                        fields,
+                        ..
+                    } = &value.value
+                    else {
+                        return false;
+                    };
+                    fields.is_empty()
+                        && self
+                            .enums
+                            .iter()
+                            .position(|enum_type| enum_type.name == *enum_identity)
+                            .is_some_and(|enum_id| pattern.base == Base::Enum(enum_id as u32))
+                })
+            } else {
+                false
+            };
+            let matches = singleton_enum_matches
+                || self.assignable_relation(source, pattern).unwrap_or(false)
+                || self.assignable_relation(pattern, source).unwrap_or(false);
+            if matches {
+                candidates.push(source);
+            }
+        }
+        if candidates.is_empty() {
+            Type::of(Base::Never)
+        } else {
+            self.join_types(candidates, span)
+        }
+    }
+
+    fn pattern_covers_complete_case(&mut self, pattern: &Pattern) -> bool {
+        match pattern {
+            Pattern::Bool(_)
+            | Pattern::Null(_)
+            | Pattern::Int(_)
+            | Pattern::Float(_)
+            | Pattern::Duration(_)
+            | Pattern::Str(_)
+            | Pattern::Char(_)
+            | Pattern::Constant(_) => true,
+            Pattern::Variant(variant) => {
+                let resolved = self.resolved_name(&variant.enum_name.name, variant.enum_name.span);
+                self.enums
+                    .iter()
+                    .find(|enum_type| enum_type.name == resolved)
+                    .and_then(|enum_type| enum_type.variant(&variant.variant.name))
+                    .is_some_and(|variant_info| {
+                        variant_info.associated.is_empty()
+                            || variant.bindings.iter().all(|binding| {
+                                matches!(binding, Pattern::Binding(_) | Pattern::Wildcard(_))
+                            })
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    fn subtract_covered_singletons(
+        &mut self,
+        current: Type,
+        covered: &[String],
+        span: Span,
+    ) -> Type {
+        let mut alternatives = match current.without_null().base {
+            Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+            Base::Boolean => {
+                let true_covered = covered.iter().any(|value| value == "true");
+                let false_covered = covered.iter().any(|value| value == "false");
+                match (true_covered, false_covered) {
+                    (true, true) => Vec::new(),
+                    (true, false) => self
+                        .boolean_singleton(false, span)
+                        .map(|ty| vec![ty.base])
+                        .unwrap_or_default(),
+                    (false, true) => self
+                        .boolean_singleton(true, span)
+                        .map(|ty| vec![ty.base])
+                        .unwrap_or_default(),
+                    (false, false) => vec![Base::Boolean],
+                }
+            }
+            base => vec![base],
+        };
+        alternatives.retain(|alternative| {
+            let Base::Singleton(id) = alternative else {
+                return true;
+            };
+            let key = Self::singleton_coverage_key(*alternative);
+            if covered.contains(&key) {
+                return false;
+            }
+            match self
+                .singleton_values
+                .get(*id as usize)
+                .map(|value| &value.value)
+            {
+                Some(crate::constant_value::ConstValue::Boolean(value)) => !covered
+                    .iter()
+                    .any(|item| item == if *value { "true" } else { "false" }),
+                _ => true,
+            }
+        });
+        let mut types = alternatives.into_iter().map(Type::of).collect::<Vec<_>>();
+        if current.nullable {
+            types.push(Type::of(Base::Null));
+        }
+        if types.is_empty() {
+            Type::of(Base::Never)
+        } else {
+            self.join_types(types, span)
+        }
+    }
+
+    fn subtract_matched_structural_alternatives(
+        &mut self,
+        current: Type,
+        pattern: &ObjectPattern,
+        span: Span,
+    ) -> Type {
+        let alternatives = match current.without_null().base {
+            Base::Union(id) => self.unions.get(id as usize).cloned().unwrap_or_default(),
+            base => vec![base],
+        };
+        let selected = pattern
+            .fields
+            .iter()
+            .map(|field| field.name.name.as_str())
+            .collect::<Vec<_>>();
+        let mut remaining = alternatives
+            .into_iter()
+            .filter(|alternative| {
+                let Some(properties) =
+                    self.structural_properties_for_relation(Type::of(*alternative))
+                else {
+                    return true;
+                };
+                let matching = selected
+                    .iter()
+                    .filter_map(|name| properties.iter().find(|property| property.name == *name))
+                    .collect::<Vec<_>>();
+                if matching.len() != selected.len() {
+                    return true;
+                }
+                // Optional properties make the pattern only partially cover
+                // an alternative, which cannot yet be represented as a type.
+                !matching.iter().all(|property| !property.optional)
+            })
+            .map(Type::of)
+            .collect::<Vec<_>>();
+        if current.nullable {
+            remaining.push(Type::of(Base::Null));
+        }
+        if remaining.is_empty() {
+            Type::of(Base::Never)
+        } else {
+            self.join_types(remaining, span)
+        }
     }
 
     /// Checks one pattern against the type it is matched against, collecting
@@ -16851,20 +22810,85 @@ impl<'a> Checker<'a> {
                 });
             }
             Pattern::Int(lit) => {
-                let ty = self.check_int_literal(lit, Some(scrutinee));
-                self.expect_pattern_type(scrutinee, ty, lit.span);
+                self.check_int_literal(lit, Some(scrutinee));
+                let singleton =
+                    self.resolve_pattern_singleton_literal(&TypeValue::Int(lit.clone()), lit.span);
+                self.record_pattern_singleton(lit.span, singleton);
+                self.expect_pattern_type(scrutinee, singleton, lit.span);
+                self.cover_singleton(singleton, covered);
             }
-            Pattern::Str(lit) => self.expect_pattern_type(scrutinee, Type::STRING, lit.span),
+            Pattern::Float(lit) => {
+                let checked = self.check_float_literal(lit, Some(scrutinee));
+                let mut contextual = lit.clone();
+                if contextual.width.is_none()
+                    && let Base::Float(width) = checked.base
+                {
+                    contextual.width = Some(
+                        match width {
+                            FloatWidth::F16 => "f16",
+                            FloatWidth::F32 => "f32",
+                            FloatWidth::F64 => "f64",
+                            FloatWidth::F128 => "f128",
+                        }
+                        .into(),
+                    );
+                }
+                let singleton =
+                    self.resolve_pattern_singleton_literal(&TypeValue::Float(contextual), lit.span);
+                self.record_pattern_singleton(lit.span, singleton);
+                self.expect_pattern_type(scrutinee, singleton, lit.span);
+                self.cover_singleton(singleton, covered);
+            }
+            Pattern::Duration(lit) => {
+                let singleton = self
+                    .resolve_pattern_singleton_literal(&TypeValue::Duration(lit.clone()), lit.span);
+                self.record_pattern_singleton(lit.span, singleton);
+                self.expect_pattern_type(scrutinee, singleton, lit.span);
+                self.cover_singleton(singleton, covered);
+            }
+            Pattern::Str(lit) => {
+                let singleton = self
+                    .resolve_pattern_singleton_literal(&TypeValue::String(lit.clone()), lit.span);
+                self.record_pattern_singleton(lit.span, singleton);
+                self.expect_pattern_type(scrutinee, singleton, lit.span);
+                self.cover_singleton(singleton, covered);
+            }
+            Pattern::Char(lit) => {
+                self.check_char_literal(lit);
+                let singleton =
+                    self.resolve_pattern_singleton_literal(&TypeValue::Char(lit.clone()), lit.span);
+                self.record_pattern_singleton(lit.span, singleton);
+                self.expect_pattern_type(scrutinee, singleton, lit.span);
+                self.cover_singleton(singleton, covered);
+            }
+            Pattern::Constant(expression) => {
+                let saved_expected = self.expected_type;
+                self.expected_type = Some(scrutinee.without_null());
+                let _expression_type = self.check_expr(expression);
+                self.expected_type = saved_expected;
+                let ty = self.resolve_constant_pattern(expression, expression.span());
+                self.record_pattern_singleton(expression.span(), ty);
+                self.expect_pattern_type(scrutinee, ty, expression.span());
+                self.cover_singleton(ty, covered);
+            }
             Pattern::Bool(lit) => {
-                self.expect_pattern_type(scrutinee, Type::BOOLEAN, lit.span);
+                let singleton = self.boolean_singleton(lit.value, lit.span);
+                self.expect_pattern_type(scrutinee, singleton.unwrap_or(Type::BOOLEAN), lit.span);
                 // `Boolean` is a closed set of two values, so covering both is
                 // as exhaustive as covering every variant of an enum.
                 let name = lit.value.to_string();
                 if !covered.contains(&name) {
                     covered.push(name);
                 }
+                if let Some(singleton) = singleton {
+                    self.record_pattern_singleton(lit.span, singleton);
+                    self.cover_singleton(singleton, covered);
+                }
             }
             Pattern::Null(lit) => {
+                if !covered.iter().any(|item| item == "null") {
+                    covered.push("null".into());
+                }
                 if !scrutinee.admits_null() && !scrutinee.is_unknown() {
                     let name = self.name(scrutinee);
                     self.error(
@@ -16986,7 +23010,12 @@ impl<'a> Checker<'a> {
             Pattern::Object(r) => {
                 let inner = scrutinee.without_null();
                 match inner.base {
-                    Base::Class(_) | Base::Instance(_) | Base::Object => {}
+                    Base::Class(_)
+                    | Base::Instance(_)
+                    | Base::Object
+                    | Base::Shape(_)
+                    | Base::Contract(_)
+                    | Base::ContractInstance(_) => {}
                     _ => {
                         let name = self.name(scrutinee);
                         self.error(
@@ -17000,9 +23029,6 @@ impl<'a> Checker<'a> {
                     }
                 };
                 let dynamic_object = inner.base == Base::Object;
-                if pattern.is_irrefutable() && !dynamic_object {
-                    *has_wildcard = true;
-                }
                 for field in &r.fields {
                     let field_ty = if dynamic_object {
                         Type::DYNAMIC
@@ -17083,6 +23109,7 @@ impl<'a> Checker<'a> {
         };
         let type_params = enum_type.type_params.clone();
         let associated = variant.associated.clone();
+        let has_associated = !associated.is_empty();
 
         self.expect_pattern_type(scrutinee, Type::of(Base::Enum(index as u32)), pattern.span);
 
@@ -17182,8 +23209,36 @@ impl<'a> Checker<'a> {
             }
         }
 
-        if !covered.contains(&pattern.variant.name) {
-            covered.push(pattern.variant.name.clone());
+        let covers_variant = !has_associated
+            || pattern
+                .bindings
+                .iter()
+                .all(|binding| matches!(binding, Pattern::Binding(_) | Pattern::Wildcard(_)));
+        let coverage_key = Self::enum_variant_coverage_key(index as u32, &pattern.variant.name);
+        if covers_variant && !covered.contains(&coverage_key) {
+            covered.push(coverage_key);
+        }
+        if covers_variant {
+            let variant_suffix = format!("::{}", pattern.variant.name);
+            let singleton_members = match scrutinee.without_null().base {
+                Base::Union(union_id) => self.unions[union_id as usize].clone(),
+                Base::Singleton(id) => vec![Base::Singleton(id)],
+                _ => Vec::new(),
+            };
+            if !singleton_members.is_empty() {
+                for member in singleton_members {
+                    if let Base::Singleton(id) = member
+                        && self.singleton_values.get(id as usize).is_some_and(|value| {
+                            matches!(&value.value, crate::constant_value::ConstValue::Enum { enum_identity, variant_identity, fields, .. } if enum_identity == &enum_type.name && variant_identity.ends_with(&variant_suffix) && fields.is_empty())
+                        })
+                    {
+                        let exact_key = Self::singleton_coverage_key(Base::Singleton(id));
+                        if !covered.contains(&exact_key) {
+                            covered.push(exact_key);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -17197,11 +23252,30 @@ impl<'a> Checker<'a> {
         // reads the pattern's own type arguments, only which variant it
         // names, so a bare `Result` pattern matching a `Result<Int32,String>`
         // scrutinee is not a real mismatch.
-        if scrutinee.without_null().accepts(pattern)
+        if scrutinee.is_unknown()
             || self.bare_enum_matches_instance(pattern, scrutinee)
-            || scrutinee.is_unknown()
+            || self.singleton_enum_matches(pattern, scrutinee)
         {
             return;
+        }
+        if matches!(scrutinee.base, Base::Union(_))
+            && self.match_union_members(scrutinee, pattern, span).base != Base::Never
+        {
+            return;
+        }
+        match self.assignable_relation(scrutinee.without_null(), pattern) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(limit) => {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    span,
+                    limit.to_string(),
+                    "pattern compatibility exceeded its deterministic type-relation budget",
+                    None,
+                );
+                return;
+            }
         }
 
         let s = self.name(scrutinee);
@@ -17215,6 +23289,22 @@ impl<'a> Checker<'a> {
         );
     }
 
+    fn singleton_enum_matches(&self, pattern: Type, scrutinee: Type) -> bool {
+        let (Base::Singleton(id), Base::Enum(enum_id)) = (scrutinee.base, pattern.base) else {
+            return false;
+        };
+        self.singleton_values.get(id as usize).is_some_and(|value| {
+            matches!(&value.value, crate::constant_value::ConstValue::Enum { enum_identity, fields, .. }
+                if fields.is_empty() && self.enums.get(enum_id as usize).is_some_and(|ty| ty.name == *enum_identity))
+        })
+    }
+
+    fn record_pattern_singleton(&mut self, span: Span, ty: Type) {
+        if let Base::Singleton(id) = ty.base {
+            self.pattern_singletons.insert(span, id);
+        }
+    }
+
     fn check_exhaustive(
         &mut self,
         expr: &MatchExpr,
@@ -17225,72 +23315,111 @@ impl<'a> Checker<'a> {
         if has_wildcard || scrutinee.is_unknown() {
             return;
         }
-
-        // `Boolean` and enums are the closed sets this phase has: for anything
-        // else, no finite list of arms can cover every value.
-        if scrutinee.base == Base::Boolean && !scrutinee.nullable {
-            let missing: Vec<&str> = ["true", "false"]
-                .into_iter()
-                .filter(|v| !covered.iter().any(|c| c == v))
-                .collect();
-
-            if missing.is_empty() {
-                return;
-            }
-
+        let cases = self.finite_match_cases(scrutinee);
+        let Some(cases) = cases else {
+            let name = self.name(scrutinee);
             self.error(
                 codes::NON_EXHAUSTIVE_MATCH,
                 expr.span,
-                "the `match` does not cover every case of `Boolean`",
-                format!("these values have no arm: {}", missing.join(", ")),
-                Some("add the missing arm, or `_` for the rest".into()),
+                format!("the `match` does not cover every value of `{name}`"),
+                "this type has an open or unbounded domain, so a finite list of cases cannot cover it",
+                Some("end with `_ => ...` to cover the rest".into()),
             );
             return;
-        }
-
-        // A generic enum instantiation (`Result<Int32,String>`, roadmap
-        // Phase 4a) has the same closed variant set as the bare enum it
-        // instantiates — only the field types differ, and exhaustiveness
-        // never looks at those.
-        let enum_id = match scrutinee.base {
-            Base::Enum(id) => Some(id),
-            Base::EnumInstance(inst) => Some(self.enum_instances[inst as usize].enum_id),
-            _ => None,
         };
-        if let Some(id) = enum_id
-            && !scrutinee.nullable
-            && let Some(enum_type) = self.enums.get(id as usize)
-        {
-            let missing: Vec<String> = enum_type
-                .variants
-                .iter()
-                .map(|v| v.name.clone())
-                .filter(|name| !covered.contains(name))
-                .collect();
-
-            if missing.is_empty() {
-                return;
-            }
-
-            let name = enum_type.name.clone();
-            self.error(
-                codes::NON_EXHAUSTIVE_MATCH,
-                expr.span,
-                format!("the `match` does not cover every case of `{name}`"),
-                format!("these variants have no arm: {}", missing.join(", ")),
-                Some("add an arm for each, or `_` for the rest".into()),
-            );
+        let missing = cases
+            .into_iter()
+            .filter(|(key, _)| !covered.contains(key))
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
             return;
         }
-
         let name = self.name(scrutinee);
         self.error(
             codes::NON_EXHAUSTIVE_MATCH,
             expr.span,
-            format!("the `match` does not cover every value of `{name}`"),
-            "only an enum has a set of values small enough to cover one by one",
-            Some("end with `_ => ...` to cover the rest".into()),
+            format!(
+                "the `match` does not cover every finite singleton or constructor case of `{name}`"
+            ),
+            format!("these canonical cases have no arm: {}", missing.join(", ")),
+            Some("add the missing case or end with `_ => ...` for the rest".into()),
         );
+    }
+
+    fn finite_match_cases(&mut self, ty: Type) -> Option<Vec<(String, String)>> {
+        let members = match ty.base {
+            Base::Union(id) => self.unions.get(id as usize)?.clone(),
+            Base::Never => Vec::new(),
+            base => vec![base],
+        };
+        let mut cases = Vec::new();
+        for member in members {
+            match member {
+                Base::Never => {}
+                Base::Null => cases.push(("null".into(), "null".into())),
+                Base::Boolean => {
+                    cases.push(("true".into(), "true".into()));
+                    cases.push(("false".into(), "false".into()));
+                }
+                Base::Singleton(id) => {
+                    let singleton = Type::of(Base::Singleton(id));
+                    cases.push((
+                        Self::singleton_coverage_key(Base::Singleton(id)),
+                        self.name(singleton),
+                    ));
+                }
+                Base::Enum(id) => self.append_enum_match_cases(id, &mut cases)?,
+                Base::EnumInstance(id) => {
+                    self.append_enum_match_cases(
+                        self.enum_instances.get(id as usize)?.enum_id,
+                        &mut cases,
+                    )?;
+                }
+                _ => return None,
+            }
+        }
+        if ty.nullable && !cases.iter().any(|(key, _)| key == "null") {
+            cases.push(("null".into(), "null".into()));
+        }
+        cases.sort_by(|left, right| left.0.cmp(&right.0));
+        cases.dedup_by(|left, right| left.0 == right.0);
+        Some(cases)
+    }
+
+    fn append_enum_match_cases(
+        &self,
+        enum_id: u32,
+        cases: &mut Vec<(String, String)>,
+    ) -> Option<()> {
+        let enum_type = self.enums.get(enum_id as usize)?;
+        for variant in &enum_type.variants {
+            cases.push((
+                Self::enum_variant_coverage_key(enum_id, &variant.name),
+                format!("{}.{}", enum_type.name, variant.name),
+            ));
+        }
+        Some(())
+    }
+
+    fn enum_variant_coverage_key(enum_id: u32, variant: &str) -> String {
+        format!("enum:{enum_id}:{variant}")
+    }
+
+    fn singleton_coverage_key(member: Base) -> String {
+        match member {
+            Base::Singleton(id) => format!("singleton:{id}"),
+            _ => String::new(),
+        }
+    }
+
+    fn cover_singleton(&self, ty: Type, covered: &mut Vec<String>) {
+        if let Base::Singleton(id) = ty.base {
+            let key = Self::singleton_coverage_key(Base::Singleton(id));
+            if !covered.contains(&key) {
+                covered.push(key);
+            }
+        }
     }
 
     /// Reports a construct this phase parses and checks but cannot yet compile.
@@ -17626,6 +23755,9 @@ impl<'a> Checker<'a> {
             return member_ty;
         }
 
+        let flow_path = self
+            .flow_path_for_expr(&expr.object)
+            .map(|path| path.project(expr.name.name.clone()));
         self.preserve_result_exprs.insert(expr.object.span());
         let object = self.check_expr(&expr.object);
 
@@ -17640,7 +23772,26 @@ impl<'a> Checker<'a> {
         }
 
         let result = self.member_type(object, &expr.name, expr.object.span(), expr.safe);
+        let result = if let Some(path) = flow_path {
+            self.flow_state.declare_if_absent(path.clone(), result);
+            self.flow_state.read(&path, result)
+        } else {
+            result
+        };
         self.borrowed_projection(object, result)
+    }
+
+    fn flow_path_for_expr(&self, expression: &Expr) -> Option<FlowPath> {
+        match expression {
+            Expr::Path(identifier) => self
+                .scopes
+                .resolve(&identifier.name)
+                .map(|resolution| FlowPath::local(resolution.binding.span)),
+            Expr::Field(field) => self
+                .flow_path_for_expr(&field.object)
+                .map(|path| path.project(field.name.name.clone())),
+            _ => None,
+        }
     }
 
     /// Propagates a region through a projection unless the result is a
@@ -17832,17 +23983,102 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
 
-        if let Base::Param(id) = object.base {
-            return self.param_field_type(id, member);
+        if let Base::Intersection(id) = object.base {
+            if let Some(property) =
+                self.structural_properties_for_relation(object)
+                    .and_then(|properties| {
+                        properties
+                            .into_iter()
+                            .find(|property| property.name == member.name)
+                    })
+            {
+                return if property.optional {
+                    property.ty.as_nullable()
+                } else {
+                    property.ty
+                };
+            }
+            let name = self.name(object);
+            let members = self.intersections[id as usize]
+                .iter()
+                .map(|base| self.name(Type::of(*base)))
+                .collect::<Vec<_>>()
+                .join(" & ");
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{name}` has no compatible member `{}`", member.name),
+                format!(
+                    "none of the declared intersection members (`{members}`) exposes this property"
+                ),
+                None,
+            );
+            return Type::UNKNOWN;
         }
 
-        if let Base::Union(_) = object.base {
+        if let Base::Shape(id) = object.base {
+            if let Some(property) = self.structural_types[id as usize]
+                .properties
+                .iter()
+                .find(|property| property.name == member.name)
+            {
+                return if property.optional {
+                    property.ty.as_nullable()
+                } else {
+                    property.ty
+                };
+            }
             let name = self.name(object);
             self.error(
                 codes::UNKNOWN_MEMBER,
                 member.span,
                 format!("`{name}` has no member `{}`", member.name),
-                "a union exposes only what every alternative has in common, and only after narrowing it",
+                "the property is not declared by this structural type",
+                None,
+            );
+            return Type::UNKNOWN;
+        }
+
+        if let Base::Param(id) = object.base {
+            return self.param_field_type(id, member);
+        }
+
+        if let Base::Union(id) = object.base {
+            // A property read is safe before narrowing when every alternative
+            // exposes that property. Keep this first implementation limited
+            // to the structural fields already used by assignability; method
+            // signature merging and writes need their own variance and
+            // mutability rules and remain rejected below.
+            let alternatives = self.unions.get(id as usize).cloned().unwrap_or_default();
+            let mut property_types = Vec::with_capacity(alternatives.len());
+            let mut compatible = !alternatives.is_empty();
+            for alternative in alternatives {
+                let Some(properties) =
+                    self.structural_properties_for_relation(Type::of(alternative))
+                else {
+                    compatible = false;
+                    break;
+                };
+                let Some(property) = properties.iter().find(|p| p.name == member.name) else {
+                    compatible = false;
+                    break;
+                };
+                property_types.push(if property.optional {
+                    property.ty.as_nullable()
+                } else {
+                    property.ty
+                });
+            }
+            if compatible {
+                return self.join_types(property_types, member.span);
+            }
+
+            let name = self.name(object);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                member.span,
+                format!("`{name}` has no compatible common member `{}`", member.name),
+                "a union property is readable only when every alternative declares it with a compatible structural field",
                 Some("narrow it first, e.g. with `match`".into()),
             );
             return Type::UNKNOWN;
@@ -18575,7 +24811,8 @@ impl<'a> Checker<'a> {
                 .collect(),
             _ => HashMap::new(),
         };
-        let (_, substitution) = self.check_direct_call_with_subst_seeded(expr, &signature, seed);
+        let (_, substitution) =
+            self.check_direct_call_with_subst_seeded(expr, &signature, seed, expected);
 
         // A generic enum's own `T` is inferred from the associated data
         // supplied here, the same way a generic class's construction infers
@@ -19071,6 +25308,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Cast(e) => self.check_recursive_reference(&e.expr, name, nested),
+            Expr::Satisfies(e) => self.check_recursive_reference(&e.expr, name, nested),
             Expr::Interpolated(e) => {
                 for part in &e.parts {
                     if let InterpolatedPart::Expr(inner) = part {
@@ -19139,8 +25377,32 @@ impl<'a> Checker<'a> {
         let enclosing_function = self.current_function.replace(expr.span);
         self.lambda_depth += 1;
         self.callable_spans.insert(expr.span);
-        let mut params: Vec<ParamInfo> =
-            expr.params.iter().map(|p| self.resolve_param(p)).collect();
+        let contextual_params = self.expected_type.and_then(|expected| {
+            let Base::Function(id) = expected.without_null().base else {
+                return None;
+            };
+            self.fn_types
+                .get(id as usize)
+                .map(|function| function.params.clone())
+        });
+        let mut params: Vec<ParamInfo> = expr
+            .params
+            .iter()
+            .map(|parameter| self.resolve_param(parameter))
+            .collect();
+        if let Some(contextual_params) = contextual_params {
+            for ((parameter, info), contextual) in
+                expr.params.iter().zip(&mut params).zip(contextual_params)
+            {
+                if parameter.ty.name == "Unknown"
+                    && parameter.ty.arguments.is_empty()
+                    && parameter.ty.union_with.is_empty()
+                    && parameter.ty.intersection_with.is_empty()
+                {
+                    info.ty = contextual;
+                }
+            }
+        }
         let returns = self.resolve_type(&expr.return_type);
         let is_service_callback = std::mem::take(&mut self.pending_service_callback)
             && params.len() == 1
@@ -19155,6 +25417,7 @@ impl<'a> Checker<'a> {
         // A lambda body is not inside the enclosing loop: `break` in it has
         // nothing to leave.
         self.current_return = returns;
+        let outer_flow = self.flow_state.checkpoint();
         let enclosing_depth = self.begin_capture_scope();
         let is_mutex_view = self.pending_mutex_view.take().is_some_and(|payload| {
             if params.len() == 1 {
@@ -19178,7 +25441,10 @@ impl<'a> Checker<'a> {
 
         for (index, (param, info)) in expr.params.iter().zip(&params).enumerate() {
             if let Some(default) = &param.default {
+                let previous_expected = self.expected_type;
+                self.expected_type = Some(info.ty);
                 let actual = self.check_expr(default);
+                self.expected_type = previous_expected;
                 self.expect_assignable(info.ty, actual, default.span(), "the default value");
             }
             self.declare_local(Binding {
@@ -19222,6 +25488,7 @@ impl<'a> Checker<'a> {
             }
         }
         let captures = self.finish_capture_scope(enclosing_depth);
+        self.flow_state.restore(outer_flow);
         self.current_return = enclosing_return;
         self.inferred_returns = enclosing_inferred;
 
@@ -19508,12 +25775,27 @@ impl<'a> Checker<'a> {
                 .map(|arg| self.check_expr(&arg.value))
                 .collect();
             self.expected_type = saved_expected;
-            let matches: Vec<usize> = arity_candidates
-                .into_iter()
-                .filter(|&index| {
-                    self.constructor_accepts_arguments(expr, &constructors[index], &argument_types)
-                })
-                .collect();
+            let mut matches = Vec::new();
+            for index in arity_candidates {
+                match self.constructor_accepts_arguments(
+                    expr,
+                    &constructors[index],
+                    &argument_types,
+                ) {
+                    Ok(true) => matches.push(index),
+                    Ok(false) => {}
+                    Err((limit, span)) => {
+                        self.error(
+                            codes::TYPE_COMPUTATION_LIMIT,
+                            span,
+                            limit.to_string(),
+                            "constructor candidate checking exceeded its deterministic type-relation budget",
+                            None,
+                        );
+                        return Type::VOID;
+                    }
+                }
+            }
             match matches.as_slice() {
                 [index] => (*index, constructors[*index].clone()),
                 [] => {
@@ -19701,6 +25983,24 @@ impl<'a> Checker<'a> {
         // Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
 
+        // Dynamic dispatch may mutate the receiver. Preserve only direct
+        // read-only properties (the stable discriminant case); all other
+        // receiver and projected facts may have become stale.
+        if let Some(path) = self.flow_path_for_expr(&field.object) {
+            let stable = self
+                .structural_properties_for_relation(object)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|property| property.readonly)
+                .map(|property| path.project(property.name))
+                .collect::<Vec<_>>();
+            self.flow_state.invalidate_preserving(&path.root(), &stable);
+        }
+
+        if let Base::Union(id) = object.base {
+            return self.check_union_method_call(object, id, expr, field);
+        }
+
         if let Base::Instance(instance) = object.base
             && let Some(result) =
                 self.project_global_subscription_method_call(expr, field, instance)
@@ -19844,6 +26144,50 @@ impl<'a> Checker<'a> {
         if let Base::ContractInstance(id) = object.base {
             return self.check_contract_instance_call(expr, field, id);
         }
+        if let Base::Intersection(id) = object.base {
+            let contracts = self.intersections[id as usize]
+                .iter()
+                .filter_map(|member| {
+                    let (contract, instance) = match member {
+                        Base::Contract(contract) => (*contract, None),
+                        Base::ContractInstance(instance) => (
+                            self.contract_instances[*instance as usize].contract,
+                            Some(*instance),
+                        ),
+                        _ => return None,
+                    };
+                    self.contracts[contract as usize]
+                        .method(&field.name.name)
+                        .is_some()
+                        .then_some((contract, instance))
+                })
+                .collect::<Vec<_>>();
+            match contracts.as_slice() {
+                [(contract, None)] => return self.check_contract_call(expr, field, *contract),
+                [(_, Some(instance))] => {
+                    return self.check_contract_instance_call(expr, field, *instance);
+                }
+                [] => {}
+                _ => {
+                    let names = contracts
+                        .iter()
+                        .map(|(contract, _)| self.contracts[*contract as usize].name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        field.name.span,
+                        format!("method `{}` is ambiguous on this intersection", field.name.name),
+                        format!("it is declared by multiple members: {names}"),
+                        Some("call through a named contract view to select the intended dispatch table".into()),
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+            }
+        }
         if let Base::Param(id) = object.base {
             return self.check_param_call(expr, field, id);
         }
@@ -19907,6 +26251,350 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         unreachable!("caller already matched object.base against these three")
+    }
+
+    /// Checks a method call available on every alternative of a union. Each
+    /// argument is checked against the intersection of the parameter types,
+    /// and the result is the union of the return types. This is the safe
+    /// callable capability shared by all possible receivers.
+    fn check_union_method_call(
+        &mut self,
+        receiver: Type,
+        union_id: u32,
+        expr: &CallExpr,
+        field: &FieldExpr,
+    ) -> Type {
+        let alternatives = self
+            .unions
+            .get(union_id as usize)
+            .cloned()
+            .unwrap_or_default();
+        let mut signatures: Vec<(Vec<ParamInfo>, Type, Vec<Type>, Option<Span>, Vec<u32>)> =
+            Vec::new();
+        for alternative in alternatives {
+            let actual = Type::of(alternative);
+            let found = match actual.base {
+                Base::Class(id) => self.classes[id as usize]
+                    .method(&field.name.name)
+                    .filter(|method| method.visibility == Visibility::Public && !method.is_static)
+                    .map(|method| {
+                        (
+                            method.params.clone(),
+                            method.returns,
+                            method.throws.clone(),
+                            Some(method.span),
+                            method.type_params.clone(),
+                        )
+                    })
+                    .or_else(|| {
+                        self.classes[id as usize]
+                            .field(&field.name.name)
+                            .filter(|member| member.visibility == Visibility::Public)
+                            .and_then(|member| self.function_signature_from_type(member.ty))
+                            .map(|(params, returns)| {
+                                (params, returns, Vec::new(), None, Vec::new())
+                            })
+                    }),
+                Base::Instance(instance_id) => {
+                    let instance = self.generic_instances[instance_id as usize].clone();
+                    let class = self.classes[instance.class as usize].clone();
+                    let substitutions: Vec<_> = class
+                        .type_params
+                        .iter()
+                        .copied()
+                        .zip(instance.args.iter().copied())
+                        .collect();
+                    class
+                        .method(&field.name.name)
+                        .filter(|method| {
+                            method.visibility == Visibility::Public && !method.is_static
+                        })
+                        .map(|method| {
+                            let params = method
+                                .params
+                                .iter()
+                                .map(|parameter| ParamInfo {
+                                    ty: self.substitute_type(parameter.ty, &substitutions),
+                                    ..parameter.clone()
+                                })
+                                .collect();
+                            let returns = self.substitute_type(method.returns, &substitutions);
+                            let throws = method
+                                .throws
+                                .iter()
+                                .map(|ty| self.substitute_type(*ty, &substitutions))
+                                .collect();
+                            (
+                                params,
+                                returns,
+                                throws,
+                                Some(method.span),
+                                method.type_params.clone(),
+                            )
+                        })
+                        .or_else(|| {
+                            class
+                                .field(&field.name.name)
+                                .filter(|member| member.visibility == Visibility::Public)
+                                .and_then(|member| {
+                                    let ty = self.substitute_type(member.ty, &substitutions);
+                                    self.function_signature_from_type(ty)
+                                })
+                                .map(|(params, returns)| {
+                                    (params, returns, Vec::new(), None, Vec::new())
+                                })
+                        })
+                }
+                Base::Contract(id) => self.contracts[id as usize]
+                    .method(&field.name.name)
+                    .filter(|method| !method.is_static)
+                    .map(|method| {
+                        (
+                            method.params.clone(),
+                            method.returns,
+                            method.throws.clone(),
+                            Some(method.span),
+                            Vec::new(),
+                        )
+                    })
+                    .or_else(|| {
+                        self.contracts[id as usize]
+                            .properties
+                            .iter()
+                            .find(|property| property.name == field.name.name)
+                            .and_then(|property| self.function_signature_from_type(property.ty))
+                            .map(|(params, returns)| {
+                                (params, returns, Vec::new(), None, Vec::new())
+                            })
+                    }),
+                Base::ContractInstance(instance_id) => {
+                    let instance = self.contract_instances[instance_id as usize].clone();
+                    let contract = self.contracts[instance.contract as usize].clone();
+                    let substitutions: Vec<_> = contract
+                        .type_params
+                        .iter()
+                        .copied()
+                        .zip(instance.args.iter().copied())
+                        .collect();
+                    contract
+                        .method(&field.name.name)
+                        .filter(|method| !method.is_static)
+                        .map(|method| {
+                            let params = method
+                                .params
+                                .iter()
+                                .map(|parameter| ParamInfo {
+                                    ty: self.substitute_type(parameter.ty, &substitutions),
+                                    ..parameter.clone()
+                                })
+                                .collect();
+                            let returns = self.substitute_type(method.returns, &substitutions);
+                            let throws = method
+                                .throws
+                                .iter()
+                                .map(|ty| self.substitute_type(*ty, &substitutions))
+                                .collect();
+                            (params, returns, throws, Some(method.span), Vec::new())
+                        })
+                        .or_else(|| {
+                            contract
+                                .properties
+                                .iter()
+                                .find(|property| property.name == field.name.name)
+                                .and_then(|property| {
+                                    let ty = self.substitute_type(property.ty, &substitutions);
+                                    self.function_signature_from_type(ty)
+                                })
+                                .map(|(params, returns)| {
+                                    (params, returns, Vec::new(), None, Vec::new())
+                                })
+                        })
+                }
+                Base::Shape(id) => self.structural_types[id as usize]
+                    .properties
+                    .iter()
+                    .find(|property| property.name == field.name.name && !property.optional)
+                    .and_then(|property| self.function_signature_from_type(property.ty))
+                    .map(|(params, returns)| (params, returns, Vec::new(), None, Vec::new())),
+                _ => None,
+            };
+            let Some(signature) = found else {
+                let name = self.name(receiver);
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    field.name.span,
+                    format!("`{name}` has no common method `{}`", field.name.name),
+                    "every union alternative must declare a compatible callable member",
+                    Some("narrow the receiver before calling this method".into()),
+                );
+                for argument in &expr.args {
+                    self.check_expr(&argument.value);
+                }
+                return Type::UNKNOWN;
+            };
+            signatures.push(signature);
+        }
+
+        let Some((first_params, _, _, _, common_type_params)) = signatures.first().cloned() else {
+            for argument in &expr.args {
+                self.check_expr(&argument.value);
+            }
+            return Type::UNKNOWN;
+        };
+        if let Some(Some(declaration)) = signatures.first().map(|signature| signature.3) {
+            self.record_semantic_reference(field.name.span, declaration, ReferenceRole::MemberCall);
+        }
+        let compatible = signatures.iter().all(|(params, _, _, _, type_params)| {
+            params.len() == first_params.len()
+                && type_params.len() == common_type_params.len()
+                && params.iter().zip(&first_params).all(|(left, right)| {
+                    left.name == right.name
+                        && left.optional == right.optional
+                        && left.has_default == right.has_default
+                        && left.variadic == right.variadic
+                })
+        });
+        if !compatible
+            || signatures
+                .iter()
+                .any(|(params, _, _, _, _)| params.iter().any(|p| p.variadic))
+        {
+            let name = self.name(receiver);
+            self.error(
+                codes::UNKNOWN_MEMBER,
+                field.name.span,
+                format!(
+                    "`{name}` has incompatible common method `{}`",
+                    field.name.name
+                ),
+                "the alternatives do not expose the same fixed callable shape",
+                Some("narrow the receiver before calling this method".into()),
+            );
+            for argument in &expr.args {
+                self.check_expr(&argument.value);
+            }
+            return Type::UNKNOWN;
+        }
+
+        for signature_index in 1..signatures.len() {
+            let other_type_params = signatures[signature_index].4.clone();
+            let substitutions: Vec<_> = other_type_params
+                .iter()
+                .copied()
+                .zip(
+                    common_type_params
+                        .iter()
+                        .copied()
+                        .map(|id| Type::of(Base::Param(id))),
+                )
+                .collect();
+            for (other, canonical) in other_type_params.iter().zip(&common_type_params) {
+                let Some(other_info) = self.type_params.get(*other as usize).cloned() else {
+                    continue;
+                };
+                let Some(canonical_info) = self.type_params.get(*canonical as usize).cloned()
+                else {
+                    continue;
+                };
+                let constraints = other_info
+                    .constraints
+                    .iter()
+                    .map(|ty| self.substitute_type(*ty, &substitutions))
+                    .collect::<Vec<_>>();
+                let default = other_info
+                    .default
+                    .map(|ty| self.substitute_type(ty, &substitutions));
+                if constraints != canonical_info.constraints || default != canonical_info.default {
+                    let name = self.name(receiver);
+                    self.error(
+                        codes::UNKNOWN_MEMBER,
+                        field.name.span,
+                        format!(
+                            "`{name}` has incompatible generic method `{}`",
+                            field.name.name
+                        ),
+                        "the alternatives use different generic constraints or defaults",
+                        Some("narrow the receiver before calling this method".into()),
+                    );
+                    for argument in &expr.args {
+                        self.check_expr(&argument.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+            }
+            let signature = &mut signatures[signature_index];
+            for parameter in &mut signature.0 {
+                parameter.ty = self.substitute_type(parameter.ty, &substitutions);
+            }
+            signature.1 = self.substitute_type(signature.1, &substitutions);
+            for thrown in &mut signature.2 {
+                *thrown = self.substitute_type(*thrown, &substitutions);
+            }
+            signature.4 = common_type_params.clone();
+        }
+
+        let mut common_params = first_params;
+        for (index, parameter) in common_params.iter_mut().enumerate() {
+            parameter.ty = self.intersect_types(
+                signatures
+                    .iter()
+                    .map(|(params, _, _, _, _)| params[index].ty)
+                    .collect(),
+                expr.span,
+            );
+        }
+
+        let returns = self.join_types(
+            signatures
+                .iter()
+                .map(|(_, returns, _, _, _)| *returns)
+                .collect(),
+            expr.span,
+        );
+        let throws = signatures
+            .iter()
+            .flat_map(|(_, _, throws, _, _)| throws.iter().copied())
+            .collect::<Vec<_>>();
+        for (_, _, _, declaration, _) in &signatures {
+            if let Some(declaration) = declaration {
+                self.record_direct_function_call(*declaration, expr.span);
+            }
+        }
+        let signature = Signature {
+            name: field.name.name.clone(),
+            params: common_params,
+            returns,
+            shared: true,
+            span: field.name.span,
+            type_params: common_type_params,
+            throws,
+        };
+        self.check_direct_call(expr, &signature)
+    }
+
+    fn function_signature_from_type(&self, ty: Type) -> Option<(Vec<ParamInfo>, Type)> {
+        if ty.nullable {
+            return None;
+        }
+        let Base::Function(id) = ty.base else {
+            return None;
+        };
+        let function = self.fn_types.get(id as usize)?;
+        Some((
+            function
+                .params
+                .iter()
+                .map(|ty| ParamInfo {
+                    name: "_".into(),
+                    ty: *ty,
+                    optional: false,
+                    has_default: false,
+                    default: None,
+                    variadic: false,
+                })
+                .collect(),
+            function.returns,
+        ))
     }
 
     /// The compiler-derived `.clone(): T` (roadmap Phase 4e, `fase-4e-clone`,
@@ -20270,12 +26958,27 @@ impl<'a> Checker<'a> {
                 .map(|arg| self.check_expr(&arg.value))
                 .collect();
             self.expected_type = saved_expected;
-            let matches: Vec<usize> = arity_candidates
-                .into_iter()
-                .filter(|&index| {
-                    self.constructor_accepts_arguments(expr, &constructors[index], &argument_types)
-                })
-                .collect();
+            let mut matches = Vec::new();
+            for index in arity_candidates {
+                match self.constructor_accepts_arguments(
+                    expr,
+                    &constructors[index],
+                    &argument_types,
+                ) {
+                    Ok(true) => matches.push(index),
+                    Ok(false) => {}
+                    Err((limit, span)) => {
+                        self.error(
+                            codes::TYPE_COMPUTATION_LIMIT,
+                            span,
+                            limit.to_string(),
+                            "constructor candidate checking exceeded its deterministic type-relation budget",
+                            None,
+                        );
+                        return Type::of(Base::Class(id));
+                    }
+                }
+            }
             match matches.as_slice() {
                 [index] => (*index, constructors[*index].clone()),
                 [] => {
@@ -20341,53 +27044,50 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         params: &[ParamInfo],
         argument_types: &[Type],
-    ) -> bool {
+    ) -> Result<bool, (crate::type_budget::BudgetExceeded, Span)> {
         let mut given = vec![false; params.len()];
         let mut next = 0usize;
         let mut seen_named = false;
 
         for (arg, &actual) in expr.args.iter().zip(argument_types) {
             if arg.is_spread {
-                return false;
+                return Ok(false);
             }
             let index = if let Some(name) = &arg.name {
                 seen_named = true;
                 let Some(index) = params.iter().position(|param| param.name == name.name) else {
-                    return false;
+                    return Ok(false);
                 };
                 index
             } else {
                 if seen_named {
-                    return false;
+                    return Ok(false);
                 }
                 while next < params.len() && given[next] {
                     next += 1;
                 }
                 if next == params.len() {
-                    return false;
+                    return Ok(false);
                 }
                 let index = next;
                 next += 1;
                 index
             };
             if given[index] {
-                return false;
+                return Ok(false);
             }
             let expected = params[index].ty;
-            if !actual.is_unknown()
-                && !expected.accepts(actual)
-                && !self.is_subclass_of(actual, expected)
-                && !self.accepts_into_union(expected, actual)
-                && !self.bare_enum_matches_instance(actual, expected)
-            {
-                return false;
+            match self.assignable_relation(expected, actual) {
+                Ok(true) => {}
+                Ok(false) => return Ok(false),
+                Err(limit) => return Err((limit, arg.span)),
             }
             given[index] = true;
         }
 
-        params.iter().enumerate().all(|(index, param)| {
+        Ok(params.iter().enumerate().all(|(index, param)| {
             given[index] || param.optional || param.has_default || param.variadic
-        })
+        }))
     }
 
     /// `Array<T>(capacity)` — the element type is taken from the expected
@@ -25566,7 +32266,11 @@ impl<'a> Checker<'a> {
             if object.nullable
                 && matches!(
                     object.base,
-                    Base::Class(_) | Base::Contract(_) | Base::Param(_) | Base::Instance(_)
+                    Base::Class(_)
+                        | Base::Contract(_)
+                        | Base::Param(_)
+                        | Base::Instance(_)
+                        | Base::Intersection(_)
                 )
             {
                 if !field.safe {
@@ -25622,6 +32326,8 @@ impl<'a> Checker<'a> {
                     | Base::Job(_)
                     | Base::Enum(_)
                     | Base::EnumInstance(_)
+                    | Base::Union(_)
+                    | Base::Intersection(_)
             ) {
                 if field.safe {
                     self.reject_redundant_safe(object, field.object.span());
@@ -25692,7 +32398,7 @@ impl<'a> Checker<'a> {
                 self.record_semantic_reference(callee.span, signature.span, ReferenceRole::Call);
                 self.require_visible(signature.span, signature.shared, callee, "function");
                 self.record_direct_function_call(signature.span, expr.span);
-                return self.check_direct_call(expr, &signature);
+                return self.check_direct_call_with_expected(expr, &signature, expected);
             }
 
             // `T(expr)` on a native scalar evaluates `expr` with its ordinary
@@ -25786,6 +32492,11 @@ impl<'a> Checker<'a> {
         }
 
         let callee = self.check_expr(&expr.callee);
+        if matches!(callee.base, Base::Union(_) | Base::Intersection(_))
+            && let Some(result) = self.check_callable_algebra_call(expr, callee, expected)
+        {
+            return result;
+        }
         let Base::Function(id) = callee.base else {
             if !callee.is_unknown() {
                 let name = self.name(callee);
@@ -25847,6 +32558,112 @@ impl<'a> Checker<'a> {
         }
 
         fn_type.returns
+    }
+
+    fn check_callable_algebra_call(
+        &mut self,
+        expr: &CallExpr,
+        callee: Type,
+        expected: Option<Type>,
+    ) -> Option<Type> {
+        let (members, union_call) = match callee.base {
+            Base::Union(id) => (self.unions.get(id as usize)?.clone(), true),
+            Base::Intersection(id) => (self.intersections.get(id as usize)?.clone(), false),
+            _ => return None,
+        };
+        let mut signatures = Vec::with_capacity(members.len());
+        for member in members {
+            let Base::Function(id) = member else {
+                return None;
+            };
+            signatures.push(self.fn_types.get(id as usize)?.clone());
+        }
+        let arguments = expr
+            .args
+            .iter()
+            .map(|arg| self.check_expr(&arg.value))
+            .collect::<Vec<_>>();
+        for arg in &expr.args {
+            if let Some(name) = &arg.name {
+                self.error(
+                    codes::UNKNOWN_ARGUMENT_NAME,
+                    name.span,
+                    "a callable algebra value does not carry parameter names",
+                    "pass arguments positionally",
+                    None,
+                );
+            }
+        }
+        let candidates = signatures
+            .iter()
+            .filter(|signature| {
+                signature.params.len() == arguments.len()
+                    && signature
+                        .params
+                        .iter()
+                        .zip(&arguments)
+                        .all(|(parameter, actual)| {
+                            self.assignable_relation(*parameter, *actual)
+                                .unwrap_or(false)
+                        })
+            })
+            .collect::<Vec<_>>();
+        if union_call {
+            let all_callable = signatures
+                .iter()
+                .all(|signature| signature.params.len() == arguments.len());
+            if !all_callable || candidates.len() != signatures.len() {
+                self.error(codes::TYPE_MISMATCH, expr.span, "arguments are not valid for every callable alternative", "a union callable can refer to any member at runtime", Some("narrow the callable before calling it or use arguments accepted by all alternatives".into()));
+                return Some(Type::UNKNOWN);
+            }
+            let returns = signatures
+                .into_iter()
+                .map(|signature| signature.returns)
+                .collect();
+            return Some(self.join_types(returns, expr.span));
+        }
+        match candidates.as_slice() {
+            [signature] => {
+                let result = signature.returns;
+                if let Some(expected) = expected
+                    && !self.assignable_relation(expected, result).unwrap_or(false)
+                {
+                    let expected_name = self.name(expected);
+                    let result_name = self.name(result);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        expr.span,
+                        format!("call result `{result_name}` does not fit `{expected_name}`"),
+                        "the selected intersection signature returns an incompatible type",
+                        None,
+                    );
+                }
+                Some(result)
+            }
+            [] => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span,
+                    "no intersection callable signature accepts these arguments",
+                    "the argument list matches none of the available signatures",
+                    None,
+                );
+                Some(Type::UNKNOWN)
+            }
+            _ => {
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    expr.span,
+                    "intersection callable selection is ambiguous",
+                    format!("{} signatures accept these arguments", candidates.len()),
+                    Some(
+                        "narrow the argument types or call through an explicitly typed signature"
+                            .into(),
+                    ),
+                );
+                Some(Type::UNKNOWN)
+            }
+        }
     }
 
     /// `Target(expr)`, a native scalar conversion. The argument is checked as
@@ -25990,7 +32807,18 @@ impl<'a> Checker<'a> {
 
     /// A call to a declared function, where names and defaults apply.
     fn check_direct_call(&mut self, expr: &CallExpr, signature: &Signature) -> Type {
-        self.check_direct_call_with_subst(expr, signature).0
+        self.check_direct_call_with_subst_seeded(expr, signature, HashMap::new(), None)
+            .0
+    }
+
+    fn check_direct_call_with_expected(
+        &mut self,
+        expr: &CallExpr,
+        signature: &Signature,
+        expected: Option<Type>,
+    ) -> Type {
+        self.check_direct_call_with_subst_seeded(expr, signature, HashMap::new(), expected)
+            .0
     }
 
     /// [`Self::check_direct_call`], also returning the type-parameter
@@ -26002,7 +32830,7 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         signature: &Signature,
     ) -> (Type, HashMap<u32, Type>) {
-        self.check_direct_call_with_subst_seeded(expr, signature, HashMap::new())
+        self.check_direct_call_with_subst_seeded(expr, signature, HashMap::new(), None)
     }
 
     /// [`Self::check_direct_call_with_subst`], pre-populating the inferred
@@ -26018,6 +32846,7 @@ impl<'a> Checker<'a> {
         expr: &CallExpr,
         signature: &Signature,
         mut seed: HashMap<u32, Type>,
+        expected: Option<Type>,
     ) -> (Type, HashMap<u32, Type>) {
         let name = signature.name.clone();
         if !expr.type_args.is_empty() {
@@ -26052,7 +32881,8 @@ impl<'a> Checker<'a> {
         // an expected `Result<Result<U,E>, F>` must preserve its `Result<U,E>`
         // payload instead of projecting it before generic inference begins.
         let slots = self.match_arguments(expr, signature, &seed);
-        let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed);
+        let substitution =
+            self.infer_type_params(expr.span, &name, signature, &slots, seed, expected);
         if !signature.type_params.is_empty() {
             self.generic_call_substitutions.insert(
                 expr.span,
@@ -26178,6 +33008,9 @@ impl<'a> Checker<'a> {
                         ),
                         None,
                     );
+                    // Preserve the first canonical constraint after reporting
+                    // the conflict. Replacing it with the latest argument
+                    // would make the inferred result depend on argument order.
                 }
                 _ => {
                     substitution.insert(id, actual);
@@ -26351,12 +33184,22 @@ impl<'a> Checker<'a> {
         signature: &Signature,
         slots: &[ArgSlot],
         seed: HashMap<u32, Type>,
+        expected: Option<Type>,
     ) -> HashMap<u32, Type> {
         if signature.type_params.is_empty() {
             return HashMap::new();
         }
 
         let mut substitution: HashMap<u32, Type> = seed;
+        if let Some(expected) = expected.filter(|expected| !expected.is_unknown()) {
+            self.unify_declared_with_actual(
+                signature.returns,
+                expected,
+                &mut substitution,
+                call_span,
+                name,
+            );
+        }
         for (index, slot) in slots.iter().enumerate() {
             let Some(param) = signature.params.get(index) else {
                 continue;
@@ -26576,6 +33419,27 @@ impl<'a> Checker<'a> {
                     _ => Base::Union(self.intern_union(substituted)),
                 }
             }
+            Base::Intersection(id) => {
+                let members = self.intersections[id as usize].clone();
+                let mut substituted: Vec<Base> = members
+                    .into_iter()
+                    .map(|base| self.substitute(Type::of(base), substitution).base)
+                    .collect();
+                Self::sort_bases(&mut substituted);
+                substituted.dedup();
+                match substituted.len() {
+                    0 => Base::Unknown,
+                    1 => substituted[0],
+                    _ => Base::Intersection(self.intern_intersection(substituted)),
+                }
+            }
+            Base::Shape(id) => {
+                let mut shape = self.structural_types[id as usize].clone();
+                for property in &mut shape.properties {
+                    property.ty = self.substitute(property.ty, substitution);
+                }
+                Base::Shape(self.intern_structural_type(shape))
+            }
             _ => return ty,
         };
 
@@ -26684,6 +33548,31 @@ impl<'a> Checker<'a> {
             self.expected_type = hint.filter(|t| {
                 arg_is_numeric_literal
                     && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+                    || (matches!(t.base, Base::Union(_))
+                        && matches!(
+                            &arg.value,
+                            Expr::Int(_)
+                                | Expr::Float(_)
+                                | Expr::Duration(_)
+                                | Expr::Str(_)
+                                | Expr::Char(_)
+                                | Expr::Bool(_)
+                                | Expr::Call(_)
+                                | Expr::Variant(_)
+                                | Expr::Field(_)
+                        ))
+                    || (matches!(t.base, Base::Singleton(_))
+                        && matches!(
+                            &arg.value,
+                            Expr::Int(_)
+                                | Expr::Float(_)
+                                | Expr::Duration(_)
+                                | Expr::Str(_)
+                                | Expr::Char(_)
+                                | Expr::Bool(_)
+                                | Expr::Call(_)
+                                | Expr::Field(_)
+                        ))
             });
             if parameter_index.is_some_and(|index| {
                 self.call_parameter_expects_result(expr, signature, index, context_substitution)
@@ -26849,15 +33738,21 @@ impl<'a> Checker<'a> {
 
     /// Checks that a value may be stored where a type is expected.
     fn expect_assignable(&mut self, expected: Type, actual: Type, span: Span, context: &str) {
-        if expected.accepts(actual)
-            || (actual.base == Base::Object
-                && matches!(expected.base, Base::Contract(_) | Base::ContractInstance(_))
-                && (!actual.nullable || expected.nullable))
-            || self.is_subclass_of(actual, expected)
-            || self.accepts_into_union(expected, actual)
-            || self.bare_enum_matches_instance(actual, expected)
-        {
-            return;
+        match self.assignable_relation(expected, actual) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(limit) => {
+                self.error(
+                    codes::TYPE_COMPUTATION_LIMIT,
+                    span,
+                    limit.to_string(),
+                    "assignability exceeded its deterministic type-relation budget",
+                    Some(
+                        "reduce the number or nesting of type alternatives in this relation".into(),
+                    ),
+                );
+                return;
+            }
         }
 
         // A named function or a capture-less lambda is already structurally
@@ -26904,7 +33799,12 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let e = self.name(expected);
+        let e = self
+            .expected_alias_display
+            .as_ref()
+            .filter(|(alias_type, _)| *alias_type == expected)
+            .map(|(_, alias)| alias.clone())
+            .unwrap_or_else(|| self.name(expected));
         let a = self.name(actual);
 
         // Narrowing from `T?` to `T` is the one mismatch with a specific fix.
@@ -27325,6 +34225,7 @@ fn collect_service_callback_references(program: &Program) -> HashSet<String> {
                 expression(&e.when_false, out);
             }
             Expr::Cast(e) => expression(&e.expr, out),
+            Expr::Satisfies(e) => expression(&e.expr, out),
             Expr::Transfer(e) => expression(&e.expr, out),
             Expr::Tuple(e) => {
                 for x in &e.elements {
@@ -27732,6 +34633,551 @@ mod borrowed_view_checker_tests {
             r"D:\a\zirk-lang\zirk-lang\stdlib\std\io\package.zrk"
         ));
         assert!(is_standard_io_source("std.io/stderr.zrk"));
+    }
+
+    #[test]
+    fn assignability_relation_obeys_union_and_intersection_truth_table() {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("type-relations.zrk", "fn main(): Void { }"));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+
+        checker
+            .unions
+            .push(vec![Base::Int(IntWidth::I32), Base::String]);
+        checker
+            .unions
+            .push(vec![Base::Int(IntWidth::I32), Base::String, Base::Boolean]);
+        checker
+            .intersections
+            .push(vec![Base::Int(IntWidth::I32), Base::Dynamic]);
+        checker
+            .intersections
+            .push(vec![Base::Int(IntWidth::I32), Base::String]);
+
+        let source_union = Type::of(Base::Union(0));
+        let target_union = Type::of(Base::Union(1));
+        let target_intersection = Type::of(Base::Intersection(0));
+        let contradictory_intersection = Type::of(Base::Intersection(1));
+
+        assert!(
+            checker
+                .assignable_relation(target_union, source_union)
+                .unwrap()
+        );
+        let memoized_pairs = checker.relation_memo.borrow().len();
+        assert!(memoized_pairs > 0);
+        assert!(
+            checker
+                .assignable_relation(target_union, source_union)
+                .unwrap()
+        );
+        assert_eq!(checker.relation_memo.borrow().len(), memoized_pairs);
+        assert!(
+            !checker
+                .assignable_relation(Type::INT32, source_union)
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(target_intersection, Type::INT32)
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(contradictory_intersection, Type::INT32)
+                .unwrap()
+        );
+
+        let source_intersection = Type::of(Base::Intersection(1));
+        assert!(
+            checker
+                .assignable_relation(Type::INT32, source_intersection)
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::BOOLEAN, source_intersection)
+                .unwrap()
+        );
+
+        let mut nullable_int = Type::INT32;
+        nullable_int.nullable = true;
+        let mut nullable_union = target_union;
+        nullable_union.nullable = true;
+        let mut nullable_source_union = source_union;
+        nullable_source_union.nullable = true;
+        assert!(
+            checker
+                .assignable_relation(nullable_union, nullable_source_union)
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::INT32, nullable_int)
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(nullable_int, Type::INT32)
+                .unwrap()
+        );
+
+        assert!(
+            checker
+                .assignable_relation(Type::INT32, Type::of(Base::Never))
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::of(Base::Never), Type::INT32)
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::INT32, Type::DYNAMIC)
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(Type::DYNAMIC, Type::DYNAMIC)
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(Type::DYNAMIC, Type::INT32)
+                .unwrap(),
+            "Dynamic accepts values by boxing them into a runtime-tagged value"
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::STRING, Type::DYNAMIC)
+                .unwrap(),
+            "Dynamic-to-specific conversion requires a checked cast"
+        );
+        assert!(
+            !checker
+                .assignable_relation(target_union, Type::DYNAMIC)
+                .unwrap(),
+            "a Dynamic value cannot select a union alternative without a checked cast"
+        );
+        assert!(
+            !checker
+                .assignable_relation(target_intersection, Type::DYNAMIC)
+                .unwrap(),
+            "Dynamic cannot satisfy all intersection members without checked proof"
+        );
+    }
+
+    #[test]
+    fn nested_callable_relation_stops_at_the_configured_depth_budget() {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new(
+            "relation-budget.zrk",
+            "fn main(): Void { }",
+        ));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+
+        let mut expected = Type::INT32;
+        let mut actual = Type::STRING;
+        for _ in 0..=crate::type_budget::BudgetKind::RelationDepth.limit() {
+            let expected_id = checker.fn_types.len() as u32;
+            checker.fn_types.push(FnType {
+                params: vec![expected],
+                returns: Type::VOID,
+            });
+            let actual_id = checker.fn_types.len() as u32;
+            checker.fn_types.push(FnType {
+                params: vec![actual],
+                returns: Type::VOID,
+            });
+            expected = Type::of(Base::Function(expected_id));
+            actual = Type::of(Base::Function(actual_id));
+        }
+
+        let error = checker
+            .assignable_relation(expected, actual)
+            .expect_err("a relation deeper than the configured cap must not return a partial bool");
+        assert_eq!(error.kind, crate::type_budget::BudgetKind::RelationDepth);
+        assert_eq!(
+            error.limit,
+            crate::type_budget::BudgetKind::RelationDepth.limit()
+        );
+        assert_eq!(error.attempted, error.limit + 1);
+    }
+
+    #[test]
+    fn singleton_debug_names_are_deterministic_utf8_and_bounded() {
+        use crate::constant_value::ConstValue;
+
+        let long_string = CanonicalConst {
+            type_identity: "String".into(),
+            value: ConstValue::String("🙂value".repeat(200)),
+        };
+        let aggregate = CanonicalConst {
+            type_identity: "package::Record".into(),
+            value: ConstValue::Aggregate {
+                type_identity: "package::Record".into(),
+                fields: vec![("label".into(), long_string.clone())],
+            },
+        };
+
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new(
+            "singleton-display.zrk",
+            "fn main(): Void { }",
+        ));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+        checker
+            .singleton_values
+            .extend([long_string.clone(), aggregate.clone()]);
+
+        for (index, constant) in [&long_string, &aggregate].into_iter().enumerate() {
+            let first = canonical_singleton_name(constant);
+            let second = canonical_singleton_name(constant);
+            assert_eq!(first, second);
+            assert!(first.len() <= MAX_SINGLETON_DISPLAY_BYTES);
+            assert!(first.ends_with("..."));
+            assert!(std::str::from_utf8(first.as_bytes()).is_ok());
+            let rendered = checker.name(Type::of(Base::Singleton(index as u32)));
+            assert_eq!(rendered, first);
+        }
+
+        let temporal = [
+            CanonicalConst {
+                type_identity: "Instant".into(),
+                value: ConstValue::Instant(-1),
+            },
+            CanonicalConst {
+                type_identity: "TimeZone".into(),
+                value: ConstValue::TimeZone {
+                    identifier: "America/Santiago".into(),
+                    rule_data: "2025b".into(),
+                },
+            },
+            CanonicalConst {
+                type_identity: "ZonedDateTime".into(),
+                value: ConstValue::ZonedDateTime {
+                    instant_nanos: 1,
+                    identifier: "America/Santiago".into(),
+                    rule_data: "2025b".into(),
+                },
+            },
+            CanonicalConst {
+                type_identity: "Period".into(),
+                value: ConstValue::Period {
+                    years: 1,
+                    months: 2,
+                    weeks: 3,
+                    days: 4,
+                },
+            },
+        ];
+        for value in &temporal {
+            let rendered = canonical_singleton_name(&value);
+            assert_eq!(rendered, canonical_singleton_name(&value));
+            assert!(rendered.len() <= MAX_SINGLETON_DISPLAY_BYTES);
+            assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+        }
+        assert!(canonical_singleton_name(&temporal[1]).contains("tzdb=2025b"));
+        assert!(canonical_singleton_name(&temporal[2]).contains("America/Santiago"));
+        assert!(canonical_singleton_name(&temporal[3]).contains("years=1, months=2"));
+    }
+
+    #[test]
+    fn structural_assignability_obeys_width_optionality_and_mutability() {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new(
+            "structural-relations.zrk",
+            "fn main(): Void { }",
+        ));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+        let property = |name: &str, ty: Type, optional: bool, readonly: bool| StructuralProperty {
+            name: name.into(),
+            ty,
+            optional,
+            readonly,
+        };
+        checker.structural_types = vec![
+            StructuralType {
+                properties: vec![property("id", Type::STRING, false, true)],
+            },
+            StructuralType {
+                properties: vec![
+                    property("id", Type::STRING, false, false),
+                    property("active", Type::BOOLEAN, true, true),
+                ],
+            },
+            StructuralType {
+                properties: vec![property("id", Type::STRING, false, false)],
+            },
+            StructuralType {
+                properties: vec![property("id", Type::STRING, true, false)],
+            },
+            StructuralType {
+                properties: vec![property("id", Type::STRING, false, true)],
+            },
+            StructuralType { properties: vec![] },
+            StructuralType {
+                properties: vec![property("id", Type::INT32, false, false)],
+            },
+            StructuralType {
+                properties: vec![property("active", Type::BOOLEAN, true, true)],
+            },
+            StructuralType {
+                properties: vec![
+                    property("id", Type::STRING, false, true),
+                    property("active", Type::BOOLEAN, true, true),
+                ],
+            },
+        ];
+
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(0)), Type::of(Base::Shape(1)))
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(0)), Type::of(Base::Shape(4)))
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::of(Base::Shape(2)), Type::of(Base::Shape(4)))
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::of(Base::Shape(0)), Type::of(Base::Shape(3)))
+                .unwrap()
+        );
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(5)), Type::of(Base::Shape(1)))
+                .unwrap()
+        );
+        assert!(
+            !checker
+                .assignable_relation(Type::of(Base::Shape(0)), Type::of(Base::Shape(6)))
+                .unwrap()
+        );
+
+        checker
+            .intersections
+            .push(vec![Base::Shape(0), Base::Shape(7)]);
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Intersection(0)), Type::of(Base::Shape(1)))
+                .unwrap()
+        );
+        checker
+            .intersections
+            .push(vec![Base::Shape(0), Base::Shape(7)]);
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(8)), Type::of(Base::Intersection(1)))
+                .unwrap()
+        );
+
+        let mut named = minimal_class(
+            "Named",
+            vec![FieldInfo {
+                name: "id".into(),
+                ty: Type::STRING,
+                visibility: Visibility::Public,
+                mutability: Mutability::Immutable,
+                span: Span::new(0, 1),
+                owner: 0,
+                default: None,
+                is_static: false,
+                promoted: false,
+            }],
+        );
+        let named_id = checker.classes.len() as u32;
+        named.fields[0].owner = named_id;
+        checker.classes.push(named);
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(0)), Type::of(Base::Class(named_id)))
+                .unwrap()
+        );
+        let other_class_id = checker.classes.len() as u32;
+        checker.classes.push(minimal_class("Other", Vec::new()));
+        assert!(
+            !checker
+                .assignable_relation(
+                    Type::of(Base::Class(named_id)),
+                    Type::of(Base::Class(other_class_id))
+                )
+                .unwrap()
+        );
+
+        let mut generic = minimal_class(
+            "Box",
+            vec![FieldInfo {
+                name: "value".into(),
+                ty: Type::of(Base::Param(0)),
+                visibility: Visibility::Public,
+                mutability: Mutability::Immutable,
+                span: Span::new(0, 1),
+                owner: 1,
+                default: None,
+                is_static: false,
+                promoted: false,
+            }],
+        );
+        let generic_id = checker.classes.len() as u32;
+        generic.fields[0].owner = generic_id;
+        generic.type_params.push(0);
+        checker.classes.push(generic);
+        checker.generic_instances.push(GenericInstance {
+            class: generic_id,
+            args: vec![Type::STRING],
+        });
+        checker.structural_types.push(StructuralType {
+            properties: vec![property("value", Type::STRING, false, true)],
+        });
+        assert!(
+            checker
+                .assignable_relation(Type::of(Base::Shape(9)), Type::of(Base::Instance(0)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn integer_singleton_assignability_matches_every_destination_boundary() {
+        use crate::constant_value::{CanonicalConst, ConstValue};
+
+        let widths = [
+            IntWidth::I8,
+            IntWidth::I16,
+            IntWidth::I32,
+            IntWidth::I64,
+            IntWidth::I128,
+            IntWidth::U8,
+            IntWidth::U16,
+            IntWidth::U32,
+            IntWidth::U64,
+            IntWidth::U128,
+        ];
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new(
+            "integer-singleton-relations.zrk",
+            "fn main(): Void { }",
+        ));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+
+        for source_width in widths {
+            let (minimum, maximum) = source_width.literal_range();
+            for value in [minimum, maximum] {
+                let constant = if source_width.signed() {
+                    CanonicalConst {
+                        type_identity: source_width.name().into(),
+                        value: ConstValue::integer(source_width, value).unwrap(),
+                    }
+                } else {
+                    CanonicalConst {
+                        type_identity: source_width.name().into(),
+                        value: ConstValue::unsigned_integer(source_width, value as u128).unwrap(),
+                    }
+                };
+                let singleton = checker.resolve_singleton_value(constant, Span::new(0, 1));
+                for destination in widths {
+                    let (minimum, maximum) = destination.literal_range();
+                    let expected = (minimum..=maximum).contains(&value);
+                    assert_eq!(
+                        checker
+                            .assignable_relation(Type::of(Base::Int(destination)), singleton)
+                            .unwrap(),
+                        expected,
+                        "{value} from {} to {}",
+                        source_width.name(),
+                        destination.name()
+                    );
+                }
+            }
+        }
+
+        let maximum_u128 = CanonicalConst {
+            type_identity: IntWidth::U128.name().into(),
+            value: ConstValue::unsigned_integer(IntWidth::U128, u128::MAX).unwrap(),
+        };
+        let singleton = checker.resolve_singleton_value(maximum_u128, Span::new(0, 1));
+        for destination in widths {
+            assert_eq!(
+                checker
+                    .assignable_relation(Type::of(Base::Int(destination)), singleton)
+                    .unwrap(),
+                destination == IntWidth::U128,
+                "u128::MAX to {}",
+                destination.name()
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_singletons_assign_only_to_their_exact_value_family() {
+        use crate::constant_value::{CanonicalConst, ConstValue};
+
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new(
+            "temporal-singleton-relations.zrk",
+            "fn main(): Void { }",
+        ));
+        let mut sink = DiagnosticSink::new();
+        let mut checker = Checker::new(&sources, &mut sink);
+        let cases = [
+            (
+                "Duration",
+                ConstValue::Duration(250_000_000),
+                Type::DURATION,
+            ),
+            ("Date", ConstValue::Date(20_812), Type::of(Base::Date)),
+            (
+                "Time",
+                ConstValue::Time(34_200_000_000_000),
+                Type::of(Base::Time),
+            ),
+            (
+                "DateTime",
+                ConstValue::DateTime(1_797_000_000_000_000_000),
+                Type::of(Base::DateTime),
+            ),
+        ];
+
+        for (type_identity, value, primitive) in cases {
+            let singleton = checker.intern_singleton_value(CanonicalConst {
+                type_identity: type_identity.into(),
+                value: value.clone(),
+            });
+            let same = checker.intern_singleton_value(CanonicalConst {
+                type_identity: type_identity.into(),
+                value,
+            });
+            assert_eq!(singleton, same, "{type_identity} canonical identity");
+            assert!(checker.assignable_relation(primitive, singleton).unwrap());
+            assert!(checker.assignable_relation(singleton, same).unwrap());
+
+            for other in [
+                Type::DURATION,
+                Type::of(Base::Date),
+                Type::of(Base::Time),
+                Type::of(Base::DateTime),
+            ] {
+                if other != primitive {
+                    assert!(
+                        !checker.assignable_relation(other, singleton).unwrap(),
+                        "{type_identity} singleton must not assign to {}",
+                        checker.name(other)
+                    );
+                }
+            }
+        }
     }
 
     fn check_composite(

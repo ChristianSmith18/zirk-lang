@@ -31,8 +31,8 @@ fn main(): Void {
     stdout.println(match error { Ok(_) => true; Error(_) => false; });
     stdout.println(match error { Ok(_) => false; Error(_) => true; });
 
-    stdout.println(ok ?? -1);
-    stdout.println(error ?? -1);
+    stdout.println(ok ?? - 1);
+    stdout.println(error ?? - 1);
     stdout.println(nested());
     stdout.println(match ok { Ok(_) => "none"; Error(value) => value; });
     stdout.println(match error { Ok(_) => "none"; Error(value) => value; });

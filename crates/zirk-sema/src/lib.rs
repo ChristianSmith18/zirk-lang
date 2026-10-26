@@ -18,9 +18,13 @@
 //! error does not produce a dozen derived ones.
 
 mod checker;
+pub mod const_eval;
+pub mod constant_value;
+mod flow;
 mod ide;
 mod scope;
 pub mod stdlib;
+pub mod type_budget;
 mod types;
 
 pub use checker::{
@@ -28,8 +32,9 @@ pub use checker::{
     OwnershipMarkers, OwnershipProperties, ProjectGlobalCallInfo, ProjectGlobalInfo,
     ProjectGlobalOperation, ProjectGlobalSpec, ProjectGlobalSubscriptionCallInfo,
     ProjectGlobalSubscriptionOperation, ServiceSpawnInfo, SettledPlan, TypeMapEntry, TypeMapKind,
-    check, check_with_globals,
+    check, check_with_globals, check_with_globals_cancellable,
 };
+pub use constant_value::{CanonicalConst, ConstValue};
 pub use ide::{
     ReferenceRole, SemanticIndex, SemanticReference, SemanticSymbol, SemanticSymbolKind,
     SemanticVisibility, SymbolId,
@@ -38,8 +43,8 @@ pub use scope::{Binding, ParamInfo, Scopes, Signature};
 pub use types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractType, EnumType, EnumVariantInfo,
     FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance, GenericInstance,
-    IntWidth, MethodInfo, PendingType, TupleType, Type, TypeNames, TypeParamInfo, VariantMapping,
-    describe, is_ffi_safe, pending_type,
+    IntWidth, MethodInfo, PendingType, StructuralProperty, StructuralType, TupleType, Type,
+    TypeNames, TypeParamInfo, VariantMapping, describe, is_ffi_safe, pending_type,
 };
 
 /// Diagnostic codes of the checker.
@@ -167,6 +172,10 @@ pub mod codes {
     /// [`TYPE_MISMATCH`] so the message can explain *why*, not just that the
     /// types differ.
     pub const AMBIGUOUS_CAPTURING_CALLABLE: Code = Code::new("E0439");
+    /// A bounded compile-time type computation exhausted its deterministic budget.
+    pub const TYPE_COMPUTATION_LIMIT: Code = Code::new("E0482");
+    /// A constant type expression is invalid for its declared value semantics.
+    pub const INVALID_CONSTANT_TYPE: Code = Code::new("E0483");
     /// A recursive lambda's own binding (`ZIRK_LANGUAGE_SPEC.md` section 6,
     /// roadmap Phase 4d) referenced inside its own body anywhere other than
     /// as the direct callee of a call — assigned to a variable, passed as
@@ -296,4 +305,6 @@ pub mod codes {
     /// `Thread.run` is unavailable, and its literal lambda has effects the
     /// future managed-thread boundary cannot currently account for.
     pub const THREAD_RUN_UNSUPPORTED_EFFECT: Code = Code::new("E0484");
+    /// A match arm is unreachable because an earlier pattern covered its cases.
+    pub const UNREACHABLE_PATTERN: Code = Code::new("E0485");
 }

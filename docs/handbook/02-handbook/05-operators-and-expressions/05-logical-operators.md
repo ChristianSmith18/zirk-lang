@@ -3,7 +3,7 @@
 `&&`, `||`, and `!` operate only on `Boolean` values.
 
 ```zirk
-if authenticated && !suspended {
+if authenticated && ! suspended {
     open_dashboard();
 }
 ```

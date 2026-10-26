@@ -71,8 +71,8 @@ match users.get(id) {
 
 mut labels: Map<String, Int32> = Map();
 mut key: String = "café";
-labels.set(key, 1);        // the collection stores a normalized key snapshot
-key[0] = "C";              // this mutation does not move the stored key
+labels.set(key, 1); // the collection stores a normalized key snapshot
+key[0] = "C"; // this mutation does not move the stored key
 ```
 
 ---

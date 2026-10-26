@@ -9,14 +9,60 @@
 
 mod common;
 
+use inkwell::OptimizationLevel;
 use inkwell::context::Context;
+use inkwell::module::Module as LlvmModule;
+use inkwell::targets::{CodeModel, RelocMode, Target, TargetTriple};
 use zirk_ast::{Ident, ModuleDecl};
-use zirk_codegen_llvm::{emit, emit_with_sources, symbols};
+use zirk_codegen_llvm::{emit, emit_object_for_triple, emit_with_sources, symbols};
 use zirk_diagnostics::{DiagnosticSink, RenderStyle, SourceFile, SourceMap};
 use zirk_ir::lower;
 use zirk_lexer::tokenize;
 use zirk_parser::parse;
 use zirk_sema::check;
+
+/// Verifies emitted LLVM IR on every host. Inkwell's in-process verifier can
+/// trigger STATUS_ACCESS_VIOLATION on Windows with otherwise valid modules;
+/// there, run the pinned LLVM `opt` verifier as a separate process instead.
+fn verify_llvm_module(module: &LlvmModule<'_>) {
+    #[cfg(not(windows))]
+    module
+        .verify()
+        .expect("the generated LLVM module does not verify");
+
+    #[cfg(windows)]
+    {
+        let prefix = std::env::var_os("LLVM_SYS_201_PREFIX")
+            .expect("LLVM_SYS_201_PREFIX must point at the pinned LLVM installation");
+        let opt = std::path::PathBuf::from(prefix)
+            .join("bin")
+            .join(common::exe("opt"));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after the Unix epoch")
+            .as_nanos();
+        let input = common::temp_dir().join(format!(
+            "zirk-llvm-verify-{}-{nonce}.ll",
+            std::process::id()
+        ));
+        module
+            .print_to_file(&input)
+            .expect("write LLVM IR for the external verifier");
+        let output = std::process::Command::new(&opt)
+            .arg("-passes=verify")
+            .arg("-disable-output")
+            .arg(&input)
+            .output()
+            .unwrap_or_else(|error| panic!("could not run {}: {error}", opt.display()));
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            output.status.success(),
+            "LLVM opt verifier rejected the module:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
 
 /// Compiles source down to LLVM IR text, asserting the module verifies.
 ///
@@ -29,6 +75,463 @@ use zirk_sema::check;
 fn llvm_ir(source_text: &str) -> String {
     let ir = checked_ir(source_text);
     llvm_ir_for_module(&ir)
+}
+
+#[test]
+fn typed_union_injection_crosses_function_parameter_and_return_abi() {
+    let ir = llvm_ir(
+        "type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn widen(value: Int32): Value { return value; }\n\
+         fn main(): Void { mut result: Value = identity(widen(42)); }",
+    );
+    assert!(
+        ir.contains("insertvalue"),
+        "union construction must emit an inline aggregate"
+    );
+    assert!(
+        ir.contains("identity"),
+        "the typed aggregate must cross the function ABI"
+    );
+    assert!(
+        ir.contains("[0 x i64]") && ir.contains("[8 x i8]"),
+        "Int32 | String must use one aligned 8-byte payload buffer"
+    );
+    assert!(
+        ir.contains("@zirk_rt_push_union_roots"),
+        "union locals must register tag-aware GC roots"
+    );
+    assert!(
+        ir.contains("@zk.union.gc."),
+        "the module must emit per-union reference descriptors"
+    );
+    let widen = ir
+        .split("define ")
+        .find(|function| {
+            function
+                .lines()
+                .next()
+                .is_some_and(|line| line.contains("widen"))
+        })
+        .expect("the union injection function is emitted")
+        .split("\n}")
+        .next()
+        .expect("function body is terminated");
+    assert!(
+        !widen.contains("call ptr @zirk_rt_alloc"),
+        "injecting and transporting this union must not allocate a managed wrapper: {widen}"
+    );
+}
+
+#[test]
+fn typed_union_indirect_calls_use_the_same_aggregate_signature() {
+    let ir = llvm_ir(
+        "type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn apply(transform: Fn(Value) => Value, value: Value): Value { return transform(value); }\n\
+         fn main(): Void { inmut result: Value = apply(identity, 42); }",
+    );
+    let aggregate = "{ i32, [4 x i8], [0 x i64], [8 x i8] }";
+    assert!(
+        ir.contains(&format!("define {aggregate} @zk_identity({aggregate}")),
+        "the direct function accepts and returns the union aggregate by value:\n{ir}"
+    );
+    assert!(
+        ir.contains(&format!(
+            "call {aggregate} %dispatch(ptr %capture, {aggregate}"
+        )),
+        "the indirect call has the same aggregate parameter and return ABI:\n{ir}"
+    );
+    assert!(
+        ir.contains(&format!(
+            "define internal {aggregate} @zk.callable.dispatch.0.identity(ptr"
+        )),
+        "the function-value adapter returns the same aggregate:\n{ir}"
+    );
+}
+
+#[test]
+fn generated_union_llvm_passes_address_sanitizer_and_verifier() {
+    let ir = llvm_ir(
+        "type Value = Int32 | String;\n\
+         class Cell { value: Value; construct(value: Value) { this.value = value; } }\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn main(): Void { inmut cell: Cell = Cell(identity(42)); inmut copy: Value = cell.value; }",
+    );
+    let prefix = std::env::var_os("LLVM_SYS_201_PREFIX")
+        .expect("LLVM_SYS_201_PREFIX must point at the pinned LLVM installation");
+    let opt = std::path::PathBuf::from(prefix)
+        .join("bin")
+        .join(common::exe("opt"));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let input =
+        common::temp_dir().join(format!("zirk-union-asan-{}-{nonce}.ll", std::process::id()));
+    let output = common::temp_dir().join(format!(
+        "zirk-union-asan-{}-{nonce}-instrumented.ll",
+        std::process::id()
+    ));
+    std::fs::write(&input, ir).expect("write generated union LLVM IR");
+    let triple = if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-apple-darwin"
+        }
+    } else if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let result = std::process::Command::new(&opt)
+        .arg(format!("-mtriple={triple}"))
+        .arg("-passes=asan,verify")
+        .arg("-S")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run {}: {error}", opt.display()));
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        result.status.success(),
+        "LLVM AddressSanitizer instrumentation or verifier failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let instrumented = std::fs::read_to_string(&output).expect("read instrumented union IR");
+    let _ = std::fs::remove_file(&output);
+    assert!(
+        instrumented.contains("asan.module_ctor"),
+        "the AddressSanitizer module initialization must be emitted"
+    );
+}
+
+#[test]
+fn value_field_nullable_nested_union_emits_recursive_gc_descriptor() {
+    let context = Context::create();
+    let mut module = checked_ir(
+        "type Inner = Int32 | String;\n\
+         fn identity(value: Inner): Inner { return value; }\n\
+         fn main(): Void { }",
+    );
+    let inner_representation = module.union_types[0].representation_layout.unwrap();
+    module.values.push(zirk_ir::ValueLayout {
+        name: "Envelope".into(),
+        fields: vec![zirk_ir::ObjectField {
+            name: "payload".into(),
+            ty: zirk_ir::IrType::Nullable(zirk_ir::Nullable::Union(inner_representation)),
+        }],
+    });
+    let outer_representation = module.enums.len() as u32;
+    let outer = zirk_ir::UnionTypeLayout::with_canonical_alternatives(
+        vec![zirk_ir::IrType::Boolean, zirk_ir::IrType::Value(0)],
+        vec![b"builtin:Boolean".to_vec(), b"value:Envelope".to_vec()],
+    )
+    .unwrap()
+    .with_representation_layout(outer_representation);
+    let fields = outer
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| zirk_ir::ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    module.enums.push(zirk_ir::EnumLayout {
+        name: "$NestedUnion".into(),
+        fields,
+        variants: vec![vec![0], vec![1]],
+        union_layout: None,
+    });
+    module.union_types.push(outer);
+    let descriptor = module.union_layout_descriptor(1).unwrap();
+    module.enums[outer_representation as usize].union_layout = Some(descriptor);
+    let function = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let root = function.slots.len() as u32;
+    function.slots.push(zirk_ir::Slot {
+        name: "nested".into(),
+        ty: zirk_ir::IrType::Union(outer_representation),
+        span: function.span,
+    });
+    function.gc_roots.push(zirk_ir::SlotId(root));
+    let llvm = emit(&context, &module, "nested_union_gc");
+    verify_llvm_module(&llvm);
+    let ir = llvm.print_to_string().to_string();
+    assert!(ir.contains("@zk.union.gc."), "GC descriptors are emitted");
+    assert!(
+        ir.contains("ptrtoint (ptr @zk.union.gc."),
+        "outer descriptor points to the recursively emitted inner descriptor"
+    );
+}
+
+#[test]
+fn union_gc_descriptor_guards_enum_nested_unions_by_discriminant() {
+    let context = Context::create();
+    let mut module = checked_ir(
+        "type Inner = Int32 | String;\n\
+         fn identity(value: Inner): Inner { return value; }\n\
+         fn main(): Void { }",
+    );
+    let inner_representation = module.union_types[0].representation_layout.unwrap();
+    let enum_id = module.enums.len() as u32;
+    module.enums.push(zirk_ir::EnumLayout {
+        name: "PayloadChoice".into(),
+        fields: vec![zirk_ir::ObjectField {
+            name: "nested".into(),
+            ty: zirk_ir::IrType::Union(inner_representation),
+        }],
+        variants: vec![vec![], vec![0]],
+        union_layout: None,
+    });
+    let outer_representation = module.enums.len() as u32;
+    let outer = zirk_ir::UnionTypeLayout::with_canonical_alternatives(
+        vec![zirk_ir::IrType::Boolean, zirk_ir::IrType::Enum(enum_id)],
+        vec![b"builtin:Boolean".to_vec(), b"enum:PayloadChoice".to_vec()],
+    )
+    .unwrap()
+    .with_representation_layout(outer_representation);
+    let fields = outer
+        .alternatives
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| zirk_ir::ObjectField {
+            name: format!("payload{index}"),
+            ty: *ty,
+        })
+        .collect();
+    module.enums.push(zirk_ir::EnumLayout {
+        name: "$EnumNestedUnion".into(),
+        fields,
+        variants: vec![vec![0], vec![1]],
+        union_layout: None,
+    });
+    module.union_types.push(outer);
+    let descriptor = module.union_layout_descriptor(1).unwrap();
+    module.enums[outer_representation as usize].union_layout = Some(descriptor);
+    let function = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let root = function.slots.len() as u32;
+    function.slots.push(zirk_ir::Slot {
+        name: "nested_enum_union".into(),
+        ty: zirk_ir::IrType::Union(outer_representation),
+        span: function.span,
+    });
+    function.gc_roots.push(zirk_ir::SlotId(root));
+
+    let llvm = emit(&context, &module, "enum_nested_union_gc");
+    verify_llvm_module(&llvm);
+    let ir = llvm.print_to_string().to_string();
+    let descriptor = ir
+        .lines()
+        .find(|line| line.contains("@zk.union.gc.1 ="))
+        .expect("outer union GC descriptor is emitted");
+    assert!(
+        descriptor.contains("i64 -1, i64 1, i64 ptrtoint"),
+        "descriptor must encode one enum guard with discriminant one: {descriptor}"
+    );
+}
+
+#[test]
+fn union_aggregate_emits_objects_for_supported_64_bit_abi_families() {
+    let context = Context::create();
+    let module = checked_ir(
+        "type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn widen(value: Int32): Value { return value; }\n\
+         fn main(): Void { mut a: Value = identity(widen(42)); mut b: Value = identity(\"ready\"); }",
+    );
+    let llvm = emit(&context, &module, "union_target_abi");
+    verify_llvm_module(&llvm);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("zirk-union-target-{}-{nonce}", std::process::id()));
+    for triple in [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ] {
+        let path = root.with_extension(format!("{}.o", triple.replace('-', "_")));
+        emit_object_for_triple(&llvm, triple, &path)
+            .unwrap_or_else(|error| panic!("{triple}: {}", error.render()));
+        assert!(path.is_file(), "{triple} object was not emitted");
+        std::fs::remove_file(path).expect("remove emitted target object");
+    }
+}
+
+#[test]
+fn compact_union_size_and_alignment_match_supported_64_bit_abis() {
+    zirk_codegen_llvm::initialize_targets();
+    let context = Context::create();
+    let module = checked_ir(
+        "type Small = Int8 | Boolean;\n\
+         type Reference = Int32 | String;\n\
+         type Wide = String | Float128;\n\
+         fn small(value: Small): Small { return value; }\n\
+         fn reference(value: Reference): Reference { return value; }\n\
+         fn wide(value: Wide): Wide { return value; }\n\
+         fn main(): Void { }",
+    );
+    let llvm = emit(&context, &module, "union_layout_abi");
+    verify_llvm_module(&llvm);
+    let expectations = [
+        ("zk_small", 8u64, 4u32),
+        ("zk_reference", 16, 8),
+        ("zk_wide", 32, 16),
+    ];
+
+    for triple in [
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ] {
+        let target_triple = TargetTriple::create(triple);
+        let target = Target::from_triple(&target_triple).expect("target triple is supported");
+        let machine = target
+            .create_target_machine(
+                &target_triple,
+                "generic",
+                "",
+                OptimizationLevel::None,
+                if triple.contains("windows") {
+                    RelocMode::Default
+                } else {
+                    RelocMode::PIC
+                },
+                CodeModel::Default,
+            )
+            .expect("target machine is available");
+        let data = machine.get_target_data();
+
+        for (function_name, expected_size, expected_alignment) in expectations {
+            let function = llvm
+                .get_function(function_name)
+                .expect("union identity function is emitted");
+            let parameter = function.get_nth_param(0).expect("union parameter exists");
+            let parameter_type = parameter.get_type();
+            assert_eq!(
+                data.get_abi_size(&parameter_type),
+                expected_size,
+                "{function_name} size for {triple}"
+            );
+            assert_eq!(
+                data.get_abi_alignment(&parameter_type),
+                expected_alignment,
+                "{function_name} alignment for {triple}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nullable_union_emits_wrapped_null_and_present_aggregate_paths() {
+    let ir = llvm_ir(
+        "type Value = Int32 | String;\n\
+         fn widen(value: Int32): Value? { return value; }\n\
+         fn main(): Void { mut result: Value? = null; result = widen(42); }",
+    );
+    assert!(
+        ir.contains("insertvalue"),
+        "the present union payload is inline"
+    );
+    assert!(
+        ir.contains("define {"),
+        "the nullable flag is represented in the returned aggregate"
+    );
+    assert!(
+        ir.contains("gc_union_present") && ir.contains("@zirk_rt_push_union_roots"),
+        "nullable union roots must check presence before reading the tag"
+    );
+}
+
+#[test]
+fn union_match_projection_has_a_runtime_tag_guard() {
+    let ir = llvm_ir(
+        "type Value = Int32 | String;\n\
+         fn classify(value: Value): Int32 { return match value { 42 => 1, \"ready\" => 2, _ => 0 }; }\n\
+         fn main(): Void { mut result: Int32 = classify(\"ready\"); }",
+    );
+    assert!(
+        ir.contains("union.project.invalid"),
+        "invalid tags must fail closed before payload extraction"
+    );
+    assert!(
+        ir.contains("union.project.tag"),
+        "the tag is read from the union representation"
+    );
+    assert!(
+        ir.contains("call void @zirk_rt_invalid_union_tag"),
+        "a corrupt tag must terminate through the controlled runtime failure path"
+    );
+}
+
+#[test]
+fn singleton_union_matches_emit_tagged_scalar_projections() {
+    let ir = llvm_ir(
+        "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Wait = 250ms | 1s;\n\
+         type Number = const(1) | const(2);\n\
+         fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
+         fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
+         fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
+         fn main(): Void { mut a = day(Date(2026, 12, 25)); mut b = wait(1s); mut c = number(2); }",
+    );
+    assert!(ir.contains("union.project.tag"));
+    assert!(ir.contains("union.tag"));
+}
+
+#[test]
+fn intersection_contract_views_emit_pointer_retypes_and_contract_dispatch() {
+    let ir = llvm_ir(
+        "contract Describable { name: String; describe(): String; }\n\
+         contract Identifiable { id(): Int32; }\n\
+         class Person implements Describable, Identifiable {\n\
+             name: String;\n\
+             construct() { this.name = \"Ada\"; }\n\
+             describe(): String { return \"person\"; }\n\
+             id(): Int32 { return 7; }\n\
+         }\n\
+         fn inspect(value: Describable & Identifiable): String {\n\
+             mut identity = value.id();\n\
+             mut name = value.name;\n\
+             return value.describe();\n\
+         }\n\
+         fn main(): Void {\n\
+             mut person = Person();\n\
+             mut view: Describable & Identifiable = person;\n\
+             mut same = person is view;\n\
+             inspect(view);\n\
+         }",
+    );
+    assert!(
+        ir.contains("Person"),
+        "the concrete implementation remains in the emitted module"
+    );
+    assert!(
+        ir.contains("inspect"),
+        "the intersection parameter crosses the function ABI"
+    );
+    assert!(
+        ir.contains("call"),
+        "contract methods retain their indirect dispatch calls"
+    );
 }
 
 fn checked_ir(source_text: &str) -> zirk_ir::Module {
@@ -105,6 +608,7 @@ fn checked_ir_with_entry(source_text: &str, synthesize_entry: bool) -> zirk_ir::
             body: zirk_ast::Block { statements, span },
             shared: false,
             is_unsafe: false,
+            is_const: false,
             span,
         });
     }
@@ -126,13 +630,7 @@ fn llvm_ir_for_module(ir: &zirk_ir::Module) -> String {
     let context = Context::create();
     let module = emit(&context, ir, "test");
 
-    if let Err(error) = module.verify() {
-        panic!(
-            "the generated LLVM module does not verify:\n{}\n--- module ---\n{}",
-            error.to_string(),
-            module.print_to_string().to_string()
-        );
-    }
+    verify_llvm_module(&module);
 
     module.print_to_string().to_string()
 }
@@ -202,9 +700,7 @@ fn native_debug_emission_maps_source_lines_parameters_and_locals() {
 
     let context = Context::create();
     let module = emit_with_sources(&context, &ir, "debug_test", &sources);
-    module
-        .verify()
-        .expect("source debug metadata must produce a valid LLVM module");
+    verify_llvm_module(&module);
     let text = module.print_to_string().to_string();
     assert!(text.contains("!DICompileUnit"));
     assert!(text.contains("!DILocation(line: 2"));

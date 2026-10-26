@@ -8,6 +8,10 @@ Inference draws from arguments, receiver, expected result, `Fn` context, and
 constraints but never guesses. Explicit arguments resolve ambiguity and only
 trailing generic parameters may define defaults.
 
+Generic aliases can also use structural type operators, conditional and
+mapped types, finite template types, and standard utility aliases. See
+[Generic Type Operators](09-type-operators.md) for syntax and examples.
+
 ---
 
 **Previous:** [← Function Types and Callable Values](../07-functions/12-function-types-and-callable-values.md) · **Next:** [Generic Functions →](01-generic-functions.md)

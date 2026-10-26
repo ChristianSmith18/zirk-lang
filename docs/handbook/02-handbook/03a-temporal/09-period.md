@@ -17,7 +17,7 @@ It has no natural order, scalar division, or context-free total seconds:
 
 ```zirk
 Period.months(1) < Period.days(31); // error
-Period.months(1).total_seconds();   // error
+Period.months(1).total_seconds(); // error
 ```
 
 The comparison is unknowable without a starting calendar position and, for
@@ -75,7 +75,7 @@ clamping by default; `add_strict()` rejects.
 Period.years(1);
 Period(weeks: 1, days: 3);
 Period("P1Y2M3D");
-Date(2026, 1, 31) + Period.months(1);   // 2026-02-28
+Date(2026, 1, 31) + Period.months(1); // 2026-02-28
 ```
 
 ---

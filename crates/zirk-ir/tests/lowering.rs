@@ -550,6 +550,32 @@ fn range_reverse_abi_is_absent_after_colon_step_migration() {
     );
 }
 
+#[test]
+fn property_presence_test_uses_nullable_dynamic_object_lookup() {
+    let module = compile(
+        "fn has_name(value: Object): Boolean { return \"name\" in value; }\n\
+         fn main(): Void { mut value: Object = { name: \"present\" }; mut found = \"name\" in value; }",
+    );
+    let lowered = instructions(module.function("main").expect("main exists"));
+    assert!(
+        lowered
+            .iter()
+            .any(|instruction| matches!(instruction, InstKind::ObjectGet { .. }))
+    );
+    assert!(
+        lowered
+            .iter()
+            .any(|instruction| matches!(instruction, InstKind::IsNull(_)))
+    );
+    assert!(lowered.iter().any(|instruction| matches!(
+        instruction,
+        InstKind::Unary {
+            op: UnaryOp::Not,
+            ..
+        }
+    )));
+}
+
 // --- Locals as slots --------------------------------------------------------
 
 #[test]
@@ -2195,6 +2221,285 @@ fn constructing_a_variant_builds_an_enum_with_no_allocation() {
 }
 
 #[test]
+fn tagged_union_representation_prototype_passes_inline_enum_payload_through_call() {
+    let module = compile(
+        "enum Value { Number(number: Int32), Text(text: String) }\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn main(): Void {\n\
+             mut number = identity(Value.Number(42));\n\
+             mut text = identity(Value.Text(\"inline\"));\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::BuildEnum { fields, .. } if fields.len() == 1)),
+        "each alternative should build its inline tag and payload"
+    );
+    assert!(
+        kinds.iter().any(|kind| matches!(
+            kind,
+            InstKind::Call { callee, args } if callee == "identity" && args.len() == 1
+        )),
+        "the inline tagged value must cross a function call: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|kind| matches!(kind, InstKind::Alloc(_))),
+        "constructing and passing either alternative must not allocate per injection"
+    );
+}
+
+#[test]
+fn int32_string_union_injects_and_passes_inline_without_allocation() {
+    let module = compile(
+        "type Value = Int32 | String;\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn widen_number(value: Int32): Value { return value; }\n\
+         fn widen_text(value: String): Value { return value; }\n\
+         fn pass_number(): Value { return widen_number(42); }\n\
+         fn pass_text(): Value { return widen_text(\"inline\"); }\n\
+         fn main(): Void { }",
+    );
+    let all_kinds: Vec<_> = module.functions.iter().flat_map(instructions).collect();
+
+    assert_eq!(
+        all_kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::UnionInject { .. }))
+            .count(),
+        2,
+        "the Int32 and String members are each wrapped in the union's inline layout"
+    );
+    let identity = module.function("identity").expect("identity exists");
+    assert!(
+        !instructions(identity)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::UnionInject { .. })),
+        "passing a value already carrying this union tag must preserve it without a redundant injection"
+    );
+    assert!(
+        all_kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Call { .. })),
+        "the union value crosses an ordinary function call"
+    );
+    let injection_functions: Vec<_> = module
+        .functions
+        .iter()
+        .filter(|function| {
+            instructions(function)
+                .iter()
+                .any(|kind| matches!(kind, InstKind::UnionInject { .. }))
+        })
+        .collect();
+    assert!(
+        injection_functions.iter().all(|function| {
+            !instructions(function)
+                .iter()
+                .any(|kind| matches!(kind, InstKind::Alloc(_)))
+        }),
+        "functions that inject union alternatives do not allocate per injection"
+    );
+}
+
+#[test]
+fn scalar_union_layout_keeps_source_identity_and_injects_every_alternative() {
+    let module = compile(
+        "type Value = Int64 | Date | String | Boolean | Float64;\n\
+         fn widen_number(value: Int64): Value { return value; }\n\
+         fn widen_date(value: Date): Value { return value; }\n\
+         fn widen_text(value: String): Value { return value; }\n\
+         fn widen_flag(value: Boolean): Value { return value; }\n\
+         fn widen_ratio(value: Float64): Value { return value; }\n\
+         fn main(): Void { }",
+    );
+    let layout = &module.union_types[0];
+    assert_eq!(layout.source_aliases, ["Value"]);
+    assert_eq!(layout.alternatives.len(), 5);
+    assert_eq!(layout.canonical_alternatives.len(), 5);
+    assert_eq!(
+        layout
+            .alternatives
+            .iter()
+            .filter(|ty| **ty == IrType::Int(IntWidth::I64))
+            .count(),
+        2,
+        "Date and Int64 share payload storage but retain distinct canonical alternatives"
+    );
+    let injections: Vec<_> = module
+        .functions
+        .iter()
+        .flat_map(instructions)
+        .filter_map(|kind| match kind {
+            InstKind::UnionInject { alternative, .. } => Some(alternative),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(injections.len(), 5);
+    assert_eq!(
+        injections
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        5,
+        "each semantic alternative maps to exactly one distinct tag"
+    );
+}
+
+#[test]
+fn singleton_union_match_lowers_temporal_and_numeric_patterns() {
+    let module = compile(
+        "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Wait = 250ms | 1s;\n\
+         type Number = const(1) | const(2);\n\
+         fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
+         fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
+         fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
+         fn main(): Void { }",
+    );
+    for name in ["day", "wait", "number"] {
+        let function = module.function(name).expect("match function is lowered");
+        assert!(
+            function
+                .blocks
+                .iter()
+                .any(|block| matches!(block.terminator, Some(Terminator::UnionDispatch { .. }))),
+            "{name} dispatches using the union tag"
+        );
+        assert!(
+            instructions(function)
+                .iter()
+                .any(|kind| matches!(kind, InstKind::UnionProject { .. })),
+            "{name} projects the active scalar payload"
+        );
+    }
+}
+
+#[test]
+fn union_values_keep_their_layout_across_storage_boundaries() {
+    let module = compile(
+        "type Value = Int32 | String;\n\
+         class Box { item: Value; construct(item: Value) { this.item = item; } }\n\
+         fn identity(value: Value): Value { return value; }\n\
+         fn main(): Void {\n\
+             mut chosen: Value = 3;\n\
+             mut boxed = Box(item: chosen);\n\
+             mut tuple = (chosen,);\n\
+             mut items: List<Value> = [chosen];\n\
+             mut callback = (): Value => chosen;\n\
+             mut result: Value = identity(callback());\n\
+         }",
+    );
+    let value_ty = module
+        .functions
+        .iter()
+        .flat_map(|function| function.slots.iter())
+        .find(|slot| slot.name == "chosen")
+        .expect("the local union slot is present")
+        .ty;
+    assert!(matches!(value_ty, IrType::Union(_)));
+    assert_eq!(module.union_types.len(), 1);
+    assert!(
+        module
+            .objects
+            .iter()
+            .find(|layout| layout.name == "Box")
+            .expect("Box layout exists")
+            .fields
+            .iter()
+            .any(|field| field.name == "item" && field.ty == value_ty)
+    );
+    assert!(
+        module
+            .values
+            .iter()
+            .any(|layout| layout.fields.iter().any(|field| field.ty == value_ty))
+    );
+    assert!(module.list_types.contains(&value_ty));
+    assert!(
+        module
+            .closures
+            .iter()
+            .any(|closure| closure.captures.contains(&value_ty))
+    );
+    let identity = module.function("identity").expect("identity exists");
+    assert_eq!(identity.slot(identity.params[0]).unwrap().ty, value_ty);
+    assert_eq!(identity.return_type, value_ty);
+}
+
+#[test]
+fn nullable_union_assignments_preserve_null_and_injected_alternatives() {
+    let module = compile(
+        "type Value = Int32 | String;\n\
+         fn identity(value: Value?): Value? { return value; }\n\
+         fn main(): Void {\n\
+             mut maybe: Value? = null;\n\
+             maybe = 7;\n\
+             maybe = \"present\";\n\
+             mut result: Value? = identity(maybe);\n\
+         }",
+    );
+    let main = module.function("main").expect("main exists");
+    assert!(
+        main.slots
+            .iter()
+            .any(|slot| matches!(slot.ty, IrType::Nullable(Nullable::Union(_))))
+    );
+    let kinds = instructions(main);
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::NullValue(Nullable::Union(_))))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::UnionInject { .. }))
+    );
+    assert!(kinds.iter().any(|kind| matches!(
+        kind,
+        InstKind::Wrap {
+            base: Nullable::Union(_),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn union_match_tests_tags_and_projects_exact_alternative_payloads() {
+    let module = compile(
+        "type Value = Int32 | String;\n\
+         fn classify(value: Value): Int32 {\n\
+             return match value { 42 => 1, \"ready\" => 2, _ => 0 };\n\
+         }\n\
+         fn main(): Void { }",
+    );
+    let classify = module.function("classify").expect("classify exists");
+    let kinds = instructions(classify);
+    let dispatches: Vec<_> = classify
+        .blocks
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            Some(Terminator::UnionDispatch { targets, .. }) => Some(targets),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatches.len(), 1, "one match must dispatch once by tag");
+    assert_eq!(
+        dispatches[0].len(),
+        2,
+        "each declared alternative gets one target"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::UnionProject { .. }))
+    );
+}
+
+#[test]
 fn destructuring_a_variant_reads_its_flattened_fields() {
     let module = compile(&format!(
         "{SHAPE}\nfn area(s: Shape): Int32 {{
@@ -2357,6 +2662,65 @@ fn an_open_object_view_can_be_narrowed_to_a_class() {
     assert!(instructions(main).iter().any(
         |kind| matches!(kind, InstKind::IsInstance { target_class, .. } if *target_class == target)
     ));
+}
+
+#[test]
+fn optional_dynamic_cast_checks_and_unboxes_the_same_runtime_type_tag() {
+    let module = compile(
+        "class Box { } fn cast(value: Dynamic): Box? { return value as? Box; } fn main(): Void { }",
+    );
+    let cast = module.function("cast").expect("cast function is lowered");
+    let kinds = instructions(cast);
+    let check_tag = kinds.iter().find_map(|kind| match kind {
+        InstKind::DynamicIsType { tag, .. } => Some(*tag),
+        _ => None,
+    });
+    let unbox_tag = kinds.iter().find_map(|kind| match kind {
+        InstKind::DynamicUnbox { tag, .. } => Some(*tag),
+        _ => None,
+    });
+    assert!(
+        check_tag.is_some(),
+        "the cast checks the runtime tag: {kinds:?}"
+    );
+    assert_eq!(
+        check_tag, unbox_tag,
+        "the payload can only be unboxed with the exact tag that passed the check: {kinds:?}"
+    );
+}
+
+#[test]
+fn dynamic_type_test_uses_the_target_class_runtime_tag() {
+    let module = compile(
+        "class Box { } fn is_box(value: Dynamic): Boolean { return value is Box; } fn take(value: Dynamic): Box? { if value is Box { return value; } return null; } fn main(): Void { }",
+    );
+    let target = module
+        .objects
+        .iter()
+        .position(|layout| layout.name == "Box")
+        .unwrap() as u32;
+    let target_tag = IrType::Object(target)
+        .dynamic_tag()
+        .expect("classes have a stable Dynamic tag");
+    let test = module
+        .function("is_box")
+        .expect("type-test function exists");
+    assert!(
+        instructions(test)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::DynamicIsType { tag, .. } if *tag == target_tag)),
+        "the type test must compare the Dynamic value against Box's runtime tag"
+    );
+    let take = module.function("take").expect("narrowed function exists");
+    assert!(
+        instructions(take)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::DynamicIsType { tag, .. } if *tag == target_tag))
+            && instructions(take).iter().any(
+                |kind| matches!(kind, InstKind::DynamicUnbox { tag, .. } if *tag == target_tag)
+            ),
+        "the successful branch extracts the payload using the tag it just checked"
+    );
 }
 
 #[test]
@@ -3574,6 +3938,57 @@ fn a_value_to_contract_conversion_boxes_then_retypes() {
         kinds.iter().any(|k| matches!(k, InstKind::Retype(_))),
         "the box's own id still needs retagging to the contract's static type, found {kinds:?}"
     );
+}
+
+#[test]
+fn intersection_contract_views_keep_object_identity_and_dispatch_each_contract() {
+    let module = compile(
+        "contract Describable { name: String; describe(): String; }\n\
+         contract Identifiable { id(): Int32; }\n\
+         class Person implements Describable, Identifiable {\n\
+             name: String;\n\
+             construct() { this.name = \"Ada\"; }\n\
+             describe(): String { return \"person\"; }\n\
+             id(): Int32 { return 7; }\
+         }\n\
+         fn inspect(value: Describable & Identifiable): String {\n\
+             mut identity = value.id();\n\
+             mut name = value.name;\n\
+             return value.describe();\n\
+         }\n\
+         fn main(): Void {\n\
+             mut person = Person();\n\
+             mut view: Describable & Identifiable = person;\n\
+             mut same = person is view;\n\
+             inspect(view);\n\
+         }",
+    );
+    let inspect = module.function("inspect").expect("inspect exists");
+    assert_eq!(
+        instructions(inspect)
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::CallContract { .. }))
+            .count(),
+        2,
+        "each method resolves through its declaring contract"
+    );
+    let main = module.function("main").expect("main exists");
+    let kinds = instructions(main);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| matches!(kind, InstKind::Alloc(_)))
+            .count(),
+        1,
+        "forming an intersection view must not allocate another object"
+    );
+    assert!(kinds.iter().any(|kind| matches!(
+        kind,
+        InstKind::Binary {
+            op: BinaryOp::Identical,
+            ..
+        }
+    )));
 }
 
 #[test]

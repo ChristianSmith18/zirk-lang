@@ -3,7 +3,7 @@ import { stdout } from std.io;
 fn main(): Void {
     mut child: Object = { value: 1 };
     inmut p: Object = { x: 1, y: 2, name: "hi", child: child };
-    inmut q: Object = { ...p };
+    inmut q: Object = { ... p };
     stdout.println(p.x as Int32);
     stdout.println(q.x as Int32);
     stdout.println(q.name as String);

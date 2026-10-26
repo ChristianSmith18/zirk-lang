@@ -122,7 +122,7 @@ The compiler infers a global's type from its literal manifest key:
 
 ```zirk
 inmut settings = Global.get("settings"); // Settings
-Global.set("retry_limit", 4);           // checked as UInt32
+Global.set("retry_limit", 4); // checked as UInt32
 mut changes = Global.watch("retry_limit");
 ```
 
@@ -172,6 +172,86 @@ Fundamental families:
 
 There is no numeric truthiness. `Boolean?` admits `null`; `Boolean` does not.
 There is no `undefined`.
+
+### Type algebra, singleton types and type-level expressions
+
+Type expressions are recursive. `&` binds more tightly than `|`; parentheses
+override precedence, and `T?` is equivalent to `T | Null`. Unions and
+intersections accept any number of members, flatten nested members of the same
+operator, remove duplicates and `Never`, and remove members already subsumed
+by a wider member. Their identity does not depend on source order or alias
+spelling. An intersection proves only the capabilities of all its checked
+members; it does not manufacture an unrelated nominal class or enum identity.
+
+Assignability checks every possible source-union member and requires an
+intersection destination to satisfy every constituent. A destination union
+accepts a value if at least one alternative accepts it. `Dynamic` remains a
+runtime-tagged value and must be narrowed or checked before concrete use;
+error-recovery `Unknown` is not a source-language escape hatch. Before a
+union is narrowed, only compatible members available on every alternative may
+be read or called. A common property read has the normalized union of the
+property result types; writes must be valid for every possible destination.
+
+Literal and constant types preserve one canonical value and its owning type.
+The literal domains include Boolean, signed and unsigned integer widths,
+Decimal, binary Float, String, Char, Null, Duration, Date, Time, DateTime,
+Instant, TimeZone, ZonedDateTime, Period, enum variants with their payloads,
+tuples, and recursively immutable user-defined values accepted by constant
+evaluation. Integer width and
+signedness remain part of identity; Decimal equality uses its normalized
+coefficient and scale; Float singleton equality uses the specified ordered
+runtime equality, so NaN is never a singleton and signed zero follows that
+equality. Temporal values use their validated canonical representation.
+Zone-dependent canonical values include the pinned time-zone rule-data
+identity. Mutable object identity and mutable aliased state are not constant
+values.
+
+Singleton values are assignable to their owning value type. Inference retains
+a singleton when a declaration, union alternative, constant expression, or
+immutable context requires it. Ordinary mutable bindings widen unless a
+narrower invariant is proven. Contextual object literals are checked against
+all viable structural alternatives, including nested properties; literal
+discriminants such as `active: true` select the matching alternative. The
+checker rejects zero or multiple viable alternatives instead of choosing by
+declaration order. Anonymous object shapes support required and optional
+properties and the ordinary `inmut`/`mut` property modifiers. Read-only or
+otherwise stable discriminants may support flow facts; writes, mutable
+aliases, and calls that may mutate a path invalidate those facts.
+
+Conditions refine only the reachable branch. Boolean conditions, null
+comparisons, type tests, and literal equality remove only alternatives proven
+impossible; the declared type is unchanged after the branch. The same
+canonical equality rule is used for checking, narrowing, matching, and
+exhaustiveness. `satisfies` checks assignability without converting or
+narrowing the expression and preserves its inferred type.
+
+Generic aliases may declare constrained, defaulted type parameters and may
+target complete recursive type expressions. Recursive aliases require a
+value-bearing guard. The erased type language also supports `keyof`, indexed
+access, conditional types with `infer`, mapped types with key remapping and
+modifier control, finite template-literal types, and the standard utility
+aliases. Conditional distribution applies to a naked type parameter and may
+be suppressed by grouping. Inferred variables are scoped to the true branch;
+operators respect ordinary visibility and cannot expose private members.
+Standard utilities include property selection, omission, partial/required and
+read-only transforms, finite-key record construction, union extraction and
+exclusion, null removal, callable parameter/result extraction, and applicable
+task-result unwrapping. Generic inference combines argument, receiver,
+expected-result, callable-context, and constraint evidence; it respects
+declared variance and reports incompatible ambiguity rather than choosing the
+first candidate. These operators have no runtime representation.
+
+Constant evaluation is deterministic and effect-free. It accepts supported
+scalar and temporal literals, pure arithmetic, explicitly constant functions,
+enums, tuples, and recursively immutable values. I/O, environment access,
+network, filesystem, clock, randomness, tasks, mutable globals, and unknown
+native calls are rejected. Evaluation is bounded to 100,000 fuel steps, 32
+call frames, aggregate depth 64, and 1 MiB per canonical value. Type-relation
+solving is bounded to 100,000 pair visits and depth 256; each normalized union
+or intersection is bounded to 256 source or flattened members. Template
+expansion is bounded to 10,000 generated members and 1 MiB of generated type
+source. Exceeding a limit produces a source-located `E0482`
+diagnostic; the compiler does not return a partial result or silently widen.
 
 Literals admit scientific notation (`1e2`) and `_` as a separator
 (`1_000_000`). A suffix-less fractional literal is an exact `Decimal`; an `f`

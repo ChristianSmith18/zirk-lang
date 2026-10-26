@@ -13,7 +13,7 @@ values. The detailed arithmetic contract belongs to the temporal-type chapters.
 Temporal types provide the friendly API; `Clock` supplies an injectable source:
 
 ```zirk
-inmut instant = Instant.now();                 // Clock.system
+inmut instant = Instant.now(); // Clock.system
 inmut date = Date.now(zone:);
 inmut time = Time.now(zone:);
 inmut current = ZonedDateTime.now(zone:);
@@ -54,8 +54,8 @@ are typed failures resolved through explicit policies.
 
 ```zirk
 concurrent {
-    Timer.after(5s, (): Void => report_timeout());
-    Timer.every(1s, (): Void => refresh_status());
+    Timer.after(5s,(): Void => report_timeout());
+    Timer.every(1s,(): Void => refresh_status());
     Timer.sleep(500ms);
 }
 ```

@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use zirk_diagnostics::{FileId, SourceFile, SourceMap, Span};
 use zirk_sema::{
-    ReferenceRole, SemanticIndex, SemanticSymbol, SemanticSymbolKind, SemanticVisibility, SymbolId,
+    Base, CanonicalConst, CheckedProgram, ReferenceRole, SemanticIndex, SemanticSymbol,
+    SemanticSymbolKind, SemanticVisibility, StructuralProperty, SymbolId, Type,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -387,6 +388,18 @@ pub struct IdeSnapshot<'a> {
     pub sources: &'a SourceMap,
     pub semantics: &'a SemanticIndex,
     module_index: Option<&'a ModuleIndex>,
+    checked: Option<&'a CheckedProgram>,
+}
+
+/// Compiler facts for a source expression in one checked IDE snapshot.
+/// `canonical_type` is an interned, snapshot-local identity; it must not be
+/// retained or compared across analysis generations.
+#[derive(Debug, Clone)]
+pub struct TypeFacts<'a> {
+    pub canonical_type: Type,
+    pub display: Option<&'a str>,
+    pub singleton: Option<&'a CanonicalConst>,
+    pub structural_members: Option<&'a [StructuralProperty]>,
 }
 
 impl<'a> IdeSnapshot<'a> {
@@ -396,7 +409,15 @@ impl<'a> IdeSnapshot<'a> {
             sources,
             semantics,
             module_index: None,
+            checked: None,
         }
+    }
+
+    /// Attach the semantic result that produced this snapshot's index. IDE
+    /// clients should use this to access compiler-resolved type facts.
+    pub fn with_checked_program(mut self, checked: &'a CheckedProgram) -> Self {
+        self.checked = Some(checked);
+        self
     }
 
     pub fn with_module_index(mut self, module_index: &'a ModuleIndex) -> Self {
@@ -482,6 +503,48 @@ impl<'a> IdeSnapshot<'a> {
         self.symbol_at(file, position)?.type_text.as_deref()
     }
 
+    /// Return the compiler's exact type facts for an expression span. This
+    /// includes flow-refined types and canonical singleton values, rather
+    /// than reconstructing semantic types from hover text.
+    pub fn type_facts(&self, span: Span) -> Option<TypeFacts<'a>> {
+        let checked = self.checked?;
+        let ty = checked.expr_types.get(&span).copied()?;
+        let display = checked
+            .type_map
+            .iter()
+            .find(|entry| entry.span == span)
+            .map(|entry| entry.text.as_str());
+        let singleton = match ty.base {
+            Base::Singleton(id) => checked.singleton_values.get(id as usize),
+            _ => None,
+        };
+        let structural_members = match ty.base {
+            Base::Shape(id) => checked
+                .structural_types
+                .get(id as usize)
+                .map(|shape| shape.properties.as_slice()),
+            _ => None,
+        };
+        Some(TypeFacts {
+            canonical_type: ty,
+            display,
+            singleton,
+            structural_members,
+        })
+    }
+
+    /// Return the concrete generic substitutions inferred at a call span.
+    /// Parameter ids and types are meaningful only within this snapshot.
+    pub fn generic_substitutions(
+        &self,
+        span: Span,
+    ) -> Option<&'a std::collections::HashMap<u32, Type>> {
+        self.checked?
+            .generic_call_substitutions
+            .get(&span)
+            .map(|call| &call.substitutions)
+    }
+
     /// Returns identifiers visible at the cursor, or public members for a
     /// receiver before the trailing dot. Suggestions come only from the
     /// current file, its imported bindings, and the checked receiver type.
@@ -545,37 +608,83 @@ impl<'a> IdeSnapshot<'a> {
                     }
                 }
             } else {
-                let type_name = symbol
-                    .type_text
-                    .as_deref()
-                    .unwrap_or(&symbol.name)
-                    .trim_end_matches('?')
-                    .split('<')
-                    .next()
-                    .unwrap_or_default();
-                let type_symbol = self.semantics.symbols().iter().find(|candidate| {
-                    candidate.name == type_name
-                        && matches!(
-                            candidate.kind,
-                            SemanticSymbolKind::Class
-                                | SemanticSymbolKind::Enum
-                                | SemanticSymbolKind::Contract
-                        )
-                });
-                if let Some(type_symbol) = type_symbol {
-                    let owner_span = if type_symbol.kind == SemanticSymbolKind::Enum {
-                        type_symbol.selection_span
-                    } else {
-                        type_symbol.declaration_span
-                    };
-                    candidates.extend(
-                        self.semantics
-                            .symbols()
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.owner_span == Some(owner_span)
-                                    && candidate.visibility == SemanticVisibility::Public
+                let checked_type = self
+                    .semantics
+                    .expression_type_at(file, receiver_offset)
+                    .or(symbol.type_text.as_deref())
+                    .unwrap_or(&symbol.name);
+                let expanded_union = checked_type
+                    .rsplit_once('(')
+                    .filter(|(prefix, members)| {
+                        prefix
+                            .trim_end()
+                            .chars()
+                            .all(|ch| ch.is_alphanumeric() || ch == '_')
+                            && members.ends_with(')')
+                            && members.contains('|')
+                    })
+                    .map(|(_, members)| &members[..members.len() - 1])
+                    .unwrap_or(checked_type);
+                let alternatives = expanded_union
+                    .split('|')
+                    .map(|alternative| {
+                        alternative
+                            .trim()
+                            .trim_end_matches('?')
+                            .split('<')
+                            .next()
+                            .unwrap_or_default()
+                            .trim_matches(['(', ')', ' '])
+                    })
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>();
+                let owners = alternatives
+                    .iter()
+                    .filter_map(|type_name| {
+                        self.semantics.symbols().iter().find(|candidate| {
+                            candidate.name == *type_name
+                                && matches!(
+                                    candidate.kind,
+                                    SemanticSymbolKind::Class
+                                        | SemanticSymbolKind::Enum
+                                        | SemanticSymbolKind::Contract
+                                )
+                        })
+                    })
+                    .map(|type_symbol| {
+                        if type_symbol.kind == SemanticSymbolKind::Enum {
+                            type_symbol.selection_span
+                        } else {
+                            type_symbol.declaration_span
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if !owners.is_empty() {
+                    let mut common = self
+                        .semantics
+                        .symbols()
+                        .iter()
+                        .filter(|candidate| {
+                            candidate.visibility == SemanticVisibility::Public
+                                && candidate
+                                    .owner_span
+                                    .is_some_and(|owner| owners.contains(&owner))
+                        })
+                        .filter(|candidate| {
+                            owners.iter().all(|owner| {
+                                self.semantics.symbols().iter().any(|member| {
+                                    member.owner_span == Some(*owner)
+                                        && member.visibility == SemanticVisibility::Public
+                                        && member.name == candidate.name
+                                })
                             })
+                        })
+                        .collect::<Vec<_>>();
+                    common.sort_by(|left, right| left.name.cmp(&right.name));
+                    common.dedup_by(|left, right| left.name == right.name);
+                    candidates.extend(
+                        common
+                            .into_iter()
                             .map(|candidate| self.completion_candidate(candidate)),
                     );
                 }
@@ -1495,8 +1604,8 @@ mod tests {
         IdeSnapshot, ModuleIndex, Position, TextRange, comparable_path, diagnostic_quick_fix,
         is_identifier,
     };
-    use zirk_diagnostics::{SourceFile, SourceMap};
-    use zirk_sema::SemanticIndex;
+    use zirk_diagnostics::{SourceFile, SourceMap, Span};
+    use zirk_sema::{Base, SemanticIndex};
 
     #[test]
     fn rename_names_follow_the_language_lexer() {
@@ -1596,6 +1705,66 @@ mod tests {
                 "E0000",
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn checked_type_queries_expose_singletons_and_generic_substitutions() {
+        use zirk_diagnostics::DiagnosticSink;
+        use zirk_lexer::tokenize;
+        use zirk_parser::parse;
+        use zirk_sema::check;
+
+        let mut sources = SourceMap::new();
+        let file = sources.add(SourceFile::new(
+            "types.zrk",
+            "type Choice = const(1) | const(2);\ntype Profile = { name: String; nickname?: String };\nfn inspect(value: Choice): Void { if value == 1 { inmut selected = value; } }\nfn identity<T>(value: T): T { return value; }\nfn main(): Void { inmut profile: Profile = { name: \"Ada\" }; inmut result = identity(1); }",
+        ));
+        let source = sources.file(file);
+        let mut diagnostics = DiagnosticSink::new();
+        let tokens = tokenize(source, &mut diagnostics);
+        let program = parse(source, &tokens, &mut diagnostics);
+        let checked = check(&sources, &program, &mut diagnostics);
+        let query =
+            IdeSnapshot::new(1, &sources, &checked.semantic_index).with_checked_program(&checked);
+
+        let (singleton_span, singleton_type) = checked
+            .expr_types
+            .iter()
+            .find(|(_, ty)| matches!(ty.base, Base::Singleton(_)))
+            .map(|(span, ty)| (*span, *ty))
+            .expect("integer argument is represented as a singleton type");
+        let facts = query.type_facts(singleton_span).expect("type facts");
+        assert_eq!(facts.canonical_type, singleton_type);
+        assert!(facts.singleton.is_some());
+
+        let shape_span = checked
+            .expr_types
+            .iter()
+            .find_map(|(span, ty)| matches!(ty.base, Base::Shape(_)).then_some(*span))
+            .expect("object literal has a structural type");
+        let shape_facts = query.type_facts(shape_span).expect("shape facts");
+        assert!(
+            shape_facts
+                .structural_members
+                .is_some_and(|members| members.iter().any(|member| member.name == "name"))
+        );
+
+        let (call_span, _) = checked
+            .generic_call_substitutions
+            .iter()
+            .next()
+            .expect("generic call substitutions");
+        assert!(
+            !query
+                .generic_substitutions(*call_span)
+                .expect("generic substitution query")
+                .is_empty()
+        );
+        assert!(
+            query
+                .generic_substitutions(Span::in_file(file, 0, 0))
+                .is_none()
         );
     }
 

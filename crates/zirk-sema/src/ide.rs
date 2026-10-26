@@ -118,6 +118,7 @@ pub(crate) struct UnresolvedSemanticReference {
 pub struct SemanticIndex {
     snapshot_id: u64,
     symbols: Vec<SemanticSymbol>,
+    expression_types: Vec<(Span, String)>,
     references: Vec<SemanticReference>,
     symbol_at_span: HashMap<Span, SymbolId>,
     references_by_symbol: HashMap<SymbolId, Vec<usize>>,
@@ -127,6 +128,7 @@ impl SemanticIndex {
     pub(crate) fn from_facts(
         mut declarations: Vec<SemanticSymbolData>,
         unresolved_references: Vec<UnresolvedSemanticReference>,
+        mut expression_types: Vec<(Span, String)>,
     ) -> Self {
         declarations.sort_by_key(|declaration| {
             (
@@ -181,9 +183,11 @@ impl SemanticIndex {
             references_by_symbol.entry(target).or_default().push(index);
         }
 
+        expression_types.sort_by_key(|(span, _)| (span.file.0, span.start, span.end));
         Self {
             snapshot_id: NEXT_SNAPSHOT_ID.fetch_add(1, Ordering::Relaxed),
             symbols,
+            expression_types,
             references,
             symbol_at_span,
             references_by_symbol,
@@ -198,6 +202,15 @@ impl SemanticIndex {
 
     pub fn symbols(&self) -> &[SemanticSymbol] {
         &self.symbols
+    }
+
+    /// Checked type at a source position, preferring the narrowest expression fact.
+    pub fn expression_type_at(&self, file: zirk_diagnostics::FileId, offset: u32) -> Option<&str> {
+        self.expression_types
+            .iter()
+            .filter(|(span, _)| span.file == file && span.start <= offset && offset <= span.end)
+            .min_by_key(|(span, _)| span.end.saturating_sub(span.start))
+            .map(|(_, ty)| ty.as_str())
     }
 
     pub fn references(&self) -> &[SemanticReference] {

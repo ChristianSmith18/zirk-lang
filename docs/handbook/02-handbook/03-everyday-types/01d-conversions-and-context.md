@@ -7,16 +7,16 @@ explicit and checked.
 
 ```zirk
 inmut small: Int8 = 10;
-inmut wide: Int32 = small;       // safe widening
-inmut byte = UInt8(wide);        // explicit, range checked
-inmut whole = Int32(3.8);        // explicit, documented truncation/check
+inmut wide: Int32 = small; // safe widening
+inmut byte = UInt8(wide); // explicit, range checked
+inmut whole = Int32(3.8); // explicit, documented truncation/check
 ```
 
 Mixed integer/Decimal arithmetic evaluates in the Decimal domain:
 
 ```zirk
-3 / 4;    // 0.75: Decimal
-3 / 4.0;  // 0.75: Decimal
+3 / 4; // 0.75: Decimal
+3 / 4.0; // 0.75: Decimal
 ```
 
 ## Final-result conversion
@@ -25,9 +25,9 @@ An explicit `T(expression)` conversion evaluates the complete expression first
 and converts only its final result:
 
 ```zirk
-Int32(3 / 4);    // Decimal 0.75, then Int32 0
-Float64(3 / 4);  // Decimal 0.75, then Float64 0.75
-String(42);      // "42"
+Int32(3 / 4); // Decimal 0.75, then Int32 0
+Float64(3 / 4); // Decimal 0.75, then Float64 0.75
+String(42); // "42"
 ```
 
 The target never propagates into operands. For example:
@@ -71,7 +71,7 @@ When failure is an ordinary outcome, `as?` yields a nullable result instead:
 match, so the result composes with `match`, `?.`, and `??`:
 
 ```zirk
-inmut maybeDog = a as? Dog;
+inmut maybeDog = a as ? Dog;
 match maybeDog {
     null => stdout.println("no dog"),
     d => stdout.println(d.speak()),

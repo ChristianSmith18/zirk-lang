@@ -768,6 +768,83 @@ fn multiple_package_reexports_initialize_the_shared_source_only_once() {
 }
 
 #[test]
+fn imported_type_alias_spelling_is_preserved_in_mismatch_diagnostics() {
+    let dir = workspace("imported_type_alias_diagnostic");
+    std::fs::write(dir.join("types.zrk"), "share type UserId = Int32;\n").unwrap();
+    std::fs::write(
+        dir.join("main.zrk"),
+        "import { UserId } from \"./types\";\nfn main(): Void { mut id: UserId = \"bad\"; }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check imported alias source");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "expected a type mismatch");
+    assert!(stderr.contains("to UserId"), "{stderr}");
+    assert!(stderr.contains("UserId` was expected"), "{stderr}");
+}
+
+#[test]
+fn type_operator_diagnostics_point_to_the_operation_and_alias_use() {
+    let dir = workspace("type_operator_alias_diagnostic");
+    std::fs::write(
+        dir.join("main.zrk"),
+        "type Source = Dynamic;\ntype Keys = keyof Source;\nfn inspect(key: Keys): Void { }\n",
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check type operator source");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "keyof Dynamic must be rejected");
+    assert!(
+        stderr.contains("`keyof` cannot inspect `Dynamic`"),
+        "diagnostic must identify the unsupported operator input: {stderr}"
+    );
+    assert!(
+        stderr.contains("main.zrk:2:"),
+        "diagnostic must locate the alias use that invoked the operator: {stderr}"
+    );
+}
+
+#[test]
+fn long_singleton_diagnostics_are_bounded_and_utf8_safe() {
+    let dir = workspace("bounded_singleton_diagnostic");
+    let repeated = "🙂".repeat(200);
+    std::fs::write(
+        dir.join("main.zrk"),
+        format!(
+            "type LongText = const(\"{repeated}\");\n\
+             fn consume(value: Int32): Void {{ }}\n\
+             fn fail(value: LongText): Void {{ consume(value); }}\n\
+             fn main(): Void {{ }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new(compiler())
+        .args(["check", "main.zrk"])
+        .current_dir(&dir)
+        .output()
+        .expect("check a source with a long singleton diagnostic");
+    let stderr = String::from_utf8(output.stderr).expect("diagnostic output stays valid UTF-8");
+    assert!(
+        !output.status.success(),
+        "expected an incompatible argument"
+    );
+    assert!(stderr.contains("String(\"🙂"), "{stderr}");
+    assert!(
+        stderr.contains("..."),
+        "long singleton names should be bounded: {stderr}"
+    );
+}
+
+#[test]
 fn imported_type_errors_prevent_all_file_scope_side_effects() {
     let dir = workspace("module_type_error_prevents_effects");
     std::fs::write(
@@ -2166,6 +2243,53 @@ fn check_and_build_agree_on_invalid_programs() {
     assert!(
         !check_stderr.is_empty() && !build_stderr.is_empty(),
         "both `check` and `build` must emit diagnostics"
+    );
+}
+
+#[test]
+fn oversized_union_payload_has_source_level_size_diagnostic() {
+    let build_tuple_union = |name: &str, element_count: usize| {
+        let dir = workspace(name);
+        let tuple = std::iter::repeat_n("Int32", element_count)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "type BigTuple = Tuple<{tuple}>;\n\
+             enum Big {{ Data(payload: BigTuple) }}\n\
+             type Huge = Big | String;\n\
+             fn take(value: Huge): Huge {{ return value; }}\n\
+             fn main(): Void {{ }}\n"
+        );
+        let input = dir.join("union.zrk");
+        std::fs::write(&input, source).expect("write generated union source");
+        Command::new(compiler())
+            .arg("build")
+            .arg(&input)
+            .current_dir(&dir)
+            .output()
+            .expect("run native compilation")
+    };
+
+    // The enum tag plus 1,023 Int32 tuple elements occupies exactly 4,096
+    // bytes. One more element crosses the explicit inline representation cap.
+    let at_limit = build_tuple_union("union_payload_at_limit", 1023);
+    assert!(
+        at_limit.status.success(),
+        "a 4096-byte union payload should build:\n{}",
+        String::from_utf8_lossy(&at_limit.stderr)
+    );
+
+    let output = build_tuple_union("union_payload_over_limit", 1024);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "oversized union unexpectedly built"
+    );
+    assert!(
+        stderr.contains("E0513")
+            && stderr.contains("4100 bytes")
+            && stderr.contains("4096-byte inline limit"),
+        "expected a source-located inline-payload diagnostic, got:\n{stderr}"
     );
 }
 

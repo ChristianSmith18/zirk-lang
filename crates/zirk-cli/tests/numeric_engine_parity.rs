@@ -163,6 +163,136 @@ fn assert_failure_parity(name: &str, program: &str, expected_category: &str) {
 }
 
 #[test]
+fn float_singleton_match_patterns_match_native_observations() {
+    assert_success_parity(
+        "float_singleton_match_patterns",
+        r#"import { stdout } from std.io;
+fn classify(value: Float64): String {
+    return match value { 1.5 => "fraction"; 0.0 => "zero"; _ => "other"; };
+}
+fn main(): Void {
+    stdout.println(classify(1.5));
+    stdout.println(classify(-0.0));
+    stdout.println(classify(2.5));
+}
+stdout.println(classify(1.5));
+stdout.println(classify(-0.0));
+stdout.println(classify(2.5));"#,
+        "fraction\nzero\nother\n",
+    );
+}
+
+#[test]
+fn char_singleton_match_patterns_match_unicode_graphemes_in_both_engines() {
+    assert_success_parity(
+        "char_singleton_match_patterns",
+        r#"import { stdout } from std.io;
+fn classify(value: Char): String {
+    return match value { '👩‍💻' => "emoji"; _ => "other"; };
+}
+fn main(): Void {
+    stdout.println(classify('👩‍💻'));
+    stdout.println(classify('x'));
+}
+stdout.println(classify('👩‍💻'));
+stdout.println(classify('x'));"#,
+        "emoji\nother\n",
+    );
+}
+
+#[test]
+fn temporal_singleton_match_patterns_match_in_both_engines() {
+    assert_success_parity(
+        "temporal_singleton_match_patterns",
+        r#"import { stdout } from std.io;
+fn classify_duration(value: Duration): String {
+    return match value { 250ms => "short"; _ => "other"; };
+}
+fn classify_date(value: Date): String {
+    return match value { Date(2026, 12, 25) => "holiday"; _ => "other"; };
+}
+fn classify_time(value: Time): String {
+    return match value { Time(9, 30) => "morning"; _ => "other"; };
+}
+fn classify_datetime(value: DateTime): String {
+    return match value { DateTime(Date(2026, 12, 25), Time(9, 30)) => "event"; _ => "other"; };
+}
+fn main(): Void {
+    stdout.println(classify_duration(250ms));
+    stdout.println(classify_date(Date(2026, 12, 25)));
+    stdout.println(classify_time(Time(9, 30)));
+    stdout.println(classify_datetime(DateTime(Date(2026, 12, 25), Time(9, 30))));
+}
+stdout.println(classify_duration(250ms));
+stdout.println(classify_date(Date(2026, 12, 25)));
+stdout.println(classify_time(Time(9, 30)));
+stdout.println(classify_datetime(DateTime(Date(2026, 12, 25), Time(9, 30))));"#,
+        "short\nholiday\nmorning\nevent\n",
+    );
+}
+
+#[test]
+fn inline_tagged_union_representation_prototype_crosses_calls_in_both_engines() {
+    assert_success_parity(
+        "inline_tagged_union_representation_prototype",
+        r#"import { stdout } from std.io;
+enum Value { Number(number: Int32), Text(text: String) }
+fn render(value: Value): String {
+    return match value {
+        Value.Number(number) => number.to_string();
+        Value.Text(text) => text;
+    };
+}
+fn pass_through(value: Value): String { return render(value); }
+fn main(): Void {
+    stdout.println(pass_through(Value.Number(42)));
+    stdout.println(pass_through(Value.Text("inline")));
+}
+stdout.println(pass_through(Value.Number(42)));
+stdout.println(pass_through(Value.Text("inline")));"#,
+        "42\ninline\n",
+    );
+}
+
+#[test]
+fn source_union_int32_string_injects_matches_and_crosses_calls_in_both_engines() {
+    assert_success_parity(
+        "source_union_int32_string",
+        r#"import { stdout } from std.io;
+type Value = Int32 | String;
+fn identity(value: Value): Value { return value; }
+fn classify(value: Value): String {
+    return match value {
+        42 => "number";
+        "inline" => "text";
+        _ => "other";
+    };
+}
+
+fn main(): Void {
+    stdout.println(classify(identity(42)));
+    stdout.println(classify(identity("inline")));
+}
+
+stdout.println(classify(identity(42)));
+stdout.println(classify(identity("inline")));"#,
+        "number\ntext\n",
+    );
+}
+
+#[test]
+fn satisfies_expression_is_a_checked_runtime_no_op_in_both_engines() {
+    assert_success_parity(
+        "satisfies_expression",
+        r#"import { stdout } from std.io;
+fn keep(value: Int32): Int32 { return value satisfies Int32; }
+fn main(): Void { stdout.println(keep(42)); }
+stdout.println(keep(42));"#,
+        "42\n",
+    );
+}
+
+#[test]
 fn numeric_and_temporal_edges_match_native_observations() {
     assert_success_parity(
         "contextual_result_projection",
@@ -174,7 +304,8 @@ fn main(): Void {
     stdout.println(failure);
     stdout.println(success ?? 0);
     stdout.println(match failure { Ok(value) => value.to_string(); Error(error) => error; });
-}"#,
+}
+main();"#,
         "7\n<Null>\n7\nhidden\n",
     );
 
@@ -186,7 +317,8 @@ fn main(): Void {
     stdout.println((-1.9f as Int32).to_string());
     stdout.println((2147483520.0f as Int32).to_string());
     stdout.println((-2147483520.0f as Int32).to_string());
-}"#,
+}
+main();"#,
         "1\n-1\n2147483520\n-2147483520\n",
     );
 
@@ -201,14 +333,14 @@ fn main(): Void {
         ),
     ] {
         let program = format!(
-            "import {{ stdout }} from std.io;\nfn main(): Void {{ inmut value = {expression}; stdout.println(value); }}"
+            "import {{ stdout }} from std.io;\nfn main(): Void {{ inmut value = {expression}; stdout.println(value); }}\nmain();"
         );
         assert_failure_parity(name, &program, "CastError");
     }
 
     assert_success_parity(
         "float_nan_generation",
-        "import { stdout } from std.io;\nfn main(): Void { try { inmut nan = 0.0f / 0.0f; stdout.println(nan); } catch FloatNanError(e) { stdout.println(\"FloatNanError:\" + e.message()); } }",
+        "import { stdout } from std.io;\nfn main(): Void { try { inmut nan = 0.0f / 0.0f; stdout.println(nan); } catch FloatNanError(e) { stdout.println(\"FloatNanError:\" + e.message()); } }\nmain();",
         "FloatNanError:Float operation produced an indeterminate result (NaN)\n",
     );
 
@@ -221,7 +353,8 @@ fn main(): Void {
     stdout.println((match Decimal.parse("6.25e-2") { Ok(value) => value; Error(_) => Decimal(0); }).to_string());
     stdout.println((1.5f * 1s).to_string());
     stdout.println((-0.25f * 2s).to_string());
-}"#,
+}
+main();"#,
         "true\nfalse\n0.0625\n1.5s\n-500ms\n",
     );
 
@@ -232,7 +365,8 @@ fn main(): Void {
     inmut max: Decimal = match Decimal.parse("99999999999999999999999999999999999999") { Ok(value) => value; Error(_) => Decimal(0); };
     inmut result = max + max;
     stdout.println(result);
-}"#,
+}
+main();"#,
         "ArithmeticOverflowError",
     );
 
@@ -244,7 +378,8 @@ fn main(): Void {
     stdout.println((Time(23, 30) + 2h).to_string());
     stdout.println((Time(0, 0) - 1ns).to_string());
     stdout.println((Time(23, 59, 59, 999999999) + 1ns).to_string());
-}"#,
+}
+main();"#,
         "23:00:00\n01:30:00\n23:59:59.999999999\n00:00:00\n",
     );
 
@@ -253,7 +388,7 @@ fn main(): Void {
         ("date_lower_i32_bound", "Date(-2147483648, 1, 1) - 1"),
     ] {
         let program = format!(
-            "import {{ stdout }} from std.io;\nfn main(): Void {{ inmut value = {expression}; stdout.println(value); }}"
+            "import {{ stdout }} from std.io;\nfn main(): Void {{ inmut value = {expression}; stdout.println(value); }}\nmain();"
         );
         assert_failure_parity(name, &program, "ArithmeticOverflowError");
     }

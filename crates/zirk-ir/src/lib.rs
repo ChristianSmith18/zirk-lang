@@ -27,6 +27,7 @@
 pub mod atomic;
 mod ir;
 mod lower;
+mod unions;
 mod verify;
 
 pub use atomic::{
@@ -40,4 +41,11 @@ pub use ir::{
     StringId, Terminator, UnaryOp, ValueId, ValueLayout,
 };
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
+pub use unions::{
+    MAX_INLINE_UNION_PAYLOAD_BYTES, PORTABLE_IR_SCHEMA_MAJOR,
+    UNION_LAYOUT_DESCRIPTOR_SCHEMA_VERSION, UNION_METADATA_SCHEMA_VERSION,
+    UNION_PACKAGE_METADATA_SCHEMA_VERSION, UnionAbiExport, UnionAlternativeDescriptor,
+    UnionLayoutDescriptor, UnionMetadataError, UnionPackageMetadata, UnionTypeLayout,
+    validate_package_union_imports,
+};
 pub use verify::{IrError, verify};

@@ -4,6 +4,10 @@ Zirk offers several ways to model domain data. Records emphasize named structure
 
 Choosing among them determines construction, equality, identity, exhaustiveness, and API compatibility—not merely spelling.
 
+Type aliases can name normalized [unions](07-union-types.md) and
+[intersections](09-intersection-types.md); intersections combine compatible
+requirements, while unions represent alternatives.
+
 ---
 
 **Previous:** [← Variance, Recursion, and Runtime Identity](../11-generics/08-variance-recursion-and-runtime.md) · **Next:** [Tuples →](00-tuples.md)

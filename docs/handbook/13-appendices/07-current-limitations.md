@@ -22,6 +22,28 @@ native/interpreter parity coverage includes the documented overflow edges.
 
 Current high-impact delivery limits include:
 
+- Type algebra is implemented in parsing, semantic checking, the LSP, and
+  native lowering for tested cases. `Int32 | String`, scalar/temporal
+  singleton unions, enum-constant unions, and class-reference unions narrowed
+  with `is` have native execution coverage; interpreter/native parity covers scalar, mixed singleton, nullable, enum,
+  temporal, and numeric singleton alternatives, but broader control-flow,
+  error, and cleanup paths remain incomplete.
+  Anonymous structural shapes are checked but not generally lowered as runtime
+  values. Some mixed nominal/scalar union combinations are still rejected by
+  code generation. Native union execution is verified on macOS ARM64 and Linux
+  ARM64; Linux x86_64 union ABI and parity cases pass under Docker emulation,
+  while native x86_64 CI and Windows x86_64 execution remain unverified. Dynamic
+  JSON serialization now rejects handles that are not exact managed allocations
+  before dereferencing them; Linux ARM64 object-engine parity passes after
+  rebuilding the runtime and CLI. Tag-aware GC
+  roots cover function frames, object fields, nested enum payloads, closure
+  captures, `List<Union>` storage, channel queues, suspended-task captures,
+  and caught exception fields. Additional specialized managed-container
+  boundaries still need stress coverage. Generic aliases,
+  `keyof`, indexed access, conditional/infer, mapped types, finite template
+  types, standard utilities, flow-aware IDE queries, and bounded diagnostics
+  have semantic test coverage.
+
 - `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
   entry selection without a required source `fn main`, dependency/dev-dependency
   graphs, typed application globals, and one `requires` capability list. Runtime
