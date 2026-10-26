@@ -219,7 +219,7 @@ jobs:
           key: ${{ matrix.name }}
 
       - name: Check dependency licenses
-        if: matrix.name == 'linux-x86_64'
+        if: matrix.name == 'linux-x86_64' && inputs.test_filter == '' && inputs.runtime_test_filter == ''
         run: |
           cargo install --locked --version 0.20.2 cargo-deny
           cargo-deny check licenses

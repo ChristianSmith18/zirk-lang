@@ -40,4 +40,7 @@ exceptions = [
     # `winx` is used by cap-primitives for Windows filesystem handles. Keep its
     # LLVM exception scoped to the exact transitive version in the lockfile.
     { allow = ["Apache-2.0 WITH LLVM-exception"], name = "winx", version = "=0.36.4" },
+    # `notify` supplies the cross-platform filesystem watcher backend. Keep its
+    # CC0 license acceptance scoped to the exact version used by this workspace.
+    { allow = ["CC0-1.0"], name = "notify", version = "=8.2.0" },
 ]
