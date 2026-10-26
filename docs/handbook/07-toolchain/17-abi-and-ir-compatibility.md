@@ -25,10 +25,15 @@ dependency.
 Union layouts use versioned portable metadata and a canonical logical-layout
 fingerprint. The validator rejects unsupported package/IR schema versions and
 fingerprint mismatches with a rebuild diagnostic. Its encoder and validator
-have crate-level round-trip tests, but the current source-based dependency
-loader has no compiled-package linker boundary yet; cross-package rejection
-before link remains incomplete. See [Portable IR](../09-packages/03-portable-ir.md)
-for the exact metadata contract.
+have crate-level round-trip tests. For local source dependencies, package
+builds emit a versioned union ABI metadata sidecar under `build/`. A consuming
+build reads that independently built metadata and validates imported layouts
+before object emission; stale fingerprints fail with rebuild guidance.
+Source-only dependencies without a sidecar are validated from the verified
+compilation graph. This closes the local compiled-package metadata check, but
+it does not introduce a portable `.zpkg` loader or serializer. See
+[Portable IR](../09-packages/03-portable-ir.md) for the exact metadata
+contract.
 
 ---
 

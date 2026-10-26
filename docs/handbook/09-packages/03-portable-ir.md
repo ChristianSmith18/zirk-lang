@@ -23,10 +23,13 @@ unsupported package or IR schema, and an importer rejects a missing or
 mismatched union fingerprint with a rebuild instruction.
 
 The union metadata encoder, decoder, and compatibility validator are tested in
-the IR crate. The current CLI still loads dependency source into one
-compilation graph and does not yet run this compiled-artifact validation at a
-package-link boundary; do not treat the metadata API alone as proof that every
-cached package is checked before linking.
+the IR crate. A local package build writes its exported union metadata to
+`build/union-package-metadata.zku`. A consuming project validates that sidecar
+against the imported union layouts before object emission; stale metadata
+requires rebuilding the package. If the sidecar is absent, the source-only
+dependency path validates the layouts from the verified compilation graph.
+This sidecar is an ABI check, not the portable `.zpkg` artifact: a `.zpkg`
+serializer and loader remain future work.
 
 ---
 

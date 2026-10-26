@@ -9863,6 +9863,142 @@ fn generic_union_aliases_cross_external_source_package_boundaries() {
 }
 
 #[test]
+fn compiled_package_union_metadata_is_checked_before_link() {
+    let dir = workspace("compiled_package_union_abi");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.values: { from: \"path:dep\"; version: \"^1\"; } }\n",
+    )
+    .unwrap();
+    write_entry(
+        dir.join("src/main.zrk"),
+        "import { api } from acme.values;\nfn main(): Void { api.echo(42); }",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project { name: \"acme.values\"; version: \"1.0.0\"; type: package; root: \"src/package.zrk\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.values;\nshare mod api from \"./api\";",
+    )
+    .unwrap();
+    let api_path = dir.join("dep/src/api.zrk");
+    std::fs::write(
+        &api_path,
+        "share type Choice<T> = T | String;\nshare fn echo(value: Choice<Int32>): Choice<Int32> { return value; }",
+    )
+    .unwrap();
+
+    let package_build = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(dir.join("dep"))
+        .output()
+        .expect("build the dependency package");
+    assert_eq!(
+        package_build.status.code(),
+        Some(0),
+        "package build stderr:\n{}",
+        String::from_utf8_lossy(&package_build.stderr)
+    );
+    let metadata_path = dir.join("dep/build/union-package-metadata.zku");
+    let metadata = zirk_ir::UnionPackageMetadata::decode(
+        &std::fs::read(&metadata_path).expect("compiled package union metadata"),
+    )
+    .expect("versioned package ABI metadata");
+    assert!(
+        metadata
+            .unions
+            .iter()
+            .any(|export| export.alias == "Choice"),
+        "the compiled metadata must export the generic union alias: {metadata:?}"
+    );
+
+    let write_lock = || {
+        let manifest = zirk_cli::project::read_manifest(&dir.join("dep/.zkinit")).unwrap();
+        let hash = zirk_cli::project::package_integrity_hash(&dir.join("dep"), &manifest).unwrap();
+        std::fs::write(
+            dir.join("zirk.lock"),
+            zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+                packages: [(
+                    "acme.values".into(),
+                    zirk_cli::project::LockedPackage {
+                        name: "acme.values".into(),
+                        version: manifest.version,
+                        source: "local".into(),
+                        locator: "path:dep".into(),
+                        revision: None,
+                        hash: format!("sha256:{hash}"),
+                        package_root: "src/package.zrk".into(),
+                    },
+                )]
+                .into(),
+            }),
+        )
+        .unwrap();
+    };
+    write_lock();
+
+    let compatible = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("build the client against compatible package metadata");
+    assert_eq!(
+        compatible.status.code(),
+        Some(0),
+        "compatible package metadata stderr:\n{}",
+        String::from_utf8_lossy(&compatible.stderr)
+    );
+
+    std::fs::write(
+        &api_path,
+        "share type Choice<T> = T | String | Boolean;\nshare fn echo(value: Choice<Int32>): Choice<Int32> { return value; }",
+    )
+    .unwrap();
+    write_lock();
+    std::fs::remove_dir_all(dir.join("build")).unwrap();
+    let stale = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("reject stale compiled package metadata");
+    let stale_diagnostics = String::from_utf8_lossy(&stale.stderr);
+    assert_ne!(stale.status.code(), Some(0), "stale metadata must fail");
+    assert!(
+        stale_diagnostics.contains("incompatible fingerprint")
+            && stale_diagnostics.contains("rebuild the package"),
+        "stale package diagnostics:\n{stale_diagnostics}"
+    );
+    assert!(
+        !dir.join("build/main.o").exists(),
+        "metadata compatibility must be checked before object emission"
+    );
+
+    let rebuilt_package = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(dir.join("dep"))
+        .output()
+        .expect("rebuild the dependency after changing its union ABI");
+    assert_eq!(rebuilt_package.status.code(), Some(0));
+    let compatible_again = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("build the client against rebuilt package metadata");
+    assert_eq!(
+        compatible_again.status.code(),
+        Some(0),
+        "rebuilt package metadata stderr:\n{}",
+        String::from_utf8_lossy(&compatible_again.stderr)
+    );
+}
+
+#[test]
 fn a_declaration_without_share_is_private_to_its_file() {
     let output = crate_of(
         "modules_private",

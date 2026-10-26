@@ -2581,6 +2581,7 @@ dependencies = [
  "zirk-ir",
  "zirk-lexer",
  "zirk-parser",
+ "zirk-runtime",
  "zirk-sema",
 ]
 

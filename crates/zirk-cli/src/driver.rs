@@ -75,7 +75,8 @@ fn compile_internal(
         program,
         checked,
         sources,
-        ..
+        module_roots,
+        project,
     }) = crate::frontend::run_frontend(path, &mut sink)
     else {
         return Compilation::failed(sink);
@@ -115,6 +116,21 @@ fn compile_internal(
                 .with_help(
                     "this is a compiler bug: please report it with the source that triggered it",
                 ),
+        );
+        return Compilation::failed(sink);
+    }
+
+    if let Some(project) = project.as_ref()
+        && let Err(error) =
+            validate_package_union_abis(&ir, &program, &sources, &module_roots, project)
+    {
+        sink.emit(
+            Diagnostic::error(
+                codes::PACKAGE_RESOLUTION,
+                "a dependency's union ABI is incompatible with this project",
+            )
+            .with_cause(error)
+            .with_help("rebuild the dependency and project with the same Zirk compiler"),
         );
         return Compilation::failed(sink);
     }
@@ -161,10 +177,214 @@ fn compile_internal(
         }
     }
 
+    if let Some(project) = project.as_ref()
+        && project.manifest.kind == crate::project::ProjectKind::Package
+        && let Err(error) = write_compiled_package_union_metadata(&ir, &program, &sources, project)
+    {
+        sink.emit(
+            Diagnostic::error(
+                codes::OUTPUT_UNAVAILABLE,
+                "could not write compiled package union ABI metadata",
+            )
+            .with_cause(error)
+            .with_help("check that the package build directory is writable"),
+        );
+        return Compilation::failed(sink);
+    }
+
     Compilation {
         executable: Some(executable),
         sink,
     }
+}
+
+/// The sidecar is package build output, not source input; it is intentionally
+/// omitted from package source-integrity hashes. Portable `.zpkg` packaging
+/// can carry these same bounded bytes when that artifact format is introduced.
+const COMPILED_PACKAGE_UNION_METADATA: &str = "union-package-metadata.zku";
+const MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Returns the public union layouts whose declarations belong to a package.
+fn package_public_union_layouts(
+    ir: &zirk_ir::Module,
+    program: &zirk_ast::Program,
+    sources: &zirk_diagnostics::SourceMap,
+    project_root: &Path,
+) -> Result<Vec<zirk_ir::UnionTypeLayout>, String> {
+    package_public_union_layouts_within(ir, program, sources, project_root)
+}
+
+fn package_public_union_layouts_within(
+    ir: &zirk_ir::Module,
+    program: &zirk_ast::Program,
+    sources: &zirk_diagnostics::SourceMap,
+    package_root: &Path,
+) -> Result<Vec<zirk_ir::UnionTypeLayout>, String> {
+    use std::collections::{BTreeSet, HashSet};
+
+    let package_root = package_root
+        .canonicalize()
+        .unwrap_or_else(|_| package_root.to_path_buf());
+    let union_aliases = ir
+        .union_types
+        .iter()
+        .flat_map(|layout| layout.source_aliases.iter().cloned())
+        .collect::<HashSet<_>>();
+
+    let exported_aliases = program
+        .type_aliases
+        .iter()
+        .filter(|alias| alias.shared && union_aliases.contains(&alias.name.name))
+        .filter_map(|alias| {
+            let source = PathBuf::from(sources.location(alias.span).file);
+            let source = source.canonicalize().unwrap_or(source);
+            source
+                .starts_with(&package_root)
+                .then(|| alias.name.name.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(ir
+        .union_types
+        .iter()
+        .filter_map(|layout| {
+            let aliases = layout
+                .source_aliases
+                .iter()
+                .filter(|alias| exported_aliases.contains(*alias))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!aliases.is_empty()).then(|| {
+                let mut package_layout = layout.clone();
+                package_layout.source_aliases = aliases;
+                package_layout
+            })
+        })
+        .collect())
+}
+
+/// Validates dependency artifact metadata before object emission. Packages
+/// without a compiled sidecar remain source packages and use the current
+/// verified graph's metadata; an existing sidecar is authoritative and stale
+/// fingerprints fail closed with rebuild guidance.
+fn validate_package_union_abis(
+    ir: &zirk_ir::Module,
+    program: &zirk_ast::Program,
+    sources: &zirk_diagnostics::SourceMap,
+    module_roots: &crate::modules::ModuleRoots,
+    project: &crate::modules::ProjectContext,
+) -> Result<(), String> {
+    for package_name in project.manifest.dependencies.keys() {
+        let package_source_root = module_roots
+            .packages
+            .get(package_name)
+            .ok_or_else(|| format!("dependency `{package_name}` has no resolved package root"))?;
+        let package_root = package_manifest_root(package_source_root)
+            .ok_or_else(|| format!("dependency `{package_name}` has no package manifest root"))?;
+        let required_unions =
+            package_public_union_layouts_within(ir, program, sources, package_source_root)?;
+        if required_unions.is_empty() {
+            continue;
+        }
+
+        let metadata_path = package_root
+            .join("build")
+            .join(COMPILED_PACKAGE_UNION_METADATA);
+        let package_metadata = match std::fs::symlink_metadata(&metadata_path) {
+            Ok(info) => {
+                if !info.file_type().is_file() {
+                    return Err(format!(
+                        "dependency `{package_name}` union metadata `{}` is not a regular file",
+                        metadata_path.display()
+                    ));
+                }
+                if info.len() > MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES {
+                    return Err(format!(
+                        "dependency `{package_name}` union metadata exceeds the 64 MiB limit"
+                    ));
+                }
+                std::fs::read(&metadata_path).map_err(|error| {
+                    format!(
+                        "could not read dependency `{package_name}` union metadata `{}`: {error}",
+                        metadata_path.display()
+                    )
+                })?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                zirk_ir::UnionPackageMetadata::current(required_unions.clone())
+                    .and_then(|metadata| metadata.encode())
+                    .map_err(|error| format!("dependency `{package_name}`: {error}"))?
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect dependency `{package_name}` union metadata `{}`: {error}",
+                    metadata_path.display()
+                ));
+            }
+        };
+        zirk_ir::validate_package_union_imports(&package_metadata, &required_unions)
+            .map_err(|error| format!("dependency `{package_name}`: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn package_manifest_root(package_source_root: &Path) -> Option<PathBuf> {
+    package_source_root
+        .ancestors()
+        .find(|candidate| candidate.join(".zkinit").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn write_compiled_package_union_metadata(
+    ir: &zirk_ir::Module,
+    program: &zirk_ast::Program,
+    sources: &zirk_diagnostics::SourceMap,
+    project: &crate::modules::ProjectContext,
+) -> Result<(), String> {
+    let layouts = package_public_union_layouts(ir, program, sources, &project.root)?;
+    let bytes = zirk_ir::UnionPackageMetadata::current(layouts)
+        .and_then(|metadata| metadata.encode())
+        .map_err(|error| error.to_string())?;
+    let build_dir = project.root.join("build");
+    if let Ok(info) = std::fs::symlink_metadata(&build_dir)
+        && !info.file_type().is_dir()
+    {
+        return Err(format!(
+            "package build directory `{}` is not a regular directory",
+            build_dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|error| format!("could not create `{}`: {error}", build_dir.display()))?;
+    let destination = build_dir.join(COMPILED_PACKAGE_UNION_METADATA);
+    let temporary = build_dir.join(format!(
+        ".{COMPILED_PACKAGE_UNION_METADATA}.{}.tmp",
+        std::process::id()
+    ));
+    if let Ok(info) = std::fs::symlink_metadata(&temporary)
+        && !info.file_type().is_file()
+    {
+        return Err(format!(
+            "temporary metadata path `{}` is not a regular file",
+            temporary.display()
+        ));
+    }
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("could not write `{}`: {error}", temporary.display()))?;
+    // Windows does not replace an existing destination with `rename`; remove
+    // the previous sidecar first so rebuilding a package works there too.
+    #[cfg(windows)]
+    if destination.exists() {
+        std::fs::remove_file(&destination).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("could not replace `{}`: {error}", destination.display())
+        })?;
+    }
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        format!("could not replace `{}`: {error}", destination.display())
+    })?;
+    Ok(())
 }
 
 /// Links the object with the Zirk runtime.

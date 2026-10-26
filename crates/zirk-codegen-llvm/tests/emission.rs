@@ -216,6 +216,241 @@ fn generated_union_llvm_passes_address_sanitizer_and_verifier() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn generated_union_code_executes_under_address_sanitizer() {
+    let ir = llvm_ir_for_module(&checked_ir_with_entry(
+        "type Value = Int32 | String;\n\
+         fn make_number(): Value { return 42; }\n\
+         fn roundtrip(value: Value): Value { return value; }\n\
+         fn validate(): Int32 { inmut value: Value = roundtrip(make_number()); return 0; }",
+        false,
+    ));
+    let instrumented_input = ir.replace(
+        "attributes #1 = { uwtable }",
+        "attributes #1 = { uwtable sanitize_address }",
+    );
+    assert_ne!(
+        instrumented_input, ir,
+        "generated Zirk functions are ASan-instrumented"
+    );
+
+    let prefix = std::env::var_os("LLVM_SYS_201_PREFIX")
+        .expect("LLVM_SYS_201_PREFIX must point at the pinned LLVM installation");
+    let bin = std::path::PathBuf::from(prefix).join("bin");
+    let opt = bin.join(common::exe("opt"));
+    let clang = common::linker_driver();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let dir = common::temp_dir();
+    let input = dir.join(format!(
+        "zirk-union-asan-run-{}-{nonce}.ll",
+        std::process::id()
+    ));
+    let transformed = dir.join(format!(
+        "zirk-union-asan-run-{}-{nonce}-instrumented.ll",
+        std::process::id()
+    ));
+    let object = dir.join(format!(
+        "zirk-union-asan-run-{}-{nonce}{}",
+        std::process::id(),
+        if cfg!(windows) { ".obj" } else { ".o" }
+    ));
+    let harness = dir.join(format!(
+        "zirk-union-asan-run-{}-{nonce}.c",
+        std::process::id()
+    ));
+    let executable = dir.join(format!(
+        "zirk-union-asan-run-{}-{nonce}{}",
+        std::process::id(),
+        if cfg!(windows) { ".exe" } else { "" }
+    ));
+    std::fs::write(&input, instrumented_input).expect("write generated union LLVM IR");
+
+    let triple = if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-apple-darwin"
+        }
+    } else if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let transformed_result = std::process::Command::new(&opt)
+        .arg(format!("-mtriple={triple}"))
+        .arg("-passes=asan,verify")
+        .arg("-S")
+        .arg(&input)
+        .arg("-o")
+        .arg(&transformed)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run {}: {error}", opt.display()));
+    assert!(
+        transformed_result.status.success(),
+        "LLVM ASan instrumentation or verification failed:\n{}\n{}",
+        String::from_utf8_lossy(&transformed_result.stdout),
+        String::from_utf8_lossy(&transformed_result.stderr)
+    );
+    let transformed_ir = std::fs::read_to_string(&transformed)
+        .expect("read generated union LLVM IR after ASan instrumentation");
+    assert!(
+        transformed_ir.contains("__asan_report_") || transformed_ir.contains("__asan_load"),
+        "the generated union operations must contain ASan checks"
+    );
+
+    // The harness calls generated Zirk functions directly through the same
+    // runtime archive used by compiled programs, so the collector-frame and
+    // cancellation paths are real while the union operations are instrumented.
+    std::fs::write(
+        &harness,
+        r#"
+#include <stdint.h>
+
+extern void zirk_rt_init(void);
+extern void zirk_rt_shutdown(void);
+extern int32_t zk_validate(void);
+
+int main(void) {
+    zirk_rt_init();
+    int status = zk_validate();
+    zirk_rt_shutdown();
+    return status;
+}
+"#,
+    )
+    .expect("write the native ASan harness");
+    let object_result = std::process::Command::new(&clang)
+        .arg("-c")
+        .arg("-fno-sanitize=all")
+        .arg(&transformed)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "could not compile instrumented IR with {}: {error}",
+                clang.display()
+            )
+        });
+    assert!(
+        object_result.status.success(),
+        "clang could not compile instrumented IR:\n{}\n{}",
+        String::from_utf8_lossy(&object_result.stdout),
+        String::from_utf8_lossy(&object_result.stderr)
+    );
+    let test_exe_dir = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .expect("test executable directory")
+        .to_path_buf();
+    let runtime_name = if cfg!(windows) {
+        "zirk_runtime.lib"
+    } else {
+        "libzirk_runtime.a"
+    };
+    let profile_dir = test_exe_dir.parent().expect("Cargo profile directory");
+    let runtime = [
+        profile_dir.join(runtime_name),
+        test_exe_dir.join(runtime_name),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+    .unwrap_or_else(|| profile_dir.join(runtime_name));
+    assert!(
+        runtime.is_file(),
+        "runtime archive does not exist: {}",
+        runtime.display()
+    );
+    let link_result = std::process::Command::new(&clang)
+        .arg("-fsanitize=address")
+        .arg("-fno-omit-frame-pointer")
+        .arg("-O0")
+        .arg(&object)
+        .arg(&harness)
+        .arg(&runtime)
+        .args(native_runtime_libraries())
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "could not link the ASan harness with {}: {error}",
+                clang.display()
+            )
+        });
+    assert!(
+        link_result.status.success(),
+        "clang could not link the ASan harness:\n{}\n{}",
+        String::from_utf8_lossy(&link_result.stdout),
+        String::from_utf8_lossy(&link_result.stderr)
+    );
+    let execution = std::process::Command::new(&executable)
+        .env("ASAN_OPTIONS", "detect_leaks=0")
+        .output()
+        .unwrap_or_else(|error| panic!("could not run generated union code: {error}"));
+    assert!(
+        execution.status.success(),
+        "generated union code failed under ASan with {:?}:\n{}\n{}",
+        execution.status.code(),
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+
+    for path in [input, transformed, object, harness, executable] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn native_runtime_libraries() -> Vec<String> {
+    if cfg!(windows) {
+        return [
+            "advapi32",
+            "bcrypt",
+            "dbghelp",
+            "kernel32",
+            "ntdll",
+            "ole32",
+            "oleaut32",
+            "shell32",
+            "synchronization",
+            "user32",
+            "userenv",
+            "uuid",
+            "ws2_32",
+        ]
+        .iter()
+        .map(|library| format!("-l{library}"))
+        .collect();
+    }
+
+    if cfg!(target_os = "linux") {
+        return vec!["-lm".into(), "-lpthread".into()];
+    }
+
+    if cfg!(target_os = "macos") {
+        return [
+            "-framework",
+            "Security",
+            "-framework",
+            "CoreFoundation",
+            "-framework",
+            "CoreServices",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    }
+
+    Vec::new()
+}
+
+#[test]
 fn value_field_nullable_nested_union_emits_recursive_gc_descriptor() {
     let context = Context::create();
     let mut module = checked_ir(

@@ -18,3 +18,4 @@ llvm-sys = { version = "201.1.0", default-features = false }
 [dev-dependencies]
 zirk-lexer.workspace = true
 zirk-parser.workspace = true
+zirk-runtime = { path = "../zirk-runtime" }
