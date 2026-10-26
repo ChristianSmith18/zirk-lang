@@ -25,6 +25,18 @@ on:
         required: false
         default: ""
         type: string
+      platform_filter:
+        description: Native runner selection for focused diagnostics
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - all
+          - linux-x86_64
+          - linux-aarch64
+          - windows-x86_64
+          - macos-aarch64
 
 # Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
 # matriz es cara y solo importa el ultimo commit.
@@ -75,17 +87,31 @@ jobs:
       # Un fallo en una plataforma no debe ocultar el estado de las demas:
       # necesitamos saber si el problema es de una o de todas.
       fail-fast: false
-      matrix: ${{ fromJSON(((github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '')) && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}' ) || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}') }}
-          #
-          # macOS volvio a la matriz al hacerse publico el repositorio: Actions
-          # es gratis e ilimitado ahi, y el argumento de costo que lo habia
-          # dejado fuera desaparecio. Ver ADR-004.
-          #
-          # macos-13 (Intel) sigue fuera: sus runners son escasos y quedaba
-          # encolado indefinidamente mientras el resto de la matriz completaba.
-          #
-          # aarch64-windows tambien sigue fuera: apila un riesgo nuevo sobre la
-          # plataforma que todavia no esta estable.
+      # macOS volvio a la matriz al hacerse publico el repositorio: Actions
+      # es gratis e ilimitado ahi, y el argumento de costo que lo habia
+      # dejado fuera desaparecio. Ver ADR-004.
+      #
+      # macos-13 (Intel) sigue fuera: sus runners son escasos y quedaba
+      # encolado indefinidamente mientras el resto de la matriz completaba.
+      #
+      # aarch64-windows tambien sigue fuera: apila un riesgo nuevo sobre la
+      # plataforma que todavia no esta estable.
+      matrix: >-
+        ${{ fromJSON(
+          (github.event_name != 'workflow_dispatch'
+            || inputs.platform_filter == 'all'
+            || (inputs.platform_filter == 'auto'
+              && inputs.test_filter == ''
+              && inputs.runtime_test_filter == ''))
+          && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}'
+          || (inputs.platform_filter == 'linux-x86_64'
+            && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"}]}')
+          || (inputs.platform_filter == 'linux-aarch64'
+            && '{"include":[{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"}]}')
+          || (inputs.platform_filter == 'macos-aarch64'
+            && '{"include":[{"name":"macos-aarch64","runner":"macos-14"}]}')
+          || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}'
+        ) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -286,8 +312,8 @@ jobs:
           New-ItemProperty -Path $registryPath -Name DumpType -Value 1 -PropertyType DWord -Force | Out-Null
           New-ItemProperty -Path $registryPath -Name DumpCount -Value 3 -PropertyType DWord -Force | Out-Null
 
-      - name: Build focused filesystem prerequisites (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter != ''
+      - name: Build focused filesystem prerequisites
+        if: inputs.test_filter != ''
         run: cargo build -p zirk-cli -p zirk-runtime
 
       # Run this after native conformance so unrelated workspace lint failures
