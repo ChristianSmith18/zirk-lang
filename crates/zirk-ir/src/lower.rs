@@ -29565,6 +29565,22 @@ impl<'a> FunctionLowering<'a> {
                 ));
             };
             let union = self.lower_expr(union_expr);
+            if !matches!(self.type_of_operand(union), IrType::Union(_)) {
+                let singleton = self.lower_expr(singleton_expr);
+                return Some(self.emit(
+                    InstKind::Binary {
+                        op: if expr.op == ast::BinaryOp::NotEq {
+                            BinaryOp::NotEq
+                        } else {
+                            BinaryOp::Eq
+                        },
+                        left: union,
+                        right: singleton,
+                    },
+                    IrType::Boolean,
+                    span,
+                ));
+            }
             let tag = self.emit(InstKind::UnionTag(union), IrType::Int(IntWidth::U32), span);
             let expected = self.const_int_at(alternative as i128, IrType::Int(IntWidth::U32), span);
             let equal = self.emit(

@@ -111,8 +111,8 @@ share class LocalListener implements Resource<LocalResourceError> {
         stale_policy: LocalStaleEndpointPolicy,
     ): Result<LocalListener, LocalError> {
         mut remove_stale: Boolean = match stale_policy {
-            RejectExisting => false;
-            RemoveStaleSocket => true;
+            LocalStaleEndpointPolicy.RejectExisting => false;
+            LocalStaleEndpointPolicy.RemoveStaleSocket => true;
         };
         return LocalListener.bind_native(endpoint, remove_stale);
     }

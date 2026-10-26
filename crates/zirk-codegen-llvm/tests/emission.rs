@@ -158,6 +158,10 @@ fn generated_union_llvm_passes_address_sanitizer_and_verifier() {
          fn identity(value: Value): Value { return value; }\n\
          fn main(): Void { inmut cell: Cell = Cell(identity(42)); inmut copy: Value = cell.value; }",
     );
+    let ir = ir.replace(
+        "attributes #1 = { uwtable }",
+        "attributes #1 = { uwtable sanitize_address }",
+    );
     let prefix = std::env::var_os("LLVM_SYS_201_PREFIX")
         .expect("LLVM_SYS_201_PREFIX must point at the pinned LLVM installation");
     let opt = std::path::PathBuf::from(prefix)
@@ -206,8 +210,8 @@ fn generated_union_llvm_passes_address_sanitizer_and_verifier() {
     let instrumented = std::fs::read_to_string(&output).expect("read instrumented union IR");
     let _ = std::fs::remove_file(&output);
     assert!(
-        instrumented.contains("asan.module_ctor"),
-        "the AddressSanitizer module initialization must be emitted"
+        instrumented.contains("__asan_report_") || instrumented.contains("__asan_load"),
+        "AddressSanitizer must instrument generated union memory operations"
     );
 }
 
