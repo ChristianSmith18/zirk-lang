@@ -12953,7 +12953,7 @@ fn main(): Void {
     }
     match Directory.copy(Path.of("src/source"), Path.of("src/replaced"), true, 8 as UInt32, 16) {
         Ok(_) => stdout.println("replaced");
-        Error(_) => stdout.println("replace-error");
+        Error(error) => stdout.println("replace-error:" + error.to_string());
     }
     match Directory.copy(Path.of("src/source"), Path.of("src/denied"), false, 8 as UInt32, 16) {
         Error(error) => match error {
@@ -13670,11 +13670,11 @@ fn main(): Void {
     };
     match File.write_text_async(Path.of("src/data/output.txt"), "async") {
         Ok(_) => stdout.println("write-ok");
-        Error(_) => stdout.println("write-error");
+        Error(error) => stdout.println("write-error:" + error.to_string());
     };
     match File.append_text_async(Path.of("src/data/output.txt"), "-append") {
         Ok(_) => stdout.println("append-ok");
-        Error(_) => stdout.println("append-error");
+        Error(error) => stdout.println("append-error:" + error.to_string());
     };
     match File.open_async(Path.of("src/data/input.txt"), OpenOptions.read_only()) with file {
         Ok(file) => {
@@ -13712,7 +13712,7 @@ fn main(): Void {
             };
             _ = file.close();
         }
-        Error(_) => stdout.println("write-open-error");
+        Error(error) => stdout.println("write-open-error:" + error.to_string());
     };
     match File.read_text_async(Path.of("src/data/output.txt"), 64) {
         Ok(text) => stdout.println("final:" + text);
@@ -14479,8 +14479,8 @@ fn bundled_std_fs_windows_no_replace_move_is_typed_unsupported() {
     write_entry(
         project.join("src/main.zrk"),
         r#"
-import { Directory, FileError } from std.fs.fs;
-import { Path } from std.path.path;
+import { Directory, FileError } from std.fs::fs;
+import { Path } from std.path::path;
 import { stdout } from std.io;
 
 fn main(): Void {
@@ -14758,7 +14758,7 @@ fn main(): Void {
     }
     match File.set_readonly(Path.of("src/target.txt"), true) {
         Ok(_) => stdout.println("readonly-set");
-        Error(_) => stdout.println("readonly-set-error");
+        Error(error) => stdout.println("readonly-set-error:" + error.to_string());
     }
     match File.metadata_for(Path.of("src/target.txt")) {
         Ok(metadata) => stdout.println(metadata.is_readonly().to_string());
@@ -14766,7 +14766,7 @@ fn main(): Void {
     }
     match File.set_readonly(Path.of("src/target.txt"), false) {
         Ok(_) => stdout.println("readonly-cleared");
-        Error(_) => stdout.println("readonly-clear-error");
+        Error(error) => stdout.println("readonly-clear-error:" + error.to_string());
     }
 }
 "#,

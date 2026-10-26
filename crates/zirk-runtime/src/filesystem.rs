@@ -772,6 +772,12 @@ fn directory_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
+#[cfg(windows)]
+fn directory_identity(metadata: &cap_std::fs::Metadata) -> (u64, u64) {
+    use cap_fs_ext::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
 #[cfg(unix)]
 fn collect_watch_subdirectories(
     root: &HostPath,
@@ -1739,6 +1745,8 @@ fn remove_tree_entry_with_operation(
         return Ok(());
     }
     let directory = parent.open_dir_nofollow(name).map_err(map_io)?;
+    #[cfg(windows)]
+    let identity = directory_identity(&directory.dir_metadata().map_err(map_io)?);
     for entry in directory.entries().map_err(map_io)? {
         let entry = entry.map_err(map_io)?;
         let child_name = entry.file_name();
@@ -1761,6 +1769,15 @@ fn remove_tree_entry_with_operation(
         operation,
         FilesystemScopeExtent::Descendants,
     )?;
+    drop(directory);
+    #[cfg(windows)]
+    {
+        let current = parent.open_dir_nofollow(name).map_err(map_io)?;
+        if directory_identity(&current.dir_metadata().map_err(map_io)?) != identity {
+            return Err(FsError::InvalidPath);
+        }
+        drop(current);
+    }
     parent.remove_dir(name).map_err(map_io)
 }
 
@@ -2000,6 +2017,8 @@ fn remove_tree_entry(
     }
 
     let directory = parent.open_dir_nofollow(name).map_err(map_io)?;
+    #[cfg(windows)]
+    let identity = directory_identity(&directory.dir_metadata().map_err(map_io)?);
     for entry in directory.entries().map_err(map_io)? {
         let entry = entry.map_err(map_io)?;
         remove_tree_entry(
@@ -2018,6 +2037,15 @@ fn remove_tree_entry(
         "directory.remove_all",
         FilesystemScopeExtent::Descendants,
     )?;
+    drop(directory);
+    #[cfg(windows)]
+    {
+        let current = parent.open_dir_nofollow(name).map_err(map_io)?;
+        if directory_identity(&current.dir_metadata().map_err(map_io)?) != identity {
+            return Err(FsError::InvalidPath);
+        }
+        drop(current);
+    }
     parent.remove_dir(name).map_err(map_io)
 }
 
@@ -2852,7 +2880,15 @@ fn path_text(path: &HostPath) -> Result<String, FsError> {
 }
 
 fn path_scope(path: &HostPath) -> Result<String, FsError> {
-    path_text(path)
+    let text = path_text(path)?;
+    #[cfg(windows)]
+    {
+        Ok(normalize_windows_path(&text))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(text)
+    }
 }
 
 #[cfg(unix)]
@@ -4789,6 +4825,36 @@ mod tests {
         let outside_handle = open_directory_chain(&outside).unwrap();
         assert!(!windows_handle_matches_path(&outside_handle, &approved).unwrap());
         assert!(windows_handle_matches_path(&outside_handle, &outside).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_scope_normalizes_extended_absolute_paths() {
+        let regular = HostPath::new(r"C:\zirk\project\data.txt");
+        let extended = HostPath::new(r"\\?\C:\zirk\project\data.txt");
+
+        assert_eq!(path_scope(regular).unwrap(), path_scope(extended).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_no_replace_rename_is_typed_unsupported() {
+        let directory = scratch("windows-no-replace-rename");
+        let source = directory.join("source.txt");
+        fs::write(&source, b"preserve source").unwrap();
+        let parent = Dir::open_ambient_dir(&directory, ambient_authority()).unwrap();
+
+        assert!(matches!(
+            rename_without_replacement(
+                &parent,
+                std::ffi::OsStr::new("source.txt"),
+                &parent,
+                std::ffi::OsStr::new("destination.txt"),
+            ),
+            Err(FsError::Unsupported)
+        ));
+        assert_eq!(fs::read(source).unwrap(), b"preserve source");
+        assert!(!directory.join("destination.txt").exists());
     }
 
     #[cfg(windows)]
