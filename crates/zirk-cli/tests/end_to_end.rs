@@ -13310,7 +13310,7 @@ fn bundled_std_fs_temporary_resources_are_unique_scoped_and_owned() {
     write_entry(
         project.join("src/main.zrk"),
         r#"
-import { Temporary } from std.fs::fs;
+import { FileError, Temporary } from std.fs::fs;
 import { Path } from std.path::path;
 import { stdout } from std.io;
 
@@ -13326,7 +13326,10 @@ fn main(): Void {
                 Error(_) => stdout.println("file-cleanup-error");
             }
         }
-        Error(_) => stdout.println("file-create-error");
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("file-unsupported");
+            _ => stdout.println("file-create-error");
+        };
     }
     match Temporary.file(Path.of("src")) {
         Ok(temp) => {
@@ -13339,7 +13342,10 @@ fn main(): Void {
                 Error(_) => stdout.println("second-file-cleanup-error");
             }
         }
-        Error(_) => stdout.println("second-file-create-error");
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("second-file-unsupported");
+            _ => stdout.println("second-file-create-error");
+        };
     }
     match Temporary.directory(Path.of("src")) {
         Ok(temp) => {
@@ -13352,7 +13358,10 @@ fn main(): Void {
                 Error(_) => stdout.println("directory-cleanup-error");
             }
         }
-        Error(_) => stdout.println("directory-create-error");
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("directory-unsupported");
+            _ => stdout.println("directory-create-error");
+        };
     }
     match Temporary.file(Path.of("src")) {
         Ok(temp) => {
@@ -13365,7 +13374,10 @@ fn main(): Void {
                 Error(_) => stdout.println("release-error");
             }
         }
-        Error(_) => stdout.println("released-file-create-error");
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("released-file-unsupported");
+            _ => stdout.println("released-file-create-error");
+        };
     }
 }
 "#,
@@ -13413,6 +13425,16 @@ fn main(): Void {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
+    if cfg!(windows) {
+        assert_eq!(
+            normalize(&String::from_utf8_lossy(&run.stdout)),
+            "file-unsupported\nsecond-file-unsupported\ndirectory-unsupported\nreleased-file-unsupported\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(std::fs::read_dir(project.join("src")).unwrap().count(), 1);
+        return;
+    }
     let lines = normalize(&String::from_utf8_lossy(&run.stdout))
         .lines()
         .map(str::to_owned)
@@ -13683,7 +13705,10 @@ fn main(): Void {
                     stdout.println("lock-async-ok");
                     _ = locked.close();
                 }
-                Error(_) => stdout.println("lock-async-error");
+                Error(error) => match error {
+                    FileError.Unsupported => stdout.println("lock-async-unsupported");
+                    _ => stdout.println("lock-async-error");
+                };
             };
             _ = file.close();
         }
@@ -13776,9 +13801,14 @@ fn main(): Void {
         String::from_utf8_lossy(&run.stdout),
         String::from_utf8_lossy(&run.stderr)
     );
+    let expected = if cfg!(windows) {
+        "read:source-data\nwrite-ok\nappend-ok\nread-handle\n2\nread-exact\n2\nwrite-handle\n2\nread-after-write\n1\nlock-async-unsupported\nfinal:ABync-append\nentry\nwalk-item\n"
+    } else {
+        "read:source-data\nwrite-ok\nappend-ok\nread-handle\n2\nread-exact\n2\nwrite-handle\n2\nread-after-write\n1\nlock-async-ok\nfinal:ABync-append\nentry\nwalk-item\n"
+    };
     assert_eq!(
         normalize(&String::from_utf8_lossy(&run.stdout)),
-        "read:source-data\nwrite-ok\nappend-ok\nread-handle\n2\nread-exact\n2\nwrite-handle\n2\nread-after-write\n1\nlock-async-ok\nfinal:ABync-append\nentry\nwalk-item\n",
+        expected,
         "stderr: {}",
         String::from_utf8_lossy(&run.stderr)
     );
@@ -14293,6 +14323,7 @@ fn main(): Void {
     assert_eq!(std::fs::read_to_string(target).unwrap(), "lock target");
 }
 
+#[cfg(unix)]
 #[test]
 fn bundled_std_fs_move_checks_both_paths_and_replacement_intent() {
     use zirk_runtime_core::permission_grant::{
@@ -14425,6 +14456,90 @@ fn main(): Void {
     );
     assert!(project.join("src/denied.txt").exists());
     assert!(!project.join("src/denied-destination.txt").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn bundled_std_fs_windows_no_replace_move_is_typed_unsupported() {
+    use zirk_runtime_core::permission_grant::{
+        FilesystemOperationScope, FilesystemScopeExtent, PermissionScopes,
+    };
+
+    let project = workspace("std_fs_windows_move");
+    let home = workspace("std_fs_windows_move_home");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    let source = project.join("src/source.txt");
+    let destination = project.join("src/destination.txt");
+    std::fs::write(&source, "keep-source").unwrap();
+    std::fs::write(
+        project.join(".zkinit"),
+        "project { name: \"std.fs.windows-move.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; }\n",
+    )
+    .unwrap();
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { Directory, FileError } from std.fs.fs;
+import { Path } from std.path.path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Directory.move(Path.of("src/source.txt"), Path.of("src/destination.txt"), false) {
+        Ok(_) => stdout.println("move-succeeded");
+        Error(error) => match error {
+            FileError.Unsupported => stdout.println("move-unsupported");
+            _ => stdout.println("move-wrong-error");
+        };
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let canonical = project.canonicalize().unwrap().join("src");
+    let scopes = [
+        ("directory.move.source", source.clone()),
+        ("directory.move.destination", destination.clone()),
+    ]
+    .into_iter()
+    .map(|(operation, path)| FilesystemOperationScope {
+        capability: "filesystem.write".into(),
+        operation: operation.into(),
+        requester: "local".into(),
+        resource: canonical
+            .join(path.file_name().unwrap())
+            .to_string_lossy()
+            .into_owned(),
+        extent: FilesystemScopeExtent::Exact,
+    })
+    .collect();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_operations: scopes,
+            ..PermissionScopes::default()
+        },
+    );
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "."]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let run = command.output().expect("run unsupported Windows move");
+    assert!(
+        run.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&run.stdout)),
+        "move-unsupported\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "keep-source");
+    assert!(!destination.exists());
 }
 
 #[test]

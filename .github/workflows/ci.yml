@@ -287,6 +287,7 @@ jobs:
       # Run this after native conformance so unrelated workspace lint failures
       # cannot suppress the filesystem security/API evidence on a platform.
       - name: Clippy
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
@@ -315,14 +316,14 @@ jobs:
 
       - name: Focused runtime tests (Windows)
         if: runner.os == 'Windows' && inputs.runtime_test_filter != ''
-        run: cargo test -p zirk-runtime --lib "$env:RUNTIME_TEST_FILTER" -- --exact --test-threads=1 --nocapture
+        run: cargo test -p zirk-runtime --lib "$env:RUNTIME_TEST_FILTER" -- --test-threads=1 --nocapture
         env:
           RUNTIME_TEST_FILTER: ${{ inputs.runtime_test_filter }}
           RUST_BACKTRACE: "1"
 
       - name: Focused runtime tests (Unix)
         if: runner.os != 'Windows' && inputs.runtime_test_filter != ''
-        run: cargo test -p zirk-runtime --lib "$RUNTIME_TEST_FILTER" -- --exact --test-threads=1 --nocapture
+        run: cargo test -p zirk-runtime --lib "$RUNTIME_TEST_FILTER" -- --test-threads=1 --nocapture
         env:
           RUNTIME_TEST_FILTER: ${{ inputs.runtime_test_filter }}
           RUST_BACKTRACE: "1"
