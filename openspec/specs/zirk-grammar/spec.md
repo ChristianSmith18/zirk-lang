@@ -1139,10 +1139,6 @@ The parser SHALL continue to recognize enum variants with associated data, union
 - **WHEN** mut value: Int32 | String; is parsed
 - **THEN** the declaration contains a two-member union type
 
-#### Scenario: Legacy record declaration is rejected
-- **WHEN** source declares record Point { x: Int32; }
-- **THEN** a targeted migration diagnostic recommends contract and Object
-
 #### Scenario: N-ary union and intersection
 - **WHEN** type View = A & B & C | D | E; is parsed
 - **THEN** the syntax tree preserves three intersection members in the first union branch and two additional union alternatives
@@ -1170,6 +1166,10 @@ The parser SHALL continue to recognize enum variants with associated data, union
 #### Scenario: Structural object type syntax
 - **WHEN** a type alias declares required, optional, literal-valued, and read-only properties in an object type expression
 - **THEN** each property modifier and property type is preserved in the syntax tree
+
+#### Scenario: Legacy record declaration is rejected
+- **WHEN** source declares record Point { x: Int32; }
+- **THEN** a targeted migration diagnostic recommends contract and Object
 
 ### Requirement: Match syntax supports partial object patterns
 The parser SHALL retain compatible-value, type, enum, union, regex, wildcard, and comma-grouped patterns while accepting nested object property patterns. Object patterns SHALL remain partial patterns and SHALL NOT imply a closed object shape.

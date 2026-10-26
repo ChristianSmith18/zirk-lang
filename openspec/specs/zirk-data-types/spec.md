@@ -198,7 +198,6 @@ A | B | ... SHALL define a union of any finite number of alternatives, and type 
 - **WHEN** type Input = String | Int32; is passed to and returned from a compiled function
 - **THEN** native and interpreted execution preserve which alternative was supplied
 
-
 ### Requirement: Example-driven documentation without semantic change
 
 The `zirk-data-types` specification examples in the handbook SHALL illustrate the value/reference/unsafe spectrum for tuples, dynamic objects, classes, contracts, enums, unions, aliases, and built-in types, but SHALL NOT introduce new language semantics, new keywords, or unapproved type syntax.
