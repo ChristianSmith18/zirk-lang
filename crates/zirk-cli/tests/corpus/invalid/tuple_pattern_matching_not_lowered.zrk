@@ -1,0 +1,12 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut value = (1, "hello");
+    match value {
+        (number, text) => {
+            stdout.println(number);
+            stdout.println(text);
+        }
+    }
+}
+main();

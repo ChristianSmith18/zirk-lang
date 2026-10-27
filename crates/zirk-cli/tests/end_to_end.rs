@@ -13145,7 +13145,6 @@ fn main(): Void {
         Error(_) => stdout.println("exists-error");
     }
 }
-share fn make_watcher(): Watched<Person> { return PersonWatcher(); }
 "#,
     )
     .unwrap();
@@ -13265,11 +13264,6 @@ fn main(): Void {
         };
     }
 }
-share fn demo(): Void {
-    mut watcher: Watched<Person> = PersonWatcher();
-    watcher.on("ageChanged", (age): Void => { stdout.println(age); });
-    watcher.on("nameChanged", (name): Void => { stdout.println(name); });
-}
 "#,
     )
     .unwrap();
@@ -13384,11 +13378,6 @@ fn main(): Void {
         }
         Error(_) => stdout.println("walk-open-error");
     }
-}
-share fn demo(): Void {
-    mut watcher: Watched<Person> = PersonWatcher();
-    watcher.on("ageChanged", (age): Void => { stdout.println(age); });
-    watcher.on("nameChanged", (name): Void => { stdout.println(name); });
 }
 "#,
     )
