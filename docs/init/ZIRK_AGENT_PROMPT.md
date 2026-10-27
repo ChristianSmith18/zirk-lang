@@ -285,16 +285,12 @@ the phase:
   context (`mut x: Int8 = 5;`, `mut y: Float16 = 1.0f16;`) is implemented;
   the literal takes the expected width when the value fits. There is still
   no integer literal suffix syntax (only `Float` has one, e.g. `1.5f32`).
-- **`Float128` arithmetic is unverified on Windows**: LLVM lowers `fp128`
-  operations to soft-float library calls (`__addtf3` and similar) the MSVC
-  toolchain this project's CI links against does not provide the way
-  `glibc`/`libSystem` do on Linux/macOS — it crashed the Windows runner
-  (an access violation, not a failing assertion) rather than just failing a
-  test, so `Float128` is excluded from the cross-platform corpus.
-- **`Float128` `to_string()` is lossy**: because `f128` is not a stable Rust
-  primitive in this toolchain, `Float128` values are truncated to `Float64`
-  before formatting. This means the printed decimal is an `f64` approximation
-  of the original `f128` value, not an exact decimal expansion.
+- **`Float128` Windows coverage is focused**: native x86_64 execution and
+  object emission for all nine codegen triples passed in CI run 40551155892.
+  Cross-target object emission is not native execution on those targets.
+- **`Float128` formatting uses binary128 precision**: `to_string()` and
+  `format(spec)` format the original binary128 value without a Float64
+  intermediate.
 - **An enum cannot implement `to_string()`.** Corrected from an earlier,
   wrong characterization of this as debt: `ZIRK_LANGUAGE_SPEC.md` section 7
   is explicit — "enums are data-only and declare no user methods" — the same

@@ -216,6 +216,7 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::Concat { .. }
             | InstKind::Repeat { .. }
             | InstKind::ToString(_)
+            | InstKind::Float128Format { .. }
             | InstKind::Println(_)
             | InstKind::Print(_)
             | InstKind::PrintlnStderr(_)
@@ -353,8 +354,18 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::Clone(_)
             | InstKind::ArrayNew { .. }
             | InstKind::ListNew { .. }
+            | InstKind::DequeNew { .. }
+            | InstKind::DequePushFront { .. }
+            | InstKind::DequePushBack { .. }
+            | InstKind::DequePopFront(_)
+            | InstKind::DequePopBack(_)
+            | InstKind::DequeClear(_)
             | InstKind::MapNew { .. }
             | InstKind::SetNew { .. }
+            | InstKind::MapKeys(_)
+            | InstKind::MapSortedKeys(_)
+            | InstKind::MapValues(_)
+            | InstKind::MapEntries(_)
             | InstKind::ListAdd { .. }
             | InstKind::ListInsert { .. }
             | InstKind::ListRemove { .. }
@@ -363,8 +374,13 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::ListClone { .. }
             | InstKind::MapSet { .. }
             | InstKind::MapRemove { .. }
-            | InstKind::SetAdd { .. }
+            | InstKind::MapClear(_)
+            | InstKind::SetValues(_)
+            | InstKind::SetSortedElements(_)
             | InstKind::SetRemove { .. }
+            | InstKind::SetAdd { .. }
+            | InstKind::SetClear(_)
+            | InstKind::SetOperation { .. }
             | InstKind::ArraySlice { .. }
     )
 }
@@ -588,8 +604,12 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
                 id < module.list_types.len() as u32
             }
             IrType::Atomic(_) | IrType::Nullable(Nullable::Atomic(_)) => true,
-            IrType::Map(id) => id < module.map_types.len() as u32,
-            IrType::Set(id) => id < module.set_types.len() as u32,
+            IrType::Map(id) | IrType::Nullable(Nullable::Map(id)) => {
+                id < module.map_types.len() as u32
+            }
+            IrType::Set(id) | IrType::Nullable(Nullable::Set(id)) => {
+                id < module.set_types.len() as u32
+            }
             IrType::Union(id) => {
                 id < module.enums.len() as u32
                     && module
@@ -3153,6 +3173,15 @@ fn verify_instruction(
                 && value == IrType::Void
             {
                 report(format!("{position}: ToString applied to Void"));
+            }
+        }
+        InstKind::Float128Format { value, spec } => {
+            expect(inst.ty, IrType::String, position, "Float128Format", report);
+            if type_of(value) != Some(IrType::Float(crate::FloatWidth::F128)) {
+                report(format!("{position}: Float128Format value is not Float128"));
+            }
+            if type_of(spec) != Some(IrType::String) {
+                report(format!("{position}: Float128Format spec is not String"));
             }
         }
 
@@ -7010,6 +7039,64 @@ fn verify_instruction(
                 report(format!("{position}: ListLength receiver is not a List"));
             }
         }
+        InstKind::DequeLength(operand) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "DequeLength",
+                report,
+            );
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!("{position}: DequeLength receiver is not a Deque"));
+            }
+        }
+        InstKind::DequeIsEmpty(operand) => {
+            expect(inst.ty, IrType::Boolean, position, "DequeIsEmpty", report);
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!("{position}: DequeIsEmpty receiver is not a Deque"));
+            }
+        }
+        InstKind::DequeVersion(operand) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "DequeVersion",
+                report,
+            );
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!("{position}: DequeVersion receiver is not a Deque"));
+            }
+        }
+        InstKind::PriorityQueueLength(operand) | InstKind::PriorityQueueVersion(operand) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "PriorityQueueLength/Version",
+                report,
+            );
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!(
+                    "{position}: priority queue query receiver is not a PriorityQueue"
+                ));
+            }
+        }
+        InstKind::PriorityQueueIsEmpty(operand) => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "PriorityQueueIsEmpty",
+                report,
+            );
+            if !matches!(type_of(operand), Some(IrType::List(_))) {
+                report(format!(
+                    "{position}: priority queue query receiver is not a PriorityQueue"
+                ));
+            }
+        }
 
         InstKind::ArrayNew {
             element_id,
@@ -7036,6 +7123,159 @@ fn verify_instruction(
                     "{position}: ListNew declares {}, expected List<{element_id}>",
                     inst.ty.as_str()
                 ));
+            }
+        }
+        InstKind::DequeNew { element_id } => {
+            if inst.ty != IrType::List(*element_id) {
+                report(format!(
+                    "{position}: DequeNew declares {}, expected Deque<{element_id}>",
+                    inst.ty.as_str()
+                ));
+            }
+        }
+        InstKind::PriorityQueueNew { element_id, order } => {
+            if inst.ty != IrType::List(*element_id) {
+                report(format!(
+                    "{position}: PriorityQueueNew declares {}, expected PriorityQueue<{element_id}>",
+                    inst.ty.as_str()
+                ));
+            }
+            let element = module
+                .list_types
+                .get(*element_id as usize)
+                .copied()
+                .unwrap_or(IrType::Void);
+            let expected_order = match element {
+                IrType::Boolean => Some(1),
+                IrType::Char => Some(2),
+                IrType::Int(IntWidth::I8) => Some(3),
+                IrType::Int(IntWidth::I16) => Some(4),
+                IrType::Int(IntWidth::I32) => Some(5),
+                IrType::Int(IntWidth::I64) => Some(6),
+                IrType::Int(IntWidth::I128) => Some(7),
+                IrType::Int(IntWidth::U8) => Some(8),
+                IrType::Int(IntWidth::U16) => Some(9),
+                IrType::Int(IntWidth::U32) => Some(10),
+                IrType::Int(IntWidth::U64) => Some(11),
+                IrType::Int(IntWidth::U128) => Some(12),
+                IrType::Float(FloatWidth::F16) => Some(13),
+                IrType::Float(FloatWidth::F32) => Some(14),
+                IrType::Float(FloatWidth::F64) => Some(15),
+                IrType::Float(FloatWidth::F128) => Some(16),
+                IrType::Decimal => Some(17),
+                IrType::String => Some(18),
+                _ => None,
+            };
+            if expected_order != Some(*order) {
+                report(format!(
+                    "{position}: PriorityQueue order code {order} is incompatible with element type {}",
+                    element.as_str()
+                ));
+            }
+        }
+        InstKind::PriorityQueueEnqueue { receiver, value } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "PriorityQueueEnqueue",
+                report,
+            );
+            let element = if let Some(IrType::List(id)) = type_of(receiver) {
+                module
+                    .list_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if element == IrType::Void {
+                report(format!(
+                    "{position}: enqueue receiver is not a PriorityQueue"
+                ));
+            }
+            if let Some(actual) = type_of(value)
+                && element != IrType::Void
+                && actual != element
+            {
+                report(format!(
+                    "{position}: PriorityQueueEnqueue value is {}, expected {}",
+                    actual.as_str(),
+                    element.as_str()
+                ));
+            }
+        }
+        InstKind::PriorityQueuePeek(receiver) | InstKind::PriorityQueueDequeue(receiver) => {
+            let element = if let Some(IrType::List(id)) = type_of(receiver) {
+                module
+                    .list_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if element == IrType::Void || inst.ty != element {
+                report(format!(
+                    "{position}: priority queue read has an incompatible receiver or result type"
+                ));
+            }
+        }
+        InstKind::DequePushFront { receiver, value }
+        | InstKind::DequePushBack { receiver, value } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "DequePush",
+                report,
+            );
+            let element = if let Some(IrType::List(id)) = type_of(receiver) {
+                module
+                    .list_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            if element == IrType::Void {
+                report(format!("{position}: DequePush receiver is not a Deque"));
+            }
+            if let Some(ty) = type_of(value)
+                && element != IrType::Void
+                && ty != element
+            {
+                report(format!(
+                    "{position}: DequePush value is {}, expected {}",
+                    ty.as_str(),
+                    element.as_str()
+                ));
+            }
+        }
+        InstKind::DequeFront(receiver)
+        | InstKind::DequeBack(receiver)
+        | InstKind::DequePopFront(receiver)
+        | InstKind::DequePopBack(receiver) => {
+            let element = if let Some(IrType::List(id)) = type_of(receiver) {
+                module
+                    .list_types
+                    .get(id as usize)
+                    .copied()
+                    .unwrap_or(IrType::Void)
+            } else {
+                IrType::Void
+            };
+            expect(inst.ty, element, position, "DequeAccess", report);
+            if element == IrType::Void {
+                report(format!("{position}: DequeAccess receiver is not a Deque"));
+            }
+        }
+        InstKind::DequeClear(receiver) => {
+            expect(inst.ty, IrType::Void, position, "DequeClear", report);
+            if !matches!(type_of(receiver), Some(IrType::List(_))) {
+                report(format!("{position}: DequeClear receiver is not a Deque"));
             }
         }
         InstKind::MapNew { map_id } => {
@@ -7269,6 +7509,84 @@ fn verify_instruction(
                 report(format!("{position}: MapLength receiver is not a Map"));
             }
         }
+        InstKind::MapVersion(operand) => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "MapVersion",
+                report,
+            );
+            if type_of(operand)
+                .map(|ty| !matches!(ty, IrType::Map(_)))
+                .unwrap_or(false)
+            {
+                report(format!("{position}: MapVersion receiver is not a Map"));
+            }
+        }
+        InstKind::MapKeys(operand)
+        | InstKind::MapSortedKeys(operand)
+        | InstKind::MapValues(operand) => {
+            let receiver_ty = type_of(operand);
+            let expected_element = match receiver_ty {
+                Some(IrType::Map(id)) => module.map_types.get(id as usize).map(|(key, value)| {
+                    if matches!(inst.kind, InstKind::MapKeys(_) | InstKind::MapSortedKeys(_)) {
+                        *key
+                    } else {
+                        *value
+                    }
+                }),
+                Some(_) => {
+                    report(format!("{position}: map snapshot receiver is not a Map"));
+                    None
+                }
+                None => None,
+            };
+            let actual_element = match inst.ty {
+                IrType::Array(id) => module.array_types.get(id as usize).copied(),
+                _ => {
+                    report(format!("{position}: map snapshot result is not an Array"));
+                    None
+                }
+            };
+            if expected_element.is_some() && actual_element != expected_element {
+                report(format!(
+                    "{position}: map snapshot element is {}, expected {}",
+                    actual_element.map_or_else(|| "<invalid>".into(), |ty| ty.as_str()),
+                    expected_element.expect("checked above").as_str()
+                ));
+            }
+        }
+        InstKind::MapEntries(operand) => {
+            let pair = match type_of(operand) {
+                Some(IrType::Map(id)) => module.map_types.get(id as usize).copied(),
+                Some(_) => {
+                    report(format!("{position}: MapEntries receiver is not a Map"));
+                    None
+                }
+                None => None,
+            };
+            let actual = match inst.ty {
+                IrType::Array(id) => module.array_types.get(id as usize).copied(),
+                _ => {
+                    report(format!("{position}: MapEntries result is not an Array"));
+                    None
+                }
+            };
+            let correct_tuple = pair.is_some_and(|(key, value)| {
+                matches!(actual, Some(IrType::Value(tuple_id))
+                if module.values.get(tuple_id as usize).is_some_and(|layout| {
+                    layout.fields.len() == 2
+                        && layout.fields[0].ty == key
+                        && layout.fields[1].ty == value
+                }))
+            });
+            if pair.is_some() && !correct_tuple {
+                report(format!(
+                    "{position}: MapEntries element is not the matching (K, V) tuple"
+                ));
+            }
+        }
         InstKind::MapIsEmpty(operand) => {
             expect(inst.ty, IrType::Boolean, position, "MapIsEmpty", report);
             if type_of(operand)
@@ -7278,12 +7596,27 @@ fn verify_instruction(
                 report(format!("{position}: MapIsEmpty receiver is not a Map"));
             }
         }
+        InstKind::MapClear(operand) => {
+            expect(inst.ty, IrType::Void, position, "MapClear", report);
+            if type_of(operand)
+                .map(|ty| !matches!(ty, IrType::Map(_)))
+                .unwrap_or(false)
+            {
+                report(format!("{position}: MapClear receiver is not a Map"));
+            }
+        }
         InstKind::MapSet {
             receiver,
             key,
             value,
         } => {
-            expect(inst.ty, IrType::Void, position, "MapSet", report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "MapSet",
+                report,
+            );
             let (expected_key, expected_value) = if let Some(IrType::Map(id)) = type_of(receiver) {
                 module
                     .map_types
@@ -7348,6 +7681,30 @@ fn verify_instruction(
                 report(format!("{position}: SetLength receiver is not a Set"));
             }
         }
+        InstKind::SetValues(operand) | InstKind::SetSortedElements(operand) => {
+            let element = match type_of(operand) {
+                Some(IrType::Set(id)) => module.set_types.get(id as usize).copied(),
+                Some(_) => {
+                    report(format!("{position}: SetValues receiver is not a Set"));
+                    None
+                }
+                None => None,
+            };
+            let actual = match inst.ty {
+                IrType::Array(id) => module.array_types.get(id as usize).copied(),
+                _ => {
+                    report(format!("{position}: SetValues result is not an Array"));
+                    None
+                }
+            };
+            if element.is_some() && actual != element {
+                report(format!(
+                    "{position}: SetValues element is {}, expected {}",
+                    actual.map_or_else(|| "<invalid>".into(), |ty| ty.as_str()),
+                    element.expect("checked above").as_str()
+                ));
+            }
+        }
         InstKind::SetIsEmpty(operand) => {
             expect(inst.ty, IrType::Boolean, position, "SetIsEmpty", report);
             if type_of(operand)
@@ -7357,8 +7714,56 @@ fn verify_instruction(
                 report(format!("{position}: SetIsEmpty receiver is not a Set"));
             }
         }
+        InstKind::SetClear(operand) => {
+            expect(inst.ty, IrType::Void, position, "SetClear", report);
+            if type_of(operand)
+                .map(|ty| !matches!(ty, IrType::Set(_)))
+                .unwrap_or(false)
+            {
+                report(format!("{position}: SetClear receiver is not a Set"));
+            }
+        }
+        InstKind::SetOperation {
+            left,
+            right,
+            operation,
+        } => {
+            let expected = match (type_of(left), type_of(right)) {
+                (Some(IrType::Set(left_id)), Some(IrType::Set(right_id))) => {
+                    let left_element = module.set_types.get(left_id as usize).copied();
+                    let right_element = module.set_types.get(right_id as usize).copied();
+                    if left_element != right_element {
+                        report(format!("{position}: SetOperation element types differ"));
+                    }
+                    if matches!(
+                        operation,
+                        crate::SetOperation::Union
+                            | crate::SetOperation::Intersection
+                            | crate::SetOperation::Difference
+                            | crate::SetOperation::SymmetricDifference
+                    ) {
+                        IrType::Set(left_id)
+                    } else {
+                        IrType::Boolean
+                    }
+                }
+                _ => {
+                    report(format!(
+                        "{position}: SetOperation operands are not matching Sets"
+                    ));
+                    IrType::Boolean
+                }
+            };
+            expect(inst.ty, expected, position, "SetOperation", report);
+        }
         InstKind::SetAdd { receiver, value } => {
-            expect(inst.ty, IrType::Void, position, "SetAdd", report);
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "SetAdd",
+                report,
+            );
             let expected = if let Some(IrType::Set(id)) = type_of(receiver) {
                 module
                     .set_types
@@ -7409,14 +7814,11 @@ fn verify_instruction(
             } else {
                 (IrType::Void, IrType::Void)
             };
-            let expected = Nullable::of(expected_value).map(IrType::Nullable);
-            if let Some(expected) = expected
-                && inst.ty != expected
-            {
+            if inst.ty != expected_value {
                 report(format!(
                     "{position}: MapGet declares {}, expected {}",
                     inst.ty.as_str(),
-                    expected.as_str()
+                    expected_value.as_str()
                 ));
             }
             if let Some(ty) = type_of(key)
@@ -8681,6 +9083,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
+        InstKind::Float128Format { value, spec } => vec![*value, *spec],
         InstKind::Println(operand)
         | InstKind::Print(operand)
         | InstKind::PrintlnStderr(operand)
@@ -9158,8 +9561,28 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::DependentFrom { base, field_ptr } => vec![*base, *field_ptr],
         InstKind::PinObject { object } | InstKind::UnpinObject { object } => vec![*object],
         InstKind::ArrayNew { capacity, .. } => vec![*capacity],
-        InstKind::ListNew { .. } | InstKind::MapNew { .. } | InstKind::SetNew { .. } => Vec::new(),
+        InstKind::ListNew { .. }
+        | InstKind::DequeNew { .. }
+        | InstKind::PriorityQueueNew { .. }
+        | InstKind::MapNew { .. }
+        | InstKind::SetNew { .. } => Vec::new(),
         InstKind::ArrayListLoad { receiver, index } => vec![*receiver, *index],
+        InstKind::DequeLength(receiver)
+        | InstKind::DequeIsEmpty(receiver)
+        | InstKind::DequeVersion(receiver)
+        | InstKind::DequeFront(receiver)
+        | InstKind::DequeBack(receiver)
+        | InstKind::DequePopFront(receiver)
+        | InstKind::DequePopBack(receiver)
+        | InstKind::DequeClear(receiver) => vec![*receiver],
+        InstKind::PriorityQueueLength(receiver)
+        | InstKind::PriorityQueueIsEmpty(receiver)
+        | InstKind::PriorityQueueVersion(receiver)
+        | InstKind::PriorityQueuePeek(receiver)
+        | InstKind::PriorityQueueDequeue(receiver) => vec![*receiver],
+        InstKind::PriorityQueueEnqueue { receiver, value } => vec![*receiver, *value],
+        InstKind::DequePushFront { receiver, value }
+        | InstKind::DequePushBack { receiver, value } => vec![*receiver, *value],
         InstKind::ArrayListStore {
             receiver,
             index,
@@ -9174,9 +9597,18 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::ListRemove { receiver, index } => vec![*receiver, *index],
         InstKind::ListRemoveValue { receiver, value } => vec![*receiver, *value],
         InstKind::MapLength(receiver)
+        | InstKind::MapVersion(receiver)
+        | InstKind::MapKeys(receiver)
+        | InstKind::MapSortedKeys(receiver)
+        | InstKind::MapValues(receiver)
+        | InstKind::MapEntries(receiver)
         | InstKind::MapIsEmpty(receiver)
+        | InstKind::MapClear(receiver)
         | InstKind::SetLength(receiver)
+        | InstKind::SetValues(receiver)
+        | InstKind::SetSortedElements(receiver)
         | InstKind::SetIsEmpty(receiver)
+        | InstKind::SetClear(receiver)
         | InstKind::ArrayClone { receiver }
         | InstKind::ListClone { receiver } => vec![*receiver],
         InstKind::MapSet {
@@ -9192,6 +9624,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         | InstKind::SetRemove { receiver, value } => {
             vec![*receiver, *value]
         }
+        InstKind::SetOperation { left, right, .. } => vec![*left, *right],
         InstKind::ArraySlice {
             receiver,
             start,

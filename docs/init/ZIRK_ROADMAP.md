@@ -582,14 +582,17 @@ distinction changes who implements them:
   statics — is implemented in `date-and-time-types`. This phase completes
   the remaining zone-aware types (`Instant`, `ZonedDateTime`, `TimeZone`,
   `Period`), their IANA data, and the `std.time` API.
-- The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>` — are
-  native reference types under the same rule. `Array<T>` (fixed-capacity) and
-  `List<T>` (resizable) are implemented in `array-list-tuple-duration-regex`;
-  `Map<K,V>` and `Set<T>` currently provide a bounded one-word runtime
-  representation, managed-reference tracing, and the documented basic
-  operations. Semantic analysis rejects collection shapes that cannot be
-  represented safely by that ABI; full generic collection representations and
-  the wider `std.collections` API remain roadmap work.
+- The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>`,
+  `Deque<T>`, `Queue<T>`, `Stack<T>`, and `PriorityQueue<T>` — are native
+  reference types. Array/List, ordered Map/Set, and Deque/FIFO/LIFO/priority
+  families have constructors, typed runtime storage, GC tracing, native and
+  interpreter behavior, and focused parity tests. Deque end operations and
+  Queue/Stack operations are amortized O(1); PriorityQueue uses a stable min-heap
+  with O(log n) enqueue/dequeue and O(n log n) ordered iteration. Map/Set support
+  scalar and reference keys/elements, nullable layouts, byte-canonical tuple
+  keys, and eligible payload enums. Structural-record keys, union keys, tuple
+  fields requiring content-based String/Char equality, and nullable Decimal
+  remain rejected until canonical derived Hash/Equal descriptors are available.
 
 `String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
 the search/trim/`substring` methods are delivered in

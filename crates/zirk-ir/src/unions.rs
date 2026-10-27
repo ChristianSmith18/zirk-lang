@@ -963,6 +963,8 @@ fn stable_builtin_key(ty: IrType) -> Result<Vec<u8>, UnionMetadataError> {
                     | Nullable::Enum(_)
                     | Nullable::Array(_)
                     | Nullable::List(_)
+                    | Nullable::Map(_)
+                    | Nullable::Set(_)
             )
     ) {
         return Err(UnionMetadataError::UnsupportedType);
@@ -1065,6 +1067,14 @@ fn encode_nullable(n: Nullable, out: &mut Vec<u8>) {
             out.push(55);
             out.extend(i.to_le_bytes());
         }
+        Nullable::Map(i) => {
+            out.push(56);
+            out.extend(i.to_le_bytes());
+        }
+        Nullable::Set(i) => {
+            out.push(57);
+            out.extend(i.to_le_bytes());
+        }
         Nullable::Atomic(k) => out.push(60 + k as u8),
         Nullable::Union(i) => {
             out.push(58);
@@ -1145,6 +1155,8 @@ fn decode_nullable(r: &mut Reader<'_>) -> Result<Nullable, UnionMetadataError> {
         47 => Nullable::Enum(r.u32()?),
         54 => Nullable::Array(r.u32()?),
         55 => Nullable::List(r.u32()?),
+        56 => Nullable::Map(r.u32()?),
+        57 => Nullable::Set(r.u32()?),
         58 => Nullable::Union(r.u32()?),
         60..=68 => Nullable::Atomic(atomic_from(r.bytes[r.offset - 1] - 60)?),
         _ => return Err(UnionMetadataError::UnsupportedType),
@@ -1484,6 +1496,19 @@ mod tests {
         let decoded = UnionTypeLayout::decode(&layout.encode().unwrap()).unwrap();
         assert_eq!(decoded.alternatives, layout.alternatives);
         assert_eq!(decoded.fingerprint, layout.fingerprint);
+    }
+
+    #[test]
+    fn nullable_map_and_set_types_round_trip_in_ir_metadata() {
+        for ty in [
+            IrType::Nullable(Nullable::Map(3)),
+            IrType::Nullable(Nullable::Set(5)),
+        ] {
+            let encoded = type_key(ty).unwrap();
+            assert_eq!(decode_type(&encoded).unwrap(), ty);
+        }
+        assert_eq!(Nullable::of(IrType::Map(3)), Some(Nullable::Map(3)));
+        assert_eq!(Nullable::of(IrType::Set(5)), Some(Nullable::Set(5)));
     }
 
     #[test]

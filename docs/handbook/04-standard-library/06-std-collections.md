@@ -24,8 +24,18 @@ insertion order.
 > `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end:step`,
 > inferred descending direction, slicing, expansion, and `Iterable<T>` for
 > integer `T` and `Duration`)
-> are delivered by `array-list-tuple-duration-regex`; `Map<K,V>`, `Set<T>`
-> and the wider eager/lazy API remain ahead of the current compiler.
+> are delivered by `array-list-tuple-duration-regex`. `Map<K,V>` and `Set<T>`
+> currently use layout-aware key, element and Map value storage for admitted
+> scalar and reference types, including 128-bit integers and `Float128`; insertion-ordered
+> operations, Set algebra, and typed `Map.keys()`, `Map.values()`,
+> `Map.entries()` and Set iteration snapshots. Nullable layouts with a defined
+> runtime representation (including text), heterogeneous tuples of
+> byte-canonical fields, and payload enums with recursively eligible fields
+> are also covered. Tuples with content-based text fields, nullable Decimal,
+> record derivation, and union key/element support remain incomplete.
+> `Deque<T>`, `PriorityQueue<T>`,
+> `Queue<T>` and `Stack<T>` are part of the target contract but are not
+> implemented yet.
 
 ## Reference, mutation and copying
 
@@ -49,16 +59,50 @@ value contexts project that same result to the value or null. Slices use
 equal-length replacement.
 
 ```zirk
-list.add(value);
-list.insert(index, value);
-inmut removed = list.remove_at(index);
-inmut changed = list.remove(value); // Boolean
-list.splice(start, delete_count, replacement);
+import { stdout } from std.io;
+fn main(): Void {
+    mut list: List<Int32> = List();
+    list.add(1);
+    list.insert(0, 2);
+    inmut changed: Boolean = list.remove(2);
 
-inmut outcome = map.set(key, value);
-// SetResult.Inserted or SetResult.Replaced(previous)
+    mut map: Map<Int32, Int32> = Map();
+    map.set(1, 7); // Void; replacement retains the key's position
+    inmut found: Boolean = map.contains_key(1);
+    inmut outcome: Result<Int32, LookupError> = map.get(1);
+    inmut keys: Array<Int32> = map.keys(); // insertion-order snapshot
+    inmut values: Array<Int32> = map.values(); // insertion-order snapshot
+    inmut entries: Array<Tuple<Int32, Int32>> = map.entries();
 
-inmut inserted = set.add(value); // Boolean
+    mut set: Set<Int32> = Set();
+    inmut inserted: Boolean = set.add(8);
+    inmut present: Boolean = set.contains(8);
+    inmut removed_from_set: Boolean = set.remove(8);
+
+    mut deque: Deque<Int32> = Deque();
+    deque.push_front(1);
+    deque.push_back(2);
+    inmut front: Result<Int32, EmptyCollectionError> = deque.front();
+    inmut last: Result<Int32, EmptyCollectionError> = deque.pop_back();
+
+    mut queue: Queue<Int32> = Queue();
+    queue.enqueue(3);
+    inmut next: Result<Int32, EmptyCollectionError> = queue.dequeue();
+    inmut head: Result<Int32, EmptyCollectionError> = queue.peek();
+
+    mut stack: Stack<Int32> = Stack();
+    stack.push(4);
+    inmut top: Result<Int32, EmptyCollectionError> = stack.pop();
+    inmut peeked: Result<Int32, EmptyCollectionError> = stack.peek();
+
+    mut priority: PriorityQueue<Int32> = PriorityQueue();
+    priority.enqueue(6);
+    priority.enqueue(5);
+    inmut least: Result<Int32, EmptyCollectionError> = priority.peek();
+    inmut removed_least: Result<Int32, EmptyCollectionError> = priority.dequeue();
+    stdout.println((found && inserted && present && removed_from_set).to_string());
+}
+main();
 ```
 
 `Array` never resizes; `fill`, `copy_from` and slice replacement preserve its
@@ -66,10 +110,36 @@ exact length. `List` grows automatically. Only `length` is public: allocation
 capacity, reservation and shrinking remain runtime implementation details.
 `clear()` is a logical operation and makes no observable capacity promise.
 
-Map/Set keys require coherent `Hash` and `Equal`; equal values must hash equally.
-Records and enums can request explicit compiler derivation.
+`Map.length` and `Set.length` have type `UInt64`. `Map.set` returns `Void`;
+`Set.add` returns whether it inserted a new value. Updating a Map key preserves
+its position, while removing and reinserting it appends it to the end.
+Set's `for … in` loop visits an insertion-order snapshot.
+
+Map keys and Set elements require coherent `Hash` and `Equal`; equal values
+must hash equally. Mutable class references use object identity. In the current
+runtime, accepted keys/elements preserve their complete declared storage
+layout. Map values preserve their declared byte layouts. Nullable values,
+tuples, and payload enums derive equality when every participating field has a
+canonical stored equality representation. Text keys/elements use normalized
+content, and floating signed zero is normalized before hashing and comparison.
+Tuple text/Char fields, structural records, and unions have no canonical
+aggregate equality descriptor yet, so the type checker rejects them as keys or
+elements before lowering. Set union, intersection,
+difference and symmetric difference preserve deterministic result order
+without mutating their inputs.
 Sets include union, intersection, difference, symmetric difference and subset,
 superset/disjoint queries.
+
+`Deque<T>` provides front/back pushes, pops and inspection, `clear()`,
+`length: UInt64`, and `is_empty: Boolean`; empty pops and inspection return
+`Result<T, EmptyCollectionError>`. `Queue<T>` exposes only FIFO `enqueue`,
+`dequeue`, and `peek`; `Stack<T>` exposes only LIFO `push`, `pop`, and `peek`.
+Both also provide `clear`, `length`, `is_empty`, and typed empty results.
+`PriorityQueue<T>` accepts Boolean, Char, integer, Float16/32/64/128, Decimal,
+and String values with a natural total order; it dequeues the least value and
+preserves insertion order for ties. All four collection families invalidate
+iterators after structural mutation. Growth failure raises catchable
+`AllocationError` without partial mutation.
 
 ## Eager and lazy transformation
 

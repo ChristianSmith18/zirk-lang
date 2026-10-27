@@ -1,0 +1,33 @@
+import { stdout } from std.io;
+
+class MutableKey {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+
+fn main(): Void {
+    mut first: MutableKey = MutableKey(7);
+    mut alias: MutableKey = first;
+    mut distinct: MutableKey = MutableKey(7);
+
+    mut keys: Set<MutableKey> = Set();
+    stdout.println(keys.add(first).to_string());
+    stdout.println(keys.add(alias).to_string());
+    stdout.println(keys.add(distinct).to_string());
+    first.value = 9;
+    stdout.println(keys.contains(first).to_string());
+    stdout.println(keys.contains(distinct).to_string());
+    for key in keys { stdout.println(key.value.to_string()); }
+
+    mut values: Map<MutableKey, Int32> = Map();
+    values.set(first, 12);
+    stdout.println((values.get(alias) ?? 0).to_string());
+    stdout.println(values.contains_key(distinct).to_string());
+
+    mut references: Map<MutableKey, MutableKey> = Map();
+    references.set(first, distinct);
+    stdout.println((references.get(alias) ?? first).value.to_string());
+    stdout.println(references.entries().length.to_string());
+    for value in references.values() { stdout.println(value.value.to_string()); }
+}
+main();

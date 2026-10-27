@@ -115,8 +115,8 @@ fn a_valid_program_passes_check() {
 }
 
 #[test]
-fn unsupported_structural_mixed_union_is_rejected_at_its_type_declaration() {
-    let dir = workspace("unsupported_structural_mixed_union_input");
+fn structural_mixed_union_is_accepted_by_frontend() {
+    let dir = workspace("structural_mixed_union_input");
     let source = dir.join("main.zrk");
     std::fs::write(
         &source,
@@ -126,20 +126,15 @@ fn unsupported_structural_mixed_union_is_rejected_at_its_type_declaration() {
     )
     .expect("write unsupported union fixture");
 
-    let (success, stdout, stderr) = zirk_check(&source, "unsupported_structural_mixed_union");
+    let (success, stdout, stderr) = zirk_check(&source, "structural_mixed_union");
     assert!(
-        !success,
-        "an unsupported union must not pass frontend checking"
+        success,
+        "supported structural and collection alternatives should type-check"
     );
     assert!(stdout.is_empty(), "zirk check must not write to stdout");
     assert!(
-        stderr.contains("E0423") && stderr.contains("main.zrk:2:"),
-        "the unsupported representation needs a source-located lowering diagnostic:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("compiler produced invalid IR")
-            && !stderr.contains("internal compiler error"),
-        "unsupported source combinations must be rejected before backend emission:\n{stderr}"
+        stderr.is_empty(),
+        "zirk check must not produce diagnostics: {stderr}"
     );
 }
 

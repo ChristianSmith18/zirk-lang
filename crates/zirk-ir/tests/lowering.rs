@@ -242,7 +242,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 27] = [
+const NATIVE_FAILURE_CODES: [&str; 30] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -266,6 +266,9 @@ const NATIVE_FAILURE_CODES: [&str; 27] = [
     // `enum-static-members`: the `Result`-carried error type of
     // `EnumType.from_name`/`EnumType.from_value`.
     "E_LOOKUP",
+    "E_ALLOCATION",
+    "E_EMPTY_COLLECTION",
+    "E_ITERATOR_INVALIDATED",
     // `date-and-time-types`: the errors the `Date`/`Time` constructors
     // throw.
     "E_INVALID_DATE",
@@ -1223,19 +1226,27 @@ fn universal_rendering_lowers_through_its_runtime_and_control_flow_shapes() {
         })
         .collect::<Vec<_>>();
 
-    for callee in [
-        "zirk_rt_map_sorted_keys",
-        "zirk_rt_set_sorted_elements",
-        "zirk_range_to_string",
-        "zirk_regex_to_string",
-    ] {
+    for callee in ["zirk_range_to_string", "zirk_regex_to_string"] {
         assert!(calls.contains(&callee), "missing {callee}; saw {calls:?}");
     }
     assert!(
         kinds
             .iter()
-            .any(|kind| matches!(kind, InstKind::WordCast(_))),
-        "Map/Set snapshots must cast their words back to typed values: {kinds:?}"
+            .any(|kind| matches!(kind, InstKind::MapSortedKeys(_)))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::SetSortedElements(_)))
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|kind| matches!(kind, InstKind::MapSortedKeys(_)))
+            && kinds
+                .iter()
+                .any(|kind| matches!(kind, InstKind::SetSortedElements(_))),
+        "Map/Set rendering must use typed ordered snapshots: {kinds:?}"
     );
     assert!(
         kinds.iter().any(|kind| matches!(kind, InstKind::Unwrap(_))) && main.blocks.len() > 1,

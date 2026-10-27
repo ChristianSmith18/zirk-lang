@@ -1,7 +1,8 @@
 //! Runtime helpers for `Set<T>`.
 
-use std::collections::HashSet;
 use std::ffi::c_void;
+
+use crate::ordered::{OrderedMap, TryKeyClone};
 
 const WORD: usize = std::mem::size_of::<usize>();
 const BODY_OFFSET: usize = crate::collector::HEADER_BYTES;
@@ -10,11 +11,12 @@ const BODY_OFFSET: usize = crate::collector::HEADER_BYTES;
 struct SetBody {
     elements: SetElements,
     reference_offsets: Box<[usize]>,
+    element_size: usize,
 }
 
 enum SetElements {
-    Words(HashSet<i64>),
-    Text(HashSet<Option<Box<str>>>),
+    Words(OrderedMap<Vec<u8>, ()>),
+    Text(OrderedMap<Option<Box<str>>, ()>),
 }
 
 impl SetElements {
@@ -26,17 +28,54 @@ impl SetElements {
     }
 
     fn is_empty(&self) -> bool {
-        self.len() == 0
+        match self {
+            Self::Words(elements) => elements.is_empty(),
+            Self::Text(elements) => elements.is_empty(),
+        }
     }
 }
 
-fn text_element(word: i64) -> Option<Box<str>> {
+fn text_element(bytes: &[u8]) -> Option<Box<str>> {
+    let word = if bytes.len() == WORD {
+        read_word(bytes)
+    } else {
+        if bytes.first().copied().unwrap_or(0) == 0 {
+            return None;
+        }
+        read_word(bytes.get(WORD..)?)
+    };
     let handle = word as usize as *mut c_void;
     if handle.is_null() {
         return None;
     }
     let text = unsafe { (*crate::string::payload_ptr(handle)).as_str() };
     Some(zirk_runtime_core::text::normalize(text, "NFC").into_boxed_str())
+}
+
+fn encode_text_element(size: usize, text: Option<&str>) -> Vec<u8> {
+    let handle = text.map_or(std::ptr::null_mut(), |text| unsafe {
+        crate::string::zirk_str_from_utf8(text.as_ptr(), text.len())
+    });
+    if size == WORD {
+        return (handle as usize as i64).to_ne_bytes().to_vec();
+    }
+    let mut bytes = vec![0; size];
+    if text.is_some() {
+        assert!(
+            size >= WORD * 2,
+            "nullable text element layout is too small"
+        );
+        bytes[0] = 1;
+        bytes[WORD..WORD * 2].copy_from_slice(&(handle as usize).to_ne_bytes());
+    }
+    bytes
+}
+
+fn read_word(bytes: &[u8]) -> i64 {
+    let mut word = 0_i64;
+    let count = bytes.len().min(WORD);
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), (&mut word as *mut i64).cast(), count) };
+    word
 }
 
 #[unsafe(no_mangle)]
@@ -51,7 +90,7 @@ unsafe fn body(set: *mut c_void) -> *mut SetBody {
     unsafe { (set as *mut u8).add(BODY_OFFSET).cast() }
 }
 
-unsafe fn reference_offsets(pointer: *const usize, count: usize) -> Box<[usize]> {
+unsafe fn reference_offsets(pointer: *const usize, count: usize, size: usize) -> Box<[usize]> {
     if count == 0 {
         return Box::new([]);
     }
@@ -59,8 +98,8 @@ unsafe fn reference_offsets(pointer: *const usize, count: usize) -> Box<[usize]>
     let offsets = unsafe { std::slice::from_raw_parts(pointer, count) };
     for &offset in offsets {
         assert!(
-            offset.checked_add(WORD).is_some_and(|end| end <= WORD),
-            "set reference offset is outside its word-sized element"
+            offset.checked_add(WORD).is_some_and(|end| end <= size),
+            "set reference offset is outside its element"
         );
     }
     offsets.to_vec().into_boxed_slice()
@@ -68,10 +107,10 @@ unsafe fn reference_offsets(pointer: *const usize, count: usize) -> Box<[usize]>
 
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_set_new() -> *mut c_void {
-    unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, false) }
+    unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, false) }
 }
 
-/// Creates a set and records managed-reference offsets in its word-sized
+/// Creates a set and records managed-reference offsets in its typed
 /// elements. The metadata is owned by the GC handle and released on sweep.
 ///
 /// # Safety
@@ -80,6 +119,7 @@ pub extern "C" fn zirk_rt_set_new() -> *mut c_void {
 pub unsafe extern "C" fn zirk_rt_set_new_with_layout(
     offsets: *const usize,
     offset_count: usize,
+    element_size: usize,
     string_content: bool,
 ) -> *mut c_void {
     assert!(
@@ -92,16 +132,17 @@ pub unsafe extern "C" fn zirk_rt_set_new_with_layout(
             std::mem::align_of::<SetBody>(),
         )
     };
-    let reference_offsets = unsafe { reference_offsets(offsets, offset_count) };
+    let reference_offsets = unsafe { reference_offsets(offsets, offset_count, element_size) };
     unsafe {
         *(object as *mut *mut c_void) = set_descriptor();
         body(object).write(SetBody {
             elements: if string_content {
-                SetElements::Text(HashSet::new())
+                SetElements::Text(OrderedMap::default())
             } else {
-                SetElements::Words(HashSet::new())
+                SetElements::Words(OrderedMap::default())
             },
             reference_offsets,
+            element_size,
         });
     }
     object
@@ -113,25 +154,23 @@ pub(crate) unsafe fn mark_entries(
     mark: &mut dyn FnMut(*mut c_void),
 ) {
     let body = unsafe { &*body(set) };
-    let mut visit = |element_word: i64| {
-        let candidate = element_word as usize as *mut c_void;
-        if allocations.contains(&(candidate as usize)) {
-            mark(candidate);
-        }
+    let mut visit = |element: &[u8]| {
         for &offset in &body.reference_offsets {
             let candidate = unsafe {
-                ((&element_word as *const i64 as *const u8)
+                element
+                    .as_ptr()
                     .add(offset)
-                    .cast::<*mut c_void>())
-                .read_unaligned()
+                    .cast::<*mut c_void>()
+                    .read_unaligned()
             };
             if allocations.contains(&(candidate as usize)) {
                 mark(candidate);
             }
         }
     };
-    if let SetElements::Words(elements) = &body.elements {
-        elements.iter().copied().for_each(&mut visit);
+    match &body.elements {
+        SetElements::Words(elements) => elements.iter().for_each(|(value, _)| visit(value)),
+        SetElements::Text(_) => {}
     }
 }
 
@@ -147,44 +186,310 @@ pub extern "C" fn zirk_rt_set_is_empty(set: *mut c_void) -> i32 {
     unsafe { (&*body(set)).elements.is_empty() as i32 }
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_set_length(set: *mut c_void) -> usize {
+pub extern "C" fn zirk_rt_set_length(set: *mut c_void) -> u64 {
     if set.is_null() {
         return 0;
     }
-    unsafe { (&*body(set)).elements.len() }
+    unsafe { (&*body(set)).elements.len() as u64 }
 }
+
+/// Returns the elements in insertion order as a typed Array snapshot.
+/// Text elements are materialized as fresh immutable String handles.
+///
+/// # Safety
+/// The set must be live. The element layout and reference offsets must match
+/// its declared `Set<T>` element type.
 #[unsafe(no_mangle)]
-pub extern "C" fn zirk_rt_set_add(set: *mut c_void, value: i64) {
-    if !set.is_null() {
-        let body = unsafe { &mut *body(set) };
-        match &mut body.elements {
-            SetElements::Words(elements) => {
-                elements.insert(value);
+pub unsafe extern "C" fn zirk_rt_set_values(
+    set: *mut c_void,
+    element_size: usize,
+    element_align: usize,
+    reference_offsets: *const usize,
+    reference_offset_count: usize,
+) -> *mut c_void {
+    if set.is_null() {
+        return std::ptr::null_mut();
+    }
+    let set_body = unsafe { &*body(set) };
+    assert_eq!(
+        element_size, set_body.element_size,
+        "Set.values layout differs from the stored element layout"
+    );
+    let elements = &set_body.elements;
+    let result = unsafe {
+        crate::array::zirk_rt_array_new_with_layout(
+            elements.len(),
+            element_size,
+            element_align,
+            reference_offsets,
+            reference_offset_count,
+        )
+    };
+    match elements {
+        SetElements::Words(elements) => {
+            for (index, (value, _)) in elements.iter().enumerate() {
+                unsafe { crate::array::write_bytes(result, index, element_size, value) };
             }
-            SetElements::Text(elements) => {
-                elements.insert(text_element(value));
+        }
+        SetElements::Text(elements) => {
+            for (index, (text, _)) in elements.iter().enumerate() {
+                let bytes = encode_text_element(element_size, text.as_deref());
+                if element_size == WORD {
+                    let word = i64::from_ne_bytes(
+                        bytes
+                            .as_slice()
+                            .try_into()
+                            .expect("word-sized text element"),
+                    );
+                    unsafe { crate::array::write_word_sized(result, index, element_size, word) };
+                } else {
+                    unsafe { crate::array::write_bytes(result, index, element_size, &bytes) };
+                }
             }
         }
     }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_set_add(set: *mut c_void, value: i64) -> i32 {
+    let bytes = unsafe { std::slice::from_raw_parts((&value as *const i64).cast::<u8>(), WORD) };
+    unsafe { zirk_rt_set_add_typed(set, bytes.as_ptr(), bytes.len()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_add_typed(
+    set: *mut c_void,
+    value: *const u8,
+    size: usize,
+) -> i32 {
+    assert!(!value.is_null() || size == 0, "set element pointer is null");
+    let value = unsafe { std::slice::from_raw_parts(value, size) };
+    if !set.is_null() {
+        let body = unsafe { &mut *body(set) };
+        assert_eq!(
+            size, body.element_size,
+            "set element size differs from its declared layout"
+        );
+        let mut value_copy = Vec::new();
+        if value_copy.try_reserve_exact(value.len()).is_err() {
+            return 2;
+        }
+        value_copy.extend_from_slice(value);
+        let value = value_copy;
+        return match &mut body.elements {
+            SetElements::Words(elements) => match elements.insert(value, ()) {
+                Ok(previous) => previous.is_none() as i32,
+                Err(()) => 2,
+            },
+            SetElements::Text(elements) => match elements.insert(text_element(&value), ()) {
+                Ok(previous) => previous.is_none() as i32,
+                Err(()) => 2,
+            },
+        };
+    }
+    0
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_set_contains(set: *mut c_void, value: i64) -> i32 {
+    let bytes = unsafe { std::slice::from_raw_parts((&value as *const i64).cast::<u8>(), WORD) };
+    unsafe { zirk_rt_set_contains_typed(set, bytes.as_ptr(), bytes.len()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_contains_typed(
+    set: *mut c_void,
+    value: *const u8,
+    size: usize,
+) -> i32 {
     if set.is_null() {
         return 0;
     }
+    assert!(!value.is_null() || size == 0, "set element pointer is null");
+    let value = unsafe { std::slice::from_raw_parts(value, size) };
+    assert_eq!(
+        size,
+        unsafe { (*body(set)).element_size },
+        "set element size differs from its declared layout"
+    );
     match &unsafe { &*body(set) }.elements {
-        SetElements::Words(elements) => elements.contains(&value) as i32,
-        SetElements::Text(elements) => elements.contains(&text_element(value)) as i32,
+        SetElements::Words(elements) => elements.get(&value.to_vec()).is_some() as i32,
+        SetElements::Text(elements) => elements.get(&text_element(value)).is_some() as i32,
     }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_set_remove(set: *mut c_void, value: i64) -> i32 {
+    let bytes = unsafe { std::slice::from_raw_parts((&value as *const i64).cast::<u8>(), WORD) };
+    unsafe { zirk_rt_set_remove_typed(set, bytes.as_ptr(), bytes.len()) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_remove_typed(
+    set: *mut c_void,
+    value: *const u8,
+    size: usize,
+) -> i32 {
     if set.is_null() {
         return 0;
     }
+    assert!(!value.is_null() || size == 0, "set element pointer is null");
+    let value = unsafe { std::slice::from_raw_parts(value, size) };
+    assert_eq!(
+        size,
+        unsafe { (*body(set)).element_size },
+        "set element size differs from its declared layout"
+    );
     match &mut unsafe { &mut *body(set) }.elements {
-        SetElements::Words(elements) => elements.remove(&value) as i32,
-        SetElements::Text(elements) => elements.remove(&text_element(value)) as i32,
+        SetElements::Words(elements) => elements.remove(&value.to_vec()).is_some() as i32,
+        SetElements::Text(elements) => elements.remove(&text_element(value)).is_some() as i32,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_set_clear(set: *mut c_void) {
+    if !set.is_null() {
+        match &mut unsafe { &mut *body(set) }.elements {
+            SetElements::Words(elements) => elements.clear(),
+            SetElements::Text(elements) => elements.clear(),
+        }
+    }
+}
+
+fn new_like(set: *mut c_void) -> *mut c_void {
+    if set.is_null() {
+        return zirk_rt_set_new();
+    }
+    let body = unsafe { &*body(set) };
+    match &body.elements {
+        SetElements::Words(_) => unsafe {
+            zirk_rt_set_new_with_layout(
+                body.reference_offsets.as_ptr(),
+                body.reference_offsets.len(),
+                body.element_size,
+                false,
+            )
+        },
+        SetElements::Text(_) => unsafe {
+            zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, true)
+        },
+    }
+}
+
+/// Applies one deterministic set operation: 0 union, 1 intersection,
+/// 2 difference, 3 symmetric difference.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_set_algebra(
+    left: *mut c_void,
+    right: *mut c_void,
+    operation: i32,
+) -> *mut c_void {
+    let result = new_like(left);
+    if left.is_null() || right.is_null() {
+        return result;
+    }
+    let left_elements = &unsafe { &*body(left) }.elements;
+    let right_elements = &unsafe { &*body(right) }.elements;
+    let result_elements = &mut unsafe { &mut *body(result) }.elements;
+    match (left_elements, right_elements, result_elements) {
+        (SetElements::Words(left), SetElements::Words(right), SetElements::Words(result)) => {
+            for (value, _) in left.iter() {
+                let in_right = right.get(value).is_some();
+                if operation == 0
+                    || (operation == 1 && in_right)
+                    || (operation == 2 && !in_right)
+                    || (operation == 3 && !in_right)
+                {
+                    result
+                        .insert(
+                            value
+                                .try_clone_key()
+                                .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed()),
+                            (),
+                        )
+                        .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                }
+            }
+            if matches!(operation, 0 | 3) {
+                for (value, _) in right.iter() {
+                    let in_left = left.get(value).is_some();
+                    if (operation == 0 || operation == 3) && !in_left {
+                        result
+                            .insert(
+                                value.try_clone_key().unwrap_or_else(|()| {
+                                    crate::failure::zirk_rt_allocation_failed()
+                                }),
+                                (),
+                            )
+                            .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                    }
+                }
+            }
+        }
+        (SetElements::Text(left), SetElements::Text(right), SetElements::Text(result)) => {
+            for (value, _) in left.iter() {
+                let in_right = right.get(value).is_some();
+                if operation == 0
+                    || (operation == 1 && in_right)
+                    || (operation == 2 && !in_right)
+                    || (operation == 3 && !in_right)
+                {
+                    result
+                        .insert(
+                            value
+                                .try_clone_key()
+                                .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed()),
+                            (),
+                        )
+                        .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                }
+            }
+            if matches!(operation, 0 | 3) {
+                for (value, _) in right.iter() {
+                    let in_left = left.get(value).is_some();
+                    if (operation == 0 || operation == 3) && !in_left {
+                        result
+                            .insert(
+                                value.try_clone_key().unwrap_or_else(|()| {
+                                    crate::failure::zirk_rt_allocation_failed()
+                                }),
+                                (),
+                            )
+                            .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                    }
+                }
+            }
+        }
+        _ => crate::failure::fatal("set algebra received incompatible layouts"),
+    }
+    result
+}
+
+/// Compares two sets: 0 subset, 1 superset, 2 disjoint.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_set_relation(
+    left: *mut c_void,
+    right: *mut c_void,
+    relation: i32,
+) -> i32 {
+    if left.is_null() || right.is_null() {
+        return (relation == 2) as i32;
+    }
+    let left = &unsafe { &*body(left) }.elements;
+    let right = &unsafe { &*body(right) }.elements;
+    match (left, right) {
+        (SetElements::Words(left), SetElements::Words(right)) => match relation {
+            0 => left.iter().all(|(value, _)| right.get(value).is_some()) as i32,
+            1 => right.iter().all(|(value, _)| left.get(value).is_some()) as i32,
+            2 => left.iter().all(|(value, _)| right.get(value).is_none()) as i32,
+            _ => 0,
+        },
+        (SetElements::Text(left), SetElements::Text(right)) => match relation {
+            0 => left.iter().all(|(value, _)| right.get(value).is_some()) as i32,
+            1 => right.iter().all(|(value, _)| left.get(value).is_some()) as i32,
+            2 => left.iter().all(|(value, _)| right.get(value).is_none()) as i32,
+            _ => 0,
+        },
+        _ => 0,
     }
 }
 
@@ -193,30 +498,75 @@ pub unsafe extern "C" fn zirk_rt_set_sorted_elements(
     set: *mut c_void,
     string_content: i64,
 ) -> *mut c_void {
+    unsafe { set_elements_snapshot(set, string_content, true) }
+}
+
+/// Returns elements in insertion order for collection iteration. Rendering
+/// uses `zirk_rt_set_sorted_elements` to retain its canonical text form.
+#[cfg(test)]
+pub(crate) unsafe fn set_elements_in_insertion_order(
+    set: *mut c_void,
+    string_content: i64,
+) -> *mut c_void {
+    unsafe { set_elements_snapshot(set, string_content, false) }
+}
+
+unsafe fn set_elements_snapshot(
+    set: *mut c_void,
+    string_content: i64,
+    sorted: bool,
+) -> *mut c_void {
     if string_content != 0 {
         let mut elements: Vec<Option<Box<str>>> = if set.is_null() {
             Vec::new()
         } else {
             match &unsafe { &*body(set) }.elements {
-                SetElements::Text(elements) => elements.iter().cloned().collect(),
+                SetElements::Text(elements) => elements
+                    .iter()
+                    .map(|(element, _)| element.clone())
+                    .collect(),
                 SetElements::Words(elements) => elements.iter().map(|_| None).collect(),
             }
         };
-        elements.sort();
+        if sorted {
+            elements.sort();
+        }
         return crate::map::snapshots_array(&elements);
     }
-    let mut elements: Vec<i64> = if set.is_null() {
-        Vec::new()
-    } else {
-        match &unsafe { &*body(set) }.elements {
-            SetElements::Words(elements) => elements.iter().copied().collect(),
-            SetElements::Text(elements) => elements.iter().map(|_| 0).collect(),
-        }
+    let (element_size, reference_offsets, mut elements): (usize, Vec<usize>, Vec<Vec<u8>>) =
+        if set.is_null() {
+            (WORD, Vec::new(), Vec::new())
+        } else {
+            let set_body = unsafe { &*body(set) };
+            let elements = match &set_body.elements {
+                SetElements::Words(elements) => {
+                    elements.iter().map(|(value, _)| value.clone()).collect()
+                }
+                SetElements::Text(elements) => elements
+                    .iter()
+                    .map(|_| vec![0; set_body.element_size])
+                    .collect(),
+            };
+            (
+                set_body.element_size,
+                set_body.reference_offsets.to_vec(),
+                elements,
+            )
+        };
+    if sorted {
+        elements.sort_unstable();
+    }
+    let array = unsafe {
+        crate::array::zirk_rt_array_new_with_layout(
+            elements.len(),
+            element_size,
+            element_size.max(1).next_power_of_two(),
+            reference_offsets.as_ptr(),
+            reference_offsets.len(),
+        )
     };
-    elements.sort_unstable();
-    let array = unsafe { crate::array::zirk_rt_array_new(elements.len(), WORD, WORD, false) };
     for (index, value) in elements.iter().enumerate() {
-        unsafe { crate::array::write_word(array, index, *value) };
+        unsafe { crate::array::write_bytes(array, index, element_size, value) };
     }
     array
 }
@@ -228,8 +578,8 @@ mod tests {
     #[test]
     fn set_operations_preserve_word_value_semantics() {
         let set = zirk_rt_set_new();
-        zirk_rt_set_add(set, 7);
-        zirk_rt_set_add(set, 7);
+        assert_eq!(zirk_rt_set_add(set, 7), 1);
+        assert_eq!(zirk_rt_set_add(set, 7), 0);
         assert_eq!(zirk_rt_set_length(set), 1);
         assert_eq!(zirk_rt_set_contains(set, 7), 1);
         assert_eq!(zirk_rt_set_remove(set, 7), 1);
@@ -238,10 +588,89 @@ mod tests {
     }
 
     #[test]
+    fn insertion_reservation_failure_leaves_set_unchanged() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let set = zirk_rt_set_new();
+        assert_eq!(zirk_rt_set_add(set, 7), 1);
+
+        crate::ordered::fail_next_insert_reservation_for_tests();
+        assert_eq!(zirk_rt_set_add(set, 9), 2);
+        assert_eq!(zirk_rt_set_length(set), 1);
+        assert_eq!(zirk_rt_set_contains(set, 7), 1);
+        assert_eq!(zirk_rt_set_contains(set, 9), 0);
+        assert_eq!(zirk_rt_set_add(set, 7), 0);
+    }
+
+    #[test]
+    fn element_snapshot_preserves_insertion_order() {
+        let set = zirk_rt_set_new();
+        zirk_rt_set_add(set, 9);
+        zirk_rt_set_add(set, 3);
+        zirk_rt_set_add(set, 7);
+        let snapshot = unsafe { set_elements_in_insertion_order(set, 0) };
+        let words = unsafe {
+            (0..crate::array::zirk_rt_array_length(snapshot))
+                .map(|i| {
+                    *(crate::array::zirk_rt_array_element(snapshot, i as i64, WORD) as *const i64)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(words, [9, 3, 7]);
+    }
+
+    #[test]
+    fn sorted_element_snapshot_uses_natural_order_for_rendering() {
+        let set = zirk_rt_set_new();
+        zirk_rt_set_add(set, 9);
+        zirk_rt_set_add(set, 3);
+        zirk_rt_set_add(set, 7);
+        let snapshot = unsafe { zirk_rt_set_sorted_elements(set, 0) };
+        let words = unsafe {
+            (0..crate::array::zirk_rt_array_length(snapshot))
+                .map(|i| {
+                    *(crate::array::zirk_rt_array_element(snapshot, i as i64, WORD) as *const i64)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(words, [3, 7, 9]);
+    }
+
+    #[test]
+    fn set_algebra_preserves_contract_order_and_does_not_mutate_inputs() {
+        let left = zirk_rt_set_new();
+        let right = zirk_rt_set_new();
+        for value in [3, 1, 4] {
+            zirk_rt_set_add(left, value);
+        }
+        for value in [1, 2, 4] {
+            zirk_rt_set_add(right, value);
+        }
+        let values = |set| unsafe {
+            let snapshot = set_elements_in_insertion_order(set, 0);
+            (0..crate::array::zirk_rt_array_length(snapshot))
+                .map(|index| {
+                    *(crate::array::zirk_rt_array_element(snapshot, index as i64, WORD)
+                        as *const i64)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(zirk_rt_set_algebra(left, right, 0)), [3, 1, 4, 2]);
+        assert_eq!(values(zirk_rt_set_algebra(left, right, 1)), [1, 4]);
+        assert_eq!(values(zirk_rt_set_algebra(left, right, 2)), [3]);
+        assert_eq!(values(zirk_rt_set_algebra(left, right, 3)), [3, 2]);
+        assert_eq!(zirk_rt_set_relation(left, right, 0), 0);
+        assert_eq!(zirk_rt_set_relation(left, right, 1), 0);
+        assert_eq!(zirk_rt_set_relation(left, right, 2), 0);
+        assert_eq!(values(left), [3, 1, 4]);
+        assert_eq!(values(right), [1, 2, 4]);
+    }
+
+    #[test]
     fn string_content_elements_use_language_equality_and_hashing() {
         let _guard = crate::collector::test_support::test_guard();
         crate::collector::reset_state_for_tests();
-        let set = unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, true) };
+        let set = unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, true) };
         let first = crate::string::alloc_owned("same-element");
         let second = crate::string::alloc_owned("same-element");
         assert_ne!(first, second);
@@ -257,7 +686,7 @@ mod tests {
     fn mutable_string_element_keeps_its_inserted_value_and_survives_source_mutation() {
         let guard = crate::collector::test_support::test_guard();
         crate::collector::reset_state_for_tests();
-        let set = unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, true) };
+        let set = unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, true) };
         let original = crate::string::alloc_owned("before");
         let replacement = crate::string::alloc_owned("after");
         let equivalent = crate::string::alloc_owned("before");
@@ -309,7 +738,7 @@ mod tests {
         let guard = crate::collector::test_support::test_guard();
         crate::collector::reset_state_for_tests();
         let offsets = [0usize];
-        let set = unsafe { zirk_rt_set_new_with_layout(offsets.as_ptr(), 1, false) };
+        let set = unsafe { zirk_rt_set_new_with_layout(offsets.as_ptr(), 1, WORD, false) };
         let value = crate::string::alloc_owned("set-root");
         zirk_rt_set_add(set, value as i64);
         let mut handle = set;

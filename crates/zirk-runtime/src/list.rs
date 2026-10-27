@@ -125,6 +125,14 @@ pub(crate) unsafe fn drop_body(list: *mut c_void) {
 /// `list` must be a live list produced by this runtime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_rt_list_length(list: *mut c_void) -> usize {
+    if !list.is_null() && unsafe { read_ptr(list, 0) } == crate::deque::deque_descriptor() {
+        return crate::deque::zirk_rt_deque_length(list) as usize;
+    }
+    if !list.is_null()
+        && unsafe { read_ptr(list, 0) } == crate::priority_queue::priority_queue_descriptor()
+    {
+        return crate::priority_queue::zirk_rt_priority_queue_length(list) as usize;
+    }
     unsafe { read_usize(list, LENGTH_OFFSET) }
 }
 
@@ -305,6 +313,22 @@ pub unsafe extern "C" fn zirk_rt_list_element(
     let Some(index) = zirk_runtime_core::collections::element_index(length, index) else {
         crate::failure::zirk_rt_index_out_of_bounds();
     };
+    if !list.is_null() && unsafe { read_ptr(list, 0) } == crate::deque::deque_descriptor() {
+        let element = unsafe { crate::deque::zirk_rt_deque_element(list, index) };
+        if element.is_null() {
+            crate::failure::zirk_rt_index_out_of_bounds();
+        }
+        return element;
+    }
+    if !list.is_null()
+        && unsafe { read_ptr(list, 0) } == crate::priority_queue::priority_queue_descriptor()
+    {
+        let element = unsafe { crate::priority_queue::zirk_rt_priority_queue_element(list, index) };
+        if element.is_null() {
+            crate::failure::zirk_rt_index_out_of_bounds();
+        }
+        return element;
+    }
     let data = unsafe { data_pointer(list) };
     if data.is_null() {
         crate::failure::zirk_rt_index_out_of_bounds();

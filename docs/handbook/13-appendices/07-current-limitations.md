@@ -11,10 +11,21 @@ nominal reference types. Their existence in documentation does not imply every p
 stage implements them.
 
 The delivered `Map`/`Set` runtime remains intentionally narrower than the
-generic API contract: entries use a one-word representation, supported managed
-references are traced, mutable text keys/elements are normalized snapshots, and
-aggregate layouts that cannot be represented safely are rejected by semantic
-analysis. The native Regex cache is bounded to 128 entries, 16 KiB per source
+generic API contract: admitted keys, elements, and Map values use typed declared
+layouts; supported managed references are traced; mutable text keys/elements
+use content equality; and aggregate key/element layouts without a supported
+`Hash`/`Equal` derivation are rejected by semantic analysis. Nullable layouts,
+byte-canonical tuples, and payload enums with recursively eligible fields are
+supported. Tuple fields requiring content-based String/Char equality,
+structural-record keys, union keys/elements, and nullable Decimal remain
+unsupported. Map and Set traversal is insertion-ordered; Map exposes typed
+key/value/entry snapshots, Set exposes ordered algebra and `for … in`,
+`Map.set` returns `Void`, and `Set.add` returns whether it inserted a new item.
+Deque, FIFO Queue, LIFO Stack, and stable minimum-first PriorityQueue have
+native/runtime implementations, interpreter parity, typed empty outcomes,
+iterator invalidation, and GC tracing. Their required operation and storage
+costs are listed in the collection contract chapter. The
+native Regex cache is bounded to 128 entries, 16 KiB per source
 pattern, 256 KiB total retained pattern text, and 256 KiB compiled size per
 pattern; when full, new patterns are rejected instead of evicting handles that
 may still be live. Numeric casts and temporal arithmetic use checked bounds;
@@ -260,9 +271,6 @@ Current high-impact delivery limits include:
   Contract<T>` satisfaction (contract members that name the contract's own
   `T` were since covered by the Phase 3 OOP closing slice described above).
   `String.split` remains pending.
-- `Float128` arithmetic lacks complete Windows verification. `Float128`
-  `to_string()` is implemented by truncating to `Float64` first, which can
-  lose precision for values not exactly representable in `f64`.
 - Exact `Decimal` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full
   28-digit budget the rational operations use. `Decimal.format(spec)` and an

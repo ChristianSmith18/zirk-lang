@@ -1,9 +1,10 @@
 # Sets
 
 `Set<T>` stores unique values according to the type's equality contract. The
-current compiler supports a restricted one-word runtime representation and
-rejects unsupported aggregate element shapes during semantic analysis.
-Supported managed references are traced by the collector. `String` and `Char`
+runtime stores admitted elements using their complete declared byte layout,
+including 128-bit integers and `Float128`; unsupported aggregate element shapes
+are still rejected during semantic analysis. Managed references inside
+supported elements are traced by the collector. `String` and `Char`
 elements are stored as normalized text snapshots so later source-string
 mutation cannot invalidate their hash.
 
@@ -12,9 +13,13 @@ mut permissions: Set<Permission> = Set();
 permissions.add(Permission.Network);
 ```
 
-Adding an equal value does not create a duplicate. Set membership is clearer than scanning a list when uniqueness is part of the domain.
+Adding an equal value does not create a duplicate. In the current runtime,
+class references use object identity; String and Char values use normalized
+content snapshots. Set algebra returns values in deterministic order and leaves
+its input sets unchanged.
 
-As with maps, iteration order is not implied unless the specific implementation promises it. Mutable elements whose equality changes while stored can violate invariants and should be rejected or avoided.
+Set `for … in` iterates an insertion-order snapshot. Structural mutation after
+iteration starts therefore does not invalidate that snapshot.
 
 The generic constraint on `T` is part of the type's safety contract. Union, intersection, difference, subset, and membership operations preserve `T`; mutation requires a mutable referent. Assignment shares the set, while an explicit clone separates subsequent membership changes.
 
@@ -22,41 +27,49 @@ The generic constraint on `T` is part of the type's safety contract. Union, inte
 
 Unique values under `T`'s equality/hash contract; insertion-order iteration.
 
-> The API below is the language contract. The current compiler implements the
-> basic constructor, length/emptiness, add, contains, and remove operations;
-> iteration and the remaining methods are still specified rather than
-> delivered.
+> The current compiler implements construction, length/emptiness, add,
+> contains, remove, clear, rendering, ordered algebra, relation queries, and
+> `for … in` snapshots for all integer widths, binary floats, Decimal, Boolean,
+> text, Duration, Date, Time, DateTime, and reference types admitted by semantic
+> analysis. Nullable values with a defined runtime layout, including nullable
+> text, are supported. Heterogeneous tuples and payload enums derive equality
+> from recursively eligible, byte-canonical fields; embedded `String` and
+> `Char` fields are not yet eligible because their equality is content-based.
+> Nullable Decimal, other derived record elements, and union elements remain
+> unsupported.
 
 ### Properties
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `length` | `UInt64` | Element count | specified |
-| `is_empty` | `Boolean` | `length == 0` | specified |
+| `length` | `UInt64` | Element count | implemented |
+| `is_empty` | `Boolean` | Whether the set is empty | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
 | `Set()` / `Set(e0, e1, …)` | `Set<T>` | Construction | specified |
-| `s.add(value)` | `Boolean` | `true` when newly inserted | specified |
-| `s.remove(value)` | `Boolean` | `true` when present | specified |
-| `s.contains(value)` | `Boolean` | Membership | specified |
-| `s.union(other)` | `Set<T>` | Set union | specified |
-| `s.intersection(other)` | `Set<T>` | Set intersection | specified |
-| `s.difference(other)` | `Set<T>` | Set difference | specified |
-| `s.symmetric_difference(other)` | `Set<T>` | Symmetric difference | specified |
-| `s.is_subset(other)` / `is_superset(other)` / `is_disjoint(other)` | `Boolean` | Relation queries | specified |
+| `s.add(value)` | `Boolean` | `true` when newly inserted | implemented |
+| `s.remove(value)` | `Boolean` | `true` when present | implemented |
+| `s.contains(value)` | `Boolean` | Membership | implemented |
+| `s.clear()` | `Void` | Removes all values | implemented |
+| `s.union(other)` | `Set<T>` | Set union | implemented |
+| `s.intersection(other)` | `Set<T>` | Set intersection | implemented |
+| `s.difference(other)` | `Set<T>` | Set difference | implemented |
+| `s.symmetric_difference(other)` | `Set<T>` | Symmetric difference | implemented |
+| `s.is_subset_of(other)` / `is_superset_of(other)` / `is_disjoint(other)` | `Boolean` | Relation queries | implemented |
 | `s.filter(fn)` | `Set<T>` | Eager selection | specified |
 | `s.map(fn)` | `List<U>` | Eager transform (returns `List` because `U` may not be hashable) | specified |
 | `s.to_list()` | `List<T>` | Materializes as a list | specified |
 | `s.to_array()` | `Array<T>` | Materializes as an array | specified |
-| `s.iterator()` | `Iterator<T>` | Insertion-order iteration | specified |
+| `for value in s` | `T` per iteration | Insertion-order snapshot | implemented |
 | `s.clone()` | `Set<T>` | Independent set | specified |
 | `s.to_string()` | `String` | Rendering | specified |
 
-Mutable elements whose equality changes while stored can violate invariants and
-should be rejected or avoided.
+Mutable class elements use identity, so changing their fields does not change
+membership. Composite value elements remain unsupported by the current
+runtime representation.
 
 ### Examples
 
@@ -64,7 +77,7 @@ should be rejected or avoided.
 mut permissions: Set<Permission> = Set();
 permissions.add(Permission.Network); // true
 permissions.add(Permission.Network); // false — no duplicate
-permissions.is_subset(all_required);
+permissions.is_subset_of(all_required);
 ```
 
 ---

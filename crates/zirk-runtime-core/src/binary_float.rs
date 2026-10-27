@@ -18,9 +18,12 @@ const MAX_NORMAL_EXPONENT: i32 = 16_383;
 const SUBNORMAL_EXPONENT: i32 = -16_494;
 const EXPONENT_MASK: u128 = 0x7fff;
 const FRACTION_MASK: u128 = (1_u128 << FRACTION_BITS) - 1;
+const DISPLAY_PRECISION: u32 = 36;
 
-/// A finite IEEE-754 binary128 value encoded in the platform-independent wire
-/// layout used by LLVM's `fp128` type.
+/// An IEEE-754 binary128 value encoded in the platform-independent wire layout
+/// used by LLVM's `fp128` type. Decimal constructors accept finite values;
+/// arithmetic may produce signed infinities or a quiet NaN for the caller's
+/// language-level guard to handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Float128(u128);
 
@@ -34,6 +37,16 @@ pub enum Float128Error {
 
 #[allow(clippy::should_implement_trait)] // Names mirror Zirk IR BinaryOp variants.
 impl Float128 {
+    /// IEEE total ordering for all binary128 bit patterns, including signed
+    /// zeros, infinities and NaN payloads.
+    pub fn total_cmp(self, other: Self) -> std::cmp::Ordering {
+        fn key(bits: u128) -> u128 {
+            let sign = 1_u128 << 127;
+            if bits & sign == 0 { bits | sign } else { !bits }
+        }
+        key(self.0).cmp(&key(other.0))
+    }
+
     pub const fn from_bits(bits: u128) -> Self {
         Self(bits)
     }
@@ -46,12 +59,33 @@ impl Float128 {
         Self((negative as u128) << 127)
     }
 
+    pub const fn infinity(negative: bool) -> Self {
+        Self(((negative as u128) << 127) | (EXPONENT_MASK as u128) << FRACTION_BITS)
+    }
+
+    pub const fn quiet_nan() -> Self {
+        Self(((EXPONENT_MASK as u128) << FRACTION_BITS) | (1_u128 << (FRACTION_BITS - 1)))
+    }
+
+    pub const fn is_nan(self) -> bool {
+        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK as u128
+            && (self.0 & FRACTION_MASK) != 0
+    }
+
+    pub const fn is_infinite(self) -> bool {
+        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK as u128
+            && (self.0 & FRACTION_MASK) == 0
+    }
+
     pub fn from_decimal(text: &str) -> Result<Self, Float128Error> {
         let text = text.trim();
         let (negative, text) = match text.strip_prefix('-') {
             Some(rest) => (true, rest),
             None => (false, text.strip_prefix('+').unwrap_or(text)),
         };
+        if text.eq_ignore_ascii_case("inf") || text.eq_ignore_ascii_case("infinity") {
+            return Ok(Self::infinity(negative));
+        }
         let (coefficient, explicit_exponent) = match text.find(['e', 'E']) {
             Some(position) => (
                 &text[..position],
@@ -100,6 +134,215 @@ impl Float128 {
         format!("@f128:{:032x}", self.0)
     }
 
+    /// Formats a binary128 value with enough decimal digits to recover finite
+    /// values when parsed back as binary128. The calculation stays
+    /// in integer arithmetic so formatting does not depend on host `f64` or
+    /// target-specific quad-precision libcalls.
+    pub fn to_decimal_string(self) -> Result<String, Float128Error> {
+        let sign_bit = self.0 >> 127 != 0;
+        let exponent = (self.0 >> FRACTION_BITS) & EXPONENT_MASK;
+        let fraction = self.0 & FRACTION_MASK;
+        if exponent == EXPONENT_MASK {
+            return if fraction == 0 {
+                Ok(if sign_bit { "-inf" } else { "inf" }.to_owned())
+            } else {
+                Err(Float128Error::NonFinite)
+            };
+        }
+        let (negative, significand, binary_exponent) = self.unpack()?;
+        if significand.is_zero() {
+            return Ok(if negative { "-0" } else { "0" }.to_owned());
+        }
+
+        let binary_magnitude = binary_exponent + significand.bits() as i32 - 1;
+        let mut decimal_exponent =
+            (binary_magnitude as f64 * std::f64::consts::LOG10_2).floor() as i32;
+        while compare_to_power_of_ten(&significand, binary_exponent, decimal_exponent)
+            == Ordering::Less
+        {
+            decimal_exponent -= 1;
+        }
+        while compare_to_power_of_ten(&significand, binary_exponent, decimal_exponent + 1)
+            != Ordering::Less
+        {
+            decimal_exponent += 1;
+        }
+
+        let mut numerator = significand;
+        let mut denominator = BigUint::one();
+        if binary_exponent >= 0 {
+            numerator <<= binary_exponent as usize;
+        } else {
+            denominator <<= binary_exponent.unsigned_abs() as usize;
+        }
+
+        let decimal_shift = DISPLAY_PRECISION as i32 - 1 - decimal_exponent;
+        if decimal_shift >= 0 {
+            numerator *= BigUint::from(10_u8).pow(decimal_shift as u32);
+        } else {
+            denominator *= BigUint::from(10_u8).pow(decimal_shift.unsigned_abs());
+        }
+        let mut coefficient = round_div(numerator, denominator);
+        let mut digits = coefficient.to_str_radix(10);
+        if digits.len() > DISPLAY_PRECISION as usize {
+            coefficient /= BigUint::from(10_u8);
+            decimal_exponent += 1;
+            digits = coefficient.to_str_radix(10);
+        }
+        while digits.len() < DISPLAY_PRECISION as usize {
+            digits.insert(0, '0');
+        }
+        while digits.ends_with('0') {
+            digits.pop();
+        }
+
+        let mut rendered = if (-6..21).contains(&decimal_exponent) {
+            let point = decimal_exponent + 1;
+            if point <= 0 {
+                format!("0.{}{}", "0".repeat((-point) as usize), digits)
+            } else if point as usize >= digits.len() {
+                format!("{}{}", digits, "0".repeat(point as usize - digits.len()))
+            } else {
+                format!(
+                    "{}.{}",
+                    &digits[..point as usize],
+                    &digits[point as usize..]
+                )
+            }
+        } else if digits.len() == 1 {
+            format!("{}e{}", digits, decimal_exponent)
+        } else {
+            format!("{}.{}e{}", &digits[..1], &digits[1..], decimal_exponent)
+        };
+        if negative {
+            rendered.insert(0, '-');
+        }
+        Ok(rendered)
+    }
+
+    /// Formats this value with the subset of Rust's float width/precision
+    /// specifiers exposed by Zirk's `FloatN.format` method, without narrowing
+    /// binary128 through binary64.
+    pub fn format(self, spec: &str) -> Result<String, Float128Error> {
+        let mut chars = spec.trim().chars().peekable();
+        let zero_pad = chars.next_if_eq(&'0').is_some();
+        let mut width = 0usize;
+        while let Some(digit) = chars.peek().and_then(|character| character.to_digit(10)) {
+            width = width.saturating_mul(10).saturating_add(digit as usize);
+            chars.next();
+        }
+        let precision = if chars.next_if_eq(&'.').is_some() {
+            let mut precision = 0usize;
+            while let Some(digit) = chars.peek().and_then(|character| character.to_digit(10)) {
+                precision = precision.saturating_mul(10).saturating_add(digit as usize);
+                chars.next();
+            }
+            Some(precision)
+        } else {
+            None
+        };
+        let exponent_style = chars
+            .next()
+            .filter(|character| matches!(character, 'e' | 'E'));
+        if chars.next().is_some() {
+            return Err(Float128Error::InvalidLiteral);
+        }
+
+        let bits_exponent = (self.0 >> FRACTION_BITS) & EXPONENT_MASK;
+        let fraction = self.0 & FRACTION_MASK;
+        if bits_exponent == EXPONENT_MASK {
+            if fraction != 0 {
+                return Err(Float128Error::NonFinite);
+            }
+            let mut value = if self.0 >> 127 != 0 {
+                "-inf".to_owned()
+            } else {
+                "inf".to_owned()
+            };
+            pad_float(&mut value, width, zero_pad);
+            return Ok(value);
+        }
+
+        let (negative, significand, binary_exponent) = self.unpack()?;
+        if precision.is_none() && exponent_style.is_none() {
+            let mut value = self.to_decimal_string()?;
+            pad_float(&mut value, width, zero_pad);
+            return Ok(value);
+        }
+
+        let requested_precision = precision.unwrap_or(6).min(10_000);
+        let decimal_exponent = if significand.is_zero() {
+            0
+        } else {
+            let magnitude = binary_exponent + significand.bits() as i32 - 1;
+            let mut exponent = (magnitude as f64 * std::f64::consts::LOG10_2).floor() as i32;
+            while compare_to_power_of_ten(&significand, binary_exponent, exponent) == Ordering::Less
+            {
+                exponent -= 1;
+            }
+            while compare_to_power_of_ten(&significand, binary_exponent, exponent + 1)
+                != Ordering::Less
+            {
+                exponent += 1;
+            }
+            exponent
+        };
+
+        let mut numerator = significand;
+        let mut denominator = BigUint::one();
+        if binary_exponent >= 0 {
+            numerator <<= binary_exponent as usize;
+        } else {
+            denominator <<= binary_exponent.unsigned_abs() as usize;
+        }
+        let decimal_shift = if exponent_style.is_some() {
+            requested_precision as i32 - decimal_exponent
+        } else {
+            requested_precision as i32
+        };
+        if decimal_shift >= 0 {
+            numerator *= BigUint::from(10_u8).pow(decimal_shift as u32);
+        } else {
+            denominator *= BigUint::from(10_u8).pow(decimal_shift.unsigned_abs());
+        }
+        let mut coefficient = round_div(numerator, denominator);
+        let mut digits = coefficient.to_str_radix(10);
+
+        let mut value = if let Some(style) = exponent_style {
+            let significant_digits = requested_precision.saturating_add(1);
+            if digits.len() > significant_digits {
+                coefficient /= BigUint::from(10_u8);
+                digits = coefficient.to_str_radix(10);
+                let exponent = decimal_exponent + 1;
+                if digits.len() < significant_digits {
+                    digits.push_str(&"0".repeat(significant_digits - digits.len()));
+                }
+                format_exponential(&digits, exponent, style)
+            } else {
+                if digits.len() < significant_digits {
+                    digits.insert_str(0, &"0".repeat(significant_digits - digits.len()));
+                }
+                format_exponential(&digits, decimal_exponent, style)
+            }
+        } else {
+            if digits.len() <= requested_precision {
+                digits.insert_str(0, &"0".repeat(requested_precision + 1 - digits.len()));
+            }
+            let point = digits.len() - requested_precision;
+            let mut fixed = digits[..point].to_owned();
+            if requested_precision > 0 {
+                fixed.push('.');
+                fixed.push_str(&digits[point..]);
+            }
+            fixed
+        };
+        if negative {
+            value.insert(0, '-');
+        }
+        pad_float(&mut value, width, zero_pad);
+        Ok(value)
+    }
+
     pub fn from_wire_or_decimal(text: &str) -> Result<Self, Float128Error> {
         if let Some(bits) = text.strip_prefix("@f128:") {
             return u128::from_str_radix(bits, 16)
@@ -116,11 +359,19 @@ impl Float128 {
             .expect("an i128 always fits binary128")
     }
 
+    pub fn from_u128(value: u128) -> Self {
+        Self::from_ratio(false, BigUint::from(value), BigUint::one())
+            .expect("a u128 always fits binary128")
+    }
+
     /// Converts a finite binary64 value exactly, preserving its binary value
     /// rather than parsing a decimal display approximation.
     pub fn from_f64(value: f64) -> Result<Self, Float128Error> {
-        if !value.is_finite() {
+        if value.is_nan() {
             return Err(Float128Error::NonFinite);
+        }
+        if value.is_infinite() {
+            return Ok(Self::infinity(value.is_sign_negative()));
         }
         let bits = value.to_bits();
         let negative = bits >> 63 != 0;
@@ -153,7 +404,20 @@ impl Float128 {
         Self(self.0 ^ (1_u128 << 127))
     }
 
+    fn is_zero_bits(self) -> bool {
+        self.0 & !(1_u128 << 127) == 0
+    }
+
     pub fn add(self, right: Self) -> Result<Self, Float128Error> {
+        if self.is_nan() || right.is_nan() {
+            return Ok(Self::quiet_nan());
+        }
+        if self.is_infinite() || right.is_infinite() {
+            if self.is_infinite() && right.is_infinite() && (self.0 >> 127) != (right.0 >> 127) {
+                return Ok(Self::quiet_nan());
+            }
+            return Ok(if self.is_infinite() { self } else { right });
+        }
         let (left_sign, left, left_exp) = self.unpack()?;
         let (right_sign, right, right_exp) = right.unpack()?;
         let exponent = left_exp.min(right_exp);
@@ -165,7 +429,7 @@ impl Float128 {
             if right_sign { Sign::Minus } else { Sign::Plus },
             right << (right_exp - exponent) as usize,
         );
-        Self::from_scaled(left + right, exponent)
+        Self::from_arithmetic_scaled(left + right, exponent)
     }
 
     pub fn sub(self, right: Self) -> Result<Self, Float128Error> {
@@ -173,9 +437,18 @@ impl Float128 {
     }
 
     pub fn mul(self, right: Self) -> Result<Self, Float128Error> {
+        if self.is_nan() || right.is_nan() {
+            return Ok(Self::quiet_nan());
+        }
+        if self.is_infinite() || right.is_infinite() {
+            if self.is_zero_bits() || right.is_zero_bits() {
+                return Ok(Self::quiet_nan());
+            }
+            return Ok(Self::infinity((self.0 ^ right.0) >> 127 != 0));
+        }
         let (left_sign, left, left_exp) = self.unpack()?;
         let (right_sign, right, right_exp) = right.unpack()?;
-        Self::from_scaled(
+        Self::from_arithmetic_scaled(
             BigInt::from_biguint(
                 if left_sign == right_sign {
                     Sign::Plus
@@ -189,25 +462,43 @@ impl Float128 {
     }
 
     pub fn div(self, right: Self) -> Result<Self, Float128Error> {
+        if self.is_nan() || right.is_nan() || (self.is_infinite() && right.is_infinite()) {
+            return Ok(Self::quiet_nan());
+        }
+        if self.is_infinite() {
+            return Ok(Self::infinity((self.0 ^ right.0) >> 127 != 0));
+        }
+        if right.is_infinite() {
+            return Ok(Self::zero((self.0 ^ right.0) >> 127 != 0));
+        }
         let (left_sign, left, left_exp) = self.unpack()?;
         let (right_sign, right, right_exp) = right.unpack()?;
         if right.is_zero() {
-            return Err(Float128Error::DivisionByZero);
+            if left.is_zero() {
+                return Ok(Self::quiet_nan());
+            }
+            return Ok(Self::infinity(left_sign != right_sign));
         }
         let (numerator, denominator) = if left_exp >= right_exp {
             (left << (left_exp - right_exp) as usize, right)
         } else {
             (left, right << (right_exp - left_exp) as usize)
         };
-        Self::from_ratio(left_sign != right_sign, numerator, denominator)
+        Self::from_arithmetic_ratio(left_sign != right_sign, numerator, denominator)
     }
 
     /// Zirk's remainder uses truncated quotient semantics, like LLVM `frem`.
     pub fn rem(self, right: Self) -> Result<Self, Float128Error> {
+        if self.is_nan() || right.is_nan() || self.is_infinite() {
+            return Ok(Self::quiet_nan());
+        }
+        if right.is_infinite() {
+            return Ok(self);
+        }
         let (left_sign, left, left_exp) = self.unpack()?;
         let (_, right, right_exp) = right.unpack()?;
         if right.is_zero() {
-            return Err(Float128Error::DivisionByZero);
+            return Ok(Self::quiet_nan());
         }
         let (numerator, denominator, quotient_shift) = if left_exp >= right_exp {
             (left << (left_exp - right_exp) as usize, right, right_exp)
@@ -224,6 +515,37 @@ impl Float128 {
     }
 
     pub fn compare(self, right: Self) -> Result<Ordering, Float128Error> {
+        if self.is_nan() || right.is_nan() {
+            return Err(Float128Error::NonFinite);
+        }
+        if self.is_infinite() || right.is_infinite() {
+            return Ok(match (self.is_infinite(), right.is_infinite()) {
+                (true, true) => {
+                    let left_negative = self.0 >> 127 != 0;
+                    let right_negative = right.0 >> 127 != 0;
+                    match (left_negative, right_negative) {
+                        (true, true) | (false, false) => Ordering::Equal,
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                    }
+                }
+                (true, false) => {
+                    if self.0 >> 127 != 0 {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    }
+                }
+                (false, true) => {
+                    if right.0 >> 127 != 0 {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Less
+                    }
+                }
+                (false, false) => unreachable!(),
+            });
+        }
         let (left_sign, left, left_exp) = self.unpack()?;
         let (right_sign, right, right_exp) = right.unpack()?;
         if left.is_zero() && right.is_zero() {
@@ -311,7 +633,7 @@ impl Float128 {
         }
     }
 
-    /// Matches the native runtime's documented display bridge for `Float128`.
+    /// Lossy compatibility bridge for consumers that explicitly need `f64`.
     pub fn display_f64(self) -> f64 {
         super::scalar::float128_bits_to_f64(self.0)
     }
@@ -341,6 +663,31 @@ impl Float128 {
             value.abs().to_biguint().unwrap_or_default(),
             exponent,
         )
+    }
+
+    fn from_arithmetic_scaled(value: BigInt, exponent: i32) -> Result<Self, Float128Error> {
+        let negative = value.sign() == Sign::Minus;
+        Self::from_scaled(value, exponent).or_else(|error| {
+            if error == Float128Error::Overflow {
+                Ok(Self::infinity(negative))
+            } else {
+                Err(error)
+            }
+        })
+    }
+
+    fn from_arithmetic_ratio(
+        negative: bool,
+        numerator: BigUint,
+        denominator: BigUint,
+    ) -> Result<Self, Float128Error> {
+        Self::from_ratio(negative, numerator, denominator).or_else(|error| {
+            if error == Float128Error::Overflow {
+                Ok(Self::infinity(negative))
+            } else {
+                Err(error)
+            }
+        })
     }
 
     fn from_power_of_two(
@@ -417,6 +764,53 @@ impl Float128 {
     }
 }
 
+fn compare_to_power_of_ten(
+    significand: &BigUint,
+    binary_exponent: i32,
+    decimal_exponent: i32,
+) -> Ordering {
+    let mut numerator = significand.clone();
+    let mut denominator = BigUint::one();
+    if binary_exponent >= 0 {
+        numerator <<= binary_exponent as usize;
+    } else {
+        denominator <<= binary_exponent.unsigned_abs() as usize;
+    }
+    if decimal_exponent >= 0 {
+        denominator *= BigUint::from(10_u8).pow(decimal_exponent as u32);
+    } else {
+        numerator *= BigUint::from(10_u8).pow(decimal_exponent.unsigned_abs());
+    }
+    numerator.cmp(&denominator)
+}
+
+fn format_exponential(digits: &str, exponent: i32, style: char) -> String {
+    let marker = if style == 'E' { 'E' } else { 'e' };
+    let mantissa = if digits.len() <= 1 {
+        format!("{}{}", digits, "0".repeat(digits.len().saturating_sub(1)))
+    } else {
+        format!("{}.{}", &digits[..1], &digits[1..])
+    };
+    format!("{mantissa}{marker}{exponent}")
+}
+
+fn pad_float(value: &mut String, width: usize, zero_pad: bool) {
+    let padding = width.saturating_sub(value.len());
+    if padding == 0 {
+        return;
+    }
+    if zero_pad {
+        let sign = value.starts_with('-');
+        if sign {
+            value.insert_str(1, &"0".repeat(padding));
+        } else {
+            value.insert_str(0, &"0".repeat(padding));
+        }
+    } else {
+        value.insert_str(0, &" ".repeat(padding));
+    }
+}
+
 fn round_div(numerator: BigUint, denominator: BigUint) -> BigUint {
     let quotient = &numerator / &denominator;
     let remainder = numerator % denominator.clone();
@@ -457,6 +851,31 @@ mod tests {
     }
 
     #[test]
+    fn zero_division_distinguishes_infinity_from_nan() {
+        let one = Float128::from_decimal("1").unwrap();
+        let zero = Float128::zero(false);
+        let infinity = one.div(zero).unwrap();
+        let nan = zero.div(zero).unwrap();
+
+        assert!(infinity.is_infinite());
+        assert_eq!(infinity.to_decimal_string().unwrap(), "inf");
+        assert_eq!(infinity.compare(one), Ok(Ordering::Greater));
+        assert_eq!(infinity.compare(infinity), Ok(Ordering::Equal));
+        assert_eq!(
+            Float128::infinity(true).compare(infinity),
+            Ok(Ordering::Less)
+        );
+        assert!(nan.is_nan());
+        assert_eq!(nan.to_decimal_string(), Err(Float128Error::NonFinite));
+        assert!(infinity.add(one).unwrap().is_infinite());
+        assert!(infinity.add(Float128::infinity(true)).unwrap().is_nan());
+        assert!(infinity.mul(zero).unwrap().is_nan());
+        assert!(one.div(infinity).unwrap().is_zero_bits());
+        assert!(infinity.div(infinity).unwrap().is_nan());
+        assert_eq!(one.rem(infinity), Ok(one));
+    }
+
+    #[test]
     fn binary64_conversion_preserves_the_exact_source_value() {
         let converted = Float128::from_f64(0.1).unwrap();
         let exact_decimal = Float128::from_decimal("0.1").unwrap();
@@ -467,7 +886,58 @@ mod tests {
         );
         assert_eq!(
             Float128::from_f64(f64::INFINITY),
+            Ok(Float128::infinity(false))
+        );
+    }
+
+    #[test]
+    fn decimal_display_round_trips_binary128_values() {
+        let values = [
+            Float128::from_decimal("0").unwrap(),
+            Float128::from_decimal("-0").unwrap(),
+            Float128::from_decimal("1.5").unwrap(),
+            Float128::from_decimal("0.1").unwrap(),
+            Float128::from_decimal("-3.1415926535897932384626433832795028841971").unwrap(),
+            Float128::from_bits(1),
+            Float128::from_bits(1_u128 << FRACTION_BITS),
+            Float128::from_bits((0x7ffe_u128 << FRACTION_BITS) | FRACTION_MASK),
+        ];
+        for value in values {
+            let rendered = value.to_decimal_string().unwrap();
+            let reparsed = Float128::from_decimal(&rendered).unwrap();
+            assert_eq!(reparsed, value, "{value:?} rendered as {rendered}");
+        }
+        assert_eq!(
+            Float128::from_decimal("1.5").unwrap().to_decimal_string(),
+            Ok("1.5".into())
+        );
+        assert_eq!(Float128::zero(true).to_decimal_string(), Ok("-0".into()));
+        assert_eq!(
+            Float128::from_bits(0x7fff_u128 << 112).to_decimal_string(),
+            Ok("inf".into())
+        );
+        assert_eq!(
+            Float128::from_bits((1_u128 << 127) | (0x7fff_u128 << 112)).to_decimal_string(),
+            Ok("-inf".into())
+        );
+        assert_eq!(
+            Float128::from_bits((0x7fff_u128 << 112) | 1).to_decimal_string(),
             Err(Float128Error::NonFinite)
+        );
+    }
+
+    #[test]
+    fn format_spec_preserves_binary128_precision_without_f64() {
+        let value = Float128::from_decimal("1.23456").unwrap();
+        assert_eq!(value.format(".3").unwrap(), "1.235");
+        assert_eq!(value.format(".3e").unwrap(), "1.235e0");
+        assert_eq!(value.format("010.2").unwrap(), "0000001.23");
+        assert_eq!(Float128::zero(false).format(".2").unwrap(), "0.00");
+        assert_eq!(
+            Float128::from_bits(0x7fff_u128 << 112)
+                .format(".2E")
+                .unwrap(),
+            "inf"
         );
     }
 

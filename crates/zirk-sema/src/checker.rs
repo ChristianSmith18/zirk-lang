@@ -1064,6 +1064,18 @@ impl<'a> OwnershipDeriver<'a> {
                     }
                 })
                 .unwrap_or(no),
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => self
+                .list_types
+                .get(id as usize)
+                .copied()
+                .map(|t| {
+                    let p = self.visit(t, subst);
+                    OwnershipProperties {
+                        transfer: p.transfer,
+                        share: p.share,
+                    }
+                })
+                .unwrap_or(no),
             Base::Map(id) => self
                 .map_types
                 .get(id as usize)
@@ -1226,6 +1238,10 @@ impl<'a> OwnershipDeriver<'a> {
             | Base::ServiceLifecycleError
             | Base::Array(_)
             | Base::List(_)
+            | Base::Deque(_)
+            | Base::Queue(_)
+            | Base::Stack(_)
+            | Base::PriorityQueue(_)
             | Base::Map(_)
             | Base::Set(_)
             | Base::Channel(_)
@@ -1391,6 +1407,12 @@ pub struct NativeExceptions {
     /// `Result` `EnumType.from_name`/`EnumType.from_value` return when no
     /// variant matches.
     pub lookup_error: u32,
+    /// Collection growth could not reserve storage.
+    pub allocation_error: u32,
+    /// A removal/inspection operation requires a collection element.
+    pub empty_collection_error: u32,
+    /// A collection changed structurally while an iterator was active.
+    pub iterator_invalidated: u32,
     /// `InvalidDateError` (`date-and-time-types`): thrown when `Date(y, m,
     /// d)` receives a month outside `1-12` or a day that does not exist in
     /// that month — 2026-02-30 is a construction error, not a rollover.
@@ -1748,6 +1770,18 @@ impl TypeNames for Names<'_> {
             .get(id as usize)
             .copied()
             .unwrap_or(Type::UNKNOWN)
+    }
+
+    fn deque_element(&self, id: u32) -> Type {
+        self.list_element(id)
+    }
+
+    fn queue_element(&self, id: u32) -> Type {
+        self.list_element(id)
+    }
+
+    fn stack_element(&self, id: u32) -> Type {
+        self.list_element(id)
     }
 
     fn range_element(&self, id: u32) -> Type {
@@ -4851,6 +4885,10 @@ impl<'a> Checker<'a> {
             Base::Null
             | Base::Array(_)
             | Base::List(_)
+            | Base::Deque(_)
+            | Base::Queue(_)
+            | Base::Stack(_)
+            | Base::PriorityQueue(_)
             | Base::Map(_)
             | Base::Set(_)
             | Base::Range(_)
@@ -5773,6 +5811,11 @@ impl<'a> Checker<'a> {
         // `EnumType.from_value`'s `Result` — a failed lookup is a controlled
         // failure, never a trap.
         let lookup_error = register_native_failure(&mut self.classes, "LookupError");
+        let allocation_error = register_native_failure(&mut self.classes, "AllocationError");
+        let empty_collection_error =
+            register_native_failure(&mut self.classes, "EmptyCollectionError");
+        let iterator_invalidated =
+            register_native_failure(&mut self.classes, "IteratorInvalidatedError");
         // `date-and-time-types`: the validation errors the `Date`/`Time`
         // constructors throw — `DateTime` reuses both (its `date`/`time`
         // components are already validated values).
@@ -5817,6 +5860,9 @@ impl<'a> Checker<'a> {
             overflow_error,
             regex_error,
             lookup_error,
+            allocation_error,
+            empty_collection_error,
+            iterator_invalidated,
             invalid_date,
             invalid_time,
             cancelled_error,
@@ -7802,6 +7848,13 @@ impl<'a> Checker<'a> {
                 .list_types
                 .get(list as usize)
                 .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
+            Base::Deque(deque)
+            | Base::Queue(deque)
+            | Base::Stack(deque)
+            | Base::PriorityQueue(deque) => self
+                .list_types
+                .get(deque as usize)
+                .is_some_and(|ty| self.type_has_wrong_variance(*ty, id, 0, expected, visiting)),
             Base::Set(set) => self
                 .set_types
                 .get(set as usize)
@@ -9775,6 +9828,28 @@ impl<'a> Checker<'a> {
                         .iter()
                         .position(|candidate| *candidate == element)? as u32,
                 )
+            }
+            Base::Deque(id) => {
+                let element =
+                    self.substitute_relation_type(*self.list_types.get(id as usize)?, subst)?;
+                Base::Deque(
+                    self.list_types
+                        .iter()
+                        .position(|candidate| *candidate == element)? as u32,
+                )
+            }
+            Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+                let element =
+                    self.substitute_relation_type(*self.list_types.get(id as usize)?, subst)?;
+                let new_id =
+                    self.list_types
+                        .iter()
+                        .position(|candidate| *candidate == element)? as u32;
+                match ty.base {
+                    Base::Queue(_) => Base::Queue(new_id),
+                    Base::PriorityQueue(_) => Base::PriorityQueue(new_id),
+                    _ => Base::Stack(new_id),
+                }
             }
             Base::Set(id) => {
                 let element =
@@ -11971,6 +12046,10 @@ impl<'a> Checker<'a> {
                 Base::ServiceLifecycleError => (37, 0),
                 Base::Object => (39, 0),
                 Base::Dynamic => (40, 0),
+                Base::Deque(id) => (45, id),
+                Base::Queue(id) => (51, id),
+                Base::Stack(id) => (52, id),
+                Base::PriorityQueue(id) => (53, id),
             }
         }
         bases.sort_by_key(key);
@@ -11994,6 +12073,16 @@ impl<'a> Checker<'a> {
                 | Base::DateTime
                 | Base::Regex
                 | Base::Enum(_)
+                | Base::Tuple(_)
+                | Base::Array(_)
+                | Base::List(_)
+                | Base::Deque(_)
+                | Base::Queue(_)
+                | Base::Stack(_)
+                | Base::PriorityQueue(_)
+                | Base::Map(_)
+                | Base::Set(_)
+                | Base::Union(_)
                 | Base::Class(_) => true,
                 // Generic signatures are checked before substitution. Keep
                 // the symbolic parameter in the union so specialization can
@@ -12780,6 +12869,41 @@ impl<'a> Checker<'a> {
         Type::of(Base::List(id))
     }
 
+    /// `Deque<T>` shares the interned element-type table with `List<T>`.
+    fn resolve_deque_type_ref(&mut self, reference: &TypeRef) -> Type {
+        self.resolve_sequence_type_ref(reference, "Deque")
+    }
+
+    fn resolve_queue_type_ref(&mut self, reference: &TypeRef) -> Type {
+        self.resolve_sequence_type_ref(reference, "Queue")
+    }
+
+    fn resolve_stack_type_ref(&mut self, reference: &TypeRef) -> Type {
+        self.resolve_sequence_type_ref(reference, "Stack")
+    }
+
+    fn resolve_sequence_type_ref(&mut self, reference: &TypeRef, name: &str) -> Type {
+        if reference.arguments.len() != 1 {
+            self.error(
+                codes::UNKNOWN_TYPE,
+                reference.span,
+                format!("`{name}<T>` takes exactly one type argument"),
+                format!("found {} type argument(s)", reference.arguments.len()),
+                Some(format!("write `{name}<T>` naming the element type")),
+            );
+            return Type::UNKNOWN;
+        }
+        let element = self.resolve_type(&reference.arguments[0]);
+        let id = self.intern_list_type(element);
+        Type::of(match name {
+            "Deque" => Base::Deque(id),
+            "Queue" => Base::Queue(id),
+            "Stack" => Base::Stack(id),
+            "PriorityQueue" => Base::PriorityQueue(id),
+            _ => unreachable!("only sequence collection names reach this resolver"),
+        })
+    }
+
     /// Interns an `Array<T>` element type, returning the id its
     /// [`Base::Array`] carries.
     fn intern_array_type(&mut self, element: Type) -> u32 {
@@ -12866,68 +12990,92 @@ impl<'a> Checker<'a> {
         Type::of(Base::Range(id))
     }
 
-    /// Whether a type has the scalar/identity hash representation currently
-    /// implemented by the collection runtime. Keep this list synchronized
-    /// with the one-word Map/Set ABI: aggregate enum values and 128-bit
-    /// integers cannot be represented by its `i64` key/element word.
+    /// Whether a type has a coherent hash/equality representation implemented
+    /// by the collection runtime. The typed entry ABI preserves wide integer
+    /// and binary-float bits; nullable and tuple fields are admitted only when
+    /// their inner types have the same supported representation recursively.
     fn is_hashable(&self, ty: Type) -> bool {
         if ty.nullable {
-            return false;
+            // Decimal has no nullable runtime/IR representation yet.
+            if ty.base == Base::Decimal {
+                return false;
+            }
+            return self.is_hashable(Type::of(ty.base));
         }
         match ty.base {
-            Base::Int(width) => width.bits() <= 64,
-            Base::Boolean
-            | Base::Char
-            | Base::String
-            | Base::Duration
-            | Base::Date
-            | Base::Time => true,
-            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
-                enum_ty
-                    .variants
-                    .iter()
-                    .all(|variant| variant.associated.is_empty())
-            }),
-            _ => false,
-        }
-    }
-
-    /// Whether Map's `i64` value slot can round-trip a type through the
-    /// current native ABI. The runtime/backend work may add more layouts;
-    /// accepting one here before `MapGet` can reconstruct it would defer a
-    /// source type error to a backend panic or lossy conversion.
-    fn is_map_word_value(&self, ty: Type) -> bool {
-        if ty.nullable {
-            return false;
-        }
-        match ty.base {
-            Base::Int(width) => width.bits() <= 64,
+            Base::Int(_) | Base::Float(_) | Base::Decimal => true,
             Base::Boolean
             | Base::Char
             | Base::String
             | Base::Duration
             | Base::Date
             | Base::Time
-            | Base::Regex
-            | Base::Job(_)
-            | Base::Channel(_)
-            | Base::Array(_)
-            | Base::List(_)
-            | Base::Map(_)
-            | Base::Set(_)
-            | Base::Range(_)
-            | Base::Weak(_) => true,
-            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
-                enum_ty
-                    .variants
-                    .iter()
-                    .all(|variant| variant.associated.is_empty())
-            }),
+            // `DateTime` is stored as a canonical epoch-nanosecond scalar,
+            // so byte equality and hashing agree with temporal equality.
+            | Base::DateTime
+            | Base::Contract(_) => true,
+            // Mutable reference keys use stable object identity. Their
+            // mutable fields never participate in hashing or equality.
             Base::Class(id) => self
                 .classes
                 .get(id as usize)
                 .is_some_and(|class| class.kind == ClassKind::Class),
-            Base::Contract(_) => true,
+            Base::Tuple(id) => self.tuple_types.get(id as usize).is_some_and(|tuple| {
+                tuple
+                    .elements
+                    .iter()
+                    .all(|field| self.is_hashable_tuple_field(*field))
+            }),
+            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
+                enum_ty.variants.iter().all(|variant| {
+                    variant
+                        .associated
+                        .iter()
+                        .all(|field| self.is_hashable_tuple_field(field.ty))
+                })
+            }),
+            _ => false,
+        }
+    }
+
+    /// Composite byte storage cannot invoke the runtime's special normalized
+    /// text equality, which applies only to direct String/Char keys.
+    fn is_hashable_tuple_field(&self, ty: Type) -> bool {
+        !matches!(ty.base, Base::String | Base::Char) && self.is_hashable(ty)
+    }
+
+    /// Whether Map can both store a value's concrete layout and represent its
+    /// absent lookup outcome as `Nullable<V>` in the current IR.
+    fn is_map_storage_value(&self, ty: Type) -> bool {
+        match ty.base {
+            Base::Int(_) | Base::Float(_) => true,
+            Base::Boolean
+            | Base::Char
+            | Base::String
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::DateTime
+            | Base::Atomic(_)
+            | Base::Array(_)
+            | Base::List(_)
+            | Base::Map(_)
+            | Base::Set(_)
+            | Base::Object
+            | Base::Dynamic => true,
+            Base::Enum(id) => self.enums.get(id as usize).is_some(),
+            Base::Tuple(id) => self.tuple_types.get(id as usize).is_some(),
+            Base::Union(id) => self.unions.get(id as usize).is_some(),
+            Base::Intersection(id) => self.intersections.get(id as usize).is_some(),
+            Base::Shape(_) => true,
+            Base::Class(id) => self
+                .classes
+                .get(id as usize)
+                .is_some_and(|class| class.kind == ClassKind::Class),
+            Base::Contract(_)
+            | Base::Instance(_)
+            | Base::ContractInstance(_)
+            | Base::EnumInstance(_) => true,
             _ => false,
         }
     }
@@ -12953,18 +13101,18 @@ impl<'a> Checker<'a> {
                 codes::TYPE_MISMATCH,
                 reference.arguments[0].span,
                 format!("`Map<{found}, ...>` has an unhashable key type"),
-                "a `Map` key must be an integer, Boolean, Char, String, Duration, or enum",
+                "a `Map` key must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)",
                 None,
             );
         }
-        if !value.is_unknown() && !self.is_map_word_value(value) {
+        if !value.is_unknown() && !self.is_map_storage_value(value) {
             let found = self.name(value);
             self.error(
                 codes::TYPE_MISMATCH,
                 reference.arguments[1].span,
-                format!("`Map<..., {found}>` has no supported one-word value representation"),
-                "a `Map` value must have a supported integer, Boolean, Char, String, Duration, Date, Time, enum, or managed-handle representation",
-                Some("use a one-word value type supported by Map".into()),
+                format!("`Map<..., {found}>` has no supported runtime value layout"),
+                "a `Map` value must have a supported storage layout and a nullable lookup representation",
+                Some("use a value type whose absent lookup outcome is representable".into()),
             );
         }
         let id = self.intern_map_type(key, value);
@@ -12990,7 +13138,7 @@ impl<'a> Checker<'a> {
                 codes::TYPE_MISMATCH,
                 reference.arguments[0].span,
                 format!("`Set<{found}>` has an unhashable element type"),
-                "a `Set` element must be an integer, Boolean, Char, String, Duration, or enum",
+                "a `Set` element must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)",
                 None,
             );
         }
@@ -13081,6 +13229,18 @@ impl<'a> Checker<'a> {
         }
         if reference.name == "List" {
             return self.resolve_list_type_ref(reference);
+        }
+        if reference.name == "Deque" {
+            return self.resolve_deque_type_ref(reference);
+        }
+        if reference.name == "Queue" {
+            return self.resolve_queue_type_ref(reference);
+        }
+        if reference.name == "Stack" {
+            return self.resolve_stack_type_ref(reference);
+        }
+        if reference.name == "PriorityQueue" {
+            return self.resolve_sequence_type_ref(reference, "PriorityQueue");
         }
         if reference.name == "Range" {
             return self.resolve_range_type_ref(reference);
@@ -17309,6 +17469,7 @@ impl<'a> Checker<'a> {
             | Base::ServiceCapacityError
             | Base::ServiceLifecycleError => true,
             Base::Array(_) | Base::List(_) => true,
+            Base::Deque(_) | Base::Queue(_) | Base::Stack(_) | Base::PriorityQueue(_) => true,
             Base::Channel(_) => true,
             _ => false,
         }
@@ -18909,12 +19070,23 @@ impl<'a> Checker<'a> {
     ///
     /// Returns `None` for types that do not implement `Iterable<T>` (or are
     /// not natively iterable like ranges, strings, arrays, and lists).
-    fn element_type_of(&self, iterable: Type) -> Option<Type> {
+    fn element_type_of(&mut self, iterable: Type) -> Option<Type> {
         match iterable.base {
             Base::Range(id) => self.range_types.get(id as usize).copied(),
             Base::String => Some(Type::of(Base::Char)),
             Base::Array(id) => self.array_types.get(id as usize).copied(),
             Base::List(id) => self.list_types.get(id as usize).copied(),
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+                self.list_types.get(id as usize).copied()
+            }
+            Base::Set(id) => self.set_types.get(id as usize).copied(),
+            Base::Map(id) => {
+                let map = self.map_types.get(id as usize)?.clone();
+                let entry = self.intern_tuple_type(TupleType {
+                    elements: vec![map.key, map.value],
+                });
+                Some(Type::of(Base::Tuple(entry)))
+            }
             Base::Unknown => Some(Type::UNKNOWN),
             Base::ContractInstance(id) => {
                 let iterable_contract = self.native_iteration?.iterable;
@@ -19651,6 +19823,9 @@ impl<'a> Checker<'a> {
                 | Base::Time
                 | Base::DateTime
                 | Base::Enum(_)
+                | Base::Tuple(_)
+                | Base::Union(_)
+                | Base::Intersection(_)
                 | Base::Atomic(_)
                 | Base::Contract(_)
                 | Base::Class(_)
@@ -19659,6 +19834,11 @@ impl<'a> Checker<'a> {
                 | Base::EnumInstance(_)
                 | Base::Array(_)
                 | Base::List(_)
+                | Base::Map(_)
+                | Base::Set(_)
+                | Base::Shape(_)
+                | Base::Object
+                | Base::Dynamic
         )
     }
 
@@ -24583,7 +24763,14 @@ impl<'a> Checker<'a> {
 
         if matches!(
             object.base,
-            Base::Array(_) | Base::List(_) | Base::Map(_) | Base::Set(_)
+            Base::Array(_)
+                | Base::List(_)
+                | Base::Deque(_)
+                | Base::Queue(_)
+                | Base::Stack(_)
+                | Base::PriorityQueue(_)
+                | Base::Map(_)
+                | Base::Set(_)
         ) {
             match member.name.as_str() {
                 "length" => return Type::of(Base::Int(IntWidth::U64)),
@@ -28120,6 +28307,81 @@ impl<'a> Checker<'a> {
         Type::of(Base::List(id))
     }
 
+    /// `Deque<T>()` uses the same interned element table as `List<T>` while
+    /// preserving its distinct source-level collection type.
+    fn check_deque_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        self.check_ordered_sequence_construction(expr, expected, "Deque")
+    }
+
+    fn check_queue_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        self.check_ordered_sequence_construction(expr, expected, "Queue")
+    }
+
+    fn check_stack_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
+        self.check_ordered_sequence_construction(expr, expected, "Stack")
+    }
+
+    fn check_priority_queue_construction(
+        &mut self,
+        expr: &CallExpr,
+        expected: Option<Type>,
+    ) -> Type {
+        let queue = self.check_ordered_sequence_construction(expr, expected, "PriorityQueue");
+        if let Base::PriorityQueue(id) = queue.base
+            && let Some(element) = self.list_types.get(id as usize).copied()
+            && !has_natural_order(element)
+        {
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                "`PriorityQueue<T>` requires an element type with a total natural ordering",
+                format!("`{}` has no supported total order", self.name(element)),
+                Some("use an ordered scalar type such as an integer, float, decimal, Boolean, Char, or String".into()),
+            );
+            return Type::UNKNOWN;
+        }
+        queue
+    }
+
+    fn check_ordered_sequence_construction(
+        &mut self,
+        expr: &CallExpr,
+        expected: Option<Type>,
+        name: &str,
+    ) -> Type {
+        if !expr.args.is_empty() {
+            self.error(
+                codes::WRONG_ARGUMENT_COUNT,
+                expr.span,
+                format!("`{name}` construction takes no elements"),
+                format!("received {} argument(s)", expr.args.len()),
+                Some(format!(
+                    "construct an empty {name}, then add values with its methods"
+                )),
+            );
+            for arg in &expr.args {
+                self.check_expr(&arg.value);
+            }
+        }
+        let list_expected = expected.map(|ty| match ty.base {
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+                Type::of(Base::List(id))
+            }
+            _ => ty,
+        });
+        let checked = self.check_list_construction(expr, list_expected);
+        match checked.base {
+            Base::List(id) => Type::of(match name {
+                "Deque" => Base::Deque(id),
+                "Queue" => Base::Queue(id),
+                "Stack" => Base::Stack(id),
+                "PriorityQueue" => Base::PriorityQueue(id),
+                _ => unreachable!("only ordered collection constructors reach this helper"),
+            }),
+            _ => checked,
+        }
+    }
+
     /// `Map<K, V>()` is a built-in constructor; the key/value types come from
     /// the surrounding expected type.
     fn check_map_construction(&mut self, expr: &CallExpr, expected: Option<Type>) -> Type {
@@ -29774,6 +30036,76 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn check_deque_method_call(
+        &mut self,
+        expr: &CallExpr,
+        field: &FieldExpr,
+        object: Type,
+    ) -> Option<Type> {
+        let (id, family) = match object.base {
+            Base::Deque(id) => (id, "Deque"),
+            Base::Queue(id) => (id, "Queue"),
+            Base::Stack(id) => (id, "Stack"),
+            Base::PriorityQueue(id) => (id, "PriorityQueue"),
+            _ => return None,
+        };
+        let element = self
+            .list_types
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Type::UNKNOWN);
+        let operation = match (family, field.name.name.as_str()) {
+            ("Deque", "push_front") | ("Deque", "push_back") => "push",
+            ("Queue", "enqueue") | ("Stack", "push") => "push",
+            ("PriorityQueue", "enqueue") => "push",
+            ("Deque", "pop_front") | ("Deque", "pop_back") => "pop",
+            ("Deque", "front") | ("Deque", "back") => "peek",
+            ("Queue", "dequeue") | ("Stack", "pop") => "pop",
+            ("PriorityQueue", "dequeue") => "pop",
+            ("Queue", "peek") | ("Stack", "peek") => "peek",
+            ("PriorityQueue", "peek") => "peek",
+            ("Deque" | "Queue" | "Stack", "clear") => "clear",
+            _ => return None,
+        };
+        match operation {
+            "push" => {
+                if expr.args.len() != 1 {
+                    self.sequence_wrong_arity(expr, field.name.name.as_str(), 1);
+                    return Some(Type::VOID);
+                }
+                let value = self.check_expr(&expr.args[0].value);
+                if !element.is_unknown() && !value.is_unknown() {
+                    self.expect_assignable(element, value, expr.args[0].value.span(), "the value");
+                }
+                Some(Type::VOID)
+            }
+            "pop" | "peek" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, field.name.name.as_str(), 0);
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                let error = self
+                    .native_exceptions
+                    .expect("collection failures are registered before type checking")
+                    .empty_collection_error;
+                self.preserve_result_exprs.insert(expr.span);
+                Some(self.native_result_with(element, error))
+            }
+            "clear" => {
+                if !expr.args.is_empty() {
+                    self.sequence_wrong_arity(expr, "clear", 0);
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                Some(Type::VOID)
+            }
+            _ => None,
+        }
+    }
+
     fn sequence_wrong_arity(&mut self, expr: &CallExpr, method: &str, expected: usize) {
         self.error(
             codes::WRONG_ARGUMENT_COUNT,
@@ -30072,6 +30404,69 @@ impl<'a> Checker<'a> {
         match field.name.name.as_str() {
             "length" if expr.args.is_empty() => Some(Type::of(Base::Int(IntWidth::U64))),
             "is_empty" if expr.args.is_empty() => Some(Type::BOOLEAN),
+            "keys" if matches!(object.base, Base::Map(_)) => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.keys` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                Some(Type::of(Base::Array(self.intern_array_type(key))))
+            }
+            "values" if matches!(object.base, Base::Map(_)) => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.values` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                Some(Type::of(Base::Array(self.intern_array_type(value))))
+            }
+            "entries" if matches!(object.base, Base::Map(_)) => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Map.entries` takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                let tuple = Type::of(Base::Tuple(self.intern_tuple_type(TupleType {
+                    elements: vec![key, value],
+                })));
+                Some(Type::of(Base::Array(self.intern_array_type(tuple))))
+            }
+            "clear" if matches!(object.base, Base::Map(_) | Base::Set(_)) => {
+                if !expr.args.is_empty() {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "collection.clear takes no arguments",
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                }
+                Some(Type::VOID)
+            }
             "set" if matches!(object.base, Base::Map(_)) => {
                 if expr.args.len() != 2 {
                     self.error(
@@ -30128,13 +30523,13 @@ impl<'a> Checker<'a> {
                     for arg in &expr.args {
                         self.check_expr(&arg.value);
                     }
-                    return Some(Type::VOID);
+                    return Some(Type::BOOLEAN);
                 }
                 let v = self.check_expr(&expr.args[0].value);
                 if !v.is_unknown() && !element.accepts(v) {
                     self.expect_assignable(element, v, expr.args[0].value.span(), "the argument");
                 }
-                Some(Type::VOID)
+                Some(Type::BOOLEAN)
             }
             "contains" if matches!(object.base, Base::Set(_)) => {
                 if expr.args.len() != 1 {
@@ -30242,6 +30637,46 @@ impl<'a> Checker<'a> {
                     self.expect_assignable(element, v, expr.args[0].value.span(), "the argument");
                 }
                 Some(Type::BOOLEAN)
+            }
+            "union"
+            | "intersection"
+            | "difference"
+            | "symmetric_difference"
+            | "is_subset_of"
+            | "is_superset_of"
+            | "is_disjoint"
+                if matches!(object.base, Base::Set(_)) =>
+            {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        format!("`Set.{}` takes one Set argument", field.name.name),
+                        format!("received {}", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                } else {
+                    let other = self.check_expr(&expr.args[0].value);
+                    if !other.is_unknown() && !object.accepts(other) {
+                        self.expect_assignable(
+                            object,
+                            other,
+                            expr.args[0].value.span(),
+                            "the other set",
+                        );
+                    }
+                }
+                if matches!(
+                    field.name.name.as_str(),
+                    "is_subset_of" | "is_superset_of" | "is_disjoint"
+                ) {
+                    Some(Type::BOOLEAN)
+                } else {
+                    Some(object)
+                }
             }
             _ => None,
         }
@@ -31956,6 +32391,16 @@ impl<'a> Checker<'a> {
                 return ty;
             }
 
+            if matches!(
+                object.base,
+                Base::Deque(_) | Base::Queue(_) | Base::Stack(_) | Base::PriorityQueue(_)
+            ) && !field.safe
+                && !object.nullable
+                && let Some(ty) = self.check_deque_method_call(expr, field, object)
+            {
+                return ty;
+            }
+
             if matches!(object.base, Base::Range(_))
                 && !field.safe
                 && !object.nullable
@@ -33162,6 +33607,18 @@ impl<'a> Checker<'a> {
             }
             if callee.name == "List" && self.scopes.lookup(&callee.name).is_none() {
                 return self.check_list_construction(expr, expected);
+            }
+            if callee.name == "Deque" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_deque_construction(expr, expected);
+            }
+            if callee.name == "Queue" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_queue_construction(expr, expected);
+            }
+            if callee.name == "Stack" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_stack_construction(expr, expected);
+            }
+            if callee.name == "PriorityQueue" && self.scopes.lookup(&callee.name).is_none() {
+                return self.check_priority_queue_construction(expr, expected);
             }
             if callee.name == "Map" && self.scopes.lookup(&callee.name).is_none() {
                 return self.check_map_construction(expr, expected);
@@ -34396,6 +34853,16 @@ impl<'a> Checker<'a> {
             Base::List(id) => {
                 let element = self.substitute(self.list_types[id as usize], substitution);
                 Base::List(self.intern_list_type(element))
+            }
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+                let element = self.substitute(self.list_types[id as usize], substitution);
+                let new_id = self.intern_list_type(element);
+                match ty.base {
+                    Base::Deque(_) => Base::Deque(new_id),
+                    Base::Queue(_) => Base::Queue(new_id),
+                    Base::PriorityQueue(_) => Base::PriorityQueue(new_id),
+                    _ => Base::Stack(new_id),
+                }
             }
             Base::Map(id) => {
                 let map = self.map_types[id as usize].clone();
@@ -35675,10 +36142,16 @@ fn is_numeric_element(ty: Type) -> bool {
 }
 
 fn has_natural_order(ty: Type) -> bool {
-    matches!(
-        ty.base,
-        Base::Int(_) | Base::Float(_) | Base::Decimal | Base::String | Base::Char | Base::Boolean
-    )
+    !ty.nullable
+        && matches!(
+            ty.base,
+            Base::Int(_)
+                | Base::Float(_)
+                | Base::Decimal
+                | Base::String
+                | Base::Char
+                | Base::Boolean
+        )
 }
 
 #[cfg(test)]

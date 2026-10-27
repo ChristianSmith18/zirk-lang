@@ -2590,6 +2590,9 @@ fn synthesize_native_failure_bodies<'a>(
         // `enum-static-members`: `LookupError`, the `Error` half of the
         // `Result` `EnumType.from_name`/`EnumType.from_value` produce.
         (native.lookup_error, "E_LOOKUP"),
+        (native.allocation_error, "E_ALLOCATION"),
+        (native.empty_collection_error, "E_EMPTY_COLLECTION"),
+        (native.iterator_invalidated, "E_ITERATOR_INVALIDATED"),
         // `date-and-time-types`: the validation errors the `Date`/`Time`
         // constructors throw.
         (native.invalid_date, "E_INVALID_DATE"),
@@ -3520,6 +3523,18 @@ fn materialize_specialized_type(
             };
             Base::List(id)
         }
+        Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::List, id, substitution)
+            else {
+                return ty;
+            };
+            match ty.base {
+                Base::Deque(_) => Base::Deque(id),
+                Base::Queue(_) => Base::Queue(id),
+                Base::PriorityQueue(_) => Base::PriorityQueue(id),
+                _ => Base::Stack(id),
+            }
+        }
         Base::Range(id) => {
             let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Range, id, substitution)
             else {
@@ -3767,13 +3782,20 @@ fn substitute_specialized_type(
             )
             .map(|id| Type::of(Base::Array(id)))
         }),
-        Base::List(id) => checked.list_types.get(id as usize).and_then(|inner| {
-            find_type(
-                &checked.list_types,
-                substitute_specialized_type(checked, *inner, substitution),
-            )
-            .map(|id| Type::of(Base::List(id)))
-        }),
+        Base::List(id) | Base::Deque(id) | Base::Queue(id) | Base::Stack(id) => {
+            checked.list_types.get(id as usize).and_then(|inner| {
+                find_type(
+                    &checked.list_types,
+                    substitute_specialized_type(checked, *inner, substitution),
+                )
+                .map(|id| match ty.base {
+                    Base::List(_) => Type::of(Base::List(id)),
+                    Base::Deque(_) => Type::of(Base::Deque(id)),
+                    Base::Queue(_) => Type::of(Base::Queue(id)),
+                    _ => Type::of(Base::Stack(id)),
+                })
+            })
+        }
         Base::Range(id) => checked.range_types.get(id as usize).and_then(|inner| {
             find_type(
                 &checked.range_types,
@@ -3872,7 +3894,11 @@ fn type_contains_param(checked: &CheckedProgram, ty: Type, seen: &mut HashSet<(u
         Base::Pin(id) => contains(checked.pin_types[id as usize], seen),
         Base::Range(id) => contains(checked.range_types[id as usize], seen),
         Base::Array(id) => contains(checked.array_types[id as usize], seen),
-        Base::List(id) => contains(checked.list_types[id as usize], seen),
+        Base::List(id)
+        | Base::Deque(id)
+        | Base::Queue(id)
+        | Base::Stack(id)
+        | Base::PriorityQueue(id) => contains(checked.list_types[id as usize], seen),
         Base::Set(id) => contains(checked.set_types[id as usize], seen),
         Base::Map(id) => {
             if !seen.insert((2, id)) {
@@ -4438,6 +4464,27 @@ fn union_member_canonical_key(member: Base, checked: &CheckedProgram) -> Vec<u8>
             key.extend_from_slice(name);
             return key;
         }
+        Base::Deque(id) => {
+            let mut key = vec![50];
+            key.extend_from_slice(
+                describe(Type::of(Base::Deque(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
+        Base::Queue(id) => {
+            let mut key = vec![51];
+            key.extend_from_slice(
+                describe(Type::of(Base::Queue(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
+        Base::Stack(id) => {
+            let mut key = vec![52];
+            key.extend_from_slice(
+                describe(Type::of(Base::Stack(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
         Base::Class(id) => {
             let name = checked.classes[id as usize].name.as_bytes();
             let mut key = vec![7];
@@ -4454,6 +4501,34 @@ fn union_member_canonical_key(member: Base, checked: &CheckedProgram) -> Vec<u8>
             let mut key = vec![44];
             let description = describe(Type::of(Base::Shape(id)), &TypeNamesResolver(checked));
             key.extend_from_slice(description.as_bytes());
+            return key;
+        }
+        Base::Array(id) => {
+            let mut key = vec![46];
+            key.extend_from_slice(
+                describe(Type::of(Base::Array(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
+        Base::List(id) => {
+            let mut key = vec![47];
+            key.extend_from_slice(
+                describe(Type::of(Base::List(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
+        Base::Map(id) => {
+            let mut key = vec![48];
+            key.extend_from_slice(
+                describe(Type::of(Base::Map(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
+            return key;
+        }
+        Base::Set(id) => {
+            let mut key = vec![49];
+            key.extend_from_slice(
+                describe(Type::of(Base::Set(id)), &TypeNamesResolver(checked)).as_bytes(),
+            );
             return key;
         }
         Base::Param(id) => {
@@ -4614,6 +4689,10 @@ fn ir_type(
 
         Base::Array(id) => IrType::Array(id),
         Base::List(id) => IrType::List(id),
+        // Deque shares the generic sequence element table but has distinct
+        // instructions and runtime storage from List.
+        Base::Deque(id) => IrType::List(id),
+        Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => IrType::List(id),
         // `Map<K, V>` and `Set<T>` (roadmap Phase 7) — runtime handles.
         // The `module.map_types` and `module.set_types` are populated in the
         // same order as the checker tables, so the id is preserved.
@@ -5004,6 +5083,15 @@ impl<'a> TypeNames for TypeNamesResolver<'a> {
     }
     fn channel_element(&self, id: u32) -> Type {
         self.0.channel_types[id as usize]
+    }
+    fn deque_element(&self, id: u32) -> Type {
+        self.0.list_types[id as usize]
+    }
+    fn queue_element(&self, id: u32) -> Type {
+        self.0.list_types[id as usize]
+    }
+    fn stack_element(&self, id: u32) -> Type {
+        self.0.list_types[id as usize]
     }
     fn atomic_element(&self, id: u32) -> Type {
         self.0.atomic_types[id as usize]
@@ -5888,6 +5976,35 @@ impl<'a> FunctionLowering<'a> {
                         )
                     }) as u32;
                 return Type::of(Base::List(id));
+            }
+            if reference.name == "Deque" {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .list_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Deque<T> element type")
+                    as u32;
+                return Type::of(Base::Deque(id));
+            }
+            if reference.name == "Queue"
+                || reference.name == "Stack"
+                || reference.name == "PriorityQueue"
+            {
+                let element = self.resolve_written_type_with_nullability(&reference.arguments[0]);
+                let id = self
+                    .checked
+                    .list_types
+                    .iter()
+                    .position(|&t| t == element)
+                    .expect("the checker interned every Queue/Stack element type")
+                    as u32;
+                return Type::of(match reference.name.as_str() {
+                    "Queue" => Base::Queue(id),
+                    "Stack" => Base::Stack(id),
+                    _ => Base::PriorityQueue(id),
+                });
             }
 
             // `Map<K, V>` / `Set<T>` (roadmap Phase 7): same interned-by-content
@@ -8427,7 +8544,10 @@ impl<'a> FunctionLowering<'a> {
         if iterable_ty == IrType::Range {
             return self.lower_for_in_range_value(stmt);
         }
-        if matches!(iterable_ty, IrType::Array(_) | IrType::List(_)) {
+        if matches!(
+            iterable_ty,
+            IrType::Array(_) | IrType::List(_) | IrType::Map(_) | IrType::Set(_)
+        ) {
             return self.lower_for_in_array_list(stmt, iterable_ty);
         }
         self.lower_for_in_iterable(stmt);
@@ -9122,13 +9242,111 @@ impl<'a> FunctionLowering<'a> {
     fn lower_for_in_array_list(&mut self, stmt: &ast::ForInStmt, iterable_ty: IrType) {
         self.scopes.push(HashMap::new());
 
-        let iterable = self.lower_expr(&stmt.iterable);
-        let iterable_slot = self.declare_slot("<iterable>", iterable_ty, stmt.iterable.span());
+        let (iterable, stored_ty, element_ty, map_iterator_guard) = if let Some(
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id),
+        ) = self
+            .checked
+            .expr_types
+            .get(&stmt.iterable.span())
+            .map(|ty| ty.base)
+        {
+            let deque = self.lower_expr(&stmt.iterable);
+            let deque_slot = self.declare_slot("<deque-iterator-source>", iterable_ty, stmt.span);
+            self.emit_effect(InstKind::Store(deque_slot, deque), stmt.span);
+            let is_priority_queue = matches!(
+                self.checked
+                    .expr_types
+                    .get(&stmt.iterable.span())
+                    .map(|ty| ty.base),
+                Some(Base::PriorityQueue(_))
+            );
+            let version_kind = if is_priority_queue {
+                InstKind::PriorityQueueVersion(deque)
+            } else {
+                InstKind::DequeVersion(deque)
+            };
+            let version = self.emit(
+                version_kind,
+                IrType::Int(IntWidth::U64),
+                stmt.iterable.span(),
+            );
+            let version_slot = self.declare_slot(
+                "<deque-iterator-version>",
+                IrType::Int(IntWidth::U64),
+                stmt.span,
+            );
+            self.emit_effect(InstKind::Store(version_slot, version), stmt.span);
+            let element = self.module.list_types[id as usize];
+            (
+                deque,
+                iterable_ty,
+                element,
+                Some((deque_slot, version_slot, true, is_priority_queue)),
+            )
+        } else if let IrType::Map(id) = iterable_ty {
+            let map = self.lower_expr(&stmt.iterable);
+            let map_slot = self.declare_slot("<map-iterator-source>", iterable_ty, stmt.span);
+            self.emit_effect(InstKind::Store(map_slot, map), stmt.span);
+            let version = self.emit(
+                InstKind::MapVersion(map),
+                IrType::Int(IntWidth::U64),
+                stmt.iterable.span(),
+            );
+            let version_slot = self.declare_slot(
+                "<map-iterator-version>",
+                IrType::Int(IntWidth::U64),
+                stmt.span,
+            );
+            self.emit_effect(InstKind::Store(version_slot, version), stmt.span);
+            let (key_ty, value_ty) = self.module.map_types[id as usize];
+            let fields = [key_ty, value_ty];
+            let tuple_id = self
+                .module
+                .values
+                .iter()
+                .position(|layout| {
+                    layout.fields.len() == fields.len()
+                        && layout
+                            .fields
+                            .iter()
+                            .zip(fields)
+                            .all(|(field, expected)| field.ty == expected)
+                })
+                .expect("sema interns the Map entry tuple layout");
+            let element = IrType::Value(tuple_id as u32);
+            let array_id = self.array_id_for(element);
+            let snapshot = self.emit(
+                InstKind::MapEntries(map),
+                IrType::Array(array_id),
+                stmt.iterable.span(),
+            );
+            (
+                snapshot,
+                IrType::Array(array_id),
+                element,
+                Some((map_slot, version_slot, false, false)),
+            )
+        } else if let IrType::Set(id) = iterable_ty {
+            let set = self.lower_expr(&stmt.iterable);
+            let element = self.module.set_types[id as usize];
+            let array_id = self.array_id_for(element);
+            let snapshot = self.emit(
+                InstKind::SetValues(set),
+                IrType::Array(array_id),
+                stmt.iterable.span(),
+            );
+            (snapshot, IrType::Array(array_id), element, None)
+        } else {
+            let iterable = self.lower_expr(&stmt.iterable);
+            let element = self.array_list_element_type(iterable_ty);
+            (iterable, iterable_ty, element, None)
+        };
+        let iterable_slot = self.declare_slot("<iterable>", stored_ty, stmt.iterable.span());
         self.emit_effect(InstKind::Store(iterable_slot, iterable), stmt.span);
 
-        let iterable_value = self.emit(InstKind::Load(iterable_slot), iterable_ty, stmt.span);
+        let iterable_value = self.emit(InstKind::Load(iterable_slot), stored_ty, stmt.span);
         let length = self.emit(
-            if matches!(iterable_ty, IrType::Array(_)) {
+            if matches!(stored_ty, IrType::Array(_)) {
                 InstKind::ArrayLength(iterable_value)
             } else {
                 InstKind::ListLength(iterable_value)
@@ -9139,7 +9357,6 @@ impl<'a> FunctionLowering<'a> {
         let length_slot = self.declare_slot("<length>", IrType::Int(IntWidth::U64), stmt.span);
         self.emit_effect(InstKind::Store(length_slot, length), stmt.span);
 
-        let element_ty = self.array_list_element_type(iterable_ty);
         let counter = self.declare_slot(
             &stmt.binding.name,
             IrType::Int(IntWidth::U64),
@@ -9161,6 +9378,55 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(header));
 
         self.current = header;
+        let condition_block =
+            if let Some((source_slot, version_slot, is_deque, is_priority_queue)) =
+                map_iterator_guard
+            {
+                let source = self.emit(InstKind::Load(source_slot), iterable_ty, stmt.span);
+                let actual_version = self.emit(
+                    if is_priority_queue {
+                        InstKind::PriorityQueueVersion(source)
+                    } else if is_deque {
+                        InstKind::DequeVersion(source)
+                    } else {
+                        InstKind::MapVersion(source)
+                    },
+                    IrType::Int(IntWidth::U64),
+                    stmt.span,
+                );
+                let expected_version = self.emit(
+                    InstKind::Load(version_slot),
+                    IrType::Int(IntWidth::U64),
+                    stmt.span,
+                );
+                let unchanged = self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: actual_version,
+                        right: expected_version,
+                    },
+                    IrType::Boolean,
+                    stmt.span,
+                );
+                let condition_block = self.new_block();
+                let invalidated_block = self.new_block();
+                self.terminate(Terminator::Branch {
+                    condition: unchanged,
+                    then_block: condition_block,
+                    else_block: invalidated_block,
+                });
+                self.current = invalidated_block;
+                let error = self
+                    .checked
+                    .native_exceptions
+                    .expect("iterator invalidation registers its native error")
+                    .iterator_invalidated;
+                self.throw_native_failure(error, "collection changed during iteration", stmt.span);
+                condition_block
+            } else {
+                header
+            };
+        self.current = condition_block;
         let current = self.emit(
             InstKind::Load(counter),
             IrType::Int(IntWidth::U64),
@@ -9195,7 +9461,7 @@ impl<'a> FunctionLowering<'a> {
         });
 
         self.current = body_block;
-        let iterable_value = self.emit(InstKind::Load(iterable_slot), iterable_ty, stmt.span);
+        let iterable_value = self.emit(InstKind::Load(iterable_slot), stored_ty, stmt.span);
         let index = self.emit(
             InstKind::Load(counter),
             IrType::Int(IntWidth::U64),
@@ -9647,6 +9913,14 @@ impl<'a> FunctionLowering<'a> {
     // --- Expressions ------------------------------------------------------
 
     fn lower_expr(&mut self, expr: &ast::Expr) -> Operand {
+        if let ast::Expr::Call(call) = expr
+            && self.is_ordered_sequence_method_call(call)
+        {
+            // Ordered sequence operations with recoverable empty/allocation
+            // outcomes expose their `Result` value to callers. The generic
+            // Result-to-nullable projection path must not erase that contract.
+            return self.lower_expr_unprojected(expr);
+        }
         let Some(&result_ty) = self.checked.result_projections.get(&expr.span()) else {
             return self.lower_expr_unprojected(expr);
         };
@@ -12845,6 +13119,9 @@ impl<'a> FunctionLowering<'a> {
                     return self.lower_throws_check(operand, ty, span);
                 }
                 if let Some(operand) = self.lower_array_list_method_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_ordered_sequence_method_call(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_range_method_call(e, span) {
@@ -20003,6 +20280,9 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.overflow_error
                 || id == n.regex_error
                 || id == n.lookup_error
+                || id == n.allocation_error
+                || id == n.empty_collection_error
+                || id == n.iterator_invalidated
                 || id == n.invalid_date
                 || id == n.invalid_time
                 || id == n.cancelled_error
@@ -20047,6 +20327,37 @@ impl<'a> FunctionLowering<'a> {
         let exception = self.build_native_failure(class_id, message, span);
         self.emit_effect(InstKind::Throw(exception), span);
         self.lower_pending_exception_dispatch(span);
+    }
+
+    fn lower_collection_allocation_check(&mut self, status: Operand, span: Span) {
+        let failure_code = self.const_int_at(2, IrType::Int(IntWidth::I32), span);
+        let failed = self.emit(
+            InstKind::Binary {
+                op: BinaryOp::Eq,
+                left: status,
+                right: failure_code,
+            },
+            IrType::Boolean,
+            span,
+        );
+        let failure = self.new_block();
+        let continuation = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: failed,
+            then_block: failure,
+            else_block: continuation,
+        });
+        self.current = failure;
+        let native = self
+            .checked
+            .native_exceptions
+            .expect("collection allocation errors are registered in the standard hierarchy");
+        self.throw_native_failure(
+            native.allocation_error,
+            "collection growth allocation failed",
+            span,
+        );
+        self.current = continuation;
     }
 
     /// Division-by-zero guard (D10): before `Div`/`Rem` over integers runs,
@@ -22654,6 +22965,10 @@ impl<'a> FunctionLowering<'a> {
         match ty.base {
             zirk_sema::Base::Array(_)
             | zirk_sema::Base::List(_)
+            | zirk_sema::Base::Deque(_)
+            | zirk_sema::Base::Queue(_)
+            | zirk_sema::Base::Stack(_)
+            | zirk_sema::Base::PriorityQueue(_)
             | zirk_sema::Base::Map(_)
             | zirk_sema::Base::Set(_) => true,
             zirk_sema::Base::Enum(id) => enum_has_payload(self.checked, id),
@@ -24613,6 +24928,17 @@ impl<'a> FunctionLowering<'a> {
         let receiver_ir = IrType::Float(width);
         let f64_ty = IrType::Float(FloatWidth::F64);
         let receiver = self.lower_expr(&field.object);
+        if width == FloatWidth::F128 && name == "format" && call.args.len() == 1 {
+            let spec = self.lower_expr_as(&call.args[0].value, IrType::String);
+            return Some(self.emit(
+                InstKind::Float128Format {
+                    value: receiver,
+                    spec,
+                },
+                IrType::String,
+                span,
+            ));
+        }
         let wide = if receiver_ir == f64_ty {
             receiver
         } else {
@@ -25557,6 +25883,155 @@ impl<'a> FunctionLowering<'a> {
     /// `list.add(v)`, `list.insert(i, v)` and `list.remove(i)` are lowered to
     /// runtime calls through dedicated instructions; the checker has already
     /// validated the receiver and argument types.
+    fn lower_ordered_sequence_method_call(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+    ) -> Option<Operand> {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return None;
+        };
+        let sema_ty = *self.checked.expr_types.get(&field.object.span())?;
+        let family = match sema_ty.base {
+            Base::Deque(_) => "Deque",
+            Base::Queue(_) => "Queue",
+            Base::Stack(_) => "Stack",
+            Base::PriorityQueue(_) => "PriorityQueue",
+            _ => return None,
+        };
+        let operation = match (family, field.name.name.as_str()) {
+            ("Deque", "push_front") => "push_front",
+            ("Deque", "push_back") => "push_back",
+            ("Deque", "pop_front") => "pop_front",
+            ("Deque", "pop_back") => "pop_back",
+            ("Deque", "front") => "front",
+            ("Deque", "back") => "back",
+            ("Queue", "enqueue") => "push_back",
+            ("Queue", "dequeue") => "pop_front",
+            ("Queue", "peek") | ("Stack", "peek") => "front",
+            ("PriorityQueue", "enqueue") => "priority_enqueue",
+            ("PriorityQueue", "dequeue") => "priority_dequeue",
+            ("PriorityQueue", "peek") => "priority_peek",
+            ("Stack", "push") => "push_front",
+            ("Stack", "pop") => "pop_front",
+            (_, "clear") => "clear",
+            _ => return None,
+        };
+        let receiver_ty = self.ir_type(sema_ty);
+        let IrType::List(ir_id) = receiver_ty else {
+            unreachable!("ordered sequence handles lower to List IR handles")
+        };
+        let element_ty = self.module.list_types[ir_id as usize];
+        let receiver = self.lower_expr(&field.object);
+        if family == "PriorityQueue" {
+            return match (operation, call.args.len()) {
+                ("priority_enqueue", 1) => {
+                    let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                    let status = self.emit(
+                        InstKind::PriorityQueueEnqueue { receiver, value },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    );
+                    self.lower_collection_allocation_check(status, span);
+                    Some(self.emit(InstKind::Undefined, IrType::Void, span))
+                }
+                ("priority_peek", 0) | ("priority_dequeue", 0) => {
+                    let receiver_slot = self.spill(receiver, receiver_ty, span);
+                    let guarded_receiver =
+                        self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                    let empty = self.emit(
+                        InstKind::PriorityQueueIsEmpty(guarded_receiver),
+                        IrType::Boolean,
+                        span,
+                    );
+                    let ok = self.emit(
+                        InstKind::Unary {
+                            op: UnaryOp::Not,
+                            operand: empty,
+                        },
+                        IrType::Boolean,
+                        span,
+                    );
+                    Some(self.build_result_from_flag(
+                        call,
+                        span,
+                        ok,
+                        move |lower| {
+                            let receiver =
+                                lower.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                            if operation == "priority_peek" {
+                                lower.emit(InstKind::PriorityQueuePeek(receiver), element_ty, span)
+                            } else {
+                                lower.emit(
+                                    InstKind::PriorityQueueDequeue(receiver),
+                                    element_ty,
+                                    span,
+                                )
+                            }
+                        },
+                        "PriorityQueue is empty",
+                    ))
+                }
+                _ => None,
+            };
+        }
+        match (operation, call.args.len()) {
+            ("push_front", 1) | ("push_back", 1) => {
+                let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                let status = if operation == "push_front" {
+                    self.emit(
+                        InstKind::DequePushFront { receiver, value },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                } else {
+                    self.emit(
+                        InstKind::DequePushBack { receiver, value },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    )
+                };
+                self.lower_collection_allocation_check(status, span);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            ("front", 0) | ("back", 0) | ("pop_front", 0) | ("pop_back", 0) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
+                let for_check = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let empty = self.emit(InstKind::DequeIsEmpty(for_check), IrType::Boolean, span);
+                let present = self.emit(
+                    InstKind::Unary {
+                        op: UnaryOp::Not,
+                        operand: empty,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                let result = self.build_result_from_flag(
+                    call,
+                    span,
+                    present,
+                    |this| {
+                        let receiver = this.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                        let kind = match operation {
+                            "front" => InstKind::DequeFront(receiver),
+                            "back" => InstKind::DequeBack(receiver),
+                            "pop_front" => InstKind::DequePopFront(receiver),
+                            _ => InstKind::DequePopBack(receiver),
+                        };
+                        this.emit(kind, element_ty, span)
+                    },
+                    "collection is empty",
+                );
+                Some(result)
+            }
+            ("clear", 0) => {
+                self.emit_effect(InstKind::DequeClear(receiver), span);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
+            }
+            _ => None,
+        }
+    }
+
     fn lower_array_list_method_call(
         &mut self,
         call: &ast::CallExpr,
@@ -25568,6 +26043,10 @@ impl<'a> FunctionLowering<'a> {
         if let ast::Expr::Path(ident) = &*field.object
             && self.try_lookup_slot(&ident.name).is_none()
         {
+            return None;
+        }
+        let source_ty = self.checked.expr_types.get(&field.object.span())?;
+        if !matches!(source_ty.base, Base::Array(_) | Base::List(_)) {
             return None;
         }
         let receiver_ty = self.type_of(&field.object, field.object.span());
@@ -28280,6 +28759,11 @@ impl<'a> FunctionLowering<'a> {
             return None;
         }
         let receiver = self.lower_expr(&field.object);
+        // Collection arguments may contain checked temporal construction or
+        // another expression that splits the current block. Keep the receiver
+        // in a slot and reload it after argument lowering so its SSA value
+        // never crosses that control-flow boundary.
+        let receiver_slot = self.spill(receiver, receiver_ty, span);
         let (key_ty, value_ty, element_ty) = match receiver_ty {
             IrType::Map(id) => {
                 let (k, v) = self
@@ -28303,37 +28787,98 @@ impl<'a> FunctionLowering<'a> {
         };
 
         match (field.name.name.as_str(), call.args.len(), receiver_ty) {
-            ("length", 0, IrType::Map(_)) => Some(self.emit(
-                InstKind::MapLength(receiver),
-                IrType::Int(IntWidth::U64),
-                span,
-            )),
-            ("length", 0, IrType::Set(_)) => Some(self.emit(
-                InstKind::SetLength(receiver),
-                IrType::Int(IntWidth::U64),
-                span,
-            )),
+            ("keys", 0, IrType::Map(_)) => {
+                let element_id = self.array_id_for(key_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(InstKind::MapKeys(receiver), IrType::Array(element_id), span))
+            }
+            ("values", 0, IrType::Map(_)) => {
+                let element_id = self.array_id_for(value_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(
+                    InstKind::MapValues(receiver),
+                    IrType::Array(element_id),
+                    span,
+                ))
+            }
+            ("entries", 0, IrType::Map(_)) => {
+                let entry_fields = [key_ty, value_ty];
+                let tuple_id = self
+                    .module
+                    .values
+                    .iter()
+                    .position(|layout| {
+                        layout.fields.len() == entry_fields.len()
+                            && layout
+                                .fields
+                                .iter()
+                                .zip(entry_fields)
+                                .all(|(field, expected)| field.ty == expected)
+                    })
+                    .expect("sema interns the Map entry tuple layout");
+                let array_id = self.array_id_for(IrType::Value(tuple_id as u32));
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(
+                    InstKind::MapEntries(receiver),
+                    IrType::Array(array_id),
+                    span,
+                ))
+            }
+            ("length", 0, IrType::Map(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(
+                    InstKind::MapLength(receiver),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ))
+            }
+            ("length", 0, IrType::Set(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(
+                    InstKind::SetLength(receiver),
+                    IrType::Int(IntWidth::U64),
+                    span,
+                ))
+            }
             ("is_empty", 0, IrType::Map(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(InstKind::MapIsEmpty(receiver), IrType::Boolean, span))
             }
             ("is_empty", 0, IrType::Set(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(InstKind::SetIsEmpty(receiver), IrType::Boolean, span))
+            }
+            ("clear", 0, IrType::Map(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(InstKind::MapClear(receiver), IrType::Void, span))
+            }
+            ("clear", 0, IrType::Set(_)) => {
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                Some(self.emit(InstKind::SetClear(receiver), IrType::Void, span))
             }
             ("set", 2, IrType::Map(_)) => {
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let key_slot = self.spill(key, key_ty, span);
                 let value = self.lower_expr_as(&call.args[1].value, value_ty);
-                Some(self.emit(
+                let value_slot = self.spill(value, value_ty, span);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let key = self.emit(InstKind::Load(key_slot), key_ty, span);
+                let value = self.emit(InstKind::Load(value_slot), value_ty, span);
+                let status = self.emit(
                     InstKind::MapSet {
                         receiver,
                         key,
                         value,
                     },
-                    IrType::Void,
+                    IrType::Int(IntWidth::I32),
                     span,
-                ))
+                );
+                self.lower_collection_allocation_check(status, span);
+                Some(self.emit(InstKind::Undefined, IrType::Void, span))
             }
             ("contains_key", 1, IrType::Map(_)) => {
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(
                     InstKind::MapContainsKey { receiver, key },
                     IrType::Boolean,
@@ -28341,7 +28886,6 @@ impl<'a> FunctionLowering<'a> {
                 ))
             }
             ("get", 1, IrType::Map(_)) => {
-                let receiver_slot = self.spill(receiver, receiver_ty, span);
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
                 let key_slot = self.spill(key, key_ty, span);
                 let receiver_for_check =
@@ -28362,24 +28906,44 @@ impl<'a> FunctionLowering<'a> {
                     |this| {
                         let receiver = this.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                         let key = this.emit(InstKind::Load(key_slot), key_ty, span);
-                        let nullable =
-                            Nullable::of(value_ty).expect("a map's value type has a nullable form");
-                        let value = this.emit(
-                            InstKind::MapGet { receiver, key },
-                            IrType::Nullable(nullable),
-                            span,
-                        );
-                        this.emit(InstKind::Unwrap(value), value_ty, span)
+                        // Presence was checked above and is carried by the
+                        // enclosing Result. Keep the stored value's full type
+                        // here, including a nullable V, so `Map<K, V?>` can
+                        // distinguish a present null from an absent key.
+                        this.emit(InstKind::MapGet { receiver, key }, value_ty, span)
                     },
                     "map key not found",
                 ))
             }
             ("add", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
-                Some(self.emit(InstKind::SetAdd { receiver, value }, IrType::Void, span))
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let status = self.emit(
+                    InstKind::SetAdd { receiver, value },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let status_slot = self.spill(status, IrType::Int(IntWidth::I32), span);
+                self.lower_collection_allocation_check(status, span);
+                let status = self.emit(
+                    InstKind::Load(status_slot),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let inserted_code = self.const_int_at(1, IrType::Int(IntWidth::I32), span);
+                Some(self.emit(
+                    InstKind::Binary {
+                        op: BinaryOp::Eq,
+                        left: status,
+                        right: inserted_code,
+                    },
+                    IrType::Boolean,
+                    span,
+                ))
             }
             ("contains", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(
                     InstKind::SetContains { receiver, value },
                     IrType::Boolean,
@@ -28388,13 +28952,57 @@ impl<'a> FunctionLowering<'a> {
             }
             ("remove", 1, IrType::Map(_)) => {
                 let key = self.lower_expr_as(&call.args[0].value, key_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(InstKind::MapRemove { receiver, key }, IrType::Boolean, span))
             }
             ("remove", 1, IrType::Set(_)) => {
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(
                     InstKind::SetRemove { receiver, value },
                     IrType::Boolean,
+                    span,
+                ))
+            }
+            (name, 1, IrType::Set(_))
+                if name == "union"
+                    || name == "intersection"
+                    || name == "difference"
+                    || name == "symmetric_difference"
+                    || name == "is_subset_of"
+                    || name == "is_superset_of"
+                    || name == "is_disjoint" =>
+            {
+                let right = self.lower_expr_as(&call.args[0].value, receiver_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
+                let operation = match name {
+                    "union" => crate::SetOperation::Union,
+                    "intersection" => crate::SetOperation::Intersection,
+                    "difference" => crate::SetOperation::Difference,
+                    "symmetric_difference" => crate::SetOperation::SymmetricDifference,
+                    "is_subset_of" => crate::SetOperation::IsSubsetOf,
+                    "is_superset_of" => crate::SetOperation::IsSupersetOf,
+                    "is_disjoint" => crate::SetOperation::IsDisjoint,
+                    _ => unreachable!("guarded set operation"),
+                };
+                let result_ty = if matches!(
+                    operation,
+                    crate::SetOperation::Union
+                        | crate::SetOperation::Intersection
+                        | crate::SetOperation::Difference
+                        | crate::SetOperation::SymmetricDifference
+                ) {
+                    receiver_ty
+                } else {
+                    IrType::Boolean
+                };
+                Some(self.emit(
+                    InstKind::SetOperation {
+                        left: receiver,
+                        right,
+                        operation,
+                    },
+                    result_ty,
                     span,
                 ))
             }
@@ -28438,7 +29046,15 @@ impl<'a> FunctionLowering<'a> {
         };
         if !matches!(
             callee.name.as_str(),
-            "Array" | "List" | "Map" | "Set" | "Channel"
+            "Array"
+                | "List"
+                | "Deque"
+                | "Queue"
+                | "Stack"
+                | "PriorityQueue"
+                | "Map"
+                | "Set"
+                | "Channel"
         ) {
             return None;
         }
@@ -28468,6 +29084,50 @@ impl<'a> FunctionLowering<'a> {
             ("List", Base::List(id)) => {
                 let element_ty = self.module.list_types[id as usize];
                 Some(self.lower_expanded_list(call.args.as_slice(), id, element_ty, span))
+            }
+            ("Deque", Base::Deque(id)) if call.args.is_empty() => Some(self.emit(
+                InstKind::DequeNew { element_id: id },
+                IrType::List(id),
+                span,
+            )),
+            ("Queue", Base::Queue(id)) | ("Stack", Base::Stack(id)) if call.args.is_empty() => {
+                Some(self.emit(
+                    InstKind::DequeNew { element_id: id },
+                    IrType::List(id),
+                    span,
+                ))
+            }
+            ("PriorityQueue", Base::PriorityQueue(id)) if call.args.is_empty() => {
+                let element = self.module.list_types[id as usize];
+                let order = match element {
+                    IrType::Boolean => 1,
+                    IrType::Char => 2,
+                    IrType::Int(IntWidth::I8) => 3,
+                    IrType::Int(IntWidth::I16) => 4,
+                    IrType::Int(IntWidth::I32) => 5,
+                    IrType::Int(IntWidth::I64) => 6,
+                    IrType::Int(IntWidth::I128) => 7,
+                    IrType::Int(IntWidth::U8) => 8,
+                    IrType::Int(IntWidth::U16) => 9,
+                    IrType::Int(IntWidth::U32) => 10,
+                    IrType::Int(IntWidth::U64) => 11,
+                    IrType::Int(IntWidth::U128) => 12,
+                    IrType::Float(FloatWidth::F16) => 13,
+                    IrType::Float(FloatWidth::F32) => 14,
+                    IrType::Float(FloatWidth::F64) => 15,
+                    IrType::Float(FloatWidth::F128) => 16,
+                    IrType::Decimal => 17,
+                    IrType::String => 18,
+                    _ => return None,
+                };
+                Some(self.emit(
+                    InstKind::PriorityQueueNew {
+                        element_id: id,
+                        order,
+                    },
+                    IrType::List(id),
+                    span,
+                ))
             }
             ("Map", Base::Map(id)) if call.args.is_empty() => {
                 Some(self.emit(InstKind::MapNew { map_id: id }, IrType::Map(id), span))
@@ -30565,12 +31225,26 @@ impl<'a> FunctionLowering<'a> {
             )
         {
             let receiver = self.lower_expr(&expr.object);
+            let collection_kind = self
+                .checked
+                .expr_types
+                .get(&expr.object.span())
+                .map(|ty| ty.base);
+            let deque = matches!(
+                collection_kind,
+                Some(Base::Deque(_) | Base::Queue(_) | Base::Stack(_))
+            );
+            let priority_queue = matches!(collection_kind, Some(Base::PriorityQueue(_)));
             let is_list = matches!(
                 self.type_of(&expr.object, expr.object.span()),
                 IrType::List(_)
             );
             let length = self.emit(
-                if is_list {
+                if priority_queue {
+                    InstKind::PriorityQueueLength(receiver)
+                } else if deque {
+                    InstKind::DequeLength(receiver)
+                } else if is_list {
                     InstKind::ListLength(receiver)
                 } else {
                     InstKind::ArrayLength(receiver)
@@ -30581,6 +31255,13 @@ impl<'a> FunctionLowering<'a> {
             match expr.name.name.as_str() {
                 "length" => return length,
                 "is_empty" => {
+                    if priority_queue {
+                        return self.emit(
+                            InstKind::PriorityQueueIsEmpty(receiver),
+                            IrType::Boolean,
+                            span,
+                        );
+                    }
                     let zero = self.emit(InstKind::ConstInt(0), IrType::Int(IntWidth::I32), span);
                     let zero = self.emit(InstKind::IntCast(zero), IrType::Int(IntWidth::U64), span);
                     return self.emit(
@@ -33949,6 +34630,11 @@ impl<'a> FunctionLowering<'a> {
                     let _ = result;
                 }
             }
+            ast::Expr::Call(e) if self.is_ordered_sequence_method_call(e) => {
+                if let Some(result) = self.lower_ordered_sequence_method_call(e, expr.span()) {
+                    let _ = result;
+                }
+            }
             ast::Expr::Call(e) if self.is_tuple_method_call(e) => {
                 if let Some(result) = self.lower_tuple_method_call(e, expr.span()) {
                     let _ = result;
@@ -34828,54 +35514,22 @@ impl<'a> FunctionLowering<'a> {
             })
     }
 
-    /// The `Array<Int64>` `IrType` the `Map`/`Set` snapshots come back as —
-    /// reusing a checker-interned `Array<Int64>` when one exists, else the
-    /// synthetic entry `lower` appends past the checker's own
-    /// (`universal-to-string-and-multiline-strings`).
-    fn word_array_type(&mut self) -> IrType {
-        let word = IrType::Int(IntWidth::I64);
-        let id = match self.module.array_types.iter().position(|&t| t == word) {
-            Some(id) => id as u32,
-            None => {
-                let id = self.module.array_types.len() as u32;
-                self.module.array_types.push(word);
-                id
-            }
-        };
-        IrType::Array(id)
-    }
-
     /// `map.to_string()` (`universal-to-string-and-multiline-strings`):
     /// `{k0: v0, k1: v1, …}` over the runtime's sorted key snapshot — the
-    /// same loop shape `lower_collection_to_string` builds, with each stored
-    /// `i64` word read back as the key's own type by `WordCast` and the
-    /// value fetched through the ordinary `MapGet`/`Unwrap` pair.
+    /// same loop shape `lower_collection_to_string` builds, over a snapshot
+    /// with the key's complete declared layout and the value fetched through
+    /// the ordinary `MapGet` path.
     fn lower_map_to_string(&mut self, receiver: Operand, map_id: u32, span: Span) -> Operand {
-        let i64_ty = IrType::Int(IntWidth::I64);
         let u64_ty = IrType::Int(IntWidth::U64);
         let map_ty = IrType::Map(map_id);
         let key_sem = self.checked.map_types[map_id as usize].key;
         let value_sem = self.checked.map_types[map_id as usize].value;
         let (key_ir, value_ir) = self.module.map_types[map_id as usize];
-        let words_ty = self.word_array_type();
+        let keys_ty = IrType::Array(self.array_id_for(key_ir));
 
         let receiver_slot = self.spill(receiver, map_ty, span);
-        let string_keys = self.const_i64(
-            matches!(
-                key_sem.base,
-                zirk_sema::Base::String | zirk_sema::Base::Char
-            ) as i128,
-            span,
-        );
-        let keys = self.emit(
-            InstKind::Call {
-                callee: "zirk_rt_map_sorted_keys".to_string(),
-                args: vec![receiver, string_keys],
-            },
-            words_ty,
-            span,
-        );
-        let keys_slot = self.spill(keys, words_ty, span);
+        let keys = self.emit(InstKind::MapSortedKeys(receiver), keys_ty, span);
+        let keys_slot = self.spill(keys, keys_ty, span);
         let length = self.emit(InstKind::ArrayLength(keys), u64_ty, span);
         let length_slot = self.spill(length, u64_ty, span);
 
@@ -34943,32 +35597,24 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(after_comma));
 
         self.current = after_comma;
-        let keys = self.emit(InstKind::Load(keys_slot), words_ty, span);
+        let keys = self.emit(InstKind::Load(keys_slot), keys_ty, span);
         let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
-        let word = self.emit(
+        let key = self.emit(
             InstKind::ArrayListLoad {
                 receiver: keys,
                 index: i,
             },
-            i64_ty,
+            key_ir,
             span,
         );
-        let key = self.emit(InstKind::WordCast(word), key_ir, span);
         let key_str = self.lower_to_string_of(key, key_sem, span);
         // The key's text is held across the value's render: that render can
         // open blocks (a nullable or collection value) and a plain operand
         // would be stranded in this block.
         let key_str_slot = self.spill(key_str, IrType::String, span);
         let receiver = self.emit(InstKind::Load(receiver_slot), map_ty, span);
-        let nullable_value = self.emit(
-            InstKind::MapGet { receiver, key },
-            IrType::Nullable(
-                Nullable::of(value_ir).expect("a map's value type has a nullable form"),
-            ),
-            span,
-        );
         // The key came from the map's own snapshot — it is always present.
-        let value = self.emit(InstKind::Unwrap(nullable_value), value_ir, span);
+        let value = self.emit(InstKind::MapGet { receiver, key }, value_ir, span);
         let value_str = self.lower_to_string_of(value, value_sem, span);
 
         let key_str = self.emit(InstKind::Load(key_str_slot), IrType::String, span);
@@ -35030,29 +35676,13 @@ impl<'a> FunctionLowering<'a> {
     /// `{v0, v1, …}` over the runtime's sorted element snapshot — the same
     /// loop `lower_map_to_string` builds, minus the value lookup.
     fn lower_set_to_string(&mut self, receiver: Operand, set_id: u32, span: Span) -> Operand {
-        let i64_ty = IrType::Int(IntWidth::I64);
         let u64_ty = IrType::Int(IntWidth::U64);
-        let _ = IrType::Set(set_id);
         let elem_sem = self.checked.set_types[set_id as usize];
         let elem_ir = self.module.set_types[set_id as usize];
-        let words_ty = self.word_array_type();
+        let elements_ty = IrType::Array(self.array_id_for(elem_ir));
 
-        let string_elements = self.const_i64(
-            matches!(
-                elem_sem.base,
-                zirk_sema::Base::String | zirk_sema::Base::Char
-            ) as i128,
-            span,
-        );
-        let elements = self.emit(
-            InstKind::Call {
-                callee: "zirk_rt_set_sorted_elements".to_string(),
-                args: vec![receiver, string_elements],
-            },
-            words_ty,
-            span,
-        );
-        let elements_slot = self.spill(elements, words_ty, span);
+        let elements = self.emit(InstKind::SetSortedElements(receiver), elements_ty, span);
+        let elements_slot = self.spill(elements, elements_ty, span);
         let length = self.emit(InstKind::ArrayLength(elements), u64_ty, span);
         let length_slot = self.spill(length, u64_ty, span);
 
@@ -35120,18 +35750,17 @@ impl<'a> FunctionLowering<'a> {
         self.terminate(Terminator::Jump(after_comma));
 
         self.current = after_comma;
-        let elements = self.emit(InstKind::Load(elements_slot), words_ty, span);
+        let elements = self.emit(InstKind::Load(elements_slot), elements_ty, span);
         let i = self.emit(InstKind::Load(i_slot), u64_ty, span);
         let word = self.emit(
             InstKind::ArrayListLoad {
                 receiver: elements,
                 index: i,
             },
-            i64_ty,
+            elem_ir,
             span,
         );
-        let element = self.emit(InstKind::WordCast(word), elem_ir, span);
-        let element_str = self.lower_to_string_of(element, elem_sem, span);
+        let element_str = self.lower_to_string_of(word, elem_sem, span);
         let result = self.emit(InstKind::Load(result_slot), IrType::String, span);
         let result = self.emit(
             InstKind::Concat {
@@ -35858,10 +36487,44 @@ impl<'a> FunctionLowering<'a> {
         {
             return false;
         }
-        matches!(
-            self.type_of(&field.object, field.object.span()),
-            IrType::Array(_) | IrType::List(_)
-        )
+        self.checked
+            .expr_types
+            .get(&field.object.span())
+            .is_some_and(|ty| matches!(ty.base, Base::Array(_) | Base::List(_)))
+    }
+
+    fn is_ordered_sequence_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        let Some(receiver) = self.checked.expr_types.get(&field.object.span()) else {
+            return false;
+        };
+        match receiver.base {
+            Base::Deque(_) => matches!(
+                (field.name.name.as_str(), call.args.len()),
+                ("push_front", 1)
+                    | ("push_back", 1)
+                    | ("pop_front", 0)
+                    | ("pop_back", 0)
+                    | ("front", 0)
+                    | ("back", 0)
+                    | ("clear", 0)
+            ),
+            Base::Queue(_) => matches!(
+                (field.name.name.as_str(), call.args.len()),
+                ("enqueue", 1) | ("dequeue", 0) | ("peek", 0) | ("clear", 0)
+            ),
+            Base::Stack(_) => matches!(
+                (field.name.name.as_str(), call.args.len()),
+                ("push", 1) | ("pop", 0) | ("peek", 0) | ("clear", 0)
+            ),
+            Base::PriorityQueue(_) => matches!(
+                (field.name.name.as_str(), call.args.len()),
+                ("enqueue", 1) | ("dequeue", 0) | ("peek", 0)
+            ),
+            _ => false,
+        }
     }
 
     fn is_range_method_call(&self, call: &ast::CallExpr) -> bool {
@@ -36194,6 +36857,7 @@ impl<'a> FunctionLowering<'a> {
             || self.is_scalar_method_call(call)
             || self.is_native_static_call(call)
             || self.is_array_list_method_call(call)
+            || self.is_ordered_sequence_method_call(call)
             || self.is_range_method_call(call)
             || self.is_tuple_method_call(call)
             || self.is_map_set_method_call(call)

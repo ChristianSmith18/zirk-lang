@@ -204,18 +204,54 @@ pub unsafe extern "C" fn zirk_rt_array_clone_with_layout(
     clone
 }
 
-/// Writes `value` into slot `index` of a word-sized-element array — the
-/// `i64` snapshots `zirk_rt_map_sorted_keys`/`zirk_rt_set_sorted_elements`
-/// build for `to_string()` (`universal-to-string-and-multiline-strings`).
+/// Writes a word-backed scalar or handle into a typed array slot whose size
+/// is at most one machine word.
 ///
 /// # Safety
+/// `array` must be a live array with elements at least `size` bytes wide, and
+/// `index` must be in bounds.
+pub(crate) unsafe fn write_word_sized(array: *mut c_void, index: usize, size: usize, value: i64) {
+    unsafe { write_word_at(array, index, size, 0, size, value) };
+}
+
+/// Writes up to one word into a field inside a typed array element.
 ///
-/// `array` must be a live array produced by `zirk_rt_array_new` with an
-/// element size of at least one word, and `index` must be in bounds.
-pub(crate) unsafe fn write_word(array: *mut c_void, index: usize, value: i64) {
-    unsafe {
-        *((array as *mut u8).add(DATA_OFFSET + index * WORD) as *mut i64) = value;
-    }
+/// # Safety
+/// The array, index, stride and byte range must describe an allocated slot.
+pub(crate) unsafe fn write_word_at(
+    array: *mut c_void,
+    index: usize,
+    stride: usize,
+    offset: usize,
+    size: usize,
+    value: i64,
+) {
+    assert!(size <= WORD, "word-backed array element exceeds one word");
+    assert!(offset.checked_add(size).is_some_and(|end| end <= stride));
+    let target = unsafe { (array as *mut u8).add(DATA_OFFSET + index * stride + offset) };
+    unsafe { std::ptr::copy_nonoverlapping((&value as *const i64).cast::<u8>(), target, size) };
+}
+
+/// Copies a complete typed value into an array slot.
+pub(crate) unsafe fn write_bytes(array: *mut c_void, index: usize, stride: usize, bytes: &[u8]) {
+    assert!(bytes.len() <= stride);
+    unsafe { write_bytes_at(array, index, stride, 0, bytes) };
+}
+
+pub(crate) unsafe fn write_bytes_at(
+    array: *mut c_void,
+    index: usize,
+    stride: usize,
+    offset: usize,
+    bytes: &[u8],
+) {
+    assert!(
+        offset
+            .checked_add(bytes.len())
+            .is_some_and(|end| end <= stride)
+    );
+    let target = unsafe { (array as *mut u8).add(DATA_OFFSET + index * stride + offset) };
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len()) };
 }
 
 /// `array[start:end:step]` — a new array holding the selected elements

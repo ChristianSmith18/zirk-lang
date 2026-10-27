@@ -1,0 +1,45 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut map: Map<Int32, Int32> = Map();
+    map.set(9, 90);
+    map.set(3, 30);
+    map.set(7, 70);
+    map.set(3, 31);
+    map.remove(9);
+    map.set(9, 91);
+    stdout.println((map.get(3) ?? 0).to_string());
+    stdout.println((map.get(7) ?? 0).to_string());
+    stdout.println((map.get(9) ?? 0).to_string());
+    map.clear();
+    stdout.println(map.length.to_string());
+
+    mut set: Set<Int32> = Set();
+    stdout.println(set.add(9).to_string());
+    stdout.println(set.add(3).to_string());
+    stdout.println(set.add(9).to_string());
+    stdout.println(set.contains(9).to_string());
+    stdout.println(set.contains(3).to_string());
+    set.clear();
+    stdout.println(set.length.to_string());
+
+    mut left: Set<Int32> = Set();
+    mut right: Set<Int32> = Set();
+    left.add(3);
+    left.add(1);
+    left.add(4);
+    right.add(1);
+    right.add(2);
+    right.add(4);
+    stdout.println(left.union(right).to_string());
+    stdout.println(left.intersection(right).to_string());
+    stdout.println(left.difference(right).to_string());
+    stdout.println(left.symmetric_difference(right).to_string());
+    stdout.println(left.is_subset_of(right).to_string());
+    stdout.println(left.is_superset_of(right).to_string());
+    stdout.println(left.is_disjoint(right).to_string());
+    stdout.println(left.to_string());
+    stdout.println(right.to_string());
+    for value in left { stdout.println(value.to_string()); }
+}
+main();

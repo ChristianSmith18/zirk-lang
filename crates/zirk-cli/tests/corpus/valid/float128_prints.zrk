@@ -1,8 +1,14 @@
 import { stdout } from std.io;
 
-// Float128 now prints by truncating to Float64 for text conversion.
-// This is a lossy conversion for values not exactly representable in f64.
+// Float128 text conversion preserves binary128 precision.
 fn main(): Void {
     mut a: Float128 = 1.5;
     stdout.println(a);
+    mut precise: Float128 = 123456789012345678901234567890;
+    stdout.println(precise);
+    mut fraction: Float128 = 1.23456;
+    stdout.println(fraction.format(".3"));
+    stdout.println(fraction.format(".3e"));
+    stdout.println((1.5 as Float128 + 0.25 as Float128).format(".2"));
+    stdout.println(((1.5 as Float128) > (1.0 as Float128)).to_string());
 }

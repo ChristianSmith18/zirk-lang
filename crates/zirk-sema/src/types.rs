@@ -423,6 +423,15 @@ pub enum Base {
     /// `List<T>`, identified by the index of its element type `T` in the
     /// checker's `list_types` table.
     List(u32),
+    /// `Deque<T>`, sharing the interned sequence element-type table.
+    Deque(u32),
+    /// FIFO-restricted `Queue<T>`, sharing the sequence element table.
+    Queue(u32),
+    /// LIFO-restricted `Stack<T>`, sharing the sequence element table.
+    Stack(u32),
+    /// Stable minimum-first `PriorityQueue<T>` element type, sharing the
+    /// sequence element table for generic storage.
+    PriorityQueue(u32),
     /// `Map<K, V>`, identified by the index of its `(K, V)` entry in the
     /// checker’s `map_types` table.
     Map(u32),
@@ -879,6 +888,15 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Tuple(id) => names.tuple_name(id),
         Base::Array(id) => format!("Array<{}>", describe(names.array_element(id), names)),
         Base::List(id) => format!("List<{}>", describe(names.list_element(id), names)),
+        Base::Deque(id) => format!("Deque<{}>", describe(names.deque_element(id), names)),
+        Base::Queue(id) => format!("Queue<{}>", describe(names.queue_element(id), names)),
+        Base::Stack(id) => format!("Stack<{}>", describe(names.stack_element(id), names)),
+        Base::PriorityQueue(id) => {
+            format!(
+                "PriorityQueue<{}>",
+                describe(names.stack_element(id), names)
+            )
+        }
         Base::Map(id) => format!(
             "Map<{}, {}>",
             describe(names.map_key(id), names),
@@ -921,6 +939,9 @@ pub trait TypeNames {
     fn tuple_name(&self, id: u32) -> String;
     fn array_element(&self, id: u32) -> Type;
     fn list_element(&self, id: u32) -> Type;
+    fn deque_element(&self, id: u32) -> Type;
+    fn queue_element(&self, id: u32) -> Type;
+    fn stack_element(&self, id: u32) -> Type;
     fn range_element(&self, id: u32) -> Type;
     fn map_key(&self, id: u32) -> Type;
     fn map_value(&self, id: u32) -> Type;

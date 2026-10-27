@@ -215,6 +215,47 @@ while hashing uses a defensive process seed. List growth is automatic;
 capacity/reserve/shrink are not public APIs, and exact fixed storage uses
 `Array`.
 
+The collection signatures are:
+
+- `Deque<T>()`: `push_front(T): Void`, `push_back(T): Void`,
+  `pop_front(): Result<T, EmptyCollectionError>`,
+  `pop_back(): Result<T, EmptyCollectionError>`, `front()` and `back()` with
+  that result type, `clear(): Void`, `length: UInt64`, `is_empty: Boolean`.
+  Iteration is front to back.
+- `Queue<T>()`: `enqueue(T): Void`,
+  `dequeue(): Result<T, EmptyCollectionError>`,
+  `peek(): Result<T, EmptyCollectionError>`, `clear(): Void`, `length: UInt64`,
+  `is_empty: Boolean`. Iteration is FIFO.
+- `Stack<T>()`: `push(T): Void`, `pop(): Result<T, EmptyCollectionError>`,
+  `peek(): Result<T, EmptyCollectionError>`, `clear(): Void`, `length: UInt64`,
+  `is_empty: Boolean`. Iteration is top to bottom.
+- `PriorityQueue<T>()`: `enqueue(T): Void`,
+  `peek(): Result<T, EmptyCollectionError>`,
+  `dequeue(): Result<T, EmptyCollectionError>`, `length: UInt64`,
+  `is_empty: Boolean`. It removes the least value first and preserves insertion
+  order among equal values. `T` must be Boolean, Char, a signed or unsigned
+  integer through 128 bits, Float16/32/64/128, Decimal, or String; nullable and
+  user-defined types without a total order are rejected.
+- `Map<K,V>()`: `set(K, V): Void`,
+  `get(K): Result<V, LookupError>`, `contains_key(K): Boolean`,
+  `remove(K): Boolean`, `clear(): Void`, `length: UInt64`, `is_empty: Boolean`,
+  and insertion-ordered `keys()`, `values()`, and `entries()` snapshots.
+- `Set<T>()`: `add(T): Boolean`, `contains(T): Boolean`,
+  `remove(T): Boolean`, `clear(): Void`, `length: UInt64`, `is_empty: Boolean`,
+  and insertion-ordered iteration. `add` returns true only when it inserts a
+  new element.
+
+Map and Set built-in keys/elements use content equality for String, value
+equality for scalars, normalized equality for floating signed zero, and
+identity equality for mutable class references. NaN remains an invalid scalar
+value. Nullable keys distinguish null from non-null values. Tuples and payload
+enums derive equality only when every field has a canonical stored equality
+layout; unsupported tuple text fields, structural records, and unions are
+rejected at the source type. Equal keys always share the same hash. Map/Set
+growth and sequence growth failures report catchable `AllocationError` without
+partially changing collection contents. Empty sequence reads return the typed
+`EmptyCollectionError` result.
+
 Collections offer `map`, `filter`, `reduce`, search, sorting and explicit
 conversion. Functional operations do not mutate the source. Whole collection
 assignment shares the container; index, slice, iterator, key/value/entry and

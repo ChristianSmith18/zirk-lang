@@ -6846,6 +6846,16 @@ fn valid_union_type_accepts_either_alternative() {
 }
 
 #[test]
+fn unsupported_callable_union_reports_a_source_diagnostic_before_lowering() {
+    let output = rejected(
+        "fn use_value(value: Int32 | Fn() => Int32): Void { }\n\
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
+    assert!(output.contains("union type"), "{output}");
+}
+
+#[test]
 fn union_assignability_checks_every_source_member_and_target_alternatives() {
     accepted(
         "fn wider(value: String | Int32 | Boolean): Void { }\n\
@@ -10253,7 +10263,65 @@ fn valid_map_and_set_types_resolve() {
 }
 
 #[test]
-fn valid_collection_word_layouts_cover_scalars_and_managed_handles() {
+fn valid_deque_constructor_and_operations_typecheck() {
+    accepted_body(
+        "mut deque: Deque<String> = Deque();\n\
+         deque.push_front(\"first\");\n\
+         deque.push_back(\"last\");\n\
+         inmut front: Result<String, EmptyCollectionError> = deque.front();\n\
+         inmut back: Result<String, EmptyCollectionError> = deque.pop_back();\n\
+         deque.clear();\n\
+         inmut count: UInt64 = deque.length;\n\
+         inmut empty: Boolean = deque.is_empty;",
+    );
+}
+
+#[test]
+fn queue_and_stack_expose_only_fifo_and_lifo_operations() {
+    accepted_body(
+        "mut queue: Queue<Int32> = Queue();\n\
+         queue.enqueue(1);\n\
+         inmut received: Result<Int32, EmptyCollectionError> = queue.dequeue();\n\
+         inmut next: Result<Int32, EmptyCollectionError> = queue.peek();\n\
+         queue.clear();\n\
+         mut stack: Stack<Int32> = Stack();\n\
+         stack.push(1);\n\
+         inmut top: Result<Int32, EmptyCollectionError> = stack.peek();\n\
+         inmut removed: Result<Int32, EmptyCollectionError> = stack.pop();\n\
+         stack.clear();",
+    );
+    let rejected_queue =
+        rejected("fn main(): Void { mut queue: Queue<Int32> = Queue(); queue.push(1); }");
+    assert!(rejected_queue.contains("E0426"), "{rejected_queue}");
+    let rejected_stack =
+        rejected("fn main(): Void { mut stack: Stack<Int32> = Stack(); stack.enqueue(1); }");
+    assert!(rejected_stack.contains("E0426"), "{rejected_stack}");
+}
+
+#[test]
+fn priority_queue_requires_a_total_order_and_exposes_typed_fifo_operations() {
+    accepted_body(
+        "mut queue: PriorityQueue<Int32> = PriorityQueue();\n\
+         queue.enqueue(3);\n\
+         inmut smallest: Result<Int32, EmptyCollectionError> = queue.peek();\n\
+         inmut removed: Result<Int32, EmptyCollectionError> = queue.dequeue();\n\
+         inmut count: UInt64 = queue.length;\n\
+         inmut empty: Boolean = queue.is_empty;",
+    );
+
+    let unordered = rejected(
+        "class Unordered {}\n\
+         fn main(): Void { mut values: PriorityQueue<Unordered> = PriorityQueue(); }",
+    );
+    assert!(unordered.contains("total natural ordering"), "{unordered}");
+
+    let nullable =
+        rejected("fn main(): Void { mut values: PriorityQueue<Int32?> = PriorityQueue(); }");
+    assert!(nullable.contains("total natural ordering"), "{nullable}");
+}
+
+#[test]
+fn valid_collection_value_layouts_cover_scalars_aggregates_and_handles() {
     accepted(
         "enum Direction { North, East }\n\
          class User { construct() { } }\n\
@@ -10265,6 +10333,10 @@ fn valid_collection_word_layouts_cover_scalars_and_managed_handles() {
              mut durations: Map<String, Duration> = Map();\n\
              mut dates: Map<String, Date> = Map();\n\
              mut times: Map<String, Time> = Map();\n\
+             mut nullable_values: Map<String, Int32?> = Map();\n\
+             mut tuple_values: Map<String, Tuple<Int32, String>> = Map();\n\
+             mut wide_values: Map<String, Int128> = Map();\n\
+             mut float128_values: Map<String, Float128> = Map();\n\
              mut directions: Map<String, Direction> = Map();\n\
              mut users: Map<String, User> = Map();\n\
              mut arrays: Map<String, Array<Int32>> = Map();\n\
@@ -10274,6 +10346,13 @@ fn valid_collection_word_layouts_cover_scalars_and_managed_handles() {
              mut names: Set<String> = Set();\n\
              mut chars: Set<Char> = Set();\n\
              mut kinds: Set<Direction> = Set();\n\
+             mut wide_keys: Set<Int128> = Set();\n\
+             mut quad_keys: Set<Float128> = Set();\n\
+             mut wide_key_map: Map<UInt128, String> = Map();\n\
+             mut quad_key_map: Map<Float128, String> = Map();\n\
+             mut point_keys: Set<Tuple<Int32, Int32>> = Set();\n\
+             mut wide_point_map: Map<Tuple<Int64, Int64>, String> = Map();\n\
+             mut nested_point_keys: Set<Tuple<Tuple<Int32, Int32>, Tuple<Int32, Int32>>> = Set();\n\
              mut date_set: Set<Date> = Set();\n\
              mut time_set: Set<Time> = Set();\n\
          }",
@@ -10301,15 +10380,9 @@ fn invalid_set_of_an_unhashable_element() {
 }
 
 #[test]
-fn invalid_collection_keys_reject_wide_nullable_and_aggregate_types() {
+fn invalid_collection_keys_reject_unsupported_aggregate_types() {
     for (source, description) in [
-        ("mut s: Set<Int128> = Set();", "Set<Int128>"),
-        ("mut s: Set<UInt128> = Set();", "Set<UInt128>"),
-        ("mut s: Set<Int32?> = Set();", "Set<Int32?>"),
-        (
-            "mut m: Map<Int128, Boolean> = Map();",
-            "Map<Int128, Boolean>",
-        ),
+        ("mut s: Set<Decimal?> = Set();", "Set<Decimal?>"),
         (
             "mut m: Map<Tuple<Int32, String>, Boolean> = Map();",
             "tuple key",
@@ -10326,14 +10399,34 @@ fn invalid_collection_keys_reject_wide_nullable_and_aggregate_types() {
 }
 
 #[test]
-fn invalid_map_values_fail_early_when_the_word_abi_cannot_round_trip_them() {
+fn structural_and_union_keys_without_canonical_equality_are_rejected_early() {
+    for source in [
+        "type Key = { id: Int32 };\n\
+         fn main(): Void { mut values: Set<Key> = Set(); }",
+        "type Key = Int32 | Boolean;\n\
+         fn main(): Void { mut values: Set<Key> = Set(); }",
+    ] {
+        let output = rejected(source);
+        assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+        assert!(output.contains("unhashable"), "{output}");
+    }
+}
+
+#[test]
+fn nullable_scalar_collection_keys_are_accepted_when_the_layout_is_canonical() {
+    accepted_body(
+        "mut nullable: Set<Int32?> = Set();\n\
+         mut nullable_text: Set<String?> = Set();\n\
+         mut nullable_float: Set<Float64?> = Set();\n\
+         mut tuples: Map<Tuple<Int32, Boolean>, String> = Map();",
+    );
+}
+
+#[test]
+fn invalid_map_values_fail_early_when_nullable_lookup_is_unsupported() {
     for (source, description) in [
-        ("mut m: Map<String, Int128> = Map();", "Int128"),
-        ("mut m: Map<String, UInt128> = Map();", "UInt128"),
-        ("mut m: Map<String, Float64> = Map();", "Float64"),
         ("mut m: Map<String, Decimal> = Map();", "Decimal"),
-        ("mut m: Map<String, String?> = Map();", "String?"),
-        ("mut m: Map<String, Tuple<Int32, String>> = Map();", "Tuple"),
+        ("mut m: Map<String, Void> = Map();", "Void"),
         ("mut m: Map<String, Fn(Int32) => Int32> = Map();", "Fn("),
     ] {
         let output = rejected_body(source);
@@ -10342,7 +10435,7 @@ fn invalid_map_values_fail_early_when_the_word_abi_cannot_round_trip_them() {
             "{description}: {output}"
         );
         assert!(
-            output.contains("one-word value representation"),
+            output.contains("nullable lookup representation"),
             "{description}: {output}"
         );
         assert!(output.contains(description), "{description}: {output}");
@@ -10350,15 +10443,24 @@ fn invalid_map_values_fail_early_when_the_word_abi_cannot_round_trip_them() {
 }
 
 #[test]
-fn invalid_map_values_reject_payload_enums() {
-    let output = rejected(
-        "enum Outcome { Success(value: String), Failure }\n\
+fn valid_map_values_accept_payload_enums() {
+    accepted(
+        "enum StoredOutcome { Success(value: String), Failure }\n\
          fn main(): Void {\n\
-             mut outcomes: Map<String, Outcome> = Map();\n\
+             mut outcomes: Map<String, StoredOutcome> = Map();\n\
          }",
     );
-    assert!(output.contains("Map<..., Outcome>"), "{output}");
-    assert!(output.contains("one-word value representation"), "{output}");
+}
+
+#[test]
+fn valid_collection_keys_accept_int32_payload_enums() {
+    accepted(
+        "enum Token { Number(value: Int32), Error(code: Int32), Missing }\n\
+         fn main(): Void {\n\
+             mut tokens: Set<Token> = Set();\n\
+             mut labels: Map<Token, String> = Map();\n\
+         }",
+    );
 }
 
 #[test]

@@ -38,6 +38,15 @@ The frontend shares persistent structures, symbol interning, content-addressed
 caches and a fine-grained dependency graph. Only affected files and symbols are
 invalidated.
 
+For collections and composite values, semantic analysis admits only layouts
+with verified storage and operation support. Lowering records typed layout IDs
+and reference offsets in portable IR; the IR verifier checks receiver/value
+types and composite descriptors before backend emission. The native runtime and
+verified-IR interpreter implement the same collection operations. GC tracing
+follows active union payloads and declared collection reference slots. A type
+outside the supported layout or equality matrix must receive a source-located
+diagnostic before IR/backend execution.
+
 ## 3. Trees and Syntax API
 
 The internal semantic AST is private and may evolve with the compiler. Tools,

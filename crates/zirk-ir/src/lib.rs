@@ -26,6 +26,7 @@
 
 pub mod atomic;
 mod ir;
+mod layout;
 mod lower;
 mod unions;
 mod verify;
@@ -38,8 +39,9 @@ pub use ir::{
     BinaryOp, Block, BlockId, BranchKind, ClosureLayout, ContractLayout, ContractTable, EnumLayout,
     ExternFn, FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, MutexId,
     Nullable, ObjectField, ObjectLayout, Operand, ProjectGlobalLayout, ProjectGlobalWatchEvent,
-    Slot, SlotId, StringId, Terminator, UnaryOp, ValueId, ValueLayout,
+    SetOperation, Slot, SlotId, StringId, Terminator, UnaryOp, ValueId, ValueLayout,
 };
+pub use layout::{RuntimeLayoutField, RuntimeLayoutKind, RuntimeTypeLayout};
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use unions::{
     MAX_INLINE_UNION_PAYLOAD_BYTES, PORTABLE_IR_SCHEMA_MAJOR,

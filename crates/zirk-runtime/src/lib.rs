@@ -48,10 +48,13 @@ mod collector;
 // Internal allocation/tracing hooks for the GC-managed Mutex foundation.
 #[allow(unused_imports)]
 pub(crate) use collector::gc_mutex;
+#[cfg(test)]
+mod collection_bench;
 #[allow(dead_code)] // Internal foundation until the language ABI is lowered.
 mod combinators;
 mod context;
 mod decimal;
+mod deque;
 mod duration;
 pub mod environment;
 mod exceptions;
@@ -62,6 +65,7 @@ mod http3_transport;
 pub mod http_api;
 pub mod http_runtime;
 pub mod local_transport;
+mod priority_queue;
 // The cooperative executor (`ADR-017`): `zirk_rt_run_main` drives it, and
 // `fase-5-structured-tasks` will add the `task` / `await` C-ABI surface.
 #[allow(dead_code)]
@@ -87,6 +91,7 @@ mod network_future;
 pub(crate) mod network_interfaces;
 pub mod network_transport;
 mod object;
+mod ordered;
 pub mod permissions;
 // The `parallel` CPU-region worker pool (`ADR-019`, `parallel-cpu-regions`).
 // Staged at pool size 1 until the stop-the-world safepoint collector lands;
@@ -148,6 +153,7 @@ pub use executor::{
 pub use context::{
     DEFAULT_TASK_STACK_BYTES, Run, Suspender, TaskContext, spawn_default, suspend_current,
 };
+pub use deque::*;
 pub use failure::{
     zirk_rt_allocation_failed, zirk_rt_division_by_zero, zirk_rt_fatal_error,
     zirk_rt_index_out_of_bounds, zirk_rt_invalid_union_tag, zirk_rt_overflow,
@@ -164,6 +170,7 @@ pub use managed_blocking::{
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
 pub use object::*;
 pub use pool::{zirk_rt_pool_join, zirk_rt_pool_submit, zirk_rt_safepoint_poll};
+pub use priority_queue::*;
 pub use range::{
     zirk_range_element_at, zirk_range_end, zirk_range_inclusive, zirk_range_length, zirk_range_new,
     zirk_range_slice, zirk_range_start, zirk_range_step,

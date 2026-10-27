@@ -1456,6 +1456,17 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
                 unsafe { crate::set::mark_entries(object, allocations, &mut enqueue) };
                 continue;
             }
+            if std::ptr::eq(descriptor, crate::deque::deque_descriptor()) {
+                unsafe { crate::deque::mark_entries(object, allocations, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(
+                descriptor,
+                crate::priority_queue::priority_queue_descriptor(),
+            ) {
+                unsafe { crate::priority_queue::mark_entries(object, allocations, &mut enqueue) };
+                continue;
+            }
             // Class instances use their fixed generated layout for declared
             // fields and an object sidecar for properties added through an
             // `Object` view. Trace that sidecar alongside the class fields.
@@ -1684,6 +1695,13 @@ fn sweep(list_head: *mut c_void, allocations: &mut AllocationSet) -> (*mut c_voi
                 unsafe { crate::object::drop_dynamic_value_body(current) };
             } else if std::ptr::eq(descriptor, crate::set::set_descriptor()) {
                 unsafe { crate::set::drop_body(current) };
+            } else if std::ptr::eq(descriptor, crate::deque::deque_descriptor()) {
+                unsafe { crate::deque::drop_body(current) };
+            } else if std::ptr::eq(
+                descriptor,
+                crate::priority_queue::priority_queue_descriptor(),
+            ) {
+                unsafe { crate::priority_queue::drop_body(current) };
             }
             let layout = Layout::from_size_align(size, GC_ALIGN)
                 .expect("this is the exact layout `zirk_rt_alloc` used to allocate it");
@@ -2144,6 +2162,279 @@ mod tests {
     }
 
     #[test]
+    fn typed_map_keys_and_set_elements_trace_nested_reference_slots() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        const WORD: usize = std::mem::size_of::<usize>();
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+
+        let map_child = crate::string::alloc_owned("typed-map-key-child");
+        let set_child = crate::string::alloc_owned("typed-set-element-child");
+        let key_offsets = [WORD];
+        let map = unsafe {
+            crate::map::zirk_rt_map_new_with_layout(
+                key_offsets.as_ptr(),
+                key_offsets.len(),
+                2 * WORD,
+                std::ptr::null(),
+                0,
+                false,
+                WORD,
+            )
+        };
+        let key = [17usize, map_child as usize];
+        let value = 23usize;
+        unsafe {
+            crate::map::zirk_rt_map_set_typed(
+                map,
+                key.as_ptr().cast(),
+                std::mem::size_of_val(&key),
+                (&value as *const usize).cast(),
+                WORD,
+            );
+        }
+
+        let set = unsafe {
+            crate::set::zirk_rt_set_new_with_layout(
+                key_offsets.as_ptr(),
+                key_offsets.len(),
+                2 * WORD,
+                false,
+            )
+        };
+        let element = [31usize, set_child as usize];
+        unsafe {
+            crate::set::zirk_rt_set_add_typed(
+                set,
+                element.as_ptr().cast(),
+                std::mem::size_of_val(&element),
+            );
+        }
+
+        let mut root_values = [map, set];
+        let mut roots: Vec<*mut c_void> = root_values
+            .iter_mut()
+            .map(|root| (root as *mut *mut c_void).cast())
+            .collect();
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(map_child));
+        assert!(test_support::is_live_for_tests(set_child));
+
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_remove_typed(
+                    map,
+                    key.as_ptr().cast(),
+                    std::mem::size_of_val(&key),
+                )
+            },
+            1
+        );
+        assert_eq!(
+            unsafe {
+                crate::set::zirk_rt_set_remove_typed(
+                    set,
+                    element.as_ptr().cast(),
+                    std::mem::size_of_val(&element),
+                )
+            },
+            1
+        );
+        test_support::collect_for_tests();
+        assert!(!test_support::is_live_for_tests(map_child));
+        assert!(!test_support::is_live_for_tests(set_child));
+
+        zirk_rt_pop_frame();
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn priority_queue_traces_and_releases_string_elements() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+        let child = crate::string::alloc_owned("priority-queue-child");
+        let offsets = [0_usize];
+        let queue = unsafe {
+            crate::priority_queue::zirk_rt_priority_queue_new_with_layout(
+                std::mem::size_of::<usize>(),
+                offsets.as_ptr(),
+                offsets.len(),
+                crate::priority_queue::PriorityOrder::String as i32,
+            )
+        };
+        assert_eq!(
+            unsafe {
+                crate::priority_queue::zirk_rt_priority_queue_enqueue(
+                    queue,
+                    (&child as *const *mut c_void).cast(),
+                )
+            },
+            0
+        );
+        let mut root = queue;
+        let mut roots = [(&mut root as *mut *mut c_void).cast()];
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(child));
+
+        let mut output = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::priority_queue::zirk_rt_priority_queue_dequeue(
+                    queue,
+                    (&mut output as *mut *mut c_void).cast(),
+                )
+            },
+            1
+        );
+        test_support::collect_for_tests();
+        assert!(!test_support::is_live_for_tests(child));
+        unsafe { zirk_rt_pop_frame() };
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn deque_traces_reference_elements_and_releases_edges_on_pop() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        let word = std::mem::size_of::<usize>();
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+        let child = crate::string::alloc_owned("deque-child");
+        let offset = [0usize];
+        let deque = unsafe {
+            crate::deque::zirk_rt_deque_new_with_layout(word, offset.as_ptr(), offset.len())
+        };
+        assert_eq!(
+            unsafe {
+                crate::deque::zirk_rt_deque_push_back(deque, (&child as *const *mut c_void).cast())
+            },
+            0
+        );
+        let mut deque_root = deque;
+        let mut roots = [&mut deque_root as *mut *mut c_void as *mut c_void];
+        unsafe { zirk_rt_push_frame(roots.as_mut_ptr(), roots.len() as i64) };
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(child));
+
+        let mut popped: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::deque::zirk_rt_deque_pop_back(
+                    deque,
+                    (&mut popped as *mut *mut c_void).cast(),
+                )
+            },
+            1
+        );
+        assert_eq!(popped, child);
+        test_support::collect_for_tests();
+        assert!(!test_support::is_live_for_tests(child));
+
+        unsafe { zirk_rt_pop_frame() };
+        reset_state_for_tests();
+    }
+
+    #[test]
+    fn failed_map_and_set_insertions_do_not_change_gc_edges() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+        let word = std::mem::size_of::<usize>();
+        let reference_offsets = [0usize];
+
+        let retained_map_value = crate::string::alloc_owned("retained-map-value");
+        let rejected_map_value = crate::string::alloc_owned("rejected-map-value");
+        let map = unsafe {
+            crate::map::zirk_rt_map_new_with_layout(
+                std::ptr::null(),
+                0,
+                word,
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                false,
+                word,
+            )
+        };
+        let first_key = 1usize;
+        let second_key = 2usize;
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_set_typed(
+                    map,
+                    (&first_key as *const usize).cast(),
+                    word,
+                    (&retained_map_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            0
+        );
+        crate::ordered::fail_next_insert_reservation_for_tests();
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_set_typed(
+                    map,
+                    (&second_key as *const usize).cast(),
+                    word,
+                    (&rejected_map_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            2
+        );
+
+        let retained_set_value = crate::string::alloc_owned("retained-set-value");
+        let rejected_set_value = crate::string::alloc_owned("rejected-set-value");
+        let set = unsafe {
+            crate::set::zirk_rt_set_new_with_layout(
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                word,
+                false,
+            )
+        };
+        assert_eq!(
+            unsafe {
+                crate::set::zirk_rt_set_add_typed(
+                    set,
+                    (&retained_set_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            1
+        );
+        crate::ordered::fail_next_insert_reservation_for_tests();
+        assert_eq!(
+            unsafe {
+                crate::set::zirk_rt_set_add_typed(
+                    set,
+                    (&rejected_set_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            2
+        );
+
+        let mut roots = [map, set];
+        let mut root_slots: Vec<*mut c_void> = roots
+            .iter_mut()
+            .map(|root| (root as *mut *mut c_void).cast())
+            .collect();
+        unsafe { zirk_rt_push_frame(root_slots.as_mut_ptr(), root_slots.len() as i64) };
+        assert_eq!(crate::map::zirk_rt_map_length(map), 1);
+        assert_eq!(crate::set::zirk_rt_set_length(set), 1);
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(retained_map_value));
+        assert!(test_support::is_live_for_tests(retained_set_value));
+        assert!(!test_support::is_live_for_tests(rejected_map_value));
+        assert!(!test_support::is_live_for_tests(rejected_set_value));
+        zirk_rt_pop_frame();
+        reset_state_for_tests();
+    }
+
+    #[test]
     fn adversarial_mixed_managed_graph_survives_churn_and_sweeps_unreachable_graphs() {
         let _guard = reset_state();
         const WORD: usize = std::mem::size_of::<usize>();
@@ -2169,12 +2460,32 @@ mod tests {
         let exception =
             unsafe { synthetic_object(crate::array::zirk_rt_array_descriptor.as_ptr().cast(), 0) };
         let exception_trace = unsafe { crate::exceptions::zirk_rt_stack_trace(exception) };
-        let offsets = [0usize];
+        let key_offsets = [0usize];
+        let map_value_offsets = [WORD];
         let map = unsafe {
-            crate::map::zirk_rt_map_new_with_layout(offsets.as_ptr(), 1, offsets.as_ptr(), 1, false)
+            crate::map::zirk_rt_map_new_with_layout(
+                key_offsets.as_ptr(),
+                key_offsets.len(),
+                WORD,
+                map_value_offsets.as_ptr(),
+                map_value_offsets.len(),
+                false,
+                2 * WORD,
+            )
         };
-        crate::map::zirk_rt_map_set(map, key as i64, mapped as i64);
-        let set = unsafe { crate::set::zirk_rt_set_new_with_layout(offsets.as_ptr(), 1, false) };
+        let map_value = [0usize, mapped as usize];
+        unsafe {
+            crate::map::zirk_rt_map_set_typed(
+                map,
+                (&key as *const *mut std::ffi::c_void).cast(),
+                WORD,
+                map_value.as_ptr().cast(),
+                std::mem::size_of_val(&map_value),
+            )
+        };
+        let set = unsafe {
+            crate::set::zirk_rt_set_new_with_layout(key_offsets.as_ptr(), 1, WORD, false)
+        };
         crate::set::zirk_rt_set_add(set, set_value as i64);
 
         // A two-word element models a flattened aggregate/enum payload whose
@@ -2220,7 +2531,16 @@ mod tests {
         // Close a real cross-container cycle through the flattened payload:
         // Map -> Array -> Map. The Map also reaches the enum-like object,
         // which reaches a String; Set and List add independent edge layouts.
-        crate::map::zirk_rt_map_set(map, enum_value as i64, array as i64);
+        let map_value = [0usize, array as usize];
+        unsafe {
+            crate::map::zirk_rt_map_set_typed(
+                map,
+                (&enum_value as *const *mut std::ffi::c_void).cast(),
+                WORD,
+                map_value.as_ptr().cast(),
+                std::mem::size_of_val(&map_value),
+            )
+        };
         crate::set::zirk_rt_set_add(set, enum_value as i64);
         crate::set::zirk_rt_set_add(set, exception as i64);
 

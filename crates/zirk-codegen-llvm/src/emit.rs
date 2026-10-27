@@ -2238,6 +2238,165 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         self.values[&operand.0]
     }
 
+    /// Copies a key or element into a stack slot using its complete LLVM
+    /// layout. Floating zero is canonicalized so equality and hashing agree.
+    fn collection_value_slot(
+        &self,
+        operand: ir::Operand,
+        name: &str,
+    ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        let ty = self.value_types[&operand.0];
+        let llvm_ty = self
+            .llvm_type(ty)
+            .expect("collection key has an LLVM layout");
+        let slot = self
+            .builder
+            .build_alloca(llvm_ty, name)
+            .expect("collection key slot");
+        self.store_canonical_collection_value(slot, ty, self.operand(operand));
+        (slot, self.byte_size_of(ty))
+    }
+
+    /// Writes a collection key field by field. The runtime compares the
+    /// resulting allocation bytes, so aggregate padding must be zeroed and
+    /// nested floating zero values normalized recursively.
+    fn store_canonical_collection_value(
+        &self,
+        destination: PointerValue<'ctx>,
+        ty: ir::IrType,
+        value: BasicValueEnum<'ctx>,
+    ) {
+        match ty {
+            ir::IrType::Float(_) => {
+                let float = value.into_float_value();
+                let zero = float.get_type().const_zero();
+                let is_zero = self
+                    .builder
+                    .build_float_compare(inkwell::FloatPredicate::OEQ, float, zero, "key.is_zero")
+                    .expect("compare floating collection key with zero");
+                let normalized = self
+                    .builder
+                    .build_select(is_zero, zero, float, "key.canonical_zero")
+                    .expect("canonicalize floating collection zero");
+                self.builder
+                    .build_store(destination, normalized)
+                    .expect("store canonical floating collection key");
+            }
+            ir::IrType::Value(id) => {
+                let layout = &self.module.values[id as usize];
+                let struct_ty = self.llvm_type(ty).expect("value layout").into_struct_type();
+                self.zero_collection_aggregate(destination, ty);
+                let value = value.into_struct_value();
+                for (index, field) in layout.fields.iter().enumerate() {
+                    let source = self
+                        .builder
+                        .build_extract_value(value, index as u32, "key.field")
+                        .expect("extract collection key field");
+                    let target = self
+                        .builder
+                        .build_struct_gep(struct_ty, destination, index as u32, "key.field.ptr")
+                        .expect("collection key field pointer");
+                    self.store_canonical_collection_value(target, field.ty, source);
+                }
+            }
+            ir::IrType::Enum(id) => {
+                let layout = &self.module.enums[id as usize];
+                let struct_ty = self.llvm_type(ty).expect("enum layout").into_struct_type();
+                self.zero_collection_aggregate(destination, ty);
+                let value = value.into_struct_value();
+                for index in 0..=layout.fields.len() {
+                    let field_ty = if index == 0 {
+                        ir::IrType::Int(ir::IntWidth::I32)
+                    } else {
+                        layout.fields[index - 1].ty
+                    };
+                    if field_ty == ir::IrType::Void {
+                        continue;
+                    }
+                    let source = self
+                        .builder
+                        .build_extract_value(value, index as u32, "key.enum.field")
+                        .expect("extract enum collection key field");
+                    let target = self
+                        .builder
+                        .build_struct_gep(
+                            struct_ty,
+                            destination,
+                            index as u32,
+                            "key.enum.field.ptr",
+                        )
+                        .expect("enum collection key field pointer");
+                    self.store_canonical_collection_value(target, field_ty, source);
+                }
+            }
+            ir::IrType::Nullable(nullable) => {
+                let struct_ty = self
+                    .llvm_type(ty)
+                    .expect("nullable layout")
+                    .into_struct_type();
+                self.zero_collection_aggregate(destination, ty);
+                let value = value.into_struct_value();
+                let present = self
+                    .builder
+                    .build_extract_value(value, 0, "key.nullable.present")
+                    .expect("extract nullable presence");
+                let present_ptr = self
+                    .builder
+                    .build_struct_gep(struct_ty, destination, 0, "key.nullable.present.ptr")
+                    .expect("nullable presence pointer");
+                self.builder
+                    .build_store(present_ptr, present)
+                    .expect("store nullable presence");
+                let inner = self
+                    .builder
+                    .build_extract_value(value, 1, "key.nullable.value")
+                    .expect("extract nullable value");
+                let inner_ptr = self
+                    .builder
+                    .build_struct_gep(struct_ty, destination, 1, "key.nullable.value.ptr")
+                    .expect("nullable value pointer");
+                self.store_canonical_collection_value(inner_ptr, nullable.inner(), inner);
+            }
+            ir::IrType::Decimal => {
+                let struct_ty = self
+                    .llvm_type(ty)
+                    .expect("Decimal layout")
+                    .into_struct_type();
+                self.zero_collection_aggregate(destination, ty);
+                let value = value.into_struct_value();
+                for index in 0..2 {
+                    let field = self
+                        .builder
+                        .build_extract_value(value, index, "key.decimal.field")
+                        .expect("extract Decimal collection key field");
+                    let target = self
+                        .builder
+                        .build_struct_gep(struct_ty, destination, index, "key.decimal.field.ptr")
+                        .expect("Decimal collection key field pointer");
+                    self.builder
+                        .build_store(target, field)
+                        .expect("store Decimal key field");
+                }
+            }
+            _ => {
+                self.builder
+                    .build_store(destination, value)
+                    .expect("store scalar collection key");
+            }
+        }
+    }
+
+    fn zero_collection_aggregate(&self, destination: PointerValue<'ctx>, ty: ir::IrType) {
+        self.builder
+            .build_memset(
+                destination,
+                1,
+                self.context.i8_type().const_zero(),
+                self.byte_size_of(ty),
+            )
+            .expect("zero collection key aggregate padding");
+    }
+
     /// Shorthand for [`llvm_type_in`] against this function's own module
     /// tables (roadmap Phase 4e — pointer lowering needs this repeatedly for
     /// a pointee's own type, which carries no LLVM representation of its
@@ -6020,7 +6179,53 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     unreachable!("IntToFloat always declares a Float destination")
                 };
                 let target_ty = self.float_type(target_width);
-                let converted = if source_signed {
+                let converted = if target_width == ir::FloatWidth::F128 {
+                    let value_bits = value.get_type().get_bit_width();
+                    let value_i128 = if value_bits == 128 {
+                        value
+                    } else if source_signed {
+                        self.builder
+                            .build_int_s_extend(value, self.context.i128_type(), "i128.sext")
+                            .expect("sign extend integer for binary128 conversion")
+                    } else {
+                        self.builder
+                            .build_int_z_extend(value, self.context.i128_type(), "i128.zext")
+                            .expect("zero extend integer for binary128 conversion")
+                    };
+                    let input = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.from_int.input")
+                        .expect("allocate integer conversion input");
+                    let output = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.from_int.output")
+                        .expect("allocate binary128 conversion result");
+                    self.builder
+                        .build_store(input, value_i128)
+                        .expect("store integer conversion input");
+                    self.builder
+                        .build_call(
+                            self.runtime.float128_from_integer,
+                            &[
+                                output.into(),
+                                input.into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(source_signed as u64, false)
+                                    .into(),
+                            ],
+                            "f128.from_int",
+                        )
+                        .expect("call portable integer-to-Float128 helper");
+                    let bits = self
+                        .builder
+                        .build_load(self.context.i128_type(), output, "f128.from_int.bits")
+                        .expect("load binary128 conversion result");
+                    self.builder
+                        .build_bit_cast(bits, target_ty, "f128.from_int.value")
+                        .expect("restore binary128 integer conversion")
+                        .into_float_value()
+                } else if source_signed {
                     self.builder
                         .build_signed_int_to_float(value, target_ty, "sitofp")
                         .expect("signed int to float")
@@ -6050,91 +6255,170 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             .expect("every IntWidth is nonzero"),
                     )
                     .expect("every IntWidth is a valid LLVM integer width");
-                let trunc_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trunc")
-                    .expect("LLVM provides llvm.trunc for every supported float width");
-                let trunc_function = trunc_intrinsic
-                    .get_declaration(self.llvm, &[value.get_type().into()])
-                    .expect("llvm.trunc accepts each supported float width");
-                let truncated = self
-                    .builder
-                    .build_call(trunc_function, &[value.into()], "float_to_int_truncated")
-                    .expect("truncate float before checked integer conversion")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("llvm.trunc returns a float")
-                    .into_float_value();
-                let float_ty = value.get_type();
-                let exponent = if target_width.signed() {
-                    target_width.bits() - 1
-                } else {
-                    target_width.bits()
-                };
-                let upper_integer = if exponent == 128 {
-                    "340282366920938463463374607431768211456".to_string()
-                } else {
-                    (1_u128 << exponent).to_string()
-                };
-                let upper = unsafe { float_ty.const_float_from_string(&upper_integer) };
-                let lower = if target_width.signed() {
-                    unsafe { float_ty.const_float_from_string(&format!("-{upper_integer}")) }
-                } else {
-                    float_ty.const_zero()
-                };
-                let at_or_above_lower = self
-                    .builder
-                    .build_float_compare(
-                        inkwell::FloatPredicate::OGE,
-                        truncated,
-                        lower,
-                        "float_to_int_lower_ok",
-                    )
-                    .expect("compare float conversion lower bound");
-                let below_upper = self
-                    .builder
-                    .build_float_compare(
-                        inkwell::FloatPredicate::OLT,
-                        truncated,
-                        upper,
-                        "float_to_int_upper_ok",
-                    )
-                    .expect("compare float conversion upper bound");
-                let in_range = self
-                    .builder
-                    .build_and(at_or_above_lower, below_upper, "float_to_int_in_range")
-                    .expect("combine float conversion range checks");
-                let function = self
-                    .builder
-                    .get_insert_block()
-                    .expect("float conversion is emitted inside a block")
-                    .get_parent()
-                    .expect("float conversion block belongs to a function");
-                let valid = self
-                    .context
-                    .append_basic_block(function, "float_to_int_valid");
-                let invalid = self
-                    .context
-                    .append_basic_block(function, "float_to_int_invalid");
-                self.builder
-                    .build_conditional_branch(in_range, valid, invalid)
-                    .expect("branch on checked float conversion range");
-                self.builder.position_at_end(invalid);
-                self.builder
-                    .build_call(self.runtime.invalid_cast, &[], "invalid_float_to_int")
-                    .expect("report out-of-range float-to-integer conversion");
-                self.builder
-                    .build_unreachable()
-                    .expect("invalid cast handler does not return");
-                self.builder.position_at_end(valid);
-                let converted = if target_width.signed() {
+                let converted = if self.value_types[&operand.0]
+                    == ir::IrType::Float(ir::FloatWidth::F128)
+                {
+                    let input = self.float128_bits_slot(value, "f128.to_int.input");
+                    let output = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.to_int.output")
+                        .expect("allocate checked Float128 conversion result");
+                    let status = self
+                        .builder
+                        .build_call(
+                            self.runtime.float128_to_integer,
+                            &[
+                                input.into(),
+                                output.into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(target_width.bits() as u64, false)
+                                    .into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(target_width.signed() as u64, false)
+                                    .into(),
+                            ],
+                            "f128.to_int.status",
+                        )
+                        .expect("call checked Float128-to-integer helper")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("Float128 conversion returns a status")
+                        .into_int_value();
+                    let valid = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            status,
+                            self.context.i32_type().const_zero(),
+                            "f128.to_int.valid",
+                        )
+                        .expect("compare Float128 conversion status");
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .expect("Float128 conversion emitted inside a block")
+                        .get_parent()
+                        .expect("Float128 conversion block belongs to a function");
+                    let success = self
+                        .context
+                        .append_basic_block(function, "f128.to_int.success");
+                    let failure = self
+                        .context
+                        .append_basic_block(function, "f128.to_int.failure");
                     self.builder
-                        .build_float_to_signed_int(truncated, target_ty, "fptosi")
-                        .expect("float to signed int")
-                } else {
+                        .build_conditional_branch(valid, success, failure)
+                        .expect("branch on Float128 conversion status");
+                    self.builder.position_at_end(failure);
                     self.builder
-                        .build_float_to_unsigned_int(truncated, target_ty, "fptoui")
-                        .expect("float to unsigned int")
+                        .build_call(self.runtime.invalid_cast, &[], "f128.to_int.failure")
+                        .expect("report invalid Float128-to-integer conversion");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid Float128 conversion handler does not return");
+                    self.builder.position_at_end(success);
+                    let bits = self
+                        .builder
+                        .build_load(self.context.i128_type(), output, "f128.to_int.bits")
+                        .expect("load Float128 conversion result bits")
+                        .into_int_value();
+                    let converted = if target_width.bits() == 128 {
+                        bits
+                    } else {
+                        self.builder
+                            .build_int_truncate(bits, target_ty, "f128.to_int")
+                            .expect("truncate checked Float128 result to target width")
+                    };
+                    converted.into()
+                } else {
+                    let trunc_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trunc")
+                        .expect("LLVM provides llvm.trunc for every supported float width");
+                    let trunc_function = trunc_intrinsic
+                        .get_declaration(self.llvm, &[value.get_type().into()])
+                        .expect("llvm.trunc accepts each supported float width");
+                    let truncated = self
+                        .builder
+                        .build_call(trunc_function, &[value.into()], "float_to_int_truncated")
+                        .expect("truncate float before checked integer conversion")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("llvm.trunc returns a float")
+                        .into_float_value();
+                    let float_ty = value.get_type();
+                    let exponent = if target_width.signed() {
+                        target_width.bits() - 1
+                    } else {
+                        target_width.bits()
+                    };
+                    let upper_integer = if exponent == 128 {
+                        "340282366920938463463374607431768211456".to_string()
+                    } else {
+                        (1_u128 << exponent).to_string()
+                    };
+                    let upper = unsafe { float_ty.const_float_from_string(&upper_integer) };
+                    let lower = if target_width.signed() {
+                        unsafe { float_ty.const_float_from_string(&format!("-{upper_integer}")) }
+                    } else {
+                        float_ty.const_zero()
+                    };
+                    let at_or_above_lower = self
+                        .builder
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OGE,
+                            truncated,
+                            lower,
+                            "float_to_int_lower_ok",
+                        )
+                        .expect("compare float conversion lower bound");
+                    let below_upper = self
+                        .builder
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OLT,
+                            truncated,
+                            upper,
+                            "float_to_int_upper_ok",
+                        )
+                        .expect("compare float conversion upper bound");
+                    let in_range = self
+                        .builder
+                        .build_and(at_or_above_lower, below_upper, "float_to_int_in_range")
+                        .expect("combine float conversion range checks");
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .expect("float conversion is emitted inside a block")
+                        .get_parent()
+                        .expect("float conversion block belongs to a function");
+                    let valid = self
+                        .context
+                        .append_basic_block(function, "float_to_int_valid");
+                    let invalid = self
+                        .context
+                        .append_basic_block(function, "float_to_int_invalid");
+                    self.builder
+                        .build_conditional_branch(in_range, valid, invalid)
+                        .expect("branch on checked float conversion range");
+                    self.builder.position_at_end(invalid);
+                    self.builder
+                        .build_call(self.runtime.invalid_cast, &[], "invalid_float_to_int")
+                        .expect("report out-of-range float-to-integer conversion");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid cast handler does not return");
+                    self.builder.position_at_end(valid);
+                    let converted = if target_width.signed() {
+                        self.builder
+                            .build_float_to_signed_int(truncated, target_ty, "fptosi")
+                            .expect("float to signed int")
+                    } else {
+                        self.builder
+                            .build_float_to_unsigned_int(truncated, target_ty, "fptoui")
+                            .expect("float to unsigned int")
+                    };
+                    converted.into()
                 };
-                Some(converted.into())
+                Some(converted)
             }
 
             // An exact base-ten `Float` literal: the digits are parsed once,
@@ -7555,6 +7839,28 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         &[(value, ir::IrType::Decimal)],
                         ir::IrType::String,
                     ))
+                } else if self.value_types[&operand.0] == ir::IrType::Float(ir::FloatWidth::F128) {
+                    let value = self.operand(*operand).into_float_value();
+                    let bits = self
+                        .builder
+                        .build_bit_cast(value, self.context.i128_type(), "to_string.f128_bits")
+                        .expect("bitcast Float128 to its exact bit representation");
+                    let slot = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "to_string.f128")
+                        .expect("stack slot for a Float128 conversion");
+                    self.builder
+                        .build_store(slot, bits)
+                        .expect("store Float128 bits for formatting");
+                    let call = self
+                        .builder
+                        .build_call(self.runtime.float128_to_string, &[slot.into()], "str")
+                        .expect("call to the binary128 formatter");
+                    Some(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("the binary128 formatter returns a String"),
+                    )
                 } else {
                     let mut value = self.operand(*operand);
                     let converter = match self.value_types[&operand.0] {
@@ -7596,36 +7902,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         ir::IrType::Float(width) => match width {
                             ir::FloatWidth::F32 => self.runtime.str_from_f32,
                             ir::FloatWidth::F64 => self.runtime.str_from_f64,
-                            // `F16` is caught by the dedicated arm above —
-                            // never reaches here, but the match still needs
-                            // it to stay exhaustive. `Float128` has no stable
-                            // Rust primitive to format through, so it is
-                            // truncated to `Float64` for printing. This is a
-                            // lossy conversion for values that are not exactly
-                            // representable in `f64`; it is a pragmatic
-                            // bridge rather than an exact formatter.
-                            //
-                            // The truncation itself is done by hand in
-                            // `zirk-runtime` (`zirk_float128_to_f64`,
-                            // decoding the raw bit pattern), not through
-                            // LLVM's native `fptrunc fp128 to double`: that
-                            // instruction depends on the target's
-                            // quad-precision libcalls (`__trunctfdf2`),
-                            // which are unreliable on Windows/MSVC
-                            // (confirmed: `1.5_Float128` silently printed
-                            // `0`). A `bitcast` to `i128` is always exact —
-                            // same bit width, no arithmetic — so the value
-                            // crosses the FFI boundary by the same
-                            // pointer-passing convention `declare_extern_fn`
-                            // already uses for `zirk_int_*`/128-bit values.
-                            // `zirk_float128_to_f64` is declared directly on
-                            // `self.runtime` (like `str_from_f64`), not
-                            // through the `ir::ExternFn` list, since no
-                            // user-visible IR ever names it — `emit_f128_to_f64`
-                            // does the spill to a stack slot by hand.
+                            // `F128` is handled by the direct binary128
+                            // formatter above; it must never reach this path.
                             ir::FloatWidth::F128 => {
-                                value = self.emit_f128_to_f64(value.into_float_value()).into();
-                                self.runtime.str_from_f64
+                                unreachable!("Float128 ToString uses its direct formatter")
                             }
                             ir::FloatWidth::F16 => {
                                 unreachable!("ToString over Float16 reaches the F16 arm")
@@ -7668,6 +7948,34 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             .expect("the converter returns a value"),
                     )
                 }
+            }
+
+            ir::InstKind::Float128Format { value, spec } => {
+                let value = self.operand(*value).into_float_value();
+                let bits = self
+                    .builder
+                    .build_bit_cast(value, self.context.i128_type(), "format.f128_bits")
+                    .expect("bitcast Float128 to its exact bit representation");
+                let slot = self
+                    .builder
+                    .build_alloca(self.context.i128_type(), "format.f128")
+                    .expect("stack slot for Float128 formatting");
+                self.builder
+                    .build_store(slot, bits)
+                    .expect("store Float128 bits for formatting");
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.float128_format,
+                        &[slot.into(), self.operand(*spec).into()],
+                        "formatted.f128",
+                    )
+                    .expect("call to the direct binary128 format helper");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the binary128 format helper returns a String"),
+                )
             }
 
             ir::InstKind::Println(operand) => {
@@ -12266,11 +12574,59 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("list new");
                 call.try_as_basic_value().basic()
             }
+            ir::InstKind::DequeNew { element_id } => {
+                let element = self.module.list_types[*element_id as usize];
+                let elem_size = self.byte_size_of(element);
+                let result_id = instruction.result.expect("DequeNew produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.deque.offsets.{result_id}"));
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.deque_new_with_layout,
+                        &[elem_size.into(), offsets.into(), count.into()],
+                        "deque",
+                    )
+                    .expect("deque new");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::PriorityQueueNew { element_id, order } => {
+                let element = self.module.list_types[*element_id as usize];
+                let elem_size = self.byte_size_of(element);
+                let result_id = instruction
+                    .result
+                    .expect("PriorityQueueNew produces a value")
+                    .0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.priority_queue.offsets.{result_id}"));
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.priority_queue_new_with_layout,
+                        &[
+                            elem_size.into(),
+                            offsets.into(),
+                            count.into(),
+                            self.context
+                                .i32_type()
+                                .const_int(*order as u64, false)
+                                .into(),
+                        ],
+                        "priority_queue",
+                    )
+                    .expect("priority queue new");
+                call.try_as_basic_value().basic()
+            }
 
             ir::InstKind::MapNew { map_id } => {
                 let (key_ty, _) = self.module.map_types[*map_id as usize];
-                let string_content_keys =
-                    self.bool_const(matches!(key_ty, ir::IrType::String | ir::IrType::Char));
+                let text_key = matches!(
+                    key_ty,
+                    ir::IrType::String
+                        | ir::IrType::Char
+                        | ir::IrType::Nullable(ir::Nullable::String | ir::Nullable::Char)
+                );
+                let string_content_keys = self.bool_const(text_key);
                 let (_, value_ty) = self.module.map_types[*map_id as usize];
                 let offsets_for = |ty: ir::IrType, suffix: &str| {
                     let paths = gc_reference_paths_of(self.module, ty);
@@ -12315,20 +12671,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         )
                     }
                 };
-                let (key_offsets, key_count) =
-                    if matches!(key_ty, ir::IrType::String | ir::IrType::Char) {
-                        // Text keys are snapshotted by the runtime into immutable
-                        // Rust-owned content; the mutable source handle is not a
-                        // GC edge of the map entry.
-                        (
-                            self.context
-                                .ptr_type(inkwell::AddressSpace::default())
-                                .const_null(),
-                            self.context.i64_type().const_zero(),
-                        )
-                    } else {
-                        offsets_for(key_ty, "key_offsets")
-                    };
+                let (key_offsets, key_count) = if text_key {
+                    // Text keys are snapshotted by the runtime into immutable
+                    // Rust-owned content; the mutable source handle is not a
+                    // GC edge of the map entry.
+                    (
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null(),
+                        self.context.i64_type().const_zero(),
+                    )
+                } else {
+                    offsets_for(key_ty, "key_offsets")
+                };
                 let (value_offsets, value_count) = offsets_for(value_ty, "value_offsets");
                 let call = self
                     .builder
@@ -12337,9 +12692,11 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         &[
                             key_offsets.into(),
                             key_count.into(),
+                            self.byte_size_of(key_ty).into(),
                             value_offsets.into(),
                             value_count.into(),
                             string_content_keys.into(),
+                            self.byte_size_of(value_ty).into(),
                         ],
                         "map",
                     )
@@ -12349,7 +12706,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::SetNew { set_id } => {
                 let element_ty = self.module.set_types[*set_id as usize];
-                let has_text_equality = matches!(element_ty, ir::IrType::String | ir::IrType::Char);
+                let has_text_equality = matches!(
+                    element_ty,
+                    ir::IrType::String
+                        | ir::IrType::Char
+                        | ir::IrType::Nullable(ir::Nullable::String | ir::Nullable::Char)
+                );
                 let string_content_elements = self.bool_const(has_text_equality);
                 let paths = if has_text_equality {
                     Vec::new()
@@ -12398,7 +12760,12 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .builder
                     .build_call(
                         self.runtime.set_new,
-                        &[offsets.into(), count.into(), string_content_elements.into()],
+                        &[
+                            offsets.into(),
+                            count.into(),
+                            self.byte_size_of(element_ty).into(),
+                            string_content_elements.into(),
+                        ],
                         "set",
                     )
                     .expect("set new");
@@ -12425,6 +12792,102 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_call(self.runtime.list_length, &[receiver.into()], "list_length")
                     .expect("list length");
                 call.try_as_basic_value().basic()
+            }
+            ir::InstKind::DequeLength(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.deque_length,
+                        &[receiver.into()],
+                        "deque_length",
+                    )
+                    .expect("deque length")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::PriorityQueueLength(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.priority_queue_length,
+                        &[receiver.into()],
+                        "priority_queue_length",
+                    )
+                    .expect("priority queue length")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::PriorityQueueIsEmpty(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let raw = self
+                    .builder
+                    .build_call(
+                        self.runtime.priority_queue_is_empty,
+                        &[receiver.into()],
+                        "priority_queue_is_empty.raw",
+                    )
+                    .expect("priority queue is_empty")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("i32 return")
+                    .into_int_value();
+                Some(
+                    self.builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            raw,
+                            self.context.i32_type().const_zero(),
+                            "priority_queue_is_empty",
+                        )
+                        .expect("priority queue empty comparison")
+                        .into(),
+                )
+            }
+            ir::InstKind::PriorityQueueVersion(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.priority_queue_version,
+                        &[receiver.into()],
+                        "priority_queue_version",
+                    )
+                    .expect("priority queue version")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::DequeIsEmpty(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let length = self
+                    .builder
+                    .build_call(
+                        self.runtime.deque_length,
+                        &[receiver.into()],
+                        "deque_length",
+                    )
+                    .expect("deque length")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("deque length result")
+                    .into_int_value();
+                let zero = length.get_type().const_zero();
+                Some(
+                    self.builder
+                        .build_int_compare(IntPredicate::EQ, length, zero, "deque_is_empty")
+                        .expect("deque empty comparison")
+                        .into(),
+                )
+            }
+            ir::InstKind::DequeVersion(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.runtime.deque_version,
+                        &[receiver.into()],
+                        "deque_version",
+                    )
+                    .expect("deque version")
+                    .try_as_basic_value()
+                    .basic()
             }
 
             // `array[i]` / `list[i]` read.
@@ -12496,6 +12959,103 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_store(ptr, value_operand)
                     .expect("array/list store");
                 None
+            }
+            ir::InstKind::DequePushFront { receiver, value }
+            | ir::InstKind::DequePushBack { receiver, value } => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let (value_slot, _) = self.collection_value_slot(*value, "deque.value.slot");
+                let function = if matches!(&instruction.kind, ir::InstKind::DequePushFront { .. }) {
+                    self.runtime.deque_push_front
+                } else {
+                    self.runtime.deque_push_back
+                };
+                self.builder
+                    .build_call(
+                        function,
+                        &[receiver.into(), value_slot.into()],
+                        "deque_push",
+                    )
+                    .expect("deque push")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::DequeFront(receiver)
+            | ir::InstKind::DequeBack(receiver)
+            | ir::InstKind::DequePopFront(receiver)
+            | ir::InstKind::DequePopBack(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let value_type = instruction.ty;
+                let llvm_type = self.llvm_type(value_type).expect("deque element type");
+                let output = self
+                    .builder
+                    .build_alloca(llvm_type, "deque.value.output")
+                    .expect("deque output slot");
+                let function = match &instruction.kind {
+                    ir::InstKind::DequeFront(_) => self.runtime.deque_front,
+                    ir::InstKind::DequeBack(_) => self.runtime.deque_back,
+                    ir::InstKind::DequePopFront(_) => self.runtime.deque_pop_front,
+                    _ => self.runtime.deque_pop_back,
+                };
+                self.builder
+                    .build_call(function, &[receiver.into(), output.into()], "deque_access")
+                    .expect("deque access");
+                Some(
+                    self.builder
+                        .build_load(llvm_type, output, "deque.value")
+                        .expect("load deque value"),
+                )
+            }
+            ir::InstKind::DequeClear(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                self.builder
+                    .build_call(self.runtime.deque_clear, &[receiver.into()], "deque_clear")
+                    .expect("deque clear");
+                None
+            }
+            ir::InstKind::PriorityQueueEnqueue { receiver, value } => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let value_ty = self.value_types[&value.0];
+                let (value_slot, _) =
+                    self.collection_value_slot(*value, "priority_queue.value.slot");
+                let _ = value_ty;
+                self.builder
+                    .build_call(
+                        self.runtime.priority_queue_enqueue,
+                        &[receiver.into(), value_slot.into()],
+                        "priority_queue_enqueue",
+                    )
+                    .expect("priority queue enqueue")
+                    .try_as_basic_value()
+                    .basic()
+            }
+            ir::InstKind::PriorityQueuePeek(receiver)
+            | ir::InstKind::PriorityQueueDequeue(receiver) => {
+                let receiver = self.operand(*receiver).into_pointer_value();
+                let value_type = instruction.ty;
+                let llvm_type = self
+                    .llvm_type(value_type)
+                    .expect("priority queue element type");
+                let output = self
+                    .builder
+                    .build_alloca(llvm_type, "priority_queue.value.output")
+                    .expect("priority queue output slot");
+                let function = if matches!(instruction.kind, ir::InstKind::PriorityQueuePeek(_)) {
+                    self.runtime.priority_queue_peek
+                } else {
+                    self.runtime.priority_queue_dequeue
+                };
+                self.builder
+                    .build_call(
+                        function,
+                        &[receiver.into(), output.into()],
+                        "priority_queue_access",
+                    )
+                    .expect("priority queue access");
+                Some(
+                    self.builder
+                        .build_load(llvm_type, output, "priority_queue.value")
+                        .expect("load priority queue value"),
+                )
             }
 
             // `list.add(value)`.
@@ -12614,12 +13174,156 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("map length");
                 call.try_as_basic_value().basic()
             }
+            ir::InstKind::MapVersion(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let call = self
+                    .builder
+                    .build_call(self.runtime.map_version, &[receiver.into()], "map_version")
+                    .expect("map version");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::MapSortedKeys(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let ir::IrType::Map(map_id) = self.value_types[&operand.0] else {
+                    panic!("MapSortedKeys receiver must be a Map")
+                };
+                let (key_type, _) = self.module.map_types[map_id as usize];
+                let string_keys = self.context.i64_type().const_int(
+                    matches!(key_type, ir::IrType::String | ir::IrType::Char) as u64,
+                    false,
+                );
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.map_sorted_keys,
+                        &[receiver.into(), string_keys.into()],
+                        "map.sorted.keys",
+                    )
+                    .expect("sorted Map key snapshot");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::MapKeys(operand)
+            | ir::InstKind::MapValues(operand)
+            | ir::InstKind::MapEntries(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let ir::IrType::Array(element_id) = instruction.ty else {
+                    panic!("MapKeys/MapValues result must be an Array")
+                };
+                let element = self.module.array_types[element_id as usize];
+                let size = self.byte_size_of(element);
+                let align = self.byte_align_of(element);
+                let result_id = instruction.result.expect("map snapshot produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.map.snapshot.offsets.{result_id}"));
+                if matches!(&instruction.kind, ir::InstKind::MapEntries(_)) {
+                    let ir::IrType::Value(_) = element else {
+                        panic!("MapEntries array element must be a tuple value")
+                    };
+                    let (key_ty, value_ty) = match self.value_types[&operand.0] {
+                        ir::IrType::Map(map_id) => self.module.map_types[map_id as usize],
+                        _ => panic!("MapEntries receiver must be a Map"),
+                    };
+                    let tuple = self
+                        .llvm_type(element)
+                        .expect("MapEntries tuple has an LLVM layout")
+                        .into_struct_type();
+                    let key_offset = const_field_offset(self.context, tuple, &[0]);
+                    let value_offset = const_field_offset(self.context, tuple, &[1]);
+                    let call = self
+                        .builder
+                        .build_call(
+                            self.runtime.map_entries,
+                            &[
+                                receiver.into(),
+                                size.into(),
+                                align.into(),
+                                offsets.into(),
+                                count.into(),
+                                key_offset.into(),
+                                self.byte_size_of(key_ty).into(),
+                                value_offset.into(),
+                                self.byte_size_of(value_ty).into(),
+                            ],
+                            "map.entries",
+                        )
+                        .expect("map entry snapshot");
+                    call.try_as_basic_value().basic()
+                } else {
+                    let runtime = if matches!(&instruction.kind, ir::InstKind::MapKeys(_)) {
+                        self.runtime.map_keys
+                    } else {
+                        self.runtime.map_values
+                    };
+                    let call = self
+                        .builder
+                        .build_call(
+                            runtime,
+                            &[
+                                receiver.into(),
+                                size.into(),
+                                align.into(),
+                                offsets.into(),
+                                count.into(),
+                            ],
+                            "map.snapshot",
+                        )
+                        .expect("map snapshot");
+                    call.try_as_basic_value().basic()
+                }
+            }
             ir::InstKind::SetLength(operand) => {
                 let receiver = self.operand(*operand).into_pointer_value();
                 let call = self
                     .builder
                     .build_call(self.runtime.set_length, &[receiver.into()], "set_len")
                     .expect("set length");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::SetValues(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let ir::IrType::Array(element_id) = instruction.ty else {
+                    panic!("SetValues result must be an Array")
+                };
+                let element = self.module.array_types[element_id as usize];
+                let size = self.byte_size_of(element);
+                let align = self.byte_align_of(element);
+                let result_id = instruction.result.expect("SetValues produces a value").0;
+                let (offsets, count) =
+                    self.gc_offsets_for(element, &format!("zk.set.snapshot.offsets.{result_id}"));
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.set_values,
+                        &[
+                            receiver.into(),
+                            size.into(),
+                            align.into(),
+                            offsets.into(),
+                            count.into(),
+                        ],
+                        "set.snapshot",
+                    )
+                    .expect("set values snapshot");
+                call.try_as_basic_value().basic()
+            }
+            ir::InstKind::SetSortedElements(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let ir::IrType::Set(set_id) = self.value_types[&operand.0] else {
+                    panic!("SetSortedElements receiver must be a Set")
+                };
+                let element_type = self.module.set_types[set_id as usize];
+                let string_elements = self.context.i64_type().const_int(
+                    matches!(element_type, ir::IrType::String | ir::IrType::Char) as u64,
+                    false,
+                );
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.set_sorted_elements,
+                        &[receiver.into(), string_elements.into()],
+                        "set.sorted.elements",
+                    )
+                    .expect("sorted Set element snapshot");
                 call.try_as_basic_value().basic()
             }
             // `map.is_empty()` / `set.is_empty()`.
@@ -12647,6 +13351,72 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .expect("set is empty");
                 call.try_as_basic_value().basic()
             }
+            ir::InstKind::MapClear(operand) | ir::InstKind::SetClear(operand) => {
+                let receiver = self.operand(*operand).into_pointer_value();
+                let function = if matches!(&instruction.kind, ir::InstKind::MapClear(_)) {
+                    self.runtime.map_clear
+                } else {
+                    self.runtime.set_clear
+                };
+                self.builder
+                    .build_call(function, &[receiver.into()], "")
+                    .expect("clear map or set");
+                None
+            }
+            ir::InstKind::SetOperation {
+                left,
+                right,
+                operation,
+            } => {
+                use ir::SetOperation as Op;
+                let left = self.operand(*left).into_pointer_value();
+                let right = self.operand(*right).into_pointer_value();
+                let (callee, tag, returns_set) = match operation {
+                    Op::Union => (self.runtime.set_algebra, 0, true),
+                    Op::Intersection => (self.runtime.set_algebra, 1, true),
+                    Op::Difference => (self.runtime.set_algebra, 2, true),
+                    Op::SymmetricDifference => (self.runtime.set_algebra, 3, true),
+                    Op::IsSubsetOf => (self.runtime.set_relation, 0, false),
+                    Op::IsSupersetOf => (self.runtime.set_relation, 1, false),
+                    Op::IsDisjoint => (self.runtime.set_relation, 2, false),
+                };
+                let call = self
+                    .builder
+                    .build_call(
+                        callee,
+                        &[
+                            left.into(),
+                            right.into(),
+                            self.context.i32_type().const_int(tag, false).into(),
+                        ],
+                        "set.operation",
+                    )
+                    .expect("set operation");
+                if returns_set {
+                    Some(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("set algebra returns a set handle"),
+                    )
+                } else {
+                    let result = call
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("set relation returns an integer status")
+                        .into_int_value();
+                    Some(
+                        self.builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                result,
+                                self.context.i32_type().const_zero(),
+                                "set.relation",
+                            )
+                            .expect("set relation result")
+                            .into(),
+                    )
+                }
+            }
             // `map.set(key, value)`.
             ir::InstKind::MapSet {
                 receiver,
@@ -12654,71 +13424,44 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 value,
             } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let key = self.operand(*key);
-                let key_i64 = match key {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "key")
-                        .expect("map key"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            key.into_pointer_value(),
-                            self.context.i64_type(),
-                            "key_ptr",
-                        )
-                        .expect("map key"),
-                };
-                let value = self.operand(*value);
-                let value_i64 = match value {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "value")
-                        .expect("map value"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            value.into_pointer_value(),
-                            self.context.i64_type(),
-                            "value_ptr",
-                        )
-                        .expect("map value"),
-                };
+                let (key_slot, key_size) = self.collection_value_slot(*key, "map.key.slot");
+                let value_ty = self.value_types[&value.0];
+                let llvm_value_ty = self
+                    .llvm_type(value_ty)
+                    .expect("Map value has an LLVM type");
+                let value_slot = self
+                    .builder
+                    .build_alloca(llvm_value_ty, "map.value.slot")
+                    .expect("Map value slot");
                 self.builder
+                    .build_store(value_slot, self.operand(*value))
+                    .expect("store Map value");
+                let value_size = self.byte_size_of(value_ty);
+                let call = self
+                    .builder
                     .build_call(
                         self.runtime.map_set,
-                        &[receiver.into(), key_i64.into(), value_i64.into()],
+                        &[
+                            receiver.into(),
+                            key_slot.into(),
+                            key_size.into(),
+                            value_slot.into(),
+                            value_size.into(),
+                        ],
                         "",
                     )
                     .expect("map set");
-                None
+                call.try_as_basic_value().basic()
             }
             // `map.contains_key(key)`.
             ir::InstKind::MapContainsKey { receiver, key } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let key = self.operand(*key);
-                let key_i64 = match key {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "key")
-                        .expect("map key"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            key.into_pointer_value(),
-                            self.context.i64_type(),
-                            "key_ptr",
-                        )
-                        .expect("map key"),
-                };
+                let (key_slot, key_size) = self.collection_value_slot(*key, "map.key.slot");
                 let call = self
                     .builder
                     .build_call(
                         self.runtime.map_contains_key,
-                        &[receiver.into(), key_i64.into()],
+                        &[receiver.into(), key_slot.into(), key_size.into()],
                         "map_contains",
                     )
                     .expect("map contains key");
@@ -12727,55 +13470,32 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // `set.add(value)`.
             ir::InstKind::SetAdd { receiver, value } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let value = self.operand(*value);
-                let value_i64 = match value {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "value")
-                        .expect("set value"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            value.into_pointer_value(),
-                            self.context.i64_type(),
-                            "value_ptr",
-                        )
-                        .expect("set value"),
-                };
-                self.builder
+                let (value_slot, value_size) =
+                    self.collection_value_slot(*value, "set.element.slot");
+                let status = self
+                    .builder
                     .build_call(
                         self.runtime.set_add,
-                        &[receiver.into(), value_i64.into()],
-                        "",
+                        &[receiver.into(), value_slot.into(), value_size.into()],
+                        "set_add",
                     )
-                    .expect("set add");
-                None
+                    .expect("set add")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("set add returns an insertion status")
+                    .into_int_value();
+                Some(status.into())
             }
             // `set.contains(value)`.
             ir::InstKind::SetContains { receiver, value } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let value = self.operand(*value);
-                let value_i64 = match value {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "value")
-                        .expect("set value"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            value.into_pointer_value(),
-                            self.context.i64_type(),
-                            "value_ptr",
-                        )
-                        .expect("set value"),
-                };
+                let (value_slot, value_size) =
+                    self.collection_value_slot(*value, "set.element.slot");
                 let call = self
                     .builder
                     .build_call(
                         self.runtime.set_contains,
-                        &[receiver.into(), value_i64.into()],
+                        &[receiver.into(), value_slot.into(), value_size.into()],
                         "set_contains",
                     )
                     .expect("set contains");
@@ -12784,108 +13504,46 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // Internal map value load; public lookup lowering guards presence.
             ir::InstKind::MapGet { receiver, key } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let key = self.operand(*key);
-                let key_i64 = match key {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "key")
-                        .expect("map key"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            key.into_pointer_value(),
-                            self.context.i64_type(),
-                            "key_ptr",
-                        )
-                        .expect("map key"),
-                };
-                let flag = self
+                let (key_slot, key_size) = self.collection_value_slot(*key, "map.key.slot");
+                let value_type = instruction.ty;
+                let inner_type = self.llvm_type(value_type).expect("map get value type");
+                let output = self
                     .builder
-                    .build_call(
-                        self.runtime.map_contains_key,
-                        &[receiver.into(), key_i64.into()],
-                        "map_contains",
-                    )
-                    .expect("map get flag")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("map get flag");
-                let raw = self
+                    .build_alloca(inner_type, "map.value.output")
+                    .expect("Map output slot");
+                let found = self
                     .builder
                     .build_call(
                         self.runtime.map_get,
-                        &[receiver.into(), key_i64.into()],
-                        "map_get",
+                        &[
+                            receiver.into(),
+                            key_slot.into(),
+                            key_size.into(),
+                            output.into(),
+                            self.byte_size_of(value_type).into(),
+                        ],
+                        "map_get_typed",
                     )
                     .expect("map get value")
                     .try_as_basic_value()
                     .basic()
-                    .expect("map get value")
-                    .into_int_value();
-                let ir::IrType::Nullable(nullable) = instruction.ty else {
-                    panic!("MapGet result must be a nullable type");
-                };
-                let inner = nullable.inner();
-                let payload: BasicValueEnum<'ctx> =
-                    match self.llvm_type(inner).expect("map get value type") {
-                        BasicTypeEnum::PointerType(ptr_ty) => BasicValueEnum::from(
-                            self.builder
-                                .build_int_to_ptr(raw, ptr_ty, "value_ptr")
-                                .expect("map get value ptr"),
-                        ),
-                        BasicTypeEnum::IntType(int_ty) => {
-                            if int_ty.get_bit_width() == 64 {
-                                BasicValueEnum::from(raw)
-                            } else {
-                                BasicValueEnum::from(
-                                    self.builder
-                                        .build_int_truncate(raw, int_ty, "value")
-                                        .expect("map get value"),
-                                )
-                            }
-                        }
-                        other => panic!("MapGet value type cannot be {other}"),
-                    };
-                let struct_ty = self
-                    .llvm_type(instruction.ty)
-                    .expect("map get nullable type")
-                    .into_struct_type();
-                let with_flag = self
+                    .expect("map get presence result");
+                let payload = self
                     .builder
-                    .build_insert_value(struct_ty.get_undef(), flag, 0, "present")
-                    .expect("map get present");
-                Some(
-                    self.builder
-                        .build_insert_value(with_flag.into_struct_value(), payload, 1, "payload")
-                        .expect("map get payload")
-                        .as_basic_value_enum(),
-                )
+                    .build_load(inner_type, output, "map.value")
+                    .expect("load Map value");
+                let _ = found; // The caller's Result branch already proved presence.
+                Some(payload)
             }
             // `map.remove(key)`.
             ir::InstKind::MapRemove { receiver, key } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let key = self.operand(*key);
-                let key_i64 = match key {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "key")
-                        .expect("map key"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            key.into_pointer_value(),
-                            self.context.i64_type(),
-                            "key_ptr",
-                        )
-                        .expect("map key"),
-                };
+                let (key_slot, key_size) = self.collection_value_slot(*key, "map.key.slot");
                 let call = self
                     .builder
                     .build_call(
                         self.runtime.map_remove,
-                        &[receiver.into(), key_i64.into()],
+                        &[receiver.into(), key_slot.into(), key_size.into()],
                         "map_remove",
                     )
                     .expect("map remove");
@@ -12894,27 +13552,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
             // `set.remove(value)`.
             ir::InstKind::SetRemove { receiver, value } => {
                 let receiver = self.operand(*receiver).into_pointer_value();
-                let value = self.operand(*value);
-                let value_i64 = match value {
-                    BasicValueEnum::IntValue(v) if v.get_type().get_bit_width() == 64 => v,
-                    BasicValueEnum::IntValue(v) => self
-                        .builder
-                        .build_int_s_extend(v, self.context.i64_type(), "value")
-                        .expect("set value"),
-                    _ => self
-                        .builder
-                        .build_ptr_to_int(
-                            value.into_pointer_value(),
-                            self.context.i64_type(),
-                            "value_ptr",
-                        )
-                        .expect("set value"),
-                };
+                let (value_slot, value_size) =
+                    self.collection_value_slot(*value, "set.element.slot");
                 let call = self
                     .builder
                     .build_call(
                         self.runtime.set_remove,
-                        &[receiver.into(), value_i64.into()],
+                        &[receiver.into(), value_slot.into(), value_size.into()],
                         "set_remove",
                     )
                     .expect("set remove");
@@ -16118,7 +16762,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
 
         if left.is_float_value() {
-            return self.emit_float_binary(op, left.into_float_value(), right.into_float_value());
+            let ir::IrType::Float(width) = left_ty else {
+                unreachable!("LLVM float value has a Float IR type")
+            };
+            return self.emit_float_binary(
+                op,
+                left.into_float_value(),
+                right.into_float_value(),
+                width,
+            );
         }
 
         if left_ty == ir::IrType::Decimal
@@ -16608,8 +17260,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         op: ir::BinaryOp,
         left: FloatValue<'ctx>,
         right: FloatValue<'ctx>,
+        width: ir::FloatWidth,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
+
+        if width == ir::FloatWidth::F128 {
+            return self.emit_float128_binary(op, left, right);
+        }
 
         match op {
             Add => self
@@ -16649,6 +17306,137 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 unreachable!("operator {op:?} over Float")
             }
         }
+    }
+
+    fn float128_bits_slot(&mut self, value: FloatValue<'ctx>, name: &str) -> PointerValue<'ctx> {
+        let bits = self
+            .builder
+            .build_bit_cast(value, self.context.i128_type(), &format!("{name}.bits"))
+            .expect("bitcast binary128 value to its bit representation");
+        let slot = self
+            .builder
+            .build_alloca(self.context.i128_type(), &format!("{name}.slot"))
+            .expect("allocate binary128 bit slot");
+        self.builder
+            .build_store(slot, bits)
+            .expect("store binary128 bits");
+        slot
+    }
+
+    fn emit_float128_binary(
+        &mut self,
+        op: ir::BinaryOp,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        use ir::BinaryOp::*;
+        let left = self.float128_bits_slot(left, "f128.left");
+        let right = self.float128_bits_slot(right, "f128.right");
+        let (operation, is_comparison) = match op {
+            Add => (0, false),
+            Sub => (1, false),
+            Mul => (2, false),
+            Div => (3, false),
+            Rem => (4, false),
+            Eq => (0, true),
+            NotEq => (1, true),
+            Lt => (2, true),
+            LtEq => (3, true),
+            Gt => (4, true),
+            GtEq => (5, true),
+            Identical | And | Or | BitAnd | BitOr | BitXor | Shl | Shr => {
+                unreachable!("operator {op:?} over Float128")
+            }
+        };
+        if is_comparison {
+            let call = self
+                .builder
+                .build_call(
+                    self.runtime.float128_compare,
+                    &[
+                        self.context.i32_type().const_int(operation, false).into(),
+                        left.into(),
+                        right.into(),
+                    ],
+                    "f128.compare",
+                )
+                .expect("call portable Float128 comparison helper")
+                .try_as_basic_value()
+                .basic()
+                .expect("Float128 comparison returns a Boolean status")
+                .into_int_value();
+            return self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    call,
+                    self.context.i32_type().const_zero(),
+                    "f128.compare.bool",
+                )
+                .expect("convert Float128 comparison status to Boolean")
+                .into();
+        }
+
+        let output = self
+            .builder
+            .build_alloca(self.context.i128_type(), "f128.result.slot")
+            .expect("allocate Float128 result bits");
+        let status = self
+            .builder
+            .build_call(
+                self.runtime.float128_binary,
+                &[
+                    self.context.i32_type().const_int(operation, false).into(),
+                    left.into(),
+                    right.into(),
+                    output.into(),
+                ],
+                "f128.binary.status",
+            )
+            .expect("call portable Float128 arithmetic helper")
+            .try_as_basic_value()
+            .basic()
+            .expect("Float128 arithmetic returns status")
+            .into_int_value();
+        let valid = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.context.i32_type().const_zero(),
+                "f128.binary.valid",
+            )
+            .expect("compare Float128 arithmetic status");
+        let function = self
+            .builder
+            .get_insert_block()
+            .expect("Float128 arithmetic emitted inside a block")
+            .get_parent()
+            .expect("Float128 arithmetic block belongs to a function");
+        let success = self
+            .context
+            .append_basic_block(function, "f128.binary.success");
+        let failure = self
+            .context
+            .append_basic_block(function, "f128.binary.failure");
+        self.builder
+            .build_conditional_branch(valid, success, failure)
+            .expect("branch on Float128 arithmetic status");
+        self.builder.position_at_end(failure);
+        self.builder
+            .build_call(self.runtime.invalid_cast, &[], "f128.binary.failure")
+            .expect("report unsupported Float128 arithmetic result");
+        self.builder
+            .build_unreachable()
+            .expect("invalid Float128 arithmetic handler does not return");
+        self.builder.position_at_end(success);
+        let bits = self
+            .builder
+            .build_load(self.context.i128_type(), output, "f128.result.bits")
+            .expect("load Float128 result bits");
+        self.builder
+            .build_bit_cast(bits, self.context.f128_type(), "f128.result")
+            .expect("restore binary128 floating value")
     }
 
     fn compare_float(

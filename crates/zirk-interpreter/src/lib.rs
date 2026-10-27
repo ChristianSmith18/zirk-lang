@@ -528,6 +528,7 @@ struct TraceState {
 #[derive(Debug, Default)]
 pub struct Heap {
     entries: Vec<HeapEntry>,
+    map_versions: Vec<Option<u64>>,
     used_bytes: usize,
 }
 
@@ -545,6 +546,8 @@ impl Heap {
             return Err(LimitFailure::Heap);
         }
         let id = HeapId(self.entries.len() as u32);
+        self.map_versions
+            .push(matches!(&entry, HeapEntry::Map(_)).then_some(0));
         self.entries.push(entry);
         self.used_bytes = next;
         Ok(id)
@@ -567,6 +570,16 @@ impl Heap {
 
     pub fn get_mut(&mut self, id: HeapId) -> Option<&mut HeapEntry> {
         self.entries.get_mut(id.0 as usize)
+    }
+
+    fn map_version(&self, id: HeapId) -> Option<u64> {
+        self.map_versions.get(id.0 as usize).copied().flatten()
+    }
+
+    fn bump_map_version(&mut self, id: HeapId) {
+        if let Some(Some(version)) = self.map_versions.get_mut(id.0 as usize) {
+            *version = version.wrapping_add(1);
+        }
     }
 
     pub const fn used_bytes(&self) -> usize {
@@ -1204,6 +1217,8 @@ pub struct Interpreter<'module> {
     module: Cow<'module, Module>,
     limits: InterpreterLimits,
     heap: Heap,
+    deque_versions: HashMap<HeapId, u64>,
+    priority_queue_orders: HashMap<HeapId, i32>,
     frames: Vec<Frame>,
     executed_steps: u64,
     output_bytes: usize,
@@ -1257,6 +1272,8 @@ impl<'module> Interpreter<'module> {
             module,
             limits,
             heap: Heap::default(),
+            deque_versions: HashMap::new(),
+            priority_queue_orders: HashMap::new(),
             frames: Vec::new(),
             executed_steps: 0,
             output_bytes: 0,
@@ -2921,6 +2938,24 @@ impl<'module> Interpreter<'module> {
                 let text = self.render_value(frame_index, *operand)?;
                 self.allocate_string(text).map(|id| Some(Value::Heap(id)))
             }
+            InstKind::Float128Format { value, spec } => {
+                let Value::Float {
+                    width: FloatWidth::F128,
+                    text,
+                } = self.value(frame_index, *value)?
+                else {
+                    return Err(ExecutionFault::Internal(
+                        "Float128Format reads a non-Float128 value".into(),
+                    ));
+                };
+                let spec = self.string_operand(frame_index, *spec)?;
+                let text = zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                    .and_then(|value| value.format(&spec))
+                    .map_err(|error| {
+                        ExecutionFault::Internal(format!("Float128 format failed: {error:?}"))
+                    })?;
+                self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
             InstKind::Load(slot) => self.frames[frame_index]
                 .slots
                 .get(slot.0 as usize)
@@ -3538,6 +3573,155 @@ impl<'module> Interpreter<'module> {
                 )
                 .map(|id| Some(Value::Heap(id)))
                 .map_err(ExecutionFault::Limit),
+            InstKind::DequeNew { .. } => self
+                .heap
+                .allocate(
+                    HeapEntry::List(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(|id| {
+                    self.deque_versions.insert(id, 0);
+                    Some(Value::Heap(id))
+                })
+                .map_err(ExecutionFault::Limit),
+            InstKind::PriorityQueueNew { order, .. } => self
+                .heap
+                .allocate(
+                    HeapEntry::List(Vec::new()),
+                    std::mem::size_of::<HeapEntry>(),
+                    self.limits,
+                )
+                .map(|id| {
+                    self.deque_versions.insert(id, 0);
+                    self.priority_queue_orders.insert(id, *order);
+                    Some(Value::Heap(id))
+                })
+                .map_err(ExecutionFault::Limit),
+            InstKind::DequeLength(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal("DequeLength receiver is not a deque".into()));
+                };
+                self.collection_length_value(values.len(), instruction.ty).map(Some)
+            }
+            InstKind::DequeIsEmpty(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal("DequeIsEmpty receiver is not a deque".into()));
+                };
+                Ok(Some(Value::Boolean(values.is_empty())))
+            }
+            InstKind::DequeVersion(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let version = self.deque_versions.get(&id).copied().unwrap_or(0);
+                Ok(Some(Value::Int(IntegerValue::from_literal(version as i128, IntWidth::U64).expect("deque version fits UInt64"))))
+            }
+            InstKind::PriorityQueueLength(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal("PriorityQueueLength receiver is not a priority queue".into()));
+                };
+                self.collection_length_value(values.len(), instruction.ty).map(Some)
+            }
+            InstKind::PriorityQueueIsEmpty(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get(id) else {
+                    return Err(ExecutionFault::Internal("PriorityQueueIsEmpty receiver is not a priority queue".into()));
+                };
+                Ok(Some(Value::Boolean(values.is_empty())))
+            }
+            InstKind::PriorityQueueVersion(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let version = self.deque_versions.get(&id).copied().unwrap_or(0);
+                Ok(Some(Value::Int(IntegerValue::from_literal(version as i128, IntWidth::U64).expect("priority queue version fits UInt64"))))
+            }
+            InstKind::PriorityQueueEnqueue { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let order = self.priority_queue_orders.get(&id).copied().unwrap_or(0);
+                let insertion = match self.heap.get(id) {
+                    Some(HeapEntry::List(values)) => values
+                        .partition_point(|existing| self.priority_value_cmp(existing, &value, order) != std::cmp::Ordering::Greater),
+                    _ => return Err(ExecutionFault::Internal("PriorityQueueEnqueue receiver is not a priority queue".into())),
+                };
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else { unreachable!() };
+                if values.try_reserve(1).is_err() {
+                    return Ok(Some(Value::Int(IntegerValue::from_literal(2, IntWidth::I32).expect("2 fits i32"))));
+                }
+                values.insert(insertion, value);
+                let version = self.deque_versions.entry(id).or_default();
+                *version = version.wrapping_add(1);
+                Ok(Some(Value::Int(IntegerValue::from_literal(0, IntWidth::I32).expect("0 fits i32"))))
+            }
+            InstKind::PriorityQueuePeek(receiver) | InstKind::PriorityQueueDequeue(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let remove = matches!(&instruction.kind, InstKind::PriorityQueueDequeue(_));
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal("PriorityQueueAccess receiver is not a priority queue".into()));
+                };
+                let Some(value) = values.first().cloned() else {
+                    return Err(ExecutionFault::Internal("PriorityQueueAccess was executed while empty".into()));
+                };
+                if remove {
+                    values.remove(0);
+                    let version = self.deque_versions.entry(id).or_default();
+                    *version = version.wrapping_add(1);
+                }
+                Ok(Some(value))
+            }
+            InstKind::DequePushFront { receiver, value }
+            | InstKind::DequePushBack { receiver, value } => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let value = self.value(frame_index, *value)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal("DequePush receiver is not a deque".into()));
+                };
+                if values.try_reserve(1).is_err() {
+                    return Ok(Some(Value::Int(IntegerValue::from_literal(2, IntWidth::I32).expect("2 fits i32"))));
+                }
+                if matches!(&instruction.kind, InstKind::DequePushFront { .. }) {
+                    values.insert(0, value);
+                } else {
+                    values.push(value);
+                }
+                let version = self.deque_versions.entry(id).or_default();
+                *version = version.wrapping_add(1);
+                Ok(Some(Value::Int(IntegerValue::from_literal(0, IntWidth::I32).expect("0 fits i32"))))
+            }
+            InstKind::DequeFront(receiver) | InstKind::DequeBack(receiver)
+            | InstKind::DequePopFront(receiver) | InstKind::DequePopBack(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal("DequeAccess receiver is not a deque".into()));
+                };
+                let is_front = matches!(&instruction.kind, InstKind::DequeFront(_) | InstKind::DequePopFront(_));
+                let is_pop = matches!(&instruction.kind, InstKind::DequePopFront(_) | InstKind::DequePopBack(_));
+                let value = if is_front {
+                    if is_pop {
+                        if values.is_empty() { None } else { Some(values.remove(0)) }
+                    } else {
+                        values.first().cloned()
+                    }
+                } else if is_pop { values.pop() } else { values.last().cloned() };
+                if is_pop && value.is_some() {
+                    let version = self.deque_versions.entry(id).or_default();
+                    *version = version.wrapping_add(1);
+                }
+                value.map(Some).ok_or_else(|| ExecutionFault::Internal("DequeAccess was executed while empty".into()))
+            }
+            InstKind::DequeClear(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let Some(HeapEntry::List(values)) = self.heap.get_mut(id) else {
+                    return Err(ExecutionFault::Internal("DequeClear receiver is not a deque".into()));
+                };
+                if !values.is_empty() {
+                    values.clear();
+                    let version = self.deque_versions.entry(id).or_default();
+                    *version = version.wrapping_add(1);
+                }
+                Ok(None)
+            }
             InstKind::ArrayLength(receiver) | InstKind::ListLength(receiver) => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let length = match self.heap.get(id) {
@@ -3710,6 +3894,158 @@ impl<'module> Interpreter<'module> {
                 self.collection_length_value(length, instruction.ty)
                     .map(Some)
             }
+            InstKind::MapVersion(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let version = self.heap.map_version(id).ok_or_else(|| {
+                    ExecutionFault::Internal("MapVersion receiver is not a map".into())
+                })?;
+                self.collection_length_value(version as usize, instruction.ty)
+                    .map(Some)
+            }
+            InstKind::MapSortedKeys(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let mut values = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => {
+                        entries.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>()
+                    }
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "MapSortedKeys receiver is not a map".into(),
+                        ));
+                    }
+                };
+                let text_keys = matches!(instruction.ty, IrType::Array(array)
+                    if matches!(self.module.array_types.get(array as usize),
+                        Some(IrType::String | IrType::Char)));
+                if text_keys {
+                    values.sort_by_key(|value| self.value_sort_text(value));
+                } else {
+                    values.sort_by_key(|value| self.value_sort_word(value));
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::MapKeys(receiver) | InstKind::MapValues(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let values = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries))
+                        if matches!(&instruction.kind, InstKind::MapKeys(_)) =>
+                    {
+                        entries.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>()
+                    }
+                    Some(HeapEntry::Map(entries)) => {
+                        entries.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>()
+                    }
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "map snapshot receiver is not a map".into(),
+                        ));
+                    }
+                };
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::MapEntries(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let rows = match self.heap.get(id) {
+                    Some(HeapEntry::Map(entries)) => entries.clone(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "MapEntries receiver is not a map".into(),
+                        ));
+                    }
+                };
+                let IrType::Array(array_id) = instruction.ty else {
+                    return Err(ExecutionFault::Internal(
+                        "MapEntries result is not an Array".into(),
+                    ));
+                };
+                let IrType::Value(tuple_id) = self.module.array_types[array_id as usize] else {
+                    return Err(ExecutionFault::Internal(
+                        "MapEntries array element is not a tuple".into(),
+                    ));
+                };
+                let mut tuples = Vec::with_capacity(rows.len());
+                for (key, value) in rows {
+                    let fields = vec![key, value];
+                    let bytes = std::mem::size_of::<HeapEntry>()
+                        .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
+                        .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                    let tuple = self
+                        .heap
+                        .allocate(
+                            HeapEntry::Tuple {
+                                layout: tuple_id,
+                                fields,
+                            },
+                            bytes,
+                            self.limits,
+                        )
+                        .map_err(ExecutionFault::Limit)?;
+                    tuples.push(Value::Heap(tuple));
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(tuples.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(tuples), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::SetValues(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let values = match self.heap.get(id) {
+                    Some(HeapEntry::Set(values)) => values.clone(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "SetValues receiver is not a set".into(),
+                        ));
+                    }
+                };
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
+            InstKind::SetSortedElements(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let mut values = match self.heap.get(id) {
+                    Some(HeapEntry::Set(values)) => values.clone(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "SetSortedElements receiver is not a set".into(),
+                        ));
+                    }
+                };
+                let text_elements = matches!(instruction.ty, IrType::Array(array)
+                    if matches!(self.module.array_types.get(array as usize),
+                        Some(IrType::String | IrType::Char)));
+                if text_elements {
+                    values.sort_by_key(|value| self.value_sort_text(value));
+                } else {
+                    values.sort_by_key(|value| self.value_sort_word(value));
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Array(values), bytes, self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
+            }
             InstKind::MapIsEmpty(receiver) | InstKind::SetIsEmpty(receiver) => {
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let empty = match self.heap.get(id) {
@@ -3722,6 +4058,76 @@ impl<'module> Interpreter<'module> {
                     }
                 };
                 Ok(Some(Value::Boolean(empty)))
+            }
+            InstKind::MapClear(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                let was_nonempty = match self.heap.get_mut(id) {
+                    Some(HeapEntry::Map(entries)) => {
+                        let was_nonempty = !entries.is_empty();
+                        entries.clear();
+                        was_nonempty
+                    }
+                    _ => return Err(ExecutionFault::Internal("MapClear receiver is not a map".into())),
+                };
+                if was_nonempty {
+                    self.heap.bump_map_version(id);
+                }
+                Ok(None)
+            }
+            InstKind::SetClear(receiver) => {
+                let id = self.heap_operand(frame_index, *receiver)?;
+                match self.heap.get_mut(id) {
+                    Some(HeapEntry::Set(values)) => values.clear(),
+                    _ => return Err(ExecutionFault::Internal("SetClear receiver is not a set".into())),
+                }
+                Ok(None)
+            }
+            InstKind::SetOperation {
+                left,
+                right,
+                operation,
+            } => {
+                let left_id = self.heap_operand(frame_index, *left)?;
+                let right_id = self.heap_operand(frame_index, *right)?;
+                let left_values = match self.heap.get(left_id) {
+                    Some(HeapEntry::Set(values)) => values.clone(),
+                    _ => return Err(ExecutionFault::Internal("SetOperation left operand is not a set".into())),
+                };
+                let right_values = match self.heap.get(right_id) {
+                    Some(HeapEntry::Set(values)) => values.clone(),
+                    _ => return Err(ExecutionFault::Internal("SetOperation right operand is not a set".into())),
+                };
+                let contains = |values: &[Value], value: &Value| {
+                    values.iter().any(|candidate| self.runtime_value_equals(candidate, value))
+                };
+                use zirk_ir::SetOperation as Op;
+                let relation = match operation {
+                    Op::IsSubsetOf => Some(left_values.iter().all(|value| contains(&right_values, value))),
+                    Op::IsSupersetOf => Some(right_values.iter().all(|value| contains(&left_values, value))),
+                    Op::IsDisjoint => Some(left_values.iter().all(|value| !contains(&right_values, value))),
+                    _ => None,
+                };
+                if let Some(result) = relation {
+                    return Ok(Some(Value::Boolean(result)));
+                }
+                let mut result = Vec::new();
+                match operation {
+                    Op::Union => {
+                        result.extend(left_values.iter().cloned());
+                        result.extend(right_values.iter().filter(|value| !contains(&left_values, value)).cloned());
+                    }
+                    Op::Intersection => result.extend(left_values.iter().filter(|value| contains(&right_values, value)).cloned()),
+                    Op::Difference => result.extend(left_values.iter().filter(|value| !contains(&right_values, value)).cloned()),
+                    Op::SymmetricDifference => {
+                        result.extend(left_values.iter().filter(|value| !contains(&right_values, value)).cloned());
+                        result.extend(right_values.iter().filter(|value| !contains(&left_values, value)).cloned());
+                    }
+                    Op::IsSubsetOf | Op::IsSupersetOf | Op::IsDisjoint => unreachable!(),
+                }
+                self.heap
+                    .allocate(HeapEntry::Set(result), std::mem::size_of::<HeapEntry>(), self.limits)
+                    .map(|id| Some(Value::Heap(id)))
+                    .map_err(ExecutionFault::Limit)
             }
             InstKind::MapSet {
                 receiver,
@@ -3741,15 +4147,37 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
-                let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
-                    unreachable!("checked above");
-                };
-                if let Some(index) = position {
+                let status = if let Some(index) = position {
+                    let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                        unreachable!("checked above");
+                    };
                     entries[index].1 = value;
+                    0
                 } else {
-                    entries.push((key, value));
-                }
-                Ok(None)
+                    let reserved = match self.heap.get_mut(id) {
+                        Some(HeapEntry::Map(entries)) => entries.try_reserve(1).is_ok(),
+                        _ => unreachable!("checked above"),
+                    };
+                    let charged = reserved
+                        && self
+                            .heap
+                            .charge(std::mem::size_of::<(Value, Value)>(), self.limits)
+                            .is_ok();
+                    if !charged {
+                        2
+                    } else {
+                        let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
+                            unreachable!("checked above");
+                        };
+                        entries.push((key, value));
+                        self.heap.bump_map_version(id);
+                        0
+                    }
+                };
+                Ok(Some(Value::Int(
+                    IntegerValue::from_literal(status, IntWidth::I32)
+                        .expect("collection status fits Int32"),
+                )))
             }
             InstKind::MapContainsKey { receiver, key } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
@@ -3771,12 +4199,15 @@ impl<'module> Interpreter<'module> {
                         "MapGet receiver is not a map".into(),
                     ));
                 };
-                Ok(Some(Value::Nullable(
-                    entries
-                        .iter()
-                        .find(|(candidate, _)| self.runtime_value_equals(candidate, &key))
-                        .map(|(_, value)| Box::new(value.clone())),
-                )))
+                entries
+                    .iter()
+                    .find(|(candidate, _)| self.runtime_value_equals(candidate, &key))
+                    .map(|(_, value)| Some(value.clone()))
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(
+                            "MapGet was executed for a key that is not present".into(),
+                        )
+                    })
             }
             InstKind::MapRemove { receiver, key } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
@@ -3796,6 +4227,7 @@ impl<'module> Interpreter<'module> {
                         unreachable!("checked above");
                     };
                     entries.remove(index);
+                    self.heap.bump_map_version(id);
                 }
                 Ok(Some(Value::Boolean(position.is_some())))
             }
@@ -3812,13 +4244,29 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
-                if !present {
-                    let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
-                        unreachable!("checked above");
+                let status = if present {
+                    0
+                } else {
+                    let reserved = match self.heap.get_mut(id) {
+                        Some(HeapEntry::Set(values)) => values.try_reserve(1).is_ok(),
+                        _ => unreachable!("checked above"),
                     };
-                    values.push(value);
-                }
-                Ok(None)
+                    let charged = reserved
+                        && self.heap.charge(std::mem::size_of::<Value>(), self.limits).is_ok();
+                    if !charged {
+                        2
+                    } else {
+                        let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
+                            unreachable!("checked above");
+                        };
+                        values.push(value);
+                        1
+                    }
+                };
+                Ok(Some(Value::Int(
+                    IntegerValue::from_literal(status, IntWidth::I32)
+                        .expect("collection status fits Int32"),
+                )))
             }
             InstKind::SetContains { receiver, value } => {
                 let id = self.heap_operand(frame_index, *receiver)?;
@@ -5661,6 +6109,67 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    fn priority_value_cmp(&self, left: &Value, right: &Value, order: i32) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (left, right) {
+            (Value::Int(left), Value::Int(right)) => {
+                if left.width.signed() {
+                    left.signed().cmp(&right.signed())
+                } else {
+                    left.unsigned().cmp(&right.unsigned())
+                }
+            }
+            (Value::Boolean(left), Value::Boolean(right)) => left.cmp(right),
+            (
+                Value::Float {
+                    width: FloatWidth::F128,
+                    text: left,
+                },
+                Value::Float {
+                    width: FloatWidth::F128,
+                    text: right,
+                },
+            ) => {
+                match (
+                    zirk_runtime_core::binary_float::Float128::from_decimal(left),
+                    zirk_runtime_core::binary_float::Float128::from_decimal(right),
+                ) {
+                    (Ok(left), Ok(right)) => left.total_cmp(right),
+                    _ => left.cmp(right),
+                }
+            }
+            (
+                Value::Float {
+                    width: lw,
+                    text: left,
+                },
+                Value::Float {
+                    width: rw,
+                    text: right,
+                },
+            ) if lw == rw => {
+                let left = Self::parse_binary_float(left).unwrap_or(f64::NAN);
+                let right = Self::parse_binary_float(right).unwrap_or(f64::NAN);
+                Self::round_binary_float(left, *lw).total_cmp(&Self::round_binary_float(right, *rw))
+            }
+            (Value::Decimal(left), Value::Decimal(right)) => {
+                match (
+                    zirk_runtime_core::decimal::parse(left),
+                    zirk_runtime_core::decimal::parse(right),
+                ) {
+                    (Some(left), Some(right)) => zirk_runtime_core::decimal::compare(left, right)
+                        .map(|ordering| ordering.cmp(&0))
+                        .unwrap_or(Ordering::Equal),
+                    _ => left.cmp(right),
+                }
+            }
+            (Value::Heap(_), Value::Heap(_)) if order == 18 || order == 2 => {
+                self.value_sort_text(left).cmp(&self.value_sort_text(right))
+            }
+            _ => Ordering::Equal,
+        }
+    }
+
     /// The `Regex.Match` class layout behind a `Nullable<Object>` result
     /// (`find`) or the element type of a `List` result (`find_all`).
     fn regex_match_layout(&self, ty: IrType) -> Result<u32, ExecutionFault> {
@@ -7108,7 +7617,7 @@ impl<'module> Interpreter<'module> {
                 width: FloatWidth::F128,
                 text,
             } => zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
-                .map(|value| value.display_f64().to_string())
+                .and_then(zirk_runtime_core::binary_float::Float128::to_decimal_string)
                 .map_err(|error| {
                     ExecutionFault::Internal(format!("cannot render Float128: {error:?}"))
                 }),
@@ -7783,7 +8292,42 @@ impl<'module> Interpreter<'module> {
 
     fn runtime_value_equals(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
+            (Value::Nullable(None), Value::Nullable(None)) => true,
+            (Value::Nullable(Some(left)), Value::Nullable(Some(right))) => {
+                self.runtime_value_equals(left, right)
+            }
             (Value::Heap(left), Value::Heap(right)) => self.value_equals(*left, *right),
+            (
+                Value::Float {
+                    width: left_width,
+                    text: left,
+                },
+                Value::Float {
+                    width: right_width,
+                    text: right,
+                },
+            ) if left_width == right_width => {
+                if *left_width == FloatWidth::F128 {
+                    use zirk_runtime_core::binary_float::Float128;
+                    match (
+                        Float128::from_wire_or_decimal(left),
+                        Float128::from_wire_or_decimal(right),
+                    ) {
+                        (Ok(left), Ok(right)) => {
+                            left.compare(right) == Ok(std::cmp::Ordering::Equal)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    matches!((left.parse::<f64>(), right.parse::<f64>()), (Ok(left), Ok(right)) if left == right)
+                }
+            }
+            (Value::Decimal(left), Value::Decimal(right)) => matches!(
+                (self.parse_decimal(left), self.parse_decimal(right)),
+                (Ok(left), Ok(right))
+                    if zirk_runtime_core::decimal::compare(left, right)
+                        .is_ok_and(|ordering| ordering == 0)
+            ),
             _ => left == right,
         }
     }
@@ -7837,6 +8381,13 @@ impl<'module> Interpreter<'module> {
             let left = Float128::from_wire_or_decimal(left).map_err(invalid)?;
             let right = Float128::from_wire_or_decimal(right).map_err(invalid)?;
             use BinaryOp::*;
+            if (left.is_nan() || right.is_nan()) && matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
+            {
+                // LLVM's ordered floating predicates are all false for NaN;
+                // this also lets the following `guard_nan` branch turn a
+                // NaN-producing arithmetic result into the source exception.
+                return Ok(Value::Boolean(false));
+            }
             let comparison = left.compare(right).map_err(|error| {
                 Self::arithmetic_error(format!("Float128 comparison failed: {error:?}"))
             });
@@ -8189,14 +8740,33 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::LoadField { .. }
         | InstKind::StoreField { .. }
         | InstKind::ToString(_)
+        | InstKind::Float128Format { .. }
         | InstKind::MakeClosure { .. }
         | InstKind::CallClosure { .. }
         | InstKind::MakeCallable { .. }
         | InstKind::CallCallable { .. }
         | InstKind::ArrayLength(_)
         | InstKind::ListLength(_)
+        | InstKind::DequeLength(_)
+        | InstKind::DequeIsEmpty(_)
+        | InstKind::DequeVersion(_)
+        | InstKind::PriorityQueueLength(_)
+        | InstKind::PriorityQueueIsEmpty(_)
+        | InstKind::PriorityQueueVersion(_)
         | InstKind::ArrayNew { .. }
         | InstKind::ListNew { .. }
+        | InstKind::DequeNew { .. }
+        | InstKind::PriorityQueueNew { .. }
+        | InstKind::PriorityQueueEnqueue { .. }
+        | InstKind::PriorityQueuePeek(_)
+        | InstKind::PriorityQueueDequeue(_)
+        | InstKind::DequePushFront { .. }
+        | InstKind::DequePushBack { .. }
+        | InstKind::DequeFront(_)
+        | InstKind::DequeBack(_)
+        | InstKind::DequePopFront(_)
+        | InstKind::DequePopBack(_)
+        | InstKind::DequeClear(_)
         | InstKind::MapNew { .. }
         | InstKind::SetNew { .. }
         | InstKind::ArrayListLoad { .. }
@@ -8208,13 +8778,21 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::ArrayClone { .. }
         | InstKind::ListClone { .. }
         | InstKind::MapLength(_)
+        | InstKind::MapVersion(_)
+        | InstKind::MapKeys(_)
+        | InstKind::MapValues(_)
+        | InstKind::MapEntries(_)
         | InstKind::MapIsEmpty(_)
+        | InstKind::MapClear(_)
         | InstKind::MapSet { .. }
         | InstKind::MapContainsKey { .. }
         | InstKind::MapGet { .. }
         | InstKind::MapRemove { .. }
         | InstKind::SetLength(_)
+        | InstKind::SetValues(_)
         | InstKind::SetIsEmpty(_)
+        | InstKind::SetClear(_)
+        | InstKind::SetOperation { .. }
         | InstKind::SetAdd { .. }
         | InstKind::SetContains { .. }
         | InstKind::SetRemove { .. }

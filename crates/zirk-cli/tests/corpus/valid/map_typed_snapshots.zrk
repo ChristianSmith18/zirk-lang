@@ -1,0 +1,15 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut values: Map<String, Int32> = Map();
+    values.set("b", 2);
+    values.set("a", 1);
+    values.set("b", 3);
+    values.remove("a");
+    values.set("a", 4);
+
+    for key in values.keys() { stdout.println(key); }
+    for value in values.values() { stdout.println(value.to_string()); }
+    for entry in values.entries() { stdout.println(entry.to_string()); }
+}
+main();

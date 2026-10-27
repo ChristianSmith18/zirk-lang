@@ -181,11 +181,23 @@ pub mod symbols {
     /// Converts a `Float64` into a `String`.
     pub const STR_FROM_F64: &str = "zirk_str_from_f64";
     /// Converts a `Float128`'s raw bits (taken by pointer, like
-    /// `STR_FROM_I128`) to the nearest `Float64`, for `ToString`.
+    /// `STR_FROM_I128`) to the nearest `Float64` for explicit conversions.
     pub const FLOAT128_TO_F64: &str = "zirk_float128_to_f64";
+    /// Formats a `Float128`'s raw bits directly as a lossless String.
+    pub const FLOAT128_TO_STRING: &str = "zirk_float128_to_string";
+    /// Formats the raw binary128 bits directly using a Zirk float specifier.
+    pub const FLOAT128_FORMAT: &str = "zirk_float128_format";
     /// Widens a `Float64` to `Float128`'s raw bits, written through an
     /// out-pointer like every other 128-bit runtime result.
     pub const F64_TO_FLOAT128: &str = "zirk_f64_to_float128";
+    /// Performs binary128 arithmetic through the portable runtime helper.
+    pub const FLOAT128_BINARY: &str = "zirk_float128_binary";
+    /// Compares binary128 values without target-specific `fp128` libcalls.
+    pub const FLOAT128_COMPARE: &str = "zirk_float128_compare";
+    /// Converts binary128 to a checked-width integer via a pointer-based ABI.
+    pub const FLOAT128_TO_INTEGER: &str = "zirk_float128_to_integer";
+    /// Converts any signed/unsigned integer bit pattern to binary128.
+    pub const FLOAT128_FROM_INTEGER: &str = "zirk_float128_from_integer";
     /// Formats a `Float64` according to a `spec` string.
     pub const FLOAT_FORMAT: &str = "zirk_float_format";
     /// Converts a `Boolean` into a `String`.
@@ -541,25 +553,61 @@ pub mod symbols {
     pub const LIST_NEW: &str = "zirk_rt_list_new";
     /// `zirk_rt_list_new_with_layout(elem_size, elem_align, offsets, count) -> *mut c_void`.
     pub const LIST_NEW_WITH_LAYOUT: &str = "zirk_rt_list_new_with_layout";
+    /// `zirk_rt_deque_new_with_layout(elem_size, offsets, count) -> *mut c_void`.
+    pub const DEQUE_NEW_WITH_LAYOUT: &str = "zirk_rt_deque_new_with_layout";
+    pub const DEQUE_LENGTH: &str = "zirk_rt_deque_length";
+    pub const DEQUE_VERSION: &str = "zirk_rt_deque_version";
+    pub const DEQUE_PUSH_FRONT: &str = "zirk_rt_deque_push_front";
+    pub const DEQUE_PUSH_BACK: &str = "zirk_rt_deque_push_back";
+    pub const DEQUE_POP_FRONT: &str = "zirk_rt_deque_pop_front";
+    pub const DEQUE_POP_BACK: &str = "zirk_rt_deque_pop_back";
+    pub const DEQUE_FRONT: &str = "zirk_rt_deque_front";
+    pub const DEQUE_BACK: &str = "zirk_rt_deque_back";
+    pub const DEQUE_CLEAR: &str = "zirk_rt_deque_clear";
+    pub const PRIORITY_QUEUE_NEW_WITH_LAYOUT: &str = "zirk_rt_priority_queue_new_with_layout";
+    pub const PRIORITY_QUEUE_ENQUEUE: &str = "zirk_rt_priority_queue_enqueue";
+    pub const PRIORITY_QUEUE_PEEK: &str = "zirk_rt_priority_queue_peek";
+    pub const PRIORITY_QUEUE_DEQUEUE: &str = "zirk_rt_priority_queue_dequeue";
+    pub const PRIORITY_QUEUE_LENGTH: &str = "zirk_rt_priority_queue_length";
+    pub const PRIORITY_QUEUE_IS_EMPTY: &str = "zirk_rt_priority_queue_is_empty";
+    pub const PRIORITY_QUEUE_VERSION: &str = "zirk_rt_priority_queue_version";
     /// `zirk_rt_array_clone_with_layout(array, elem_size, elem_align, offsets, count)`.
     pub const ARRAY_CLONE_WITH_LAYOUT: &str = "zirk_rt_array_clone_with_layout";
     /// `zirk_rt_array_slice_with_layout(array, start, end, step, elem_size, elem_align, offsets, count)`.
     pub const ARRAY_SLICE_WITH_LAYOUT: &str = "zirk_rt_array_slice_with_layout";
-    /// `zirk_rt_map_new_with_layout(key_offsets, key_count, value_offsets,
-    /// value_count, string_content_keys) -> *mut c_void`.
+    /// `zirk_rt_map_new_with_layout(key_offsets, key_count, key_size,
+    /// value_offsets, value_count, string_content_keys, value_size)`.
     pub const MAP_NEW_WITH_LAYOUT: &str = "zirk_rt_map_new_with_layout";
     /// `zirk_rt_map_length(map) -> i64`.
     pub const MAP_LENGTH: &str = "zirk_rt_map_length";
+    /// `zirk_rt_map_version(map) -> u64`.
+    pub const MAP_VERSION: &str = "zirk_rt_map_version";
+    /// `zirk_rt_map_keys(map, size, align, offsets, count) -> Array<K>`.
+    pub const MAP_KEYS: &str = "zirk_rt_map_keys";
+    /// `zirk_rt_map_sorted_keys(map, string_content) -> Array<K>`.
+    pub const MAP_SORTED_KEYS: &str = "zirk_rt_map_sorted_keys";
+    /// `zirk_rt_map_values(map, size, align, offsets, count) -> Array<V>`.
+    pub const MAP_VALUES: &str = "zirk_rt_map_values";
+    /// `zirk_rt_map_entries(map, tuple layout, offsets, field offsets/sizes)`.
+    pub const MAP_ENTRIES: &str = "zirk_rt_map_entries";
     /// `zirk_rt_map_is_empty(map) -> i32`.
     pub const MAP_IS_EMPTY: &str = "zirk_rt_map_is_empty";
-    /// `zirk_rt_map_set(map, key, value)`.
-    pub const MAP_SET: &str = "zirk_rt_map_set";
+    /// `zirk_rt_map_set_typed(map, key, key_size, value, value_size) -> status`.
+    pub const MAP_SET: &str = "zirk_rt_map_set_typed";
     /// `zirk_rt_map_contains_key(map, key) -> i32`.
-    pub const MAP_CONTAINS_KEY: &str = "zirk_rt_map_contains_key";
+    pub const MAP_CONTAINS_KEY: &str = "zirk_rt_map_contains_key_typed";
     /// `zirk_rt_map_get(map, key) -> i64`.
-    pub const MAP_GET: &str = "zirk_rt_map_get";
+    pub const MAP_GET: &str = "zirk_rt_map_get_keyed";
     /// `zirk_rt_map_remove(map, key) -> i32`.
-    pub const MAP_REMOVE: &str = "zirk_rt_map_remove";
+    pub const MAP_REMOVE: &str = "zirk_rt_map_remove_typed";
+    /// `zirk_rt_map_clear(map)`.
+    pub const MAP_CLEAR: &str = "zirk_rt_map_clear";
+    /// `zirk_rt_set_clear(set)`.
+    pub const SET_CLEAR: &str = "zirk_rt_set_clear";
+    /// `zirk_rt_set_algebra(left, right, operation) -> set`.
+    pub const SET_ALGEBRA: &str = "zirk_rt_set_algebra";
+    /// `zirk_rt_set_relation(left, right, relation) -> i32`.
+    pub const SET_RELATION: &str = "zirk_rt_set_relation";
     /// Allocates a managed dynamic object with stable reference identity.
     pub const OBJECT_NEW: &str = "zirk_rt_object_new";
     /// Returns one dynamic object's own property count.
@@ -594,19 +642,23 @@ pub mod symbols {
     pub const DYNAMIC_VALUE_COPY_TO: &str = "zirk_rt_dynamic_value_copy_to";
     pub const JSON_STRINGIFY_DYNAMIC: &str = "zirk_rt_json_stringify_dynamic";
     pub const JSON_PARSE_DYNAMIC: &str = "zirk_rt_json_parse_dynamic";
-    /// `zirk_rt_set_new_with_layout(element_offsets, count,
+    /// `zirk_rt_set_new_with_layout(element_offsets, count, element_size,
     /// string_content_elements) -> *mut c_void`.
     pub const SET_NEW_WITH_LAYOUT: &str = "zirk_rt_set_new_with_layout";
     /// `zirk_rt_set_length(set) -> i64`.
     pub const SET_LENGTH: &str = "zirk_rt_set_length";
+    /// `zirk_rt_set_values(set, size, align, offsets, count) -> Array<T>`.
+    pub const SET_VALUES: &str = "zirk_rt_set_values";
+    /// `zirk_rt_set_sorted_elements(set, string_content) -> Array<T>`.
+    pub const SET_SORTED_ELEMENTS: &str = "zirk_rt_set_sorted_elements";
     /// `zirk_rt_set_is_empty(set) -> i32`.
     pub const SET_IS_EMPTY: &str = "zirk_rt_set_is_empty";
-    /// `zirk_rt_set_add(set, value)`.
-    pub const SET_ADD: &str = "zirk_rt_set_add";
+    /// `zirk_rt_set_add_typed(set, value, value_size) -> 0 duplicate, 1 inserted, 2 allocation failure`.
+    pub const SET_ADD: &str = "zirk_rt_set_add_typed";
     /// `zirk_rt_set_contains(set, value) -> i32`.
-    pub const SET_CONTAINS: &str = "zirk_rt_set_contains";
+    pub const SET_CONTAINS: &str = "zirk_rt_set_contains_typed";
     /// `zirk_rt_set_remove(set, value) -> i32`.
-    pub const SET_REMOVE: &str = "zirk_rt_set_remove";
+    pub const SET_REMOVE: &str = "zirk_rt_set_remove_typed";
     /// `zirk_rt_array_length(array) -> usize`.
     pub const ARRAY_LENGTH: &str = "zirk_rt_array_length";
     /// `zirk_rt_list_length(list) -> usize`.
@@ -701,6 +753,23 @@ pub struct Runtime<'ctx> {
     pub chan_capacity: FunctionValue<'ctx>,
     pub chan_drain: FunctionValue<'ctx>,
     pub list_new_with_layout: FunctionValue<'ctx>,
+    pub deque_new_with_layout: FunctionValue<'ctx>,
+    pub deque_length: FunctionValue<'ctx>,
+    pub deque_version: FunctionValue<'ctx>,
+    pub deque_push_front: FunctionValue<'ctx>,
+    pub deque_push_back: FunctionValue<'ctx>,
+    pub deque_pop_front: FunctionValue<'ctx>,
+    pub deque_pop_back: FunctionValue<'ctx>,
+    pub deque_front: FunctionValue<'ctx>,
+    pub deque_back: FunctionValue<'ctx>,
+    pub deque_clear: FunctionValue<'ctx>,
+    pub priority_queue_new_with_layout: FunctionValue<'ctx>,
+    pub priority_queue_enqueue: FunctionValue<'ctx>,
+    pub priority_queue_peek: FunctionValue<'ctx>,
+    pub priority_queue_dequeue: FunctionValue<'ctx>,
+    pub priority_queue_length: FunctionValue<'ctx>,
+    pub priority_queue_is_empty: FunctionValue<'ctx>,
+    pub priority_queue_version: FunctionValue<'ctx>,
     pub array_new_with_layout: FunctionValue<'ctx>,
     pub array_clone_with_layout: FunctionValue<'ctx>,
     pub array_slice_with_layout: FunctionValue<'ctx>,
@@ -720,7 +789,13 @@ pub struct Runtime<'ctx> {
     pub str_from_f32: FunctionValue<'ctx>,
     pub str_from_f64: FunctionValue<'ctx>,
     pub float128_to_f64: FunctionValue<'ctx>,
+    pub float128_to_string: FunctionValue<'ctx>,
+    pub float128_format: FunctionValue<'ctx>,
     pub f64_to_float128: FunctionValue<'ctx>,
+    pub float128_binary: FunctionValue<'ctx>,
+    pub float128_compare: FunctionValue<'ctx>,
+    pub float128_to_integer: FunctionValue<'ctx>,
+    pub float128_from_integer: FunctionValue<'ctx>,
     pub float_format: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
     pub str_grapheme_offset: FunctionValue<'ctx>,
@@ -963,11 +1038,17 @@ pub struct Runtime<'ctx> {
     pub list_new: FunctionValue<'ctx>,
     pub map_new: FunctionValue<'ctx>,
     pub map_length: FunctionValue<'ctx>,
+    pub map_version: FunctionValue<'ctx>,
+    pub map_keys: FunctionValue<'ctx>,
+    pub map_sorted_keys: FunctionValue<'ctx>,
+    pub map_values: FunctionValue<'ctx>,
+    pub map_entries: FunctionValue<'ctx>,
     pub map_is_empty: FunctionValue<'ctx>,
     pub map_set: FunctionValue<'ctx>,
     pub map_contains_key: FunctionValue<'ctx>,
     pub map_get: FunctionValue<'ctx>,
     pub map_remove: FunctionValue<'ctx>,
+    pub map_clear: FunctionValue<'ctx>,
     pub object_new: FunctionValue<'ctx>,
     pub object_length: FunctionValue<'ctx>,
     pub object_key_at: FunctionValue<'ctx>,
@@ -989,10 +1070,15 @@ pub struct Runtime<'ctx> {
     pub json_parse_dynamic: FunctionValue<'ctx>,
     pub set_new: FunctionValue<'ctx>,
     pub set_length: FunctionValue<'ctx>,
+    pub set_values: FunctionValue<'ctx>,
+    pub set_sorted_elements: FunctionValue<'ctx>,
     pub set_is_empty: FunctionValue<'ctx>,
     pub set_add: FunctionValue<'ctx>,
     pub set_contains: FunctionValue<'ctx>,
     pub set_remove: FunctionValue<'ctx>,
+    pub set_clear: FunctionValue<'ctx>,
+    pub set_algebra: FunctionValue<'ctx>,
+    pub set_relation: FunctionValue<'ctx>,
     pub array_length: FunctionValue<'ctx>,
     pub list_length: FunctionValue<'ctx>,
     pub array_element: FunctionValue<'ctx>,
@@ -1477,11 +1563,61 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         context.f64_type().fn_type(&[ptr.into()], false),
         external,
     );
+    let float128_to_string = module.add_function(
+        symbols::FLOAT128_TO_STRING,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let float128_format = module.add_function(
+        symbols::FLOAT128_FORMAT,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
     let f64_to_float128 = module.add_function(
         symbols::F64_TO_FLOAT128,
         context
             .void_type()
             .fn_type(&[ptr.into(), context.f64_type().into()], false),
+        external,
+    );
+    let float128_binary = module.add_function(
+        symbols::FLOAT128_BINARY,
+        context.i32_type().fn_type(
+            &[
+                context.i32_type().into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let float128_compare = module.add_function(
+        symbols::FLOAT128_COMPARE,
+        context
+            .i32_type()
+            .fn_type(&[context.i32_type().into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let float128_to_integer = module.add_function(
+        symbols::FLOAT128_TO_INTEGER,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                context.i32_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let float128_from_integer = module.add_function(
+        symbols::FLOAT128_FROM_INTEGER,
+        context
+            .void_type()
+            .fn_type(&[ptr.into(), ptr.into(), context.i32_type().into()], false),
         external,
     );
     let float_format = module.add_function(
@@ -2714,6 +2850,99 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), ptr.into(), i64.into()], false),
         external,
     );
+    let deque_new_with_layout = module.add_function(
+        symbols::DEQUE_NEW_WITH_LAYOUT,
+        ptr.fn_type(&[i64.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let deque_length = module.add_function(
+        symbols::DEQUE_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let deque_version = module.add_function(
+        symbols::DEQUE_VERSION,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let deque_push_front = module.add_function(
+        symbols::DEQUE_PUSH_FRONT,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_push_back = module.add_function(
+        symbols::DEQUE_PUSH_BACK,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_pop_front = module.add_function(
+        symbols::DEQUE_POP_FRONT,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_pop_back = module.add_function(
+        symbols::DEQUE_POP_BACK,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_front = module.add_function(
+        symbols::DEQUE_FRONT,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_back = module.add_function(
+        symbols::DEQUE_BACK,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let deque_clear = module.add_function(
+        symbols::DEQUE_CLEAR,
+        context.void_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let priority_queue_new_with_layout = module.add_function(
+        symbols::PRIORITY_QUEUE_NEW_WITH_LAYOUT,
+        ptr.fn_type(
+            &[
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                context.i32_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let priority_queue_enqueue = module.add_function(
+        symbols::PRIORITY_QUEUE_ENQUEUE,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let priority_queue_peek = module.add_function(
+        symbols::PRIORITY_QUEUE_PEEK,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let priority_queue_dequeue = module.add_function(
+        symbols::PRIORITY_QUEUE_DEQUEUE,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let priority_queue_length = module.add_function(
+        symbols::PRIORITY_QUEUE_LENGTH,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let priority_queue_is_empty = module.add_function(
+        symbols::PRIORITY_QUEUE_IS_EMPTY,
+        context.i32_type().fn_type(&[ptr.into()], false),
+        external,
+    );
+    let priority_queue_version = module.add_function(
+        symbols::PRIORITY_QUEUE_VERSION,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
     let array_clone_with_layout = module.add_function(
         symbols::ARRAY_CLONE_WITH_LAYOUT,
         ptr.fn_type(
@@ -2745,9 +2974,11 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
             &[
                 ptr.into(),
                 i64.into(),
+                i64.into(),
                 ptr.into(),
                 i64.into(),
                 context.bool_type().into(),
+                i64.into(),
             ],
             false,
         ),
@@ -2758,6 +2989,50 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         i64.fn_type(&[ptr.into()], false),
         external,
     );
+    let map_version = module.add_function(
+        symbols::MAP_VERSION,
+        i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let map_keys = module.add_function(
+        symbols::MAP_KEYS,
+        ptr.fn_type(
+            &[ptr.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let map_sorted_keys = module.add_function(
+        symbols::MAP_SORTED_KEYS,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
+        external,
+    );
+    let map_values = module.add_function(
+        symbols::MAP_VALUES,
+        ptr.fn_type(
+            &[ptr.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let map_entries = module.add_function(
+        symbols::MAP_ENTRIES,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
     let map_is_empty = module.add_function(
         symbols::MAP_IS_EMPTY,
         context.bool_type().fn_type(&[ptr.into()], false),
@@ -2765,26 +3040,37 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let map_set = module.add_function(
         symbols::MAP_SET,
-        void.fn_type(&[ptr.into(), i64.into(), i64.into()], false),
+        context.i32_type().fn_type(
+            &[ptr.into(), ptr.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
         external,
     );
     let map_contains_key = module.add_function(
         symbols::MAP_CONTAINS_KEY,
         context
             .bool_type()
-            .fn_type(&[ptr.into(), i64.into()], false),
+            .fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
         external,
     );
     let map_get = module.add_function(
         symbols::MAP_GET,
-        i64.fn_type(&[ptr.into(), i64.into()], false),
+        context.bool_type().fn_type(
+            &[ptr.into(), ptr.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
         external,
     );
     let map_remove = module.add_function(
         symbols::MAP_REMOVE,
         context
             .bool_type()
-            .fn_type(&[ptr.into(), i64.into()], false),
+            .fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let map_clear = module.add_function(
+        symbols::MAP_CLEAR,
+        void.fn_type(&[ptr.into()], false),
         external,
     );
     let object_new = module.add_function(symbols::OBJECT_NEW, ptr.fn_type(&[], false), external);
@@ -2914,12 +3200,33 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let set_new = module.add_function(
         symbols::SET_NEW_WITH_LAYOUT,
-        ptr.fn_type(&[ptr.into(), i64.into(), context.bool_type().into()], false),
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+            ],
+            false,
+        ),
         external,
     );
     let set_length = module.add_function(
         symbols::SET_LENGTH,
         i64.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let set_values = module.add_function(
+        symbols::SET_VALUES,
+        ptr.fn_type(
+            &[ptr.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let set_sorted_elements = module.add_function(
+        symbols::SET_SORTED_ELEMENTS,
+        ptr.fn_type(&[ptr.into(), i64.into()], false),
         external,
     );
     let set_is_empty = module.add_function(
@@ -2929,21 +3236,40 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
     );
     let set_add = module.add_function(
         symbols::SET_ADD,
-        void.fn_type(&[ptr.into(), i64.into()], false),
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
         external,
     );
     let set_contains = module.add_function(
         symbols::SET_CONTAINS,
         context
             .bool_type()
-            .fn_type(&[ptr.into(), i64.into()], false),
+            .fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
         external,
     );
     let set_remove = module.add_function(
         symbols::SET_REMOVE,
         context
             .bool_type()
-            .fn_type(&[ptr.into(), i64.into()], false),
+            .fn_type(&[ptr.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let set_clear = module.add_function(
+        symbols::SET_CLEAR,
+        void.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let set_algebra = module.add_function(
+        symbols::SET_ALGEBRA,
+        ptr.fn_type(&[ptr.into(), ptr.into(), context.i32_type().into()], false),
+        external,
+    );
+    let set_relation = module.add_function(
+        symbols::SET_RELATION,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), ptr.into(), context.i32_type().into()], false),
         external,
     );
     let array_length = module.add_function(
@@ -3276,6 +3602,23 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         chan_capacity,
         chan_drain,
         list_new_with_layout,
+        deque_new_with_layout,
+        deque_length,
+        deque_version,
+        deque_push_front,
+        deque_push_back,
+        deque_pop_front,
+        deque_pop_back,
+        deque_front,
+        deque_back,
+        deque_clear,
+        priority_queue_new_with_layout,
+        priority_queue_enqueue,
+        priority_queue_peek,
+        priority_queue_dequeue,
+        priority_queue_length,
+        priority_queue_is_empty,
+        priority_queue_version,
         array_new_with_layout,
         array_clone_with_layout,
         array_slice_with_layout,
@@ -3295,7 +3638,13 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_from_f32,
         str_from_f64,
         float128_to_f64,
+        float128_to_string,
+        float128_format,
         f64_to_float128,
+        float128_binary,
+        float128_compare,
+        float128_to_integer,
+        float128_from_integer,
         float_format,
         str_from_bool,
         str_grapheme_offset,
@@ -3493,11 +3842,17 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         list_new,
         map_new,
         map_length,
+        map_version,
+        map_keys,
+        map_sorted_keys,
+        map_values,
+        map_entries,
         map_is_empty,
         map_set,
         map_contains_key,
         map_get,
         map_remove,
+        map_clear,
         object_new,
         object_length,
         object_key_at,
@@ -3519,10 +3874,15 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         json_parse_dynamic,
         set_new,
         set_length,
+        set_values,
+        set_sorted_elements,
         set_is_empty,
         set_add,
         set_contains,
         set_remove,
+        set_clear,
+        set_algebra,
+        set_relation,
         array_length,
         list_length,
         array_element,

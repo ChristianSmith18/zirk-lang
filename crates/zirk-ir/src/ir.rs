@@ -322,6 +322,8 @@ pub enum Nullable {
     Enum(u32),
     Array(u32),
     List(u32),
+    Map(u32),
+    Set(u32),
     Atomic(crate::AtomicKind),
     /// A union whose complete tagged value may also be absent.
     Union(u32),
@@ -343,6 +345,8 @@ impl Nullable {
             Nullable::Enum(id) => IrType::Enum(id),
             Nullable::Array(id) => IrType::Array(id),
             Nullable::List(id) => IrType::List(id),
+            Nullable::Map(id) => IrType::Map(id),
+            Nullable::Set(id) => IrType::Set(id),
             Nullable::Atomic(kind) => IrType::Atomic(kind),
             Nullable::Union(id) => IrType::Union(id),
         }
@@ -364,6 +368,8 @@ impl Nullable {
             IrType::Enum(id) => Nullable::Enum(id),
             IrType::Array(id) => Nullable::Array(id),
             IrType::List(id) => Nullable::List(id),
+            IrType::Map(id) => Nullable::Map(id),
+            IrType::Set(id) => Nullable::Set(id),
             IrType::Atomic(kind) => Nullable::Atomic(kind),
             IrType::Union(id) => Nullable::Union(id),
             _ => return None,
@@ -458,6 +464,8 @@ impl IrType {
                 Nullable::Enum(_) => "enum?",
                 Nullable::Array(_) => "Array?",
                 Nullable::List(_) => "List?",
+                Nullable::Map(_) => "Map?",
+                Nullable::Set(_) => "Set?",
                 Nullable::Atomic(_) => "Atomic?",
                 Nullable::Union(_) => "union?",
             },
@@ -1671,6 +1679,11 @@ pub enum InstKind {
     /// is what keeps `Println` receiving a `String` always, and it is the shape
     /// that becomes a real trait call once traits exist in Phase 3.
     ToString(Operand),
+    /// `Float128.format(spec)` formats the binary128 bits directly.
+    Float128Format {
+        value: Operand,
+        spec: Operand,
+    },
     /// `stdout.println`, an intrinsic while there is no stdlib (design D4).
     ///
     /// Its operand is **always** a `String`: the lowering inserts a `ToString`
@@ -2912,6 +2925,12 @@ pub enum InstKind {
     ArrayLength(Operand),
     /// `list.length`: the element count of a `List<T>`.
     ListLength(Operand),
+    /// `deque.length`: the number of elements in a double-ended sequence.
+    DequeLength(Operand),
+    /// `deque.is_empty`: whether a double-ended sequence contains no items.
+    DequeIsEmpty(Operand),
+    /// Structural version used to invalidate active deque iterators.
+    DequeVersion(Operand),
     /// `view[i]` read (design D5): a bounds-checked load at `pointer + i *
     /// sizeof(T)`. Only ever emitted on the branch a bounds check
     /// (`Self::lower_native_slice_bounds_check`) already proved `i` safe
@@ -2942,6 +2961,44 @@ pub enum InstKind {
     ListNew {
         element_id: u32,
     },
+    /// `Deque<T>()` allocates an empty double-ended sequence.
+    /// The opaque handle reuses the sequence type id while its runtime body
+    /// remains distinct from `List<T>`.
+    DequeNew {
+        element_id: u32,
+    },
+    /// End insertion returns runtime status 0 on success and 2 on allocation
+    /// failure; lowering turns nonzero failure into catchable AllocationError.
+    DequePushFront {
+        receiver: Operand,
+        value: Operand,
+    },
+    DequePushBack {
+        receiver: Operand,
+        value: Operand,
+    },
+    /// Typed end operations are emitted only in the success branch after an
+    /// emptiness check, so they return an initialized element value.
+    DequeFront(Operand),
+    DequeBack(Operand),
+    DequePopFront(Operand),
+    DequePopBack(Operand),
+    DequeClear(Operand),
+    /// Stable, minimum-first priority queue operations over the typed sequence
+    /// layout. `order` is the runtime's fixed natural-order ABI code.
+    PriorityQueueNew {
+        element_id: u32,
+        order: i32,
+    },
+    PriorityQueueEnqueue {
+        receiver: Operand,
+        value: Operand,
+    },
+    PriorityQueuePeek(Operand),
+    PriorityQueueDequeue(Operand),
+    PriorityQueueLength(Operand),
+    PriorityQueueIsEmpty(Operand),
+    PriorityQueueVersion(Operand),
     /// `Map<K, V>()` allocates an empty map. Result type is
     /// `IrType::Map(map_id)`.
     MapNew {
@@ -2997,9 +3054,19 @@ pub enum InstKind {
 
     /// `map.length()` — returns `UInt64`.
     MapLength(Operand),
+    /// Structural generation of a map, used to invalidate live iterators.
+    MapVersion(Operand),
+    /// `map.keys()` — typed insertion-ordered snapshot.
+    MapKeys(Operand),
+    /// `map.to_string()` support — typed naturally sorted key snapshot.
+    MapSortedKeys(Operand),
+    /// `map.values()` — typed insertion-ordered snapshot.
+    MapValues(Operand),
+    /// `map.entries()` — typed insertion-ordered tuple snapshot.
+    MapEntries(Operand),
     /// `map.is_empty()` — returns `Boolean`.
     MapIsEmpty(Operand),
-    /// `map.set(key, value)` — returns `Void`.
+    /// Internal status for `map.set(key, value)`: `0` success, `2` allocation failure.
     MapSet {
         receiver: Operand,
         key: Operand,
@@ -3010,7 +3077,8 @@ pub enum InstKind {
         receiver: Operand,
         key: Operand,
     },
-    /// Internal map value load; callers guard presence and unwrap the value.
+    /// Internal map value load; callers guard key presence and preserve the
+    /// stored value type verbatim (which may itself be nullable).
     MapGet {
         receiver: Operand,
         key: Operand,
@@ -3020,11 +3088,17 @@ pub enum InstKind {
         receiver: Operand,
         key: Operand,
     },
+    /// `map.clear()` — removes every association.
+    MapClear(Operand),
     /// `set.length()` — returns `UInt64`.
     SetLength(Operand),
+    /// `for value in set` — takes a typed insertion-ordered snapshot.
+    SetValues(Operand),
+    /// `set.to_string()` support — typed naturally sorted element snapshot.
+    SetSortedElements(Operand),
     /// `set.is_empty()` — returns `Boolean`.
     SetIsEmpty(Operand),
-    /// `set.add(value)` — returns `Void`.
+    /// Internal status for `set.add(value)`: `0` duplicate, `1` inserted, `2` allocation failure.
     SetAdd {
         receiver: Operand,
         value: Operand,
@@ -3038,6 +3112,14 @@ pub enum InstKind {
     SetRemove {
         receiver: Operand,
         value: Operand,
+    },
+    /// `set.clear()` — removes every element.
+    SetClear(Operand),
+    /// Ordered set algebra and relation queries over matching element types.
+    SetOperation {
+        left: Operand,
+        right: Operand,
+        operation: SetOperation,
     },
 
     /// `array[start:end:step]`: returns a new `Array<T>` with the selected
@@ -3108,6 +3190,17 @@ impl BranchKind {
     pub const fn is_ambient(self) -> bool {
         matches!(self, BranchKind::TimerAfter | BranchKind::TimerEvery)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperation {
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    IsSubsetOf,
+    IsSupersetOf,
+    IsDisjoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,18 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut first = DateTime(Date(2026, 10, 27), Time(9, 30));
+    inmut equivalent = DateTime(Date(2026, 10, 27), Time(9, 30));
+
+    mut map: Map<DateTime, Int32> = Map();
+    map.set(first, 42);
+    stdout.println(map.contains_key(equivalent).to_string());
+    stdout.println((map.get(equivalent) ?? 0).to_string());
+
+    mut set: Set<DateTime> = Set();
+    stdout.println(set.add(first).to_string());
+    stdout.println(set.add(equivalent).to_string());
+    stdout.println(set.length.to_string());
+}
+
+main();

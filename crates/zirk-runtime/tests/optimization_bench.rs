@@ -22,6 +22,8 @@ mod combinators;
 mod context;
 #[path = "../src/decimal.rs"]
 mod decimal;
+#[path = "../src/deque.rs"]
+mod deque;
 #[path = "../src/duration.rs"]
 mod duration;
 #[path = "../src/exceptions.rs"]
@@ -42,6 +44,8 @@ mod list;
 mod map;
 #[path = "../src/memory.rs"]
 mod memory;
+#[path = "../src/ordered.rs"]
+mod ordered;
 // This benchmark compiles selected runtime modules into a deliberately
 // minimal test crate. None of its measured task paths own network resources.
 mod network_api {
@@ -342,7 +346,10 @@ fn benchmark_map_set_churn() {
         for key in (0..CHURN_ITEMS).step_by(2) {
             assert_eq!(crate::map::zirk_rt_map_remove(map, key as i64), 1);
         }
-        assert_eq!(crate::map::zirk_rt_map_length(map), CHURN_ITEMS / 2);
+        assert_eq!(
+            crate::map::zirk_rt_map_length(map),
+            (CHURN_ITEMS / 2) as u64
+        );
         for key in 0..CHURN_ITEMS {
             let value = crate::map::zirk_rt_map_get(map, key as i64);
             let expected = if key % 2 == 0 {
@@ -376,7 +383,10 @@ fn benchmark_map_set_churn() {
         for value in (0..CHURN_ITEMS).step_by(2) {
             assert_eq!(crate::set::zirk_rt_set_remove(set, value as i64), 1);
         }
-        assert_eq!(crate::set::zirk_rt_set_length(set), CHURN_ITEMS / 2);
+        assert_eq!(
+            crate::set::zirk_rt_set_length(set),
+            (CHURN_ITEMS / 2) as u64
+        );
         for value in 0..CHURN_ITEMS {
             let present = crate::set::zirk_rt_set_contains(set, value as i64);
             assert_eq!(present, i32::from(value % 2 == 1));

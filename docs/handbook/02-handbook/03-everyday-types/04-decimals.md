@@ -64,8 +64,8 @@ inmut wide: Float128 = 1e-20f128;
 `Float` keeps every IEEE behavior: `Float64.POSITIVE_INFINITY` /
 `NEGATIVE_INFINITY` are valid values, `NaN` is not (a `NaN`-producing operation
 is a controlled error), and `Float64 / 0.0f` is an infinity, not an error.
-`Float128` formatting still truncates to `Float64` precision, and Windows
-verification is pending.
+`Float128` formatting operates directly on binary128 precision. Focused native
+execution passed on Windows x86_64 in [CI run 40551155892](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40551155892); object emission for nine codegen triples is separate cross-target evidence.
 
 `Decimal` and `Float` never mix in one operation — convert explicitly with
 `Float(x)` / `Decimal(x)` (or `x as Float64` / `x as Decimal`).
