@@ -335,7 +335,7 @@ jobs:
       # intensiva. Ejecutar en serie es la unica garantia real; el costo es
       # despreciable con esta cantidad de tests.
       - name: Focused tests (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter != ''
+        if: runner.os == 'Windows' && inputs.test_filter != '' && inputs.test_filter != 'collections' && inputs.test_filter != 'float128_collection_key'
         run: |
           Write-Host "Running focused end-to-end tests matching: $env:TEST_FILTER"
           cargo test -p zirk-cli --test end_to_end "$env:TEST_FILTER" -- --test-threads=1 --nocapture
@@ -346,8 +346,39 @@ jobs:
           RUST_BACKTRACE: "1"
           ZIRK_TRACE: "1"
 
+      - name: Collection and composite parity matrix
+        if: inputs.test_filter == 'collections'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p zirk-browser --example interp_repro
+          for test_filter in \
+            datetime_collection_keys_match_native_and_interpreter \
+            decimal_collection_keys_match_native_and_interpreter \
+            nullable_and_heterogeneous_tuple_collection_keys_match_native_and_interpreter \
+            ordered_set_operations_and_add_results_match_native_and_interpreter \
+            map_key_and_value_snapshots_preserve_insertion_order_in_both_engines \
+            typed_collection_rendering_preserves_narrow_and_character_layouts \
+            aggregate_nullable_and_float128_map_values_match_both_engines \
+            collection_failure_types_are_catchable_in_both_engines \
+            priority_queue_is_minimum_first_and_iterable_in_both_engines \
+            sequence_families_preserve_reference_and_composite_elements \
+            map_iteration_is_invalidated_by_structural_mutation_only \
+            mutable_reference_collection_keys_use_identity_in_both_engines \
+            floating_collection_keys_normalize_signed_zero_in_both_engines \
+            collection_reference_union_has_native_interpreter_parity; do
+            cargo test -p zirk-cli --test object_engine_parity "$test_filter" -- --test-threads=1 --nocapture
+          done
+
+      - name: Focused Float128 collection key diagnostic
+        if: inputs.test_filter == 'float128_collection_key'
+        shell: bash
+        run: |
+          cargo build -p zirk-browser --example interp_repro
+          cargo test -p zirk-cli --test object_engine_parity float128_collection_keys_match_native_and_interpreter -- --test-threads=1 --nocapture
+
       - name: Focused tests (Unix)
-        if: runner.os != 'Windows' && inputs.test_filter != ''
+        if: runner.os != 'Windows' && inputs.test_filter != '' && inputs.test_filter != 'collections' && inputs.test_filter != 'float128_collection_key'
         run: |
           echo "Running focused end-to-end tests matching: $TEST_FILTER"
           cargo test -p zirk-cli --test end_to_end "$TEST_FILTER" -- --test-threads=1 --nocapture
