@@ -2267,6 +2267,90 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         value: BasicValueEnum<'ctx>,
     ) {
         match ty {
+            ir::IrType::Float(ir::FloatWidth::F128) => {
+                // Avoid an LLVM fp128 comparison here. On MSVC it can lower
+                // through an ABI-incompatible soft-float helper. Signed zero
+                // is canonicalized directly from the binary128 bits instead.
+                let bits = self
+                    .builder
+                    .build_bit_cast(
+                        value.into_float_value(),
+                        self.context.i128_type(),
+                        "key.f128.bits",
+                    )
+                    .expect("bitcast Float128 collection key")
+                    .into_int_value();
+                let low = self
+                    .builder
+                    .build_int_truncate(bits, self.context.i64_type(), "key.f128.low")
+                    .expect("truncate Float128 low bits");
+                let high_bits = self
+                    .builder
+                    .build_right_shift(
+                        bits,
+                        self.context.i128_type().const_int(64, false),
+                        false,
+                        "key.f128.high.bits",
+                    )
+                    .expect("extract Float128 high bits");
+                let high = self
+                    .builder
+                    .build_int_truncate(high_bits, self.context.i64_type(), "key.f128.high")
+                    .expect("truncate Float128 high bits");
+                let high_magnitude = self
+                    .builder
+                    .build_and(
+                        high,
+                        self.context
+                            .i64_type()
+                            .const_int(0x7fff_ffff_ffff_ffff, false),
+                        "key.f128.high.magnitude",
+                    )
+                    .expect("clear Float128 sign bit");
+                let low_is_zero = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        low,
+                        self.context.i64_type().const_zero(),
+                        "key.f128.low.is_zero",
+                    )
+                    .expect("compare Float128 low bits");
+                let high_is_zero = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        high_magnitude,
+                        self.context.i64_type().const_zero(),
+                        "key.f128.high.is_zero",
+                    )
+                    .expect("compare Float128 high magnitude");
+                let is_zero = self
+                    .builder
+                    .build_and(low_is_zero, high_is_zero, "key.f128.is_zero")
+                    .expect("detect signed Float128 zero");
+                let normalized_bits = self
+                    .builder
+                    .build_select(
+                        is_zero,
+                        self.context.i128_type().const_zero(),
+                        bits,
+                        "key.f128.canonical_bits",
+                    )
+                    .expect("canonicalize Float128 signed zero")
+                    .into_int_value();
+                let normalized = self
+                    .builder
+                    .build_bit_cast(
+                        normalized_bits,
+                        self.context.f128_type(),
+                        "key.f128.canonical_value",
+                    )
+                    .expect("restore Float128 collection key");
+                self.builder
+                    .build_store(destination, normalized)
+                    .expect("store canonical Float128 collection key");
+            }
             ir::IrType::Float(_) => {
                 let float = value.into_float_value();
                 let zero = float.get_type().const_zero();
