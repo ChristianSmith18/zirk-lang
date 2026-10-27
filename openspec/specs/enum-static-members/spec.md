@@ -1,7 +1,7 @@
 # enum-static-members Specification
 
 ## Purpose
-TBD - created by archiving change enum-static-members. Update Purpose after archive.
+Defines the static members exposed by enum type names for inspecting variants and converting between names and values.
 ## Requirements
 ### Requirement: Enum type static members
 Every declared enum type `E` SHALL expose the built-in static members `E.count`, `E.keys()`, `E.values()`, `E.from_name(name)`, and `E.from_value(value)`, dispatched on the type name itself rather than on a value.

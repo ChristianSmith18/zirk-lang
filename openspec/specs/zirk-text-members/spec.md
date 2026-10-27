@@ -1,7 +1,7 @@
 # zirk-text-members Specification
 
 ## Purpose
-TBD - created by archiving change native-type-member-surface. Update Purpose after archive.
+Defines String and Char properties and methods, including Unicode-aware indexing, transformation, searching, and iteration.
 ## Requirements
 ### Requirement: String metadata properties
 

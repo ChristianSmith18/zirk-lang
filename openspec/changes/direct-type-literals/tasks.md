@@ -25,4 +25,4 @@
 ## 5. Integration verification
 
 - [x] 5.1 Run focused lexer/parser/sema/IR/CLI/IDE tests and `cargo fmt --check`; verify direct scalar, enum, object/tuple, and temporal literal unions end to end.
-- [ ] 5.2 Run `git diff --check`, `openspec validate direct-type-literals --strict`, and `openspec validate --specs --strict`; verify the active implementation and canonical specs contain no obsolete public syntax.
+- [x] 5.2 Run `git diff --check`, `openspec validate direct-type-literals --strict`, and `openspec validate --specs --strict`; all pass after replacing 14 archived-change placeholder Purpose summaries. Remaining active-spec occurrences of `const(...)` describe only rejected syntax; public docs and demos use direct literals and temporal constructors.

@@ -1,7 +1,7 @@
 # timer-operations Specification
 
 ## Purpose
-TBD - created by archiving change concurrent-blocks-and-timers. Update Purpose after archive.
+Defines timer waits and related operations, including suspension, cancellation safe points, and executor interaction.
 ## Requirements
 ### Requirement: `Timer.sleep` suspends the current branch
 

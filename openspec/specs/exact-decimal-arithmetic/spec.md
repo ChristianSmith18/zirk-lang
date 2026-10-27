@@ -1,7 +1,7 @@
 # exact-decimal-arithmetic Specification
 
 ## Purpose
-TBD - created by archiving change exact-decimal-float. Update Purpose after archive.
+Defines exact base-ten Decimal representation, arithmetic, comparison, conversion, and formatting semantics.
 
 ## Requirements
 

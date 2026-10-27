@@ -1,7 +1,7 @@
 # set-collections Specification
 
 ## Purpose
-TBD - created by archiving change map-set-collections. Update Purpose after archive.
+Defines the generic Set collection, its hashability requirements, operations, and runtime behavior.
 
 ## Requirements
 

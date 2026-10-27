@@ -1,7 +1,7 @@
 # exponentiation-operator Specification
 
 ## Purpose
-TBD - created by archiving change exponentiation-operator. Update Purpose after archive.
+Defines the exponentiation operators and their lowering to the existing numeric power operations.
 ## Requirements
 ### Requirement: Infix `**` is available and desugars to `pow`
 

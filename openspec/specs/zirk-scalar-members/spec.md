@@ -1,7 +1,7 @@
 # zirk-scalar-members Specification
 
 ## Purpose
-TBD - created by archiving change native-type-member-surface. Update Purpose after archive.
+Defines static and instance members provided by numeric and other scalar types, including parsing, bounds, and arithmetic helpers.
 ## Requirements
 ### Requirement: Integer static members
 

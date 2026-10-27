@@ -1,7 +1,7 @@
 # zirk-check Specification
 
 ## Purpose
-TBD - created by archiving change zirk-check. Update Purpose after archive.
+Defines the frontend-only `zirk check` command and its diagnostic and artifact guarantees.
 ## Requirements
 ### Requirement: Frontend-only validation command
 

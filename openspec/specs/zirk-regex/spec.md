@@ -1,7 +1,7 @@
 # zirk-regex Specification
 
 ## Purpose
-TBD - created by archiving change array-list-tuple-duration-regex. Update Purpose after archive.
+Defines the Regex value surface, pattern literals, matching, replacement, iteration, and error behavior.
 
 ## Requirements
 

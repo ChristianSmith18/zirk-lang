@@ -1,7 +1,7 @@
 # spread-rest-operators Specification
 
 ## Purpose
-TBD - created by archiving change spread-rest-operators. Update Purpose after archive.
+Defines spread and rest syntax for calls, declarations, and collection construction, including evaluation and ordering semantics.
 ## Requirements
 ### Requirement: Explicit spread in calls
 

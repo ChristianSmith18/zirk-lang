@@ -1,7 +1,7 @@
 # concurrent-scopes Specification
 
 ## Purpose
-TBD - created by archiving change concurrent-blocks-and-timers. Update Purpose after archive.
+Defines structured concurrent scopes, branch-local execution, binding visibility, and scope completion semantics.
 ## Requirements
 ### Requirement: The `concurrent` block is a structured scope
 

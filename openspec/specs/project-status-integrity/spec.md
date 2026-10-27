@@ -1,7 +1,7 @@
 # project-status-integrity Specification
 
 ## Purpose
-TBD - created by archiving change fix-docs-tooling-drift. Update Purpose after archive.
+Defines the authoritative feature-status catalog and the integrity checks that keep public project status synchronized with source evidence.
 ## Requirements
 ### Requirement: Single feature-status catalog
 

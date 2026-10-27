@@ -1,7 +1,7 @@
 # zirk-temporal-members Specification
 
 ## Purpose
-TBD - created by archiving change temporal-rich-api. Update Purpose after archive.
+Defines the properties and methods exposed by Date, Time, and DateTime values.
 ## Requirements
 ### Requirement: Civil calendrical properties
 
