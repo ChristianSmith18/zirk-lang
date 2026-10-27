@@ -280,7 +280,7 @@ fn scalar_collection_hash_matrix_matches_native_and_interpreter() {
 fn float128_collection_keys_match_native_and_interpreter() {
     let program = r#"import { stdout } from std.io;
 fn main(): Void {
-    let key: Float128 = 1.5 as Float128;
+    mut key: Float128 = 1.5 as Float128;
     mut map: Map<Float128, Int32> = Map();
     map.set(key, 17);
     stdout.println(map.contains_key(key).to_string());
