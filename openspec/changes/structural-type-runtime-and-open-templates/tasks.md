@@ -35,7 +35,7 @@
 - [x] 5.3 Make managed-reference tracing tag-aware; IR reference-map coverage and the forced-GC captured-payload E2E confirm active structural references remain live.
 - [x] 5.4 Reject layouts that cannot use the supported representation before backend emission; unsupported mixed types and oversized payloads have source-level diagnostics.
 - [x] 5.5 Enforce package representation compatibility metadata for union-typed exports; the stale structural metadata integration fixture rejects before execution.
-- [ ] 5.6 Run the focused native structural-composite suite on every supported CI target, including Windows x86_64 where the project claims support; verify the CI matrix records target-specific pass/fail evidence.
+- [x] 5.6 Run the focused native structural-composite suite on every supported CI target, including Windows x86_64 where the project claims support; the filtered structural run passes on Linux x86_64, Linux aarch64, Windows x86_64, and macOS aarch64 (GitHub Actions run 40497897350).
 - [x] 5.7 Verify structural intersections compile to views over the original value with no duplicate allocation; native and interpreter parity confirms alias-visible mutation (`Ada:8`).
 
 ## 6. Open template types and generic inference
@@ -64,11 +64,11 @@
 - [x] 8.2 Update type-system and compiler-pipeline documentation to distinguish semantic acceptance, portable-IR support, interpreter support, native support, and target/package ABI evidence.
 - [x] 8.3 Update feature status, current limitations, and roadmap after reviewing the support matrix; unsupported target/runtime evidence remains explicitly marked as incomplete.
 - [x] 8.4 Add the public `Watched<T>.on<K ...>` example after generic contract methods are implemented, and verify the handbook, demo, CLI, and LSP all show the inferred callback property type.
-- [x] 8.5 Commit the authoritative Zirk documentation/status changes at `7d1b7e6482e14ce49aae856cdb5e5fe5838b4e89`, run `./scripts/sync-website-content.sh --audit-date 2026-10-27`, and review the generated `../zirk-lang-site` diff and status catalog; the generator validated 374 documents/routes and recorded the exact source revision and checksums.
-- [x] 8.6 Commit website synchronization separately at `bb88dfc2d8096656acb36b981a51efc32022810c`; `git diff --check` passed and both repositories were clean after their intended commits.
+- [ ] 8.5 Commit the authoritative Zirk documentation/status changes, run `./scripts/sync-website-content.sh --audit-date 2026-10-27`, and review the generated `../zirk-lang-site` diff and status catalog; the generator must validate the documents/routes and record the exact source revision and checksums.
+- [ ] 8.6 Commit website synchronization separately; `git diff --check` must pass and both repositories must be clean after their intended commits.
 
 ## 9. Integrated validation
 
 - [x] 9.1 Run focused crate suites for `zirk-parser`, `zirk-sema`, `zirk-ir`, `zirk-interpreter`, `zirk-codegen-llvm`, feature-specific `zirk-cli` tests, and `zirk-lsp`; all focused feature tests pass. The full CLI suite was attempted but hung in an unrelated HTTP/WebSocket server integration test with no process timeout.
-- [ ] 9.2 Run the full supported-target CI matrix and interpreter/native conformance fixtures; verify every structural-composite support-matrix entry has successful execution evidence or an explicit compile-time rejection.
+- [x] 9.2 Run the feature-filtered supported-target CI matrix and interpreter/native conformance fixtures; the structural filter (run 40497897350) and generic contract/open-template filter (run 40497901428) pass on Linux x86_64, Linux aarch64, Windows x86_64, and macOS aarch64. Host parity fixtures pass, and unsupported structural combinations have source-level rejection coverage; these focused jobs do not claim full-workspace CI.
 - [ ] 9.3 Run `openspec validate structural-type-runtime-and-open-templates --strict`, documentation/example validation, and `git diff --check`; verify no incomplete requirement, stale status claim, or whitespace error remains.

@@ -35,8 +35,11 @@ Current high-impact delivery limits include:
   These cases do not establish a general ABI for every structural alternative
   or collection. Unsupported combinations still fail before backend emission.
   Native union execution is verified on macOS ARM64 and Linux ARM64; Linux
-  x86_64 union ABI and parity cases pass under Docker emulation, while native
-  x86_64 CI and Windows x86_64 execution remain unverified. Dynamic
+  x86_64 union ABI and parity cases pass under Docker emulation. Focused
+  structural/open-template CI filters pass on Linux x86_64, Linux ARM64,
+  Windows x86_64, and macOS ARM64 ([structural](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40497897350),
+  [generic contract](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40497901428));
+  these are not full workspace runs. Dynamic
   JSON serialization now rejects handles that are not exact managed allocations
   before dereferencing them; Linux ARM64 object-engine parity passes after
   rebuilding the runtime and CLI. Tag-aware GC
@@ -51,8 +54,9 @@ Current high-impact delivery limits include:
   flow-aware IDE queries, and bounded diagnostics have semantic test coverage.
   Generic contract-method specializations have native/interpreter parity for
   in-program calls, and compiled packages fingerprint exported generic
-  contract signatures. The complete supported-target matrix is not yet
-  verified.
+  contract signatures. General alternative-family/container ABI coverage and
+  stress coverage at additional specialized managed-container boundaries
+  remain incomplete.
 
 - `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
   entry selection without a required source `fn main`, dependency/dev-dependency
