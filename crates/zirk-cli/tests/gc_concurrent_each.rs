@@ -59,6 +59,7 @@ fn main(): Void {
         }
     }
 }
+main();
 "#,
     )
     .expect("write collection-combinator GC fixture");
