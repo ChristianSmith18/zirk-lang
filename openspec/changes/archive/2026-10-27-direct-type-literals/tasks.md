@@ -20,9 +20,9 @@
 
 - [x] 4.1 Sync the delta specs into the four canonical specs and validate the change with strict OpenSpec validation; verify no active normative spec presents `const(...)` as singleton type syntax.
 - [x] 4.2 Update the handbook, language reference, type-algebra examples, and current feature/limitation documents to document direct non-temporal literals and required temporal constructors; verify repository searches distinguish historical archives from active documents.
-- [ ] 4.3 After the zirk-lang documentation changes are committed, run `./scripts/sync-website-content.sh`, review and validate the companion website diff, and report both repository revisions; if status evidence changed, review its catalog and pass an explicit audit date.
+- [x] 4.3 After the Zirk documentation was committed, `./scripts/sync-website-content.sh` validated 374 documents and 374 routes. Reviewed the companion diff: checksums/content digest were unchanged and only source provenance advanced. Zirk source revision: `23f354d9155449816ead626ae07d6245df9999cd`; website synchronization revision: `b30a8f06974389676f0440305bceca6a09ca8387`. Status evidence was unchanged; the existing catalog audit date remains `2026-10-27`.
 
 ## 5. Integration verification
 
 - [x] 5.1 Run focused lexer/parser/sema/IR/CLI/IDE tests and `cargo fmt --check`; verify direct scalar, enum, object/tuple, and temporal literal unions end to end.
-- [x] 5.2 Run `git diff --check`, `openspec validate direct-type-literals --strict`, and `openspec validate --specs --strict`; all pass after replacing 14 archived-change placeholder Purpose summaries. Remaining active-spec occurrences of `const(...)` describe only rejected syntax; public docs and demos use direct literals and temporal constructors.
+- [x] 5.2 `git diff --check`, `openspec validate direct-type-literals --strict`, and `openspec validate --specs --strict` pass (78/78 canonical specs). Fourteen archived-change placeholder Purpose summaries were replaced without changing requirements. Remaining active-spec occurrences of `const(...)` describe only rejected syntax; public docs and demos use direct literals and temporal constructors.
