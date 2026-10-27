@@ -8,16 +8,16 @@ enum StoredNumber {
 }
 
 fn main(): Void {
-    mut values: Map<Int32, Tuple<Int32, Int32>> = Map();
-    values.set(2, (20, 200));
-    values.set(1, (10, 100));
-    values.set(2, (21, 201));
+    mut values: Map<Int32, Tuple<Int32, Int32 >> = Map();
+    values.set(2,(20, 200));
+    values.set(1,(10, 100));
+    values.set(2,(21, 201));
 
     for entry in values { stdout.println(entry.to_string()); }
     for value in values.values() { stdout.println(value.to_string()); }
     for entry in values.entries() { stdout.println(entry.to_string()); }
-    stdout.println((values.get(2) ?? (0, 0)).to_string());
-    stdout.println((values.get(9) ?? (0, 0)).to_string());
+    stdout.println((values.get(2) ??(0, 0)).to_string());
+    stdout.println((values.get(9) ??(0, 0)).to_string());
 
     mut nullable: Map<Int32, Int32?> = Map();
     nullable.set(1, null);
@@ -26,14 +26,18 @@ fn main(): Void {
     for entry in nullable.entries() { stdout.println(entry.to_string()); }
     stdout.println(nullable.contains_key(1).to_string());
     stdout.println(nullable.contains_key(3).to_string());
-    stdout.println(match nullable.get(1) {
+    stdout.println(
+        match nullable.get(1) {
         Error(_) => "absent";
         Ok(value) => "present:" + value.to_string();
-    });
-    stdout.println(match nullable.get(3) {
+    },
+    );
+    stdout.println(
+        match nullable.get(3) {
         Error(_) => "absent";
         Ok(value) => "present:" + value.to_string();
-    });
+    },
+    );
 
     mut wide: Map<Int32, Float128> = Map();
     wide.set(1, 1.5 as Float128);
@@ -56,7 +60,7 @@ fn main(): Void {
         stdout.println(match value { 17 => "number"; "union" => "text"; _ => "other"; });
     }
 
-    mut nested: Map<String, Set<Int32>> = Map();
+    mut nested: Map<String, Set<Int32 >> = Map();
     mut numbers: Set<Int32> = Set();
     numbers.add(7);
     nested.set("numbers", numbers);
@@ -65,23 +69,25 @@ fn main(): Void {
     stdout.println((nested.get("missing") ?? empty).length.to_string());
 
     mut list_value: List<Int32> = List(8, 9);
-    mut lists: Map<Int32, List<Int32>> = Map();
+    mut lists: Map<Int32, List<Int32 >> = Map();
     lists.set(1, list_value);
     for value in lists.values() { stdout.println(value.to_string()); }
     mut array_value: Array<Int32> = Array(6, 7);
-    mut arrays: Map<Int32, Array<Int32>> = Map();
+    mut arrays: Map<Int32, Array<Int32 >> = Map();
     arrays.set(1, array_value);
     for value in arrays.values() { stdout.println(value.to_string()); }
     mut inner_map: Map<String, Int32> = Map();
     inner_map.set("inner", 11);
-    mut maps: Map<Int32, Map<String, Int32>> = Map();
+    mut maps: Map<Int32, Map<String, Int32 >> = Map();
     maps.set(1, inner_map);
     for value in maps.values() { stdout.println((value.get("inner") ?? 0).to_string()); }
     mut dynamic_values: Map<Int32, Dynamic> = Map();
     dynamic_values.set(1, "dynamic");
-    stdout.println(match dynamic_values.get(1) {
+    stdout.println(
+        match dynamic_values.get(1) {
         Ok(value) => value as String;
         Error(_) => "missing";
-    });
+    },
+    );
 }
 main();

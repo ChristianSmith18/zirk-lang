@@ -10,5 +10,5 @@ fn main(): Void {
     stdout.println(fraction.format(".3"));
     stdout.println(fraction.format(".3e"));
     stdout.println((1.5 as Float128 + 0.25 as Float128).format(".2"));
-    stdout.println(((1.5 as Float128) > (1.0 as Float128)).to_string());
+    stdout.println(((1.5 as Float128) >(1.0 as Float128)).to_string());
 }
