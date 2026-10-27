@@ -70,13 +70,15 @@ fn assert_parity(name: &str, program: &str, expected: &str) {
     let (native, interpreted) = run_same_program(name, program);
     assert!(
         native.status.success(),
-        "native `{name}` failed:\n{}\n{}",
+        "native `{name}` failed with status {:?}:\n{}\n{}",
+        native.status,
         normalize(&native.stdout),
         normalize(&native.stderr)
     );
     assert!(
         interpreted.status.success(),
-        "interpreter `{name}` failed:\n{}\n{}",
+        "interpreter `{name}` failed with status {:?}:\n{}\n{}",
+        interpreted.status,
         normalize(&interpreted.stdout),
         normalize(&interpreted.stderr)
     );
@@ -239,7 +241,6 @@ fn scalar_collection_hash_matrix_matches_native_and_interpreter() {
         ("Float16", "1.5 as Float16"),
         ("Float32", "1.5 as Float32"),
         ("Float64", "1.5 as Float64"),
-        ("Float128", "1.5 as Float128"),
         ("Decimal", "1.5"),
         ("Boolean", "true"),
         ("Char", "'x'"),
@@ -273,6 +274,28 @@ fn scalar_collection_hash_matrix_matches_native_and_interpreter() {
     }
     program.push_str("}\nmain();\n");
     assert_parity("scalar_collection_hash_matrix", &program, &expected);
+}
+
+#[test]
+fn float128_collection_keys_match_native_and_interpreter() {
+    let program = r#"import { stdout } from std.io;
+fn main(): Void {
+    let key: Float128 = 1.5 as Float128;
+    mut map: Map<Float128, Int32> = Map();
+    map.set(key, 17);
+    stdout.println(map.contains_key(key).to_string());
+    stdout.println((map.get(key) ?? 0).to_string());
+    mut set: Set<Float128> = Set();
+    stdout.println(set.add(key).to_string());
+    stdout.println(set.add(key).to_string());
+    stdout.println(set.length.to_string());
+}
+main();"#;
+    assert_parity(
+        "float128_collection_keys",
+        program,
+        "true\n17\ntrue\nfalse\n1\n",
+    );
 }
 
 #[test]
