@@ -1801,6 +1801,17 @@ impl<'a> Parser<'a> {
         let type_params = self.parse_type_params();
         self.expect(&TokenKind::Assign, "after the alias name");
         let target = self.parse_type()?;
+        if matches!(self.peek(), TokenKind::LParen) {
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "function and constructor calls are not type atoms",
+                "found a call after a type name or literal",
+                Some("use a type name or write the supported literal directly".into()),
+            );
+            return None;
+        }
         let end = self.peek_span();
         self.eat(&TokenKind::Semicolon);
 
@@ -2184,9 +2195,19 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let mut encoded = String::from("template:");
             let mut arguments = Vec::new();
+            let mut template_parts = Vec::new();
             for part in parts {
                 match part {
-                    StrPart::Literal(text) => encoded.push_str(&format!("L{}:{text}", text.len())),
+                    StrPart::Literal(text) => {
+                        encoded.push_str(&format!("L{}:{text}", text.len()));
+                        template_parts.push(TemplateTypePart::Literal {
+                            text,
+                            // The lexer currently gives source spans to
+                            // interpolation expressions. Fixed fragments use
+                            // the containing interpolated type span.
+                            span,
+                        });
+                    }
                     StrPart::Expr { text, span } => {
                         let type_name = text.trim();
                         if type_name.is_empty()
@@ -2204,12 +2225,21 @@ impl<'a> Parser<'a> {
                             return None;
                         }
                         encoded.push_str(&format!("P{};", arguments.len()));
-                        arguments.push(TypeRef::new(type_name, span));
+                        let interpolation = TypeRef::new(type_name, span);
+                        arguments.push(interpolation.clone());
+                        template_parts.push(TemplateTypePart::Interpolation {
+                            ty: Box::new(interpolation),
+                            span,
+                        });
                     }
                 }
             }
             let mut template = TypeRef::new(encoded, span);
             template.arguments = arguments;
+            template.template = Some(Box::new(TemplateLiteralType {
+                parts: template_parts,
+                span,
+            }));
             return Some(template);
         }
         if matches!(self.peek(), TokenKind::Identifier(name) if name == "keyof") {
@@ -2245,10 +2275,38 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), TokenKind::LBrace) {
             return self.parse_object_type_shape();
         }
+        if matches!(
+            self.peek(),
+            TokenKind::Identifier(name) if matches!(name.as_str(), "Date" | "Time" | "DateTime")
+        ) && matches!(self.peek_at(1), TokenKind::LParen)
+        {
+            return self.parse_temporal_constructor_type();
+        }
+        if self.starts_temporal_type_literal() {
+            let temporal = self.parse_temporal_type_literal()?;
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                temporal.span,
+                "temporal singleton types require their owning constructor",
+                "found a bare ISO temporal value in type position",
+                Some("use `Date(...)`, `Time(...)`, or `DateTime(Date(...), Time(...))`".into()),
+            );
+            return None;
+        }
         if matches!(self.peek(), TokenKind::Identifier(name) if name == "const")
             && matches!(self.peek_at(1), TokenKind::LParen)
         {
-            return self.parse_const_type_expression();
+            let span = self.peek_span();
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                span,
+                "singleton type values must be written as direct literals",
+                "found call-shaped `const(...)` type syntax",
+                Some(
+                    "write the literal directly, for example `200` or `true`; use `Date(...)`, `Time(...)`, or `DateTime(...)` for temporal singleton values".into(),
+                ),
+            );
+            return None;
         }
         if self.eat(&TokenKind::LParen) {
             if !self.enter() {
@@ -2469,34 +2527,267 @@ impl<'a> Parser<'a> {
         Some(ty)
     }
 
-    fn parse_const_type_expression(&mut self) -> Option<TypeRef> {
-        if !self.enter() {
-            self.leave();
-            return None;
-        }
-        let result = self.parse_const_type_expression_inner();
-        self.leave();
-        result
+    fn starts_temporal_type_literal(&self) -> bool {
+        let start = self.peek_span().start as usize;
+        let bytes = self.source.text().as_bytes();
+        let Some(rest) = bytes.get(start..) else {
+            return false;
+        };
+        (rest.len() >= 5 && rest[..4].iter().all(u8::is_ascii_digit) && rest[4] == b'-')
+            || (rest.len() >= 3 && rest[..2].iter().all(u8::is_ascii_digit) && rest[2] == b':')
     }
 
-    fn parse_const_type_expression_inner(&mut self) -> Option<TypeRef> {
-        let start = self.peek_span();
-        self.pos += 2; // `const(`
-        let expression = self.parse_expr()?;
-        let expression_span = expression.span();
-        let source = self.source.slice(expression_span).to_string();
-        let close = self.peek_span();
-        if !self.expect(&TokenKind::RParen, "to close `const(...)`") {
-            return None;
+    fn parse_temporal_type_literal(&mut self) -> Option<TypeRef> {
+        let start_span = self.peek_span();
+        let start = start_span.start as usize;
+        let bytes = self.source.text().as_bytes();
+        let mut end = start;
+        while let Some(byte) = bytes.get(end)
+            && (byte.is_ascii_digit() || matches!(byte, b'-' | b':' | b'.' | b'T'))
+        {
+            end += 1;
         }
-        let span = start.to(close);
-        let mut reference = TypeRef::new("const", span);
-        reference.expression = Some(Box::new(TypeExpr::Constant {
-            source,
-            expression: Box::new(expression),
+        if end >= start + 10 && bytes.get(start + 4) == Some(&b'-') {
+            let mut time_start = end;
+            if bytes.get(time_start) == Some(&b' ') {
+                time_start += 1;
+                while bytes.get(time_start) == Some(&b' ') {
+                    time_start += 1;
+                }
+            }
+            if bytes
+                .get(time_start..time_start + 3)
+                .is_some_and(|time| time[..2].iter().all(u8::is_ascii_digit) && time[2] == b':')
+            {
+                end = time_start + 3;
+                while let Some(byte) = bytes.get(end)
+                    && (byte.is_ascii_digit() || matches!(byte, b':' | b'.'))
+                {
+                    end += 1;
+                }
+            }
+        }
+        let text = self.source.text().get(start..end)?.to_string();
+        let kind = if text.as_bytes().get(4) == Some(&b'-') && text.len() > 10 {
+            TemporalType::DateTime
+        } else if text.as_bytes().get(4) == Some(&b'-') {
+            TemporalType::Date
+        } else {
+            TemporalType::Time
+        };
+        let mut last_span = start_span;
+        while self.pos < self.tokens.len()
+            && (self.peek_span().start as usize) < end
+            && (self.peek_span().end as usize) <= end
+        {
+            last_span = self.peek_span();
+            self.pos += 1;
+        }
+        let span = start_span.to(last_span);
+        let mut reference = TypeRef::literal(TypeValue::Temporal { kind, text }, span);
+        reference.expression = Some(Box::new(TypeExpr::Value {
+            value: reference
+                .value
+                .clone()
+                .expect("literal value was just assigned"),
             span,
         }));
         Some(reference)
+    }
+
+    fn parse_temporal_constructor_type(&mut self) -> Option<TypeRef> {
+        let (kind, text, span) = self.parse_temporal_constructor_value()?;
+        let mut reference = TypeRef::literal(TypeValue::Temporal { kind, text }, span);
+        reference.expression = Some(Box::new(TypeExpr::Value {
+            value: reference
+                .value
+                .clone()
+                .expect("literal value was just assigned"),
+            span,
+        }));
+        Some(reference)
+    }
+
+    fn parse_temporal_constructor_value(&mut self) -> Option<(TemporalType, String, Span)> {
+        let start = self.peek_span();
+        let TokenKind::Identifier(name) = self.peek().clone() else {
+            return None;
+        };
+        self.pos += 1;
+        if !self.eat(&TokenKind::LParen) {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_span(),
+                "expected `(` after temporal constructor",
+                format!("found {}", self.peek().description()),
+                None,
+            );
+            return None;
+        }
+
+        let (kind, text) = match name.as_str() {
+            "Date" => {
+                let values = self.parse_temporal_integer_arguments(3, 3)?;
+                let [year, month, day] = values.as_slice() else {
+                    unreachable!("Date requires exactly three components")
+                };
+                if !(0..=9999).contains(year)
+                    || !(1..=12).contains(month)
+                    || !(1..=31).contains(day)
+                {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        start,
+                        "temporal constructor components are out of range",
+                        "Date type values require a four-digit year, month 1–12, and day 1–31",
+                        Some("use a valid `Date(year, month, day)` constructor".into()),
+                    );
+                    return None;
+                }
+                (TemporalType::Date, format!("{year:04}-{month:02}-{day:02}"))
+            }
+            "Time" => {
+                let values = self.parse_temporal_integer_arguments(2, 4)?;
+                let hour = values[0];
+                let minute = values[1];
+                let second = values.get(2).copied().unwrap_or(0);
+                let nanos = values.get(3).copied().unwrap_or(0);
+                if !(0..=23).contains(&hour)
+                    || !(0..=59).contains(&minute)
+                    || !(0..=59).contains(&second)
+                    || !(0..=999_999_999).contains(&nanos)
+                {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        start,
+                        "temporal constructor components are out of range",
+                        "Time type values require hour 0–23, minute/second 0–59, and nanoseconds 0–999999999",
+                        Some("use a valid `Time(hour, minute, second?, nanosecond?)` constructor".into()),
+                    );
+                    return None;
+                }
+                let mut text = format!("{hour:02}:{minute:02}");
+                if values.len() >= 3 || nanos != 0 {
+                    text.push_str(&format!(":{second:02}"));
+                }
+                if nanos != 0 {
+                    let fraction = format!("{nanos:09}");
+                    text.push('.');
+                    text.push_str(fraction.trim_end_matches('0'));
+                }
+                (TemporalType::Time, text)
+            }
+            "DateTime" => {
+                let (date_kind, date, _) = self.parse_temporal_constructor_value()?;
+                if date_kind != TemporalType::Date || !self.eat(&TokenKind::Comma) {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        self.peek_span(),
+                        "DateTime type values require a Date and a Time constructor",
+                        "expected `DateTime(Date(...), Time(...))`",
+                        Some("pass direct `Date(...)` and `Time(...)` constructor values".into()),
+                    );
+                    return None;
+                }
+                let (time_kind, time, _) = self.parse_temporal_constructor_value()?;
+                if time_kind != TemporalType::Time {
+                    self.error(
+                        codes::UNEXPECTED_TOKEN,
+                        self.peek_span(),
+                        "DateTime type values require a Date and a Time constructor",
+                        "the second argument must be `Time(...)`",
+                        Some("pass `DateTime(Date(...), Time(...))`".into()),
+                    );
+                    return None;
+                }
+                (TemporalType::DateTime, format!("{date} {time}"))
+            }
+            _ => {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    start,
+                    "DateTime type values accept only direct Date and Time constructors",
+                    format!("found `{name}(...)`"),
+                    Some(
+                        "write `DateTime(Date(...), Time(...))` with integer literal components"
+                            .into(),
+                    ),
+                );
+                return None;
+            }
+        };
+
+        let close = self.peek_span();
+        if !self.eat(&TokenKind::RParen) {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                close,
+                "expected `)` to close temporal constructor",
+                format!("found {}", self.peek().description()),
+                None,
+            );
+            return None;
+        }
+        let end = self.tokens[self.pos - 1].span;
+        Some((kind, text, start.to(end)))
+    }
+
+    fn parse_temporal_integer_arguments(&mut self, min: usize, max: usize) -> Option<Vec<i128>> {
+        let mut values = Vec::new();
+        loop {
+            let span = self.peek_span();
+            let sign = if self.eat(&TokenKind::Minus) { -1 } else { 1 };
+            let TokenKind::Integer(value) = self.peek().clone() else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "temporal constructors in type position accept integer literals only",
+                    format!("found {}", self.peek().description()),
+                    Some("write fixed numeric components in `Date(...)` or `Time(...)`".into()),
+                );
+                return None;
+            };
+            self.pos += 1;
+            let Some(value) = (if sign < 0 {
+                value.checked_neg()
+            } else {
+                Some(value)
+            }) else {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "temporal constructor component is out of range",
+                    "the integer literal cannot be represented as a signed temporal component",
+                    None,
+                );
+                return None;
+            };
+            values.push(value);
+            if values.len() > max {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    span,
+                    "too many temporal constructor components",
+                    format!("this constructor accepts at most {max} integer literals"),
+                    None,
+                );
+                return None;
+            }
+            if !self.eat(&TokenKind::Comma) || matches!(self.peek(), TokenKind::RParen) {
+                break;
+            }
+        }
+        if values.len() < min {
+            self.error(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_span(),
+                "too few temporal constructor components",
+                format!("this constructor requires at least {min} integer literals"),
+                None,
+            );
+            return None;
+        }
+        Some(values)
     }
 
     fn parse_object_type_shape(&mut self) -> Option<TypeRef> {

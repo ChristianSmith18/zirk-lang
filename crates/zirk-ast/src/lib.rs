@@ -504,6 +504,7 @@ pub enum TypeExpr {
         nullable: bool,
         function: Option<Box<FnTypeRef>>,
         fixed_size: Option<IntLit>,
+        template: Option<Box<TemplateLiteralType>>,
         span: Span,
     },
     Union {
@@ -543,6 +544,18 @@ pub enum TypeValue {
     Char(CharLit),
     Boolean(BoolLit),
     Null(NullLit),
+    /// A temporal singleton value written with its owning type constructor.
+    Temporal {
+        kind: TemporalType,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalType {
+    Date,
+    Time,
+    DateTime,
 }
 
 /// One property in an anonymous structural object type expression.
@@ -594,7 +607,23 @@ pub struct TypeRef {
     /// names an `Array<T>` of exactly that many slots; the parser rewrites
     /// `T[n]` into `name = "Array"`, `arguments = [T]`, `fixed_size = Some(n)`.
     pub fixed_size: Option<IntLit>,
+    /// Lossless segments for an interpolated type string. `name` keeps its
+    /// stable encoded spelling for existing semantic consumers while this
+    /// field preserves each fixed fragment, interpolation identity, and span.
+    pub template: Option<Box<TemplateLiteralType>>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateLiteralType {
+    pub parts: Vec<TemplateTypePart>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateTypePart {
+    Literal { text: String, span: Span },
+    Interpolation { ty: Box<TypeRef>, span: Span },
 }
 
 impl TypeRef {
@@ -610,6 +639,7 @@ impl TypeRef {
             value: None,
             function: None,
             fixed_size: None,
+            template: None,
             span,
         }
     }
@@ -626,6 +656,7 @@ impl TypeRef {
             value: None,
             function: None,
             fixed_size: None,
+            template: None,
             span,
         }
     }
@@ -643,6 +674,7 @@ impl TypeRef {
             value: None,
             function: Some(Box::new(function)),
             fixed_size: None,
+            template: None,
             span,
         }
     }
@@ -660,6 +692,7 @@ impl TypeRef {
             value: Some(value),
             function: None,
             fixed_size: None,
+            template: None,
             span,
         }
     }
@@ -681,6 +714,7 @@ impl TypeRef {
             nullable: self.nullable,
             function: self.function.clone(),
             fixed_size: self.fixed_size.clone(),
+            template: self.template.clone(),
             span: self.span,
         };
         if !self.intersection_with.is_empty() {

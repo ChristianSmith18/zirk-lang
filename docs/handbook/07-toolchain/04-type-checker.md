@@ -8,10 +8,11 @@ generates typed information for portable IR; it does not choose native layout.
 > intersections, canonical singleton values and constant evaluation, generic
 > aliases and type operators, structural shapes, common-member checking,
 > branch narrowing, and bounded relation solving. Native lowering and runtime
-> support vary by type family: scalar/string, enum-constant, and narrowed
-> nominal class-reference unions have end-to-end native/interpreter coverage,
-> while structural shape values and some nominal/scalar combinations remain
-> unsupported. See the
+> support vary by type family and target: scalar/string, enum-constant, narrowed
+> nominal class-reference unions, structural intersections, and mixed
+> structural/scalar unions have focused native/interpreter coverage on the host
+> target. Broader native ABI coverage across all supported targets remains
+> incomplete. See the
 > [feature-status catalog](../../init/ZIRK_FEATURE_STATUS.md) and
 > [current limitations](../13-appendices/07-current-limitations.md) for the
 > evidence by compiler stage.

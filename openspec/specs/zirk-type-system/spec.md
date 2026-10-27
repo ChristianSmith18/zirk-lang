@@ -1214,34 +1214,42 @@ The checker SHALL define assignability for primitive, singleton, structural, nom
 - **THEN** the operation is rejected or performs the specified checked conversion
 
 ### Requirement: Singleton values widen only under explicit inference rules
-Singleton values SHALL be assignable to their owning primitive or value type. Type inference SHALL preserve a singleton when required by an explicit singleton annotation, a singleton union alternative, a constant type expression, or an immutable literal context. Mutable bindings SHALL widen to their declared base type unless a narrower invariant is proven. Contextual typing SHALL NOT silently widen away a discriminant required by the expected type.
+Singleton values SHALL be assignable to their owning primitive or value type. Type inference SHALL preserve a singleton when required by an explicit singleton annotation, a singleton union alternative, or an immutable literal context. Mutable bindings SHALL widen to their declared base type unless a narrower invariant is proven. Contextual typing SHALL NOT silently widen away a discriminant required by the expected type. Singleton annotations SHALL use a type name or direct non-temporal literal; temporal singleton values SHALL use only their owning Date, Time, or DateTime constructor forms with direct integer components. Bare ISO temporal spellings, wrapper calls, arbitrary function calls, and computed expressions SHALL NOT be part of singleton type syntax.
 
 #### Scenario: Literal fits its primitive type
-- **WHEN** the singleton 404 is assigned to Int32
-- **THEN** assignment succeeds if the exact value is representable by Int32
+- **WHEN** the singleton `404` is assigned to `Int32`
+- **THEN** assignment succeeds if the exact value is representable by `Int32`
 
 #### Scenario: Context preserves a union discriminant
-- **WHEN** { active: true } is checked against a union requiring active: true or active: false
+- **WHEN** `{ active: true }` is checked against a union requiring `active: true` or `active: false`
 - **THEN** contextual typing retains the true singleton while selecting the matching alternative
 
 #### Scenario: Mutable variable widens safely
-- **WHEN** mut active = true is declared without a singleton expectation
-- **THEN** its inferred type permits later assignment of false
+- **WHEN** `mut active = true` is declared without a singleton expectation
+- **THEN** its inferred type permits later assignment of `false`
+
+#### Scenario: Temporal constructor singleton retains its owning type
+- **WHEN** the Date singleton `Date(2026, 12, 25)` is assigned to `Date`
+- **THEN** assignment succeeds while its explicit singleton annotation remains exact
+
+#### Scenario: Wrapper expression is not a type annotation
+- **WHEN** a type annotation contains `const(1)`, `Date.today()`, or another arbitrary call
+- **THEN** the parser rejects it and directs the author to use a type name, a direct non-temporal literal, or a fixed temporal constructor literal
 
 ### Requirement: Conditional checks narrow local and property paths
 Boolean conditions, null comparisons, and literal equality or inequality SHALL refine only the reachable branch's local or property path. The true and false branches SHALL remove only alternatives proven impossible by the condition. A nullable value compared with `null` SHALL narrow to the present type or `Null` on the corresponding branch. Comparing a finite singleton union with a literal SHALL preserve the exact matching alternative. The declared type SHALL remain unchanged after the branch.
 
 #### Scenario: Boolean condition has complementary branch types
 - **WHEN** a Boolean local is used directly as an `if` condition
-- **THEN** the true arm sees `const(true)` and the false arm sees `const(false)`
+- **THEN** the true arm sees the `true` literal type and the false arm sees the `false` literal type
 
 #### Scenario: Null comparison narrows both outcomes
 - **WHEN** a nullable local is compared with `null` using `==` or `!=`
 - **THEN** the present branch sees the non-null type and the absent branch sees `Null`
 
 #### Scenario: Literal equality removes only impossible alternatives
-- **WHEN** a local of type `const(1) | const(2)` is compared with `1`
-- **THEN** the equal branch sees `const(1)` and the unequal branch sees `const(2)`
+- **WHEN** a local of type `1 | 2` is compared with `1`
+- **THEN** the equal branch sees the `1` literal type and the unequal branch sees the `2` literal type
 
 ### Requirement: Satisfies expressions preserve precise inferred types
 An expression written as `value satisfies Target` SHALL be checked for assignability to `Target` and SHALL retain its original inferred type as the expression result. The operator SHALL not perform a runtime conversion or narrow the source expression. A failed relation SHALL produce the normal source-located type mismatch.

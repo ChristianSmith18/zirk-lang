@@ -1405,16 +1405,16 @@ mod tests {
         let response = run(Request {
             api_version: API_VERSION,
             source: "import { stdout } from std.io;\n\
-                type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+                type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
                 type Wait = 250ms | 1s;\n\
-                type ClockTime = const(Time(9, 30)) | const(Time(17, 0));\n\
-                type Moment = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
-                type CivilOrClock = const(Date(2026, 12, 25)) | const(Time(9, 30));\n\
-                type Number = const(1) | const(2);\n\
-                type Word = const(\"one\") | const(\"two\");\n\
-                type Letter = const('a') | const('b');\n\
-                type Ratio = const(1.5f64) | const(2.5f64);\n\
-                type Money = const(1.25) | const(2.5);\n\
+                type ClockTime = Time(9, 30) | Time(17, 0);\n\
+                type Moment = DateTime(Date(2026, 12, 25), Time(9, 30)) | DateTime(Date(2027, 1, 1), Time(0, 0));\n\
+                type CivilOrClock = Date(2026, 12, 25) | Time(9, 30);\n\
+                type Number = 1 | 2;\n\
+                type Word = \"one\" | \"two\";\n\
+                type Letter = 'a' | 'b';\n\
+                type Ratio = 1.5f64 | 2.5f64;\n\
+                type Money = 1.25 | 2.5;\n\
                 type Flag = true | false;\n\
                 fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
                 fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\

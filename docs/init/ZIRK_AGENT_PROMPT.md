@@ -205,10 +205,10 @@ reaches a backend that cannot compile it:
   field type, and cannot escape the function that created it. The semantics
   beyond that limit are already decided (D9) for whichever future phase
   implements the syntax.
-- **A generic contract or enum instantiation** works end to end only for the
-  language's own `Iterable<T>`/`Iterator<T>`/`Iteration<T>` (needed by
-  `for ... in`); a user's own generic contract or enum stays gated the same
-  way it was before this phase.
+- **Generic contract-method calls** support compile-time specialization for
+  in-program native/interpreter dispatch, including an enclosing `T` used by
+  an open-template method such as `Watched<T>.on<K ...>`. Package-boundary
+  specialization metadata and broader generic enum support remain gated.
 - **`abstract class`** type-checks completely — a concrete class adopts its
   requirements with `implements`, and conformance is
   verified — but a value typed *through* the abstract class would need

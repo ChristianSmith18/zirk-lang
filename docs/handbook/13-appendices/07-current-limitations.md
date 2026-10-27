@@ -28,11 +28,15 @@ Current high-impact delivery limits include:
   with `is` have native execution coverage; interpreter/native parity covers scalar, mixed singleton, nullable, enum,
   temporal, and numeric singleton alternatives, but broader control-flow,
   error, and cleanup paths remain incomplete.
-  Anonymous structural shapes are checked but not generally lowered as runtime
-  values. Some mixed nominal/scalar union combinations are still rejected by
-  code generation. Native union execution is verified on macOS ARM64 and Linux
-  ARM64; Linux x86_64 union ABI and parity cases pass under Docker emulation,
-  while native x86_64 CI and Windows x86_64 execution remain unverified. Dynamic
+  Focused macOS ARM64 native/interpreter cases now execute discriminated
+  structural unions, a structural/scalar union through a function, an
+  identity-preserving structural intersection, and a captured structural
+  payload; forced-GC coverage verifies the managed payload stays live.
+  These cases do not establish a general ABI for every structural alternative
+  or collection. Unsupported combinations still fail before backend emission.
+  Native union execution is verified on macOS ARM64 and Linux ARM64; Linux
+  x86_64 union ABI and parity cases pass under Docker emulation, while native
+  x86_64 CI and Windows x86_64 execution remain unverified. Dynamic
   JSON serialization now rejects handles that are not exact managed allocations
   before dereferencing them; Linux ARM64 object-engine parity passes after
   rebuilding the runtime and CLI. Tag-aware GC
@@ -41,8 +45,14 @@ Current high-impact delivery limits include:
   and caught exception fields. Additional specialized managed-container
   boundaries still need stress coverage. Generic aliases,
   `keyof`, indexed access, conditional/infer, mapped types, finite template
-  types, standard utilities, flow-aware IDE queries, and bounded diagnostics
-  have semantic test coverage.
+  types, one-hole open template inference from string singletons (including
+  `"{K}Changed"` and contextual `T[K]` callbacks through generic functions
+  and `Watched<T>` contract methods), standard utilities,
+  flow-aware IDE queries, and bounded diagnostics have semantic test coverage.
+  Generic contract-method specializations have native/interpreter parity for
+  in-program calls, and compiled packages fingerprint exported generic
+  contract signatures. The complete supported-target matrix is not yet
+  verified.
 
 - `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
   entry selection without a required source `fn main`, dependency/dev-dependency

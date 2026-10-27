@@ -35,10 +35,10 @@ pub use atomic::{
     declare_managed_abi as declare_managed_atomic_abi,
 };
 pub use ir::{
-    BinaryOp, Block, BlockId, BranchKind, ClosureLayout, ContractTable, EnumLayout, ExternFn,
-    FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, MutexId, Nullable,
-    ObjectField, ObjectLayout, Operand, ProjectGlobalLayout, ProjectGlobalWatchEvent, Slot, SlotId,
-    StringId, Terminator, UnaryOp, ValueId, ValueLayout,
+    BinaryOp, Block, BlockId, BranchKind, ClosureLayout, ContractLayout, ContractTable, EnumLayout,
+    ExternFn, FloatWidth, Function, InstKind, Instruction, IntWidth, IrType, Module, MutexId,
+    Nullable, ObjectField, ObjectLayout, Operand, ProjectGlobalLayout, ProjectGlobalWatchEvent,
+    Slot, SlotId, StringId, Terminator, UnaryOp, ValueId, ValueLayout,
 };
 pub use lower::{constructor_symbol, contract_method_symbol, lower, method_symbol};
 pub use unions::{

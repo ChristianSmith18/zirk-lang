@@ -696,16 +696,16 @@ fn scalar_singleton_unions_match_and_execute_on_native_backend() {
     std::fs::write(
         &source,
         "import { stdout } from std.io;\n\
-         type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          type Wait = 250ms | 1s;\n\
-         type ClockTime = const(Time(9, 30)) | const(Time(17, 0));\n\
-         type Moment = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
-         type CivilOrClock = const(Date(2026, 12, 25)) | const(Time(9, 30));\n\
-         type Number = const(1) | const(2);\n\
-         type Word = const(\"one\") | const(\"two\");\n\
-         type Letter = const('a') | const('b');\n\
-         type Ratio = const(1.5f64) | const(2.5f64);\n\
-         type Money = const(1.25) | const(2.5);\n\
+         type ClockTime = Time(9, 30) | Time(17, 0);\n\
+         type Moment = DateTime(Date(2026, 12, 25), Time(9, 30)) | DateTime(Date(2027, 1, 1), Time(0, 0));\n\
+         type CivilOrClock = Date(2026, 12, 25) | Time(9, 30);\n\
+         type Number = 1 | 2;\n\
+         type Word = \"one\" | \"two\";\n\
+         type Letter = 'a' | 'b';\n\
+         type Ratio = 1.5f64 | 2.5f64;\n\
+         type Money = 1.25 | 2.5;\n\
          type Flag = true | false;\n\
          fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
          fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
@@ -738,7 +738,7 @@ fn enum_constant_singleton_unions_execute_with_exact_variant_identity() {
         &source,
         "import { stdout } from std.io;\n\
          enum Shade { Red, Blue }\n\
-         type Color = const(Shade.Red) | const(Shade.Blue);\n\
+         type Color = Shade.Red | Shade.Blue;\n\
          fn label(value: Color): String { return match value { Shade.Red => \"red\"; Shade.Blue => \"blue\"; }; }\n\
          fn main(): Void { stdout.println(label(Shade.Red)); stdout.println(label(Shade.Blue)); }\n\
          main();\n",
@@ -799,6 +799,129 @@ fn structural_union_discriminants_narrow_before_field_reads() {
     );
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "number 42\ntext ready\n");
+}
+
+#[test]
+fn structural_union_three_alternatives_narrow_across_else_if() {
+    let root = workspace("structural_union_three_alternatives_native");
+    let source = root.join("shape_union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type NumberEntry = { kind: \"number\"; value: Int32 };\n\
+         type TextEntry = { kind: \"text\"; value: String };\n\
+         type FlagEntry = { kind: \"flag\"; value: Boolean };\n\
+         type Entry = NumberEntry | TextEntry | FlagEntry;\n\
+         fn show(entry: Entry): Void {\n\
+             if entry.kind == \"number\" { stdout.println(\"number {entry.value}\"); }\n\
+             else if entry.kind == \"text\" { stdout.println(\"text {entry.value}\"); }\n\
+             else if entry.kind == \"flag\" { stdout.println(\"flag {entry.value}\"); }\n\
+         }\n\
+         fn main(): Void {\n\
+             inmut number: Entry = { kind: \"number\", value: 42 };\n\
+             inmut text: Entry = { kind: \"text\", value: \"ready\" };\n\
+             inmut flag: Entry = { kind: \"flag\", value: true };\n\
+             show(number); show(text); show(flag);\n\
+         }\n\
+         main();\n",
+    )
+    .expect("write three-alternative structural union source");
+    let output = zirk(
+        "run",
+        &source,
+        "structural_union_three_alternatives_native_run",
+        &[],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "number 42\ntext ready\nflag true\n"
+    );
+}
+
+#[test]
+fn structural_union_mixed_with_scalar_preserves_tag_and_managed_payload() {
+    let root = workspace("structural_union_mixed_scalar_native");
+    let source = root.join("shape_scalar_union.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type TextEntry = { kind: \"text\"; value: String };\n\
+         type Entry = TextEntry | 42;\n\
+         fn identity(entry: Entry): Entry { return entry; }\n\
+         fn show(entry: Entry): String {\n\
+             inmut result: Entry = identity(entry);\n\
+             return match result { 42 => \"number\"; _ => result.value; };\n\
+         }\n\
+         fn main(): Void {\n\
+             inmut text: Entry = { kind: \"text\", value: \"ready\" };\n\
+             inmut number: Entry = 42;\n\
+             stdout.println(show(text));\n\
+             stdout.println(show(number));\n\
+         }\n\
+         main();\n",
+    )
+    .expect("write mixed structural union source");
+    let output = zirk(
+        "run",
+        &source,
+        "structural_union_mixed_scalar_native_run",
+        &[],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "ready\nnumber\n");
+}
+
+#[test]
+fn structural_intersection_object_literal_keeps_one_object_identity() {
+    let root = workspace("structural_intersection_native");
+    let source = root.join("shape_intersection.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         type Named = { name: String };\n\
+         type Numbered = { id: Int32 };\n\
+         type IdentifiedPerson = Named & Numbered;\n\
+         fn describe(value: IdentifiedPerson): String {\n\
+             return \"{value.name}:{value.id}\";\n\
+         }\n\
+         fn main(): Void {\n\
+             mut person: IdentifiedPerson = { name: \"Ada\", id: 7 };\n\
+             mut same: IdentifiedPerson = person;\n\
+             same.id = 8;\n\
+             stdout.println(describe(person));\n\
+         }\n\
+         main();\n",
+    )
+    .expect("write structural intersection source");
+    let output = zirk("run", &source, "structural_intersection_native_run", &[]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "Ada:8\n");
+}
+
+#[test]
+fn open_template_generic_indexed_callback_executes_after_specialization() {
+    let root = workspace("open_template_indexed_callback_native");
+    let source = root.join("open_template.zrk");
+    std::fs::write(
+        &source,
+        "import { stdout } from std.io;\n\
+         fn on<T, K from String & keyof T>(value: T, event: \"{K}Changed\", new_value: T[K], callback: Fn(T[K]) => Void): Void { callback(new_value); }\n\
+         fn main(): Void {\n\
+             inmut person: { age: Int32; name: String } = { age: 42, name: \"Ada\" };\n\
+             on(person, \"ageChanged\", person.age, (age): Void => { stdout.println(age); });\n\
+         }\n\
+         main();\n",
+    )
+    .expect("write open-template generic callback source");
+    let output = zirk(
+        "run",
+        &source,
+        "open_template_indexed_callback_native_run",
+        &[],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "42\n");
 }
 
 #[test]
@@ -1755,6 +1878,7 @@ fn generic_static_method_is_monomorphized_and_executes() {
 class Parser {
     static identity<T>(value: T): T { return value; }
 }
+
 fn main(): Void {
     mut value: Int32 = Parser.identity<Int32>(42);
     stdout.println(value);
@@ -1768,6 +1892,201 @@ fn main(): Void {
     assert_eq!(normalize(&output.stdout), "42\nzirk\n");
 }
 
+#[test]
+fn generic_instance_method_is_monomorphized_and_executes() {
+    let output = crate_of(
+        "generic_instance_method_monomorphization",
+        &[(
+            "main.zrk",
+            r#"import { stdout } from std.io;
+class Echo {
+    identity<T>(value: T): T { return value; }
+}
+fn main(): Void {
+    mut echo = Echo();
+    mut value: Int32 = echo.identity(42);
+    stdout.println(value);
+    mut text: String = echo.identity("zirk");
+    stdout.println(text);
+}"#,
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "42\nzirk\n");
+}
+
+#[test]
+fn open_template_generic_contract_method_dispatches_specialization() {
+    let output = crate_of(
+        "open_template_contract_method_dispatch",
+        &[(
+            "main.zrk",
+            r#"import { stdout } from std.io;
+type Person = { age: Int32; name: String; };
+contract Watched<T> {
+    on<K from String & keyof T>(event: "{K}Changed", callback: Fn(T[K]) => Void): Void;
+}
+
+class PersonWatcher implements Watched<Person> {
+    on<K from String & keyof Person>(event: "{K}Changed", callback: Fn(Person[K]) => Void): Void {
+        stdout.println("called");
+    }
+}
+fn attach(person: Watched<Person>): Void {
+    person.on("ageChanged", (age): Void => { stdout.println(age); });
+    person.on("nameChanged", (name): Void => { stdout.println(name); });
+}
+fn main(): Void {
+    mut watcher: Watched<Person> = PersonWatcher();
+    attach(watcher);
+}"#,
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "called\ncalled\n");
+}
+
+#[test]
+fn open_template_generic_contract_dispatches_across_package_source_boundary() {
+    let dir = workspace("open_template_contract_package_boundary");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("dep/src")).unwrap();
+    std::fs::write(
+        dir.join(".zkinit"),
+        "project { name: \"app\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\ndependencies { acme.math: { from: \"path:dep\"; version: \"^1\"; } }\n",
+    )
+    .unwrap();
+    write_entry(
+        dir.join("src/main.zrk"),
+        r#"import { math } from acme.math;
+import { stdout } from std.io;
+fn main(): Void {
+    stdout.println(math.demo());
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/.zkinit"),
+        "project { name: \"acme.math\"; version: \"1.0.0\"; type: package; root: \"src/package.zrk\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/package.zrk"),
+        "package acme.math;\nshare mod math from \"./math\";",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("dep/src/math.zrk"),
+        r#"share type Person = { age: Int32; name: String; };
+import { stdout } from std.io;
+share contract Watched<T> {
+    on<K from String & keyof T>(event: "{K}Changed", callback: Fn(T[K]) => Void): Void;
+}
+share class PersonWatcher implements Watched<Person> {
+    on<K from String & keyof Person>(event: "{K}Changed", callback: Fn(Person[K]) => Void): Void {
+        stdout.println("called");
+    }
+}
+share fn demo(): Int32 {
+    mut watcher: Watched<Person> = PersonWatcher();
+    watcher.on("ageChanged", (age): Void => { stdout.println(age); });
+    watcher.on("nameChanged", (name): Void => { stdout.println(name); });
+    return 42;
+}"#,
+    )
+    .unwrap();
+
+    let package_build = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(dir.join("dep"))
+        .output()
+        .expect("build the package exporting the generic contract");
+    assert_eq!(
+        package_build.status.code(),
+        Some(0),
+        "package build stderr:\n{}",
+        String::from_utf8_lossy(&package_build.stderr)
+    );
+    let contract_metadata: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join("dep/build/generic-contract-metadata.zkc")).unwrap(),
+    )
+    .expect("compiled generic contract metadata");
+    assert!(
+        contract_metadata["contracts"]
+            .as_object()
+            .is_some_and(|contracts| contracts.keys().any(|key| key.ends_with("::Watched"))),
+        "the compiled package exports the generic contract fingerprint: {contract_metadata}"
+    );
+
+    let package_manifest = zirk_cli::project::read_manifest(&dir.join("dep/.zkinit")).unwrap();
+    let package_hash =
+        zirk_cli::project::package_integrity_hash(&dir.join("dep"), &package_manifest).unwrap();
+    std::fs::write(
+        dir.join("zirk.lock"),
+        zirk_cli::project::format_lockfile(&zirk_cli::project::Lockfile {
+            packages: [(
+                "acme.math".into(),
+                zirk_cli::project::LockedPackage {
+                    name: "acme.math".into(),
+                    version: package_manifest.version,
+                    source: "local".into(),
+                    locator: "path:dep".into(),
+                    revision: None,
+                    hash: format!("sha256:{package_hash}"),
+                    package_root: "src/package.zrk".into(),
+                },
+            )]
+            .into(),
+        }),
+    )
+    .unwrap();
+
+    let output = TestCommand::new(compiler())
+        .args(["run", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("run generic contract method from a source dependency");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        normalize(&String::from_utf8_lossy(&output.stdout)),
+        "called\ncalled\n42\n"
+    );
+
+    let contract_fingerprints = contract_metadata["contracts"]
+        .as_object()
+        .expect("generic contract fingerprint map");
+    let contract_identity = contract_fingerprints
+        .keys()
+        .next()
+        .expect("one exported generic contract")
+        .clone();
+    let mut stale_metadata = contract_metadata;
+    stale_metadata["contracts"][&contract_identity] = serde_json::Value::String("00".repeat(32));
+    std::fs::write(
+        dir.join("dep/build/generic-contract-metadata.zkc"),
+        serde_json::to_vec(&stale_metadata).unwrap(),
+    )
+    .unwrap();
+    let stale_client = TestCommand::new(compiler())
+        .args(["build", "."])
+        .current_dir(&dir)
+        .output()
+        .expect("validate stale generic contract metadata");
+    assert_ne!(stale_client.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&stale_client.stderr);
+    assert!(
+        stderr.contains("incompatible generic contract"),
+        "stale contract metadata was not rejected before emission:\n{stderr}"
+    );
+}
 #[test]
 fn generic_static_method_substitutes_nested_result_types() {
     let output = crate_of(
@@ -9874,7 +10193,7 @@ fn compiled_package_union_metadata_is_checked_before_link() {
     .unwrap();
     write_entry(
         dir.join("src/main.zrk"),
-        "import { api } from acme.values;\nfn main(): Void { api.echo(42); }",
+        "import { api } from acme.values;\nfn main(): Void { api.echo({ value: 42 }); }",
     )
     .unwrap();
     std::fs::write(
@@ -9890,7 +10209,7 @@ fn compiled_package_union_metadata_is_checked_before_link() {
     let api_path = dir.join("dep/src/api.zrk");
     std::fs::write(
         &api_path,
-        "share type Choice<T> = T | String;\nshare fn echo(value: Choice<Int32>): Choice<Int32> { return value; }",
+        "share type Choice = { value: Int32 } | String;\nshare fn echo(value: Choice): Choice { return value; }",
     )
     .unwrap();
 
@@ -9915,7 +10234,7 @@ fn compiled_package_union_metadata_is_checked_before_link() {
             .unions
             .iter()
             .any(|export| export.alias == "Choice"),
-        "the compiled metadata must export the generic union alias: {metadata:?}"
+        "the compiled metadata must export the structural union alias: {metadata:?}"
     );
 
     let write_lock = || {
@@ -9957,7 +10276,7 @@ fn compiled_package_union_metadata_is_checked_before_link() {
 
     std::fs::write(
         &api_path,
-        "share type Choice<T> = T | String | Boolean;\nshare fn echo(value: Choice<Int32>): Choice<Int32> { return value; }",
+        "share type Choice = { value: Int32; extra?: Int64 } | String;\nshare fn echo(value: Choice): Choice { return value; }",
     )
     .unwrap();
     write_lock();
@@ -10293,6 +10612,31 @@ fn d4_hazard_fixture_is_correct_without_a_forced_collection_too() {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "111\n222\n");
+}
+
+#[test]
+fn captured_structural_union_payload_survives_forced_gc() {
+    let source = "import { stdout } from std.io;\n\
+        type Payload = { text: String };\n\
+        type Value = Payload | 42;\n\
+        class Churn { value: Int32; construct(value: Int32) { this.value = value; } }\n\
+        fn main(): Void {\n\
+            inmut captured: Value = { text: \"structural payload survives\" };\n\
+            inmut read: Fn() => Value = (): Value => captured;\n\
+            mut i = 0;\
+            while i < 12000 { mut discarded = Churn(i); i = i + 1; }\n\
+            mut value: Value = read();\n\
+            stdout.println(match value { 42 => \"number\"; _ => value.text; });\n\
+        }";
+
+    let output = zirk_with_env(
+        source,
+        "gc_captured_structural_union",
+        &[("ZIRK_GC_THRESHOLD", "1"), ("ZIRK_GC_TRACE", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "structural payload survives\n");
+    assert!(output.stderr.contains("[zirk-gc] collection"));
 }
 
 /// `docs/decisions/ADR-003-investigacion-fase-4.md`'s probe 1 cycle (two
@@ -12759,6 +13103,7 @@ fn main(): Void {
         Error(_) => stdout.println("exists-error");
     }
 }
+share fn make_watcher(): Watched<Person> { return PersonWatcher(); }
 "#,
     )
     .unwrap();
@@ -12878,6 +13223,11 @@ fn main(): Void {
         };
     }
 }
+share fn demo(): Void {
+    mut watcher: Watched<Person> = PersonWatcher();
+    watcher.on("ageChanged", (age): Void => { stdout.println(age); });
+    watcher.on("nameChanged", (name): Void => { stdout.println(name); });
+}
 "#,
     )
     .unwrap();
@@ -12992,6 +13342,11 @@ fn main(): Void {
         }
         Error(_) => stdout.println("walk-open-error");
     }
+}
+share fn demo(): Void {
+    mut watcher: Watched<Person> = PersonWatcher();
+    watcher.on("ageChanged", (age): Void => { stdout.println(age); });
+    watcher.on("nameChanged", (name): Void => { stdout.println(name); });
 }
 "#,
     )

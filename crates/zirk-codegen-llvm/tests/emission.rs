@@ -724,9 +724,9 @@ fn union_match_projection_has_a_runtime_tag_guard() {
 #[test]
 fn singleton_union_matches_emit_tagged_scalar_projections() {
     let ir = llvm_ir(
-        "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+        "type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          type Wait = 250ms | 1s;\n\
-         type Number = const(1) | const(2);\n\
+         type Number = 1 | 2;\n\
          fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
          fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
          fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\

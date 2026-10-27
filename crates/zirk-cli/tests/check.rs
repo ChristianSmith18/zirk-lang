@@ -115,6 +115,63 @@ fn a_valid_program_passes_check() {
 }
 
 #[test]
+fn unsupported_structural_mixed_union_is_rejected_at_its_type_declaration() {
+    let dir = workspace("unsupported_structural_mixed_union_input");
+    let source = dir.join("main.zrk");
+    std::fs::write(
+        &source,
+        "type Tagged = { label: String };\n\
+         type Choice = Tagged | List<Int32>;\n\
+         fn consume(value: Choice): Void { }\n",
+    )
+    .expect("write unsupported union fixture");
+
+    let (success, stdout, stderr) = zirk_check(&source, "unsupported_structural_mixed_union");
+    assert!(
+        !success,
+        "an unsupported union must not pass frontend checking"
+    );
+    assert!(stdout.is_empty(), "zirk check must not write to stdout");
+    assert!(
+        stderr.contains("E0423") && stderr.contains("main.zrk:2:"),
+        "the unsupported representation needs a source-located lowering diagnostic:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("compiler produced invalid IR")
+            && !stderr.contains("internal compiler error"),
+        "unsupported source combinations must be rejected before backend emission:\n{stderr}"
+    );
+}
+
+#[test]
+fn unsupported_structural_match_patterns_are_rejected_before_lowering() {
+    let dir = workspace("unsupported_structural_match_pattern_input");
+    let source = dir.join("main.zrk");
+    std::fs::write(
+        &source,
+        "type Payload = { text: String };\n\
+         fn read(value: Payload): String { return match value { { text } => text; _ => \"missing\"; }; }\n\
+         fn main(): Void { }",
+    )
+    .expect("write unsupported record-match fixture");
+
+    let (success, stdout, stderr) = zirk_check(&source, "unsupported_structural_match_pattern_run");
+    assert!(!success, "unsupported match patterns must be rejected");
+    assert!(stdout.is_empty(), "zirk check must not write to stdout");
+    assert!(
+        stderr.contains("not compilable yet")
+            && stderr.contains("main.zrk:2:")
+            && stderr.contains("record matching patterns"),
+        "the diagnostic must identify the unsupported source pattern:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("compiler produced invalid IR")
+            && !stderr.contains("internal compiler error"),
+        "unsupported patterns must not reach lowering or a backend:\n{stderr}"
+    );
+}
+
+#[test]
 fn an_invalid_program_is_rejected_with_diagnostics() {
     let path = corpus("invalid").join("type_mismatch.zrk");
     let (success, stdout, stderr) = zirk_check(&path, "invalid_duplicate");
@@ -820,7 +877,7 @@ fn long_singleton_diagnostics_are_bounded_and_utf8_safe() {
     std::fs::write(
         dir.join("main.zrk"),
         format!(
-            "type LongText = const(\"{repeated}\");\n\
+            "type LongText = \"{repeated}\";\n\
              fn consume(value: Int32): Void {{ }}\n\
              fn fail(value: LongText): Void {{ consume(value); }}\n\
              fn main(): Void {{ }}\n"

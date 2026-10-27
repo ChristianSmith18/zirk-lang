@@ -456,6 +456,7 @@ fn lsp_completion_kind(kind: SemanticSymbolKind) -> CompletionItemKind {
 
 fn completion_items(
     semantics: &SemanticIndex,
+    checked: &zirk_sema::CheckedProgram,
     file: FileId,
     position: IdePosition,
     sources: &SourceMap,
@@ -463,7 +464,7 @@ fn completion_items(
     document_version: i32,
     module_index: Option<&zirk_ide::ModuleIndex>,
 ) -> Vec<CompletionItem> {
-    let snapshot = IdeSnapshot::new(0, sources, semantics);
+    let snapshot = IdeSnapshot::new(0, sources, semantics).with_checked_program(checked);
     let snapshot = match module_index {
         Some(index) => snapshot.with_module_index(index),
         None => snapshot,
@@ -2665,7 +2666,8 @@ impl LanguageServer for Backend {
             character: cursor.position.character,
         };
         let snapshot =
-            IdeSnapshot::new(version, &frontend.sources, &frontend.checked.semantic_index);
+            IdeSnapshot::new(version, &frontend.sources, &frontend.checked.semantic_index)
+                .with_checked_program(&frontend.checked);
         let module_index = if snapshot.completion_needs_module_index(file, position) {
             self.module_index_for(uri, &analysis).await
         } else {
@@ -2689,6 +2691,7 @@ impl LanguageServer for Backend {
         }
         Ok(Some(CompletionResponse::Array(completion_items(
             &frontend.checked.semantic_index,
+            &frontend.checked,
             file,
             position,
             &frontend.sources,
@@ -3958,7 +3961,8 @@ mod tests {
         let frontend = analysis.frontend.unwrap();
         let offset = text.find("box.reveal").unwrap() as u32 + "box.".len() as u32;
         let (line, character) = frontend.sources.entry().line_column_utf16(offset);
-        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index);
+        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index)
+            .with_checked_program(&frontend.checked);
         let completions = snapshot.completions(FileId::ENTRY, IdePosition { line, character });
 
         assert!(
@@ -3992,7 +3996,8 @@ mod tests {
             fn main(): Void {}";
         let analysis = analyze(&path, source);
         let frontend = analysis.frontend.expect("valid union source");
-        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index);
+        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index)
+            .with_checked_program(&frontend.checked);
         let first_offset = source.find("value.shared").unwrap() as u32 + "value.".len() as u32;
         let (line, character) = frontend.sources.entry().line_column_utf16(first_offset);
         let common = snapshot.completions(FileId::ENTRY, IdePosition { line, character });
@@ -4025,6 +4030,36 @@ mod tests {
     }
 
     #[test]
+    fn structural_union_completion_uses_the_narrowed_alternative() {
+        let dir = scratch("structural-union-completion");
+        let path = dir.join("main.zrk");
+        let source = "type Alpha = { kind: \"alpha\"; alpha_only: String; shared: Boolean };\n\
+            type Beta = { kind: \"beta\"; beta_only: Int32; shared: Boolean };\n\
+            type Choice = Alpha | Beta;\n\
+            fn inspect(value: Choice): Void {\n\
+                if value.kind == \"alpha\" { inmut selected = value.alpha_only; }\n\
+            }\n\
+            fn main(): Void { }";
+        let analysis = analyze(&path, source);
+        let frontend = analysis.frontend.expect("valid structural union source");
+        let snapshot = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index)
+            .with_checked_program(&frontend.checked);
+        let offset = source.rfind("value.alpha_only").unwrap() as u32 + "value.".len() as u32;
+        let (line, character) = frontend.sources.entry().line_column_utf16(offset);
+        let completions = snapshot.completions(FileId::ENTRY, IdePosition { line, character });
+        assert!(
+            completions
+                .iter()
+                .any(|candidate| candidate.label == "alpha_only")
+        );
+        assert!(
+            !completions
+                .iter()
+                .any(|candidate| candidate.label == "beta_only")
+        );
+    }
+
+    #[test]
     fn hover_prefers_the_declaration_over_the_expression() {
         let dir = scratch("hover");
         let path = dir.join("ok.zrk");
@@ -4044,7 +4079,7 @@ mod tests {
     fn type_map_reports_branch_refined_singleton_types() {
         let dir = scratch("narrowed-type-map");
         let path = dir.join("main.zrk");
-        let source = "type Choice = const(1) | const(2);\n\
+        let source = "type Choice = 1 | 2;\n\
             fn inspect(value: Choice): Void {\n\
                 if value == 1 { inmut selected = value; }\n\
             }\n\
@@ -4079,7 +4114,7 @@ mod tests {
         let path = dir.join("main.zrk");
         let repeated = "🙂".repeat(200);
         let source = format!(
-            "type LongText = const(\"{repeated}\");\n\
+            "type LongText = \"{repeated}\";\n\
              fn inspect(value: LongText): LongText {{ return value; }}\n\
              fn main(): Void {{ }}"
         );
@@ -4101,6 +4136,61 @@ mod tests {
         assert!(rendered.len() <= MAX_TYPE_QUERY_DISPLAY_BYTES);
         assert!(rendered.ends_with('…'));
         assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn open_template_inference_and_indexed_callback_types_reach_lsp_hover_and_diagnostics() {
+        let dir = scratch("open-template-lsp");
+        let path = dir.join("main.zrk");
+        let valid = "fn on<T, K from String & keyof T>(value: T, event: \"{K}Changed\", callback: Fn(T[K]) => Void): Void { }\n\
+            fn main(): Void {\n\
+                inmut person: { age: Int32 } = { age: 1 };\n\
+                on(person, \"ageChanged\", (age): Void => { inmut number = age; });\n\
+            }";
+        let analysis = analyze(&path, valid);
+        assert!(
+            !analysis
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error),
+            "the LSP frontend should share CLI open-template inference: {:?}",
+            analysis.diagnostics
+        );
+        let frontend = analysis
+            .frontend
+            .expect("valid event source should be analyzed");
+        let age_use = valid.rfind("= age").unwrap() as u32 + 2;
+        let hover = best_hover_entry(&frontend.checked.type_map, age_use)
+            .map(hover_text)
+            .expect("the callback parameter use should have a hover type");
+        assert_eq!(hover, "Int32");
+        let hints = inferred_type_hints(
+            &frontend.checked.type_map,
+            &frontend.sources,
+            FileId::ENTRY,
+            Range::new(Position::new(0, 0), Position::new(100, 0)),
+        );
+        assert!(
+            hints.iter().any(|hint| {
+                matches!(&hint.label, InlayHintLabel::String(label) if label == ": Int32")
+            }),
+            "inlay hints should use the inferred callback property type"
+        );
+
+        let invalid = valid.replace("ageChanged", "heightChanged");
+        let analysis = analyze(&path, &invalid);
+        let diagnostic = analysis
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message.contains("has no property `height`"))
+            .expect("an event key absent from T should be diagnosed");
+        let location = diagnostic.location.as_ref().expect("diagnostic location");
+        let event_offset = invalid.find("heightChanged").unwrap() as u32 - 1;
+        let (expected_line, expected_column) =
+            zirk_diagnostics::SourceFile::new(path.display().to_string(), &invalid)
+                .line_column_utf16(event_offset);
+        assert_eq!(location.line, expected_line + 1);
+        assert_eq!(location.column, expected_column + 1);
     }
 
     #[test]
@@ -4422,7 +4512,7 @@ mod tests {
         let dir = scratch("overlay");
         let path = dir.join("doc.zrk");
         fs::write(&path, "fn on_disk() { return 0; }\n").unwrap();
-        let overlay = "type Choice = const(1) | const(2);\n\
+        let overlay = "type Choice = 1 | 2;\n\
             fn inspect(value: Choice): Void {\n\
                 if value == 1 { inmut selected = value; }\n\
             }\n\
@@ -5211,6 +5301,86 @@ mod tests {
             .expect("call with a missing argument retains signature help");
         assert_eq!(outer.callee_name, "identity");
         assert_eq!(outer.active_parameter, 0);
+    }
+
+    #[test]
+    fn generic_contract_method_has_signature_help_after_open_template_inference() {
+        let path = scratch("generic-contract-method-signature").join("main.zrk");
+        let source = r#"type Person = { age: Int32; name: String; };
+contract Watched<T> {
+    on<K from String & keyof T>(event: "{K}Changed", callback: Fn(T[K]) => Void): Void;
+}
+fn on_age(age: Int32): Void { }
+fn attach(person: Watched<Person>): Void {
+    person.on("ageChanged", on_age);
+}
+fn main(): Void { }"#;
+        let analysis = analyze(&path, source);
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        let frontend = analysis.frontend.expect("valid generic contract fixture");
+        let query = IdeSnapshot::new(1, &frontend.sources, &frontend.checked.semantic_index);
+        let cursor = source.find("person.on(").unwrap() as u32 + "person.on(".len() as u32;
+        let (line, character) = frontend.sources.entry().line_column_utf16(cursor);
+        let signature = query
+            .signature_help(FileId::ENTRY, IdePosition { line, character })
+            .expect("the generic contract call exposes its declared signature");
+        assert_eq!(signature.callee_name, "on");
+        assert_eq!(signature.parameters.len(), 2);
+        assert!(signature.label.contains("on<K>"), "{}", signature.label);
+        assert!(signature.label.contains("event"), "{}", signature.label);
+        assert!(signature.label.contains("callback"), "{}", signature.label);
+        assert!(signature.label.contains("T[K]"), "{}", signature.label);
+
+        let method_offset = source.find("person.on(").unwrap() as u32 + "person.".len() as u32;
+        let method_reference = frontend
+            .checked
+            .semantic_index
+            .reference_at_position(FileId::ENTRY, method_offset)
+            .expect("contract method call resolves to its declaration");
+        let method_symbol = frontend
+            .checked
+            .semantic_index
+            .symbol(method_reference.target)
+            .expect("contract method declaration is indexed for hover");
+        assert!(
+            method_symbol
+                .type_text
+                .as_deref()
+                .is_some_and(|text| text.contains("fn<K>")),
+            "{:?}",
+            method_symbol.type_text
+        );
+
+        let invalid = source.replace("ageChanged", "heightChanged");
+        let invalid_analysis = analyze(&path, &invalid);
+        assert!(
+            invalid_analysis.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("property `height`")
+                    || diagnostic.message.contains("heightChanged")
+            }),
+            "{:?}",
+            invalid_analysis.diagnostics
+        );
+
+        let ambiguous_source = "type Left = { value: Int32; left?: Boolean };\n\
+            type Right = { value: Int32; right?: Boolean };\n\
+            type Choice = Left | Right;\n\
+            fn choose(): Choice { return { value: 7 }; }\n\
+            fn main(): Void { }";
+        let ambiguous_analysis = analyze(&path, ambiguous_source);
+        assert!(
+            ambiguous_analysis.diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("ambiguous between union alternatives")
+            }),
+            "{:?}",
+            ambiguous_analysis.diagnostics
+        );
     }
 
     #[test]

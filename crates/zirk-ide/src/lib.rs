@@ -4,7 +4,7 @@
 //! tooling, and future editor clients can share the same source locations and
 //! compiler-resolved symbol identities.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 use zirk_diagnostics::{FileId, SourceFile, SourceMap, Span};
 use zirk_sema::{
@@ -391,6 +391,71 @@ pub struct IdeSnapshot<'a> {
     checked: Option<&'a CheckedProgram>,
 }
 
+fn structural_completion_members(
+    checked: &CheckedProgram,
+    ty: Type,
+    active: &mut HashSet<Base>,
+) -> Option<BTreeMap<String, Vec<String>>> {
+    if !active.insert(ty.base) {
+        return None;
+    }
+    let result = match ty.base {
+        Base::Shape(id) => {
+            let shape = checked.structural_types.get(id as usize)?;
+            Some(
+                shape
+                    .properties
+                    .iter()
+                    .map(|property| {
+                        (
+                            property.name.clone(),
+                            vec![checked.describe_type(property.ty)],
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        Base::Union(id) => {
+            let alternatives = checked.unions.get(id as usize)?;
+            let mut alternatives = alternatives.iter();
+            let first =
+                structural_completion_members(checked, Type::of(*alternatives.next()?), active)?;
+            let mut common = first;
+            for alternative in alternatives {
+                let members =
+                    structural_completion_members(checked, Type::of(*alternative), active)?;
+                common.retain(|name, types| {
+                    let Some(alternative_types) = members.get(name) else {
+                        return false;
+                    };
+                    types.extend(alternative_types.iter().cloned());
+                    types.sort();
+                    types.dedup();
+                    true
+                });
+            }
+            Some(common)
+        }
+        Base::Intersection(id) => {
+            let members = checked.intersections.get(id as usize)?;
+            let mut combined = BTreeMap::<String, Vec<String>>::new();
+            for member in members {
+                let properties = structural_completion_members(checked, Type::of(*member), active)?;
+                for (name, types) in properties {
+                    let combined_types = combined.entry(name).or_default();
+                    combined_types.extend(types);
+                    combined_types.sort();
+                    combined_types.dedup();
+                }
+            }
+            Some(combined)
+        }
+        _ => None,
+    };
+    active.remove(&ty.base);
+    result
+}
+
 /// Compiler facts for a source expression in one checked IDE snapshot.
 /// `canonical_type` is an interned, snapshot-local identity; it must not be
 /// retained or compared across analysis generations.
@@ -575,6 +640,31 @@ impl<'a> IdeSnapshot<'a> {
             let Some(symbol) = symbol else {
                 return candidates;
             };
+
+            if symbol.kind != SemanticSymbolKind::Import
+                && let Some(checked) = self.checked
+                && let Some((_, receiver_type)) = checked
+                    .expr_types
+                    .iter()
+                    .filter(|(span, _)| span.file == file && span.start == receiver_offset)
+                    .min_by_key(|(span, _)| span.end.saturating_sub(span.start))
+                && let Some(members) =
+                    structural_completion_members(checked, *receiver_type, &mut HashSet::new())
+            {
+                candidates.extend(
+                    members
+                        .into_iter()
+                        .map(|(name, types)| CompletionCandidate {
+                            label: name,
+                            kind: SemanticSymbolKind::Field,
+                            detail: Some(types.join(" | ")),
+                            declaration: None,
+                        }),
+                );
+                candidates.sort_by(|left, right| left.label.cmp(&right.label));
+                candidates.dedup_by(|left, right| left.label == right.label);
+                return candidates;
+            }
 
             if symbol.kind == SemanticSymbolKind::Import {
                 let modules = self
@@ -1071,13 +1161,23 @@ impl<'a> IdeSnapshot<'a> {
         let (line, character) = source.line_column_utf16(callee_token.span.start);
         let symbol = self.symbol_at(file, Position { line, character })?;
         let type_text = symbol.type_text.as_deref()?;
-        let parameters_text = type_text.strip_prefix("fn(")?.split_once(')')?.0;
+        let function_text = type_text.strip_prefix("fn")?;
+        let (type_parameters, function_signature) = if function_text.starts_with('<') {
+            let (parameters, remainder) = function_text.split_once(">(")?;
+            (format!("{}>", parameters), format!("({remainder}"))
+        } else {
+            (String::new(), function_text.to_string())
+        };
+        let parameters_text = function_signature.strip_prefix('(')?.split_once(')')?.0;
         let parameters = split_signature_parameters(parameters_text);
         let label = match symbol.kind {
             SemanticSymbolKind::Method => {
-                format!("{}{}", symbol.name, &type_text[2..])
+                format!("{}{}{}", symbol.name, type_parameters, function_signature)
             }
-            _ => format!("fn {}{}", symbol.name, &type_text[2..]),
+            _ => format!(
+                "fn {}{}{}",
+                symbol.name, type_parameters, function_signature
+            ),
         };
 
         let mut active_parameter = 0u32;
@@ -1718,7 +1818,7 @@ mod tests {
         let mut sources = SourceMap::new();
         let file = sources.add(SourceFile::new(
             "types.zrk",
-            "type Choice = const(1) | const(2);\ntype Profile = { name: String; nickname?: String };\nfn inspect(value: Choice): Void { if value == 1 { inmut selected = value; } }\nfn identity<T>(value: T): T { return value; }\nfn main(): Void { inmut profile: Profile = { name: \"Ada\" }; inmut result = identity(1); }",
+            "type Choice = 1 | 2;\ntype Profile = { name: String; nickname?: String };\nfn inspect(value: Choice): Void { if value == 1 { inmut selected = value; } }\nfn identity<T>(value: T): T { return value; }\nfn main(): Void { inmut profile: Profile = { name: \"Ada\" }; inmut result = identity(1); }",
         ));
         let source = sources.file(file);
         let mut diagnostics = DiagnosticSink::new();

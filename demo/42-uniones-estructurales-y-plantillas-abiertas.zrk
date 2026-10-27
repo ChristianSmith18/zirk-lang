@@ -1,0 +1,80 @@
+// DEMO 42 — Uniones/intersecciones estructurales y plantillas abiertas.
+// Ejecutar con: zirk run demo/42-uniones-estructurales-y-plantillas-abiertas.zrk
+
+import { stdout } from std.io;
+
+type NumberEntry = { kind: "number"; value: Int32 };
+type TextEntry = { kind: "text"; value: String };
+type FlagEntry = { kind: "flag"; value: Boolean };
+type Entry = NumberEntry | TextEntry | FlagEntry;
+
+type Named = { name: String };
+type Numbered = { id: Int32 };
+type IdentifiedPerson = Named & Numbered;
+
+fn show(entry: Entry): Void {
+    if entry.kind == "number" {
+        stdout.println("number {entry.value}");
+    } else if entry.kind == "text" {
+        stdout.println("text {entry.value}");
+    } else if entry.kind == "flag" {
+        stdout.println("flag {entry.value}");
+    }
+}
+
+fn describe(person: IdentifiedPerson): String {
+    return "{person.name}:{person.id}";
+}
+
+fn on<T, K from String & keyof T>(
+    value: T,
+    event: "{K}Changed",
+    new_value: T[K],
+    callback: Fn(T[K]) => Void
+): Void {
+    callback(new_value);
+}
+
+type Person = { age: Int32; name: String };
+contract Watched<T> {
+    on<K from String & keyof T>(
+        event: "{K}Changed",
+        callback: Fn(T[K]) => Void
+    ): Void;
+}
+class PersonWatcher implements Watched<Person> {
+    on<K from String & keyof Person>(
+        event: "{K}Changed",
+        callback: Fn(Person[K]) => Void
+    ): Void { }
+}
+
+fn watch_person(person: Watched<Person>): Void {
+    person.on("ageChanged", (age): Void => {
+        stdout.println("age is {age}");
+    });
+}
+
+fn main(): Void {
+    inmut number: Entry = { kind: "number", value: 42 };
+    inmut text: Entry = { kind: "text", value: "ready" };
+    inmut flag: Entry = { kind: "flag", value: true };
+    show(number);
+    show(text);
+    show(flag);
+
+    mut person: IdentifiedPerson = { name: "Ada", id: 7 };
+    mut same: IdentifiedPerson = person;
+    same.id = 8;
+    stdout.println(describe(person));
+
+    inmut watched: { age: Int32; name: String } = { age: 42, name: "Ada" };
+    on(watched, "ageChanged", watched.age, (age): Void => {
+        stdout.println(age);
+    });
+
+    mut person_watcher: Watched<Person> = PersonWatcher();
+    watch_person(person_watcher);
+}
+
+main();

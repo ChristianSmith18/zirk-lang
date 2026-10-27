@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-26
+goal: Make singleton type syntax consist only of types and literal values, with
+  no calls or wrappers.

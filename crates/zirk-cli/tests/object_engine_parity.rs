@@ -93,6 +93,33 @@ fn assert_parity(name: &str, program: &str, expected: &str) {
 }
 
 #[test]
+fn generic_contract_method_specialization_matches_native_and_interpreter() {
+    assert_parity(
+        "generic_contract_method_specialization",
+        r#"import { stdout } from std.io;
+type Person = { age: Int32; name: String; };
+contract Watched<T> {
+    on<K from String & keyof T>(event: "{K}Changed", callback: Fn(T[K]) => Void): Void;
+}
+class PersonWatcher implements Watched<Person> {
+    on<K from String & keyof Person>(event: "{K}Changed", callback: Fn(Person[K]) => Void): Void {
+        stdout.println("called");
+    }
+}
+fn attach(person: Watched<Person>): Void {
+    person.on("ageChanged", (age): Void => { });
+    person.on("nameChanged", (name): Void => { });
+}
+fn main(): Void {
+    mut watcher: Watched<Person> = PersonWatcher();
+    attach(watcher);
+}
+main();"#,
+        "called\ncalled\n",
+    );
+}
+
+#[test]
 fn dynamic_object_patterns_and_rest_match_across_engines() {
     let program = r#"import { stdout } from std.io;
 fn main(): Void {
@@ -229,7 +256,7 @@ main();
 fn enum_singleton_union_matching_has_native_interpreter_parity() {
     let program = r#"import { stdout } from std.io;
 enum Shade { Red, Blue }
-type Color = const(Shade.Red) | const(Shade.Blue);
+type Color = Shade.Red | Shade.Blue;
 fn describe(value: Color): String {
     return match value {
         Shade.Red => "warm";
@@ -249,10 +276,10 @@ main();
 fn numeric_and_temporal_singleton_unions_match_across_engines() {
     let program = r#"import { stdout } from std.io;
 type Wait = 250ms | 1s;
-type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));
-type Ratio = const(1.5f64) | const(2.5f64);
-type Money = const(1.25) | const(2.5);
-type Letter = const('a') | const('b');
+type Day = Date(2026, 12, 25) | Date(2027, 1, 1);
+type Ratio = 1.5f64 | 2.5f64;
+type Money = 1.25 | 2.5;
+type Letter = 'a' | 'b';
 fn wait(value: Wait): String { return match value { 250ms => "short"; 1s => "long"; }; }
 fn day(value: Day): String { return match value { Date(2026, 12, 25) => "holiday"; Date(2027, 1, 1) => "new year"; }; }
 fn ratio(value: Ratio): String { return match value { 1.5f64 => "first"; 2.5f64 => "second"; }; }
@@ -297,6 +324,113 @@ main();
         program,
         "number 42\ntext ready\n",
     );
+}
+
+#[test]
+fn structural_union_three_alternatives_match_across_engines() {
+    let program = r#"import { stdout } from std.io;
+type NumberEntry = { kind: "number"; value: Int32 };
+type TextEntry = { kind: "text"; value: String };
+type FlagEntry = { kind: "flag"; value: Boolean };
+type Entry = NumberEntry | TextEntry | FlagEntry;
+fn show(entry: Entry): Void {
+    if entry.kind == "number" { stdout.println("number {entry.value}"); }
+    else if entry.kind == "text" { stdout.println("text {entry.value}"); }
+    else if entry.kind == "flag" { stdout.println("flag {entry.value}"); }
+}
+fn main(): Void {
+    inmut number: Entry = { kind: "number", value: 42 };
+    inmut text: Entry = { kind: "text", value: "ready" };
+    inmut flag: Entry = { kind: "flag", value: true };
+    show(number);
+    show(text);
+    show(flag);
+}
+main();
+"#;
+    assert_parity(
+        "structural_union_three_alternatives",
+        program,
+        "number 42\ntext ready\nflag true\n",
+    );
+}
+
+#[test]
+fn structural_union_with_scalar_alternative_matches_across_engines() {
+    let program = r#"import { stdout } from std.io;
+type TextEntry = { kind: "text"; value: String };
+type Entry = TextEntry | 42;
+fn identity(entry: Entry): Entry { return entry; }
+fn show(entry: Entry): String {
+    inmut result: Entry = identity(entry);
+    return match result { 42 => "number"; _ => result.value; };
+}
+fn main(): Void {
+    inmut text: Entry = { kind: "text", value: "ready" };
+    inmut number: Entry = 42;
+    stdout.println(show(text));
+    stdout.println(show(number));
+}
+main();
+"#;
+    assert_parity(
+        "structural_union_scalar_alternative",
+        program,
+        "ready\nnumber\n",
+    );
+}
+
+#[test]
+fn captured_structural_union_payload_matches_across_engines() {
+    let program = r#"import { stdout } from std.io;
+type Payload = { text: String };
+type Value = Payload | 42;
+fn main(): Void {
+    inmut captured: Value = { text: "captured structural payload" };
+    inmut read: Fn() => Value = (): Value => captured;
+    inmut value: Value = read();
+    stdout.println(match value { 42 => "number"; _ => value.text; });
+}
+main();
+"#;
+    assert_parity(
+        "captured_structural_union_payload",
+        program,
+        "captured structural payload\n",
+    );
+}
+
+#[test]
+fn structural_intersection_view_keeps_identity_across_engines() {
+    let program = r#"import { stdout } from std.io;
+type Named = { name: String };
+type Numbered = { id: Int32 };
+type IdentifiedPerson = Named & Numbered;
+fn describe(value: IdentifiedPerson): String { return "{value.name}:{value.id}"; }
+fn main(): Void {
+    mut person: IdentifiedPerson = { name: "Ada", id: 7 };
+    mut same: IdentifiedPerson = person;
+    same.id = 8;
+    stdout.println(describe(person));
+}
+main();
+"#;
+    assert_parity("structural_intersection_view", program, "Ada:8\n");
+}
+
+#[test]
+fn open_template_indexed_callback_matches_native_and_interpreter() {
+    let program = r#"import { stdout } from std.io;
+fn on<T, K from String & keyof T>(value: T, event: "{K}Changed", new_value: T[K], callback: Fn(T[K]) => Void): Void {
+    callback(new_value);
+}
+fn main(): Void {
+    inmut person: { age: Int32; name: String } = { age: 42, name: "Ada" };
+    on(person, "ageChanged", person.age, (age): Void => { stdout.println(age); });
+}
+main();
+"#;
+    assert_parity("open_template_indexed_callback", program, "42\n");
 }
 
 #[test]

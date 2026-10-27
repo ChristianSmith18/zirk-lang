@@ -23,10 +23,14 @@ Before narrowing, only members and operators valid for every alternative with a 
 Prefer an enum when alternatives form one owned closed domain with meaningful case names or payloads. Use a union when existing types themselves are the alternatives.
 
 Literal alternatives preserve their exact value and owning type. For example,
-`type Status = const(200) | const(404);` accepts only those two `Int32`
+`type Status = 200 | 404;` accepts only those two `Int32`
 values. The same form works for Boolean, String, Char, Decimal, binary Float,
-Duration, temporal values, enum variants, tuples, and recursively immutable
-value types supported by constant evaluation.
+Duration, and enum cases. Literal values are written directly. Temporal values
+must use their owning constructors (`Date(2026, 12, 25)`, `Time(9, 30)`,
+`DateTime(Date(2026, 12, 25), Time(9, 30))`) as literal type atoms; bare ISO
+spellings are not accepted in type position. These forms accept integer
+components only; arbitrary calls and computed expressions are not singleton
+type atoms.
 
 Structural alternatives can use a literal property as a discriminant:
 

@@ -1395,11 +1395,13 @@ mod tests {
         let layout = UnionTypeLayout::with_canonical_alternatives(
             vec![
                 IrType::Object(0),
+                IrType::ObjectAny,
                 IrType::String,
                 IrType::Int(IntWidth::I32),
             ],
             vec![
                 b"class::Widget".to_vec(),
+                b"shape::{ value: String }".to_vec(),
                 b"builtin::String".to_vec(),
                 b"builtin::Int32".to_vec(),
             ],
@@ -1412,7 +1414,7 @@ mod tests {
         let descriptor = module.union_layout_descriptor(0).unwrap();
         for (index, ty) in layout.alternatives.iter().enumerate() {
             assert_eq!(descriptor.alternatives[index].tag, index as u32);
-            if matches!(ty, IrType::Object(_)) || *ty == IrType::String {
+            if matches!(ty, IrType::Object(_) | IrType::ObjectAny) || *ty == IrType::String {
                 assert_eq!(descriptor.alternatives[index].reference_paths, [vec![1]]);
             } else {
                 assert!(descriptor.alternatives[index].reference_paths.is_empty());

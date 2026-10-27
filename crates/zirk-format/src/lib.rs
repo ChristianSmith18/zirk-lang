@@ -434,6 +434,17 @@ fn token_gap(
     {
         return "";
     }
+    // Bare temporal type literals are lexed as integer/operator sequences.
+    // Keep their compact separators so formatting does not turn a Date or
+    // Time singleton into subtraction or a malformed declaration.
+    if original_gap.is_empty()
+        && matches!(
+            (previous, next),
+            (Integer(_), Minus) | (Minus, Integer(_)) | (Integer(_), Colon) | (Colon, Integer(_))
+        )
+    {
+        return "";
+    }
     if matches!(previous, Comma) {
         return " ";
     }
@@ -1144,23 +1155,24 @@ mod tests {
     fn type_alias_formatting_round_trips_generic_structural_algebra() {
         let source = "type Choice<T = String> = { inmut active: true, value?: T } | { active: false };\n\
                       type Tagged = Int32 & { status?: 1 | 2 };\n\
-                      type Constant = const(1 + 2);\n\
+                      type Constant = 3;\n\
                       type Callable = Fn(Int32 | String) => Boolean;\n\
                       type Nary = A & B & C | D | E;\n\
                       type Grouped = (A | B) & (C | D);\n\
-                      type Temporal = const(Date(2026, 12, 25)) | const(Time(9, 30));\n";
+                      type Temporal = Date(2026, 12, 25) | Time(9, 30);\n\
+                      type TemporalConstructors = Date(2026, 12, 25) | Time(9, 30) | DateTime(Date(2026, 12, 25), Time(9, 30));\n";
         let formatted = format("types.zrk", source).unwrap();
         let formatted_again = format("types.zrk", &formatted).unwrap();
         assert_eq!(formatted, formatted_again);
         assert!(formatted.contains(" | "), "{formatted}");
         assert!(formatted.contains(" & "), "{formatted}");
         assert!(formatted.contains("value?: T"), "{formatted}");
-        assert!(formatted.contains("const(1 + 2)"), "{formatted}");
+        assert!(formatted.contains("3"), "{formatted}");
         assert!(formatted.contains("A & B & C | D | E"), "{formatted}");
         assert!(formatted.contains("A | B"), "{formatted}");
         assert!(formatted.contains("C | D"), "{formatted}");
         assert!(
-            formatted.contains("const(Date(2026, 12, 25)) | const(Time(9, 30))"),
+            formatted.contains("Date(2026, 12, 25) | Time(9, 30)"),
             "{formatted}"
         );
 
@@ -1251,12 +1263,12 @@ mod tests {
             )));
         }
         assert!(matches!(
-            parse_alias(source, 2).target.expression.as_deref(),
-            Some(zirk_ast::TypeExpr::Constant { .. })
+            parse_alias(source, 2).target.value,
+            Some(zirk_ast::TypeValue::Int(_))
         ));
         assert!(matches!(
-            parse_alias(&formatted, 2).target.expression.as_deref(),
-            Some(zirk_ast::TypeExpr::Constant { .. })
+            parse_alias(&formatted, 2).target.value,
+            Some(zirk_ast::TypeValue::Int(_))
         ));
         assert!(parse_alias(source, 3).target.function.is_some());
         assert!(parse_alias(&formatted, 3).target.function.is_some());

@@ -132,6 +132,33 @@ fn generic_type_alias_preserves_parameters_constraints_defaults_and_nested_targe
     ));
 }
 
+#[test]
+fn open_template_type_keeps_fixed_segments_interpolation_identity_and_spans() {
+    let source = "fn subscribe(event: \"before-{K}Changed\"): Void { }\nfn main(): Void { }";
+    let parsed = program(source);
+    let template = parsed.functions[0].params[0]
+        .ty
+        .template
+        .as_deref()
+        .expect("interpolated type syntax should retain structured template segments");
+    assert_eq!(template.parts.len(), 3);
+    assert!(matches!(
+        &template.parts[0],
+        TemplateTypePart::Literal { text, span }
+            if text == "before-" && *span == parsed.functions[0].params[0].ty.span
+    ));
+    let TemplateTypePart::Interpolation { ty, span } = &template.parts[1] else {
+        panic!("the middle template part should retain the type interpolation");
+    };
+    assert_eq!(ty.name, "K");
+    assert_eq!(*span, ty.span);
+    assert_eq!(&source[span.start as usize..span.end as usize], "K");
+    assert!(matches!(
+        &template.parts[2],
+        TemplateTypePart::Literal { text, .. } if text == "Changed"
+    ));
+}
+
 /// Parses expecting no errors.
 fn program(source_text: &str) -> Program {
     let source = SourceFile::new("test.zrk", source_text);
@@ -1830,28 +1857,28 @@ fn valid_builtin_literal_singletons_preserve_exact_payloads_in_type_position() {
 }
 
 #[test]
-fn valid_constant_expression_and_structural_shape_preserve_source_and_modifiers() {
-    let p = program(
-        "type State = const(Date(2026, 12, 25));\n\
+fn temporal_literals_and_structural_shape_preserve_source_and_modifiers() {
+    let source = "type State = Date(2026, 12, 25);\n\
          type User = { inmut id: String; name?: String; mut active: Boolean };\n\
-         fn main(): Void { }",
-    );
-    let TypeExpr::Constant {
-        source, expression, ..
+         fn main(): Void { }";
+    let p = program(source);
+    let TypeExpr::Value {
+        value: TypeValue::Temporal { kind, text },
+        span,
     } = p.type_aliases[0]
         .target
         .expression
         .as_deref()
-        .expect("constant expression node is preserved")
+        .expect("temporal literal node is preserved")
     else {
-        panic!("const(...) should produce a constant type node");
+        panic!("Date constructor should produce a temporal literal type node");
     };
-    assert_eq!(source, "Date(2026, 12, 25)");
-    let Expr::Call(call) = expression.as_ref() else {
-        panic!("const expression should retain its parsed expression tree");
-    };
-    assert!(matches!(call.callee.as_ref(), Expr::Path(name) if name.name == "Date"));
-    assert_eq!(call.args.len(), 3);
+    assert_eq!(*kind, TemporalType::Date);
+    assert_eq!(text, "2026-12-25");
+    assert_eq!(
+        &source[span.start as usize..span.end as usize],
+        "Date(2026, 12, 25)"
+    );
 
     let TypeExpr::Object { properties, .. } = p.type_aliases[1]
         .target
@@ -1867,6 +1894,69 @@ fn valid_constant_expression_and_structural_shape_preserve_source_and_modifiers(
     assert!(properties[1].optional);
     assert!(!properties[1].readonly);
     assert!(!properties[2].readonly);
+}
+
+#[test]
+fn direct_iso_temporal_values_are_rejected_in_type_position() {
+    for source in [
+        "type D = 2026-12-25; fn main(): Void { }",
+        "type T = 09:30; fn main(): Void { }",
+        "type DT = 2026-12-25 09:30; fn main(): Void { }",
+    ] {
+        assert!(!errors(source).is_empty(), "accepted {source}");
+    }
+}
+
+#[test]
+fn temporal_constructor_type_values_accept_only_direct_components() {
+    let source = "type D = Date(2026, 12, 25); type T = Time(9, 30, 15, 250000000); type DT = DateTime(Date(2026, 12, 25), Time(9, 30));\nfn main(): Void { }";
+    let p = program(source);
+    let expected = [
+        (TemporalType::Date, "2026-12-25", "Date(2026, 12, 25)"),
+        (
+            TemporalType::Time,
+            "09:30:15.25",
+            "Time(9, 30, 15, 250000000)",
+        ),
+        (
+            TemporalType::DateTime,
+            "2026-12-25 09:30",
+            "DateTime(Date(2026, 12, 25), Time(9, 30))",
+        ),
+    ];
+    for (alias, (expected_kind, expected_text, expected_source)) in
+        p.type_aliases.iter().zip(expected)
+    {
+        let Some(TypeExpr::Value {
+            value: TypeValue::Temporal { kind, text },
+            span,
+        }) = alias.target.expression.as_deref()
+        else {
+            panic!(
+                "expected temporal constructor type value for {}",
+                alias.name.name
+            );
+        };
+        assert_eq!(*kind, expected_kind);
+        assert_eq!(text, expected_text);
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            expected_source
+        );
+    }
+}
+
+#[test]
+fn temporal_type_constructors_reject_calls_and_computed_components() {
+    for source in [
+        "type Today = Date.today();\nfn main(): Void { }",
+        "type Offset = Date(2026 + 1, 12, 25);\nfn main(): Void { }",
+        "type Clock = Time(next_hour(), 30);\nfn main(): Void { }",
+        "type Moment = DateTime(make_date(), Time(9, 30));\nfn main(): Void { }",
+    ] {
+        let output = errors(source);
+        assert!(output.contains("error[E0301]"), "{source}: {output}");
+    }
 }
 
 #[test]
@@ -1888,15 +1978,15 @@ fn invalid_structural_type_modifier_reports_its_position() {
 }
 
 #[test]
-fn invalid_constant_type_expression_reports_empty_malformed_and_incomplete_forms() {
+fn call_shaped_singleton_type_syntax_is_rejected() {
     let empty = errors("type Empty = const();\nfn main(): Void { }");
-    assert!(empty.contains("expected an expression"), "{empty}");
+    assert!(empty.contains("direct literals"), "{empty}");
 
     let malformed = errors("type Bad = const(Date(, 12, 25));\nfn main(): Void { }");
-    assert!(malformed.contains("expected an expression"), "{malformed}");
+    assert!(malformed.contains("direct literals"), "{malformed}");
 
     let incomplete = errors("type Open = const(Date(2026, 12, 25);\nfn main(): Void { }");
-    assert!(incomplete.contains("const(...)"), "{incomplete}");
+    assert!(incomplete.contains("direct literals"), "{incomplete}");
 }
 
 #[test]
@@ -1917,7 +2007,7 @@ fn invalid_incomplete_constant_type_recovers_at_the_next_declaration() {
             .any(|function| function.name.name == "main"),
         "an incomplete const type must not hide later declarations"
     );
-    assert!(sink.render(RenderStyle::Human).contains("const(...)"));
+    assert!(sink.render(RenderStyle::Human).contains("direct literals"));
 }
 
 #[test]

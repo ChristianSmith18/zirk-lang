@@ -2858,7 +2858,9 @@ fn format_decimal(coefficient: i128, scale: u8) -> String {
 mod tests {
     use super::*;
     use crate::type_budget::TypeComputationBudget;
-    use zirk_ast::{Arg, BinaryExpr, CallExpr, CharLit, DurationLit, FloatLit, Ident, IntLit};
+    use zirk_ast::{
+        Arg, BinaryExpr, CallExpr, CharLit, DurationLit, FloatLit, Ident, IntLit, Stmt,
+    };
     use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceMap, Span};
     use zirk_lexer::tokenize;
     use zirk_parser::parse;
@@ -2897,9 +2899,47 @@ mod tests {
         })
     }
 
+    /// Adapts the historical `const(...)` test fixture into an ordinary local
+    /// initializer before invoking the production parser. The wrapper is test
+    /// data only; singleton type syntax no longer accepts it.
     fn parse_constant(source: &str) -> Expr {
+        let wrapper = source.find("const(").expect("constant fixture wrapper");
+        let expression_start = wrapper + "const(".len();
+        let bytes = source.as_bytes();
+        let mut depth = 1usize;
+        let mut quote = None;
+        let mut escaped = false;
+        let mut expression_end = None;
+        for (offset, byte) in bytes.iter().enumerate().skip(expression_start) {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if *byte == b'\\' {
+                    escaped = true;
+                } else if *byte == delimiter {
+                    quote = None;
+                }
+                continue;
+            }
+            if matches!(byte, b'"' | b'\'') {
+                quote = Some(*byte);
+            } else if *byte == b'(' {
+                depth += 1;
+            } else if *byte == b')' {
+                depth -= 1;
+                if depth == 0 {
+                    expression_end = Some(offset);
+                    break;
+                }
+            }
+        }
+        let expression = &source[expression_start..expression_end.expect("closed fixture")];
+        let declaration_start = source[..wrapper].rfind("type ").unwrap_or(0);
+        let prefix = &source[..declaration_start];
+        let transformed =
+            format!("{prefix}\nfn __constant_fixture(): Void {{ mut __value = {expression}; }}");
         let mut sources = SourceMap::new();
-        sources.add(SourceFile::new("const.zrk", source));
+        sources.add(SourceFile::new("const.zrk", transformed));
         let mut sink = DiagnosticSink::new();
         let file = sources.entry();
         let tokens = tokenize(file, &mut sink);
@@ -2909,15 +2949,15 @@ mod tests {
             "{}",
             sink.render(zirk_diagnostics::RenderStyle::Human)
         );
-        let zirk_ast::TypeExpr::Constant { expression, .. } = program.type_aliases[0]
-            .target
-            .expression
-            .as_deref()
-            .expect("constant AST")
-        else {
-            panic!("const type expression expected")
+        let fixture = program
+            .functions
+            .iter()
+            .find(|function| function.name.name == "__constant_fixture")
+            .expect("fixture function");
+        let Some(Stmt::Let(binding)) = fixture.body.statements.first() else {
+            panic!("fixture body should begin with an initialized local");
         };
-        expression.as_ref().clone()
+        binding.init.as_ref().expect("fixture initializer").clone()
     }
 
     #[test]

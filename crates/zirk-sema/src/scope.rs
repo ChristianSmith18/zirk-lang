@@ -290,6 +290,10 @@ impl Signature {
 pub struct ParamInfo {
     pub name: String,
     pub ty: Type,
+    /// A single open string-template hole associated with this argument.
+    /// It exists only during generic call inference; the value's runtime type
+    /// remains `String`.
+    pub open_template_pattern: Option<OpenTemplatePattern>,
     pub optional: bool,
     pub has_default: bool,
     /// The default expression is retained so lowering can materialize it for
@@ -297,6 +301,14 @@ pub struct ParamInfo {
     /// lookup.
     pub default: Option<zirk_ast::Expr>,
     pub variadic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenTemplatePattern {
+    pub type_param: u32,
+    pub prefix: String,
+    pub suffix: String,
+    pub span: Span,
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ use crate::ide::{
     ReferenceRole, SemanticIndex, SemanticSymbolData, SemanticSymbolKind, SemanticVisibility,
     UnresolvedSemanticReference,
 };
-use crate::scope::{Binding, ParamInfo, Scopes, Signature};
+use crate::scope::{Binding, OpenTemplatePattern, ParamInfo, Scopes, Signature};
 use crate::types::{
     AssociatedFieldInfo, Base, ClassType, ContractMethod, ContractProperty, ContractType, EnumType,
     EnumVariantInfo, FieldInfo, FloatWidth, FnType, GenericContractInstance, GenericEnumInstance,
@@ -76,6 +76,27 @@ fn substitute_alias_type_ref(reference: &TypeRef, bindings: &HashMap<String, Typ
             returns: Box::new(substitute_alias_type_ref(&function.returns, bindings)),
         })
     });
+    result.template = reference.template.as_deref().map(|template| {
+        Box::new(TemplateLiteralType {
+            parts: template
+                .parts
+                .iter()
+                .map(|part| match part {
+                    TemplateTypePart::Literal { text, span } => TemplateTypePart::Literal {
+                        text: text.clone(),
+                        span: *span,
+                    },
+                    TemplateTypePart::Interpolation { ty, span } => {
+                        TemplateTypePart::Interpolation {
+                            ty: Box::new(substitute_alias_type_ref(ty, bindings)),
+                            span: *span,
+                        }
+                    }
+                })
+                .collect(),
+            span: template.span,
+        })
+    });
     result
 }
 
@@ -90,6 +111,7 @@ fn substitute_alias_type_expr(
             nullable,
             function,
             fixed_size,
+            template,
             span,
         } => {
             let mut reference = TypeRef::new(name.clone(), *span);
@@ -97,6 +119,7 @@ fn substitute_alias_type_expr(
             reference.nullable = *nullable;
             reference.function = function.clone();
             reference.fixed_size = fixed_size.clone();
+            reference.template = template.clone();
             substitute_alias_type_ref(&reference, bindings).to_type_expr()
         }
         TypeExpr::Union { members, span } => TypeExpr::Union {
@@ -195,6 +218,7 @@ fn type_ref_has_guarded_alias_cycle(
                 nullable,
                 function,
                 fixed_size,
+                template,
                 span,
             } => {
                 let mut reference = TypeRef::new(name.clone(), *span);
@@ -202,6 +226,7 @@ fn type_ref_has_guarded_alias_cycle(
                 reference.nullable = *nullable;
                 reference.function = function.clone();
                 reference.fixed_size = fixed_size.clone();
+                reference.template = template.clone();
                 visit_ref(&reference, origin, aliases, guarded, visiting)
             }
             TypeExpr::Union { members, .. } | TypeExpr::Intersection { members, .. } => members
@@ -390,10 +415,15 @@ pub struct GenericCallInfo {
     /// owner; static and instance methods retain their declaration owner so
     /// lowering can select the correct body without guessing from spelling.
     pub owner_class: Option<u32>,
+    /// Contract whose dynamically dispatched generic method was called.
+    pub owner_contract: Option<u32>,
     /// Whether the resolved method call has no receiver.
     pub is_static_method: bool,
     /// Concrete or enclosing-generic type arguments by type-parameter id.
     pub substitutions: HashMap<u32, Type>,
+    /// Parameter types after all call-site substitutions, used by lowering
+    /// to give contextual callable arguments their concrete specialized ABI.
+    pub argument_types: Vec<Type>,
 }
 
 /// One application global passed from the validated `.zkinit` project model
@@ -1771,6 +1801,11 @@ struct Checker<'a> {
     relation_memo: RefCell<HashMap<(Type, Type), bool>>,
     conditional_memo: RefCell<HashMap<(Type, String, bool), Type>>,
     template_memo: RefCell<HashMap<String, Type>>,
+    open_template_patterns: HashMap<Span, OpenTemplatePattern>,
+    current_open_template_parameter: Option<Span>,
+    failed_open_template_calls: HashSet<Span>,
+    deferred_keyof_constraints: HashMap<u32, Vec<u32>>,
+    deferred_indexed_accesses: HashMap<u32, (Type, u32, Span)>,
     mapped_memo: RefCell<HashMap<String, Type>>,
     keyof_memo: RefCell<HashMap<(Type, Option<Type>, Option<u32>), Type>>,
     current_function: Option<Span>,
@@ -2473,6 +2508,11 @@ impl<'a> Checker<'a> {
             relation_memo: RefCell::new(HashMap::new()),
             conditional_memo: RefCell::new(HashMap::new()),
             template_memo: RefCell::new(HashMap::new()),
+            open_template_patterns: HashMap::new(),
+            current_open_template_parameter: None,
+            failed_open_template_calls: HashSet::new(),
+            deferred_keyof_constraints: HashMap::new(),
+            deferred_indexed_accesses: HashMap::new(),
             mapped_memo: RefCell::new(HashMap::new()),
             keyof_memo: RefCell::new(HashMap::new()),
             current_function: None,
@@ -3851,7 +3891,11 @@ impl<'a> Checker<'a> {
                     name: Some(method.name.name.clone()),
                     kind: TypeMapKind::Method,
                     span: method.name.span,
-                    text: self.signature_text(&info.params, info.returns),
+                    text: self.signature_text_with_type_params(
+                        &info.params,
+                        info.returns,
+                        &info.type_params,
+                    ),
                     inferred: method.return_type.is_none(),
                 });
             }
@@ -3899,7 +3943,11 @@ impl<'a> Checker<'a> {
                     name: Some(method.name.name.clone()),
                     kind: TypeMapKind::Method,
                     span: method.name.span,
-                    text: self.signature_text(&info.params, info.returns),
+                    text: self.signature_text_with_type_params(
+                        &info.params,
+                        info.returns,
+                        &info.type_params,
+                    ),
                     inferred: method.return_type.is_none(),
                 });
             }
@@ -4438,6 +4486,28 @@ impl<'a> Checker<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         format!("fn({params}): {}", self.name(returns))
+    }
+
+    fn signature_text_with_type_params(
+        &self,
+        params: &[ParamInfo],
+        returns: Type,
+        type_params: &[u32],
+    ) -> String {
+        let signature = self.signature_text(params, returns);
+        if type_params.is_empty() {
+            return signature;
+        }
+        let names = type_params
+            .iter()
+            .filter_map(|id| {
+                self.type_params
+                    .get(*id as usize)
+                    .map(|info| info.name.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        signature.replacen("fn(", &format!("fn<{names}>("), 1)
     }
 
     /// Notes which names each file brought in with `import`.
@@ -5041,6 +5111,8 @@ impl<'a> Checker<'a> {
             .methods
             .push(ContractMethod {
                 name: "iterator".into(),
+                type_params: Vec::new(),
+                type_param_constraints: Vec::new(),
                 params: Vec::new(),
                 returns: Type::of(Base::ContractInstance(returns_iterator)),
                 span: at,
@@ -5059,6 +5131,8 @@ impl<'a> Checker<'a> {
             .methods
             .push(ContractMethod {
                 name: "next".into(),
+                type_params: Vec::new(),
+                type_param_constraints: Vec::new(),
                 params: Vec::new(),
                 returns: Type::of(Base::EnumInstance(returns_iteration)),
                 span: at,
@@ -5125,6 +5199,7 @@ impl<'a> Checker<'a> {
                 params: vec![ParamInfo {
                     name: "message".to_string(),
                     ty: Type::STRING,
+                    open_template_pattern: None,
                     optional: false,
                     has_default: false,
                     default: None,
@@ -5636,6 +5711,7 @@ impl<'a> Checker<'a> {
                 constructors: vec![vec![ParamInfo {
                     name: "reason".into(),
                     ty: Type::STRING,
+                    open_template_pattern: None,
                     optional: false,
                     has_default: false,
                     default: None,
@@ -5814,6 +5890,8 @@ impl<'a> Checker<'a> {
             .methods
             .push(ContractMethod {
                 name: "close".into(),
+                type_params: Vec::new(),
+                type_param_constraints: Vec::new(),
                 params: Vec::new(),
                 returns: Type::of(Base::EnumInstance(close_returns)),
                 span: at,
@@ -5828,6 +5906,8 @@ impl<'a> Checker<'a> {
             .methods
             .push(ContractMethod {
                 name: "is_closed".into(),
+                type_params: Vec::new(),
+                type_param_constraints: Vec::new(),
                 params: Vec::new(),
                 returns: Type::BOOLEAN,
                 span: at,
@@ -6035,6 +6115,9 @@ impl<'a> Checker<'a> {
             // A `trait` default may omit the annotation — `UNKNOWN` marks it
             // for `infer_return_types`; the parser has already forced one on
             // every signature-only member.
+            let previous_generic_mode =
+                std::mem::replace(&mut self.allow_generic_function_params, true);
+            let method_type_params = self.enter_type_params(&method.type_params);
             let returns = method
                 .return_type
                 .as_ref()
@@ -6042,13 +6125,24 @@ impl<'a> Checker<'a> {
                 .unwrap_or(Type::UNKNOWN);
             let throws = self.resolve_throws_clause(&method.throws);
             let index = instance_method_index;
+            let params = method
+                .params
+                .iter()
+                .map(|p| self.resolve_param(p))
+                .collect::<Vec<_>>();
+            let method_inputs = params.iter().map(|p| p.ty).collect::<Vec<_>>();
+            self.check_declared_variance(&method.type_params, &method_inputs, &[returns], &[]);
+            let method_type_param_constraints = method_type_params
+                .iter()
+                .map(|id| self.type_params[*id as usize].constraints.clone())
+                .collect();
+            self.leave_type_params();
+            self.allow_generic_function_params = previous_generic_mode;
             methods.push(ContractMethod {
                 name: method.name.name.clone(),
-                params: method
-                    .params
-                    .iter()
-                    .map(|p| self.resolve_param(p))
-                    .collect(),
+                type_params: method_type_params,
+                type_param_constraints: method_type_param_constraints,
+                params,
                 returns,
                 span: method.name.span,
                 has_default: method.body.is_some(),
@@ -6816,8 +6910,58 @@ impl<'a> Checker<'a> {
         method: &ContractMethod,
         subst: &[(u32, Type)],
     ) -> ContractMethod {
+        let mut type_param_constraints: Vec<Vec<Type>> = method
+            .type_param_constraints
+            .iter()
+            .map(|constraints| {
+                constraints
+                    .iter()
+                    .map(|constraint| self.substitute_type(*constraint, subst))
+                    .collect()
+            })
+            .collect();
+        for (index, parameter) in method.type_params.iter().enumerate() {
+            let Some(receivers) = self.deferred_keyof_constraints.get(parameter).cloned() else {
+                continue;
+            };
+            for receiver_id in receivers {
+                let Some((_, receiver)) = subst.iter().find(|(id, _)| *id == receiver_id) else {
+                    continue;
+                };
+                let keys = self.keyof_member_names(*receiver, &mut HashSet::new());
+                if keys.is_empty() {
+                    continue;
+                }
+                let mut key_members = keys
+                    .into_iter()
+                    .map(|key| {
+                        self.intern_singleton_value(CanonicalConst {
+                            type_identity: "String".into(),
+                            value: ConstValue::String(key),
+                        })
+                        .base
+                    })
+                    .collect::<Vec<_>>();
+                Self::sort_bases(&mut key_members);
+                key_members.dedup();
+                let key_constraint = match key_members.len() {
+                    0 => Type::of(Base::Never),
+                    1 => Type::of(key_members[0]),
+                    _ => Type::of(Base::Union(self.intern_union(key_members))),
+                };
+                if let Some(constraints) = type_param_constraints.get_mut(index)
+                    && let Some(position) = constraints
+                        .iter()
+                        .rposition(|constraint| constraint.base == Base::String)
+                {
+                    constraints[position] = key_constraint;
+                }
+            }
+        }
         ContractMethod {
             name: method.name.clone(),
+            type_params: method.type_params.clone(),
+            type_param_constraints,
             params: method
                 .params
                 .iter()
@@ -7011,7 +7155,7 @@ impl<'a> Checker<'a> {
         let index = self.classes[class as usize].methods.len();
         self.classes[class as usize].methods.push(MethodInfo {
             name: method.name.clone(),
-            type_params: Vec::new(),
+            type_params: method.type_params.clone(),
             params: method.params.clone(),
             returns: method.returns,
             visibility: Visibility::Public,
@@ -7035,22 +7179,88 @@ impl<'a> Checker<'a> {
         contract: &str,
         at: Span,
     ) {
-        let same_params = supplied.params.len() == required.params.len()
+        // Generic method parameter IDs are allocated independently for the
+        // class and contract declarations. Compare signatures after mapping
+        // each required method parameter onto its supplied counterpart.
+        let same_generic_arity = supplied.type_params.len() == required.type_params.len();
+        let alpha_subst: Vec<_> = supplied
+            .type_params
+            .iter()
+            .copied()
+            .zip(required.type_params.iter().copied())
+            .map(|(supplied, required)| (required, Type::of(Base::Param(supplied))))
+            .collect();
+        let mut same_constraints = same_generic_arity
+            && supplied.type_params.len() == required.type_param_constraints.len();
+        if same_constraints {
+            for (index, supplied_id) in supplied.type_params.iter().enumerate() {
+                let supplied_constraints =
+                    self.type_params[*supplied_id as usize].constraints.clone();
+                let required_constraints = required.type_param_constraints[index].clone();
+                let required_constraints = required_constraints
+                    .into_iter()
+                    .map(|ty| self.substitute_type(ty, &alpha_subst))
+                    .collect::<Vec<_>>();
+                if supplied_constraints.len() != required_constraints.len()
+                    || !supplied_constraints.iter().zip(&required_constraints).all(
+                        |(supplied, required)| {
+                            self.assignable_relation(*required, *supplied)
+                                .unwrap_or(false)
+                                && self
+                                    .assignable_relation(*supplied, *required)
+                                    .unwrap_or(false)
+                        },
+                    )
+                {
+                    same_constraints = false;
+                    break;
+                }
+            }
+        }
+        let required_param_types = required
+            .params
+            .iter()
+            .map(|param| self.substitute_type(param.ty, &alpha_subst))
+            .collect::<Vec<_>>();
+        let same_params = same_generic_arity
+            && supplied.params.len() == required.params.len()
             && supplied
                 .params
                 .iter()
                 .zip(&required.params)
-                .all(|(a, b)| a.ty == b.ty);
+                .zip(&required_param_types)
+                .all(|((a, b), required_ty)| {
+                    self.same_generic_signature_type(a.ty, *required_ty)
+                        && a.open_template_pattern.as_ref().map(|pattern| {
+                            (
+                                supplied.type_params.contains(&pattern.type_param),
+                                &pattern.prefix,
+                                &pattern.suffix,
+                            )
+                        }) == b.open_template_pattern.as_ref().map(|pattern| {
+                            (
+                                required.type_params.contains(&pattern.type_param),
+                                &pattern.prefix,
+                                &pattern.suffix,
+                            )
+                        })
+                });
 
         // An `UNKNOWN` on either side is a still-pending inference, not a
         // mismatch: the pair is registered for `verify_pending_signatures`
         // and the return type compares once both are resolved
         // (`return-type-inference`).
+        let required_returns = self.substitute_type(required.returns, &alpha_subst);
         let same_returns = supplied.returns.is_unknown()
             || required.returns.is_unknown()
-            || supplied.returns == required.returns;
+            || self.same_generic_signature_type(supplied.returns, required_returns);
 
-        if supplied.is_static == required.is_static && same_params && same_returns {
+        if supplied.is_static == required.is_static
+            && same_generic_arity
+            && same_constraints
+            && same_params
+            && same_returns
+        {
             if supplied.visibility != Visibility::Public {
                 let name = supplied.name.clone();
                 self.error(
@@ -8446,15 +8656,12 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            // Static generic methods have no receiver ABI and can use the
-            // same direct-position monomorphization as generic free
-            // functions. Other generic declarations remain gated here.
-            let allow_static_method_specialization = self.allow_generic_function_params;
-            if method.is_static {
-                self.allow_generic_function_params = true;
-            }
+            // Method-local parameters are retained for both static and
+            // instance methods. Lowering specializes every call site before
+            // emitting a concrete callable ABI.
+            let previous_generic_mode =
+                std::mem::replace(&mut self.allow_generic_function_params, true);
             let type_params = self.enter_type_params(&method.type_params);
-            self.allow_generic_function_params = allow_static_method_specialization;
             // `None` marks the signature for `infer_return_types` — the
             // parser only allows the omission on a method with a body.
             let returns = method
@@ -8510,6 +8717,7 @@ impl<'a> Checker<'a> {
                 &[],
             );
             self.leave_type_params();
+            self.allow_generic_function_params = previous_generic_mode;
 
             match methods.iter().position(|m| m.name == method.name.name) {
                 Some(position) if methods[position].owner != id => {
@@ -10513,7 +10721,9 @@ impl<'a> Checker<'a> {
 
     /// Resolves one parameter, applying the rule that `name?: T` is nullable.
     fn resolve_param(&mut self, p: &Param) -> ParamInfo {
+        let previous_template_parameter = self.current_open_template_parameter.replace(p.ty.span);
         let mut ty = self.resolve_type(&p.ty);
+        self.current_open_template_parameter = previous_template_parameter;
 
         // An optional parameter may be absent, and absence is `null`.
         if p.optional {
@@ -10523,6 +10733,7 @@ impl<'a> Checker<'a> {
         ParamInfo {
             name: p.name.name.clone(),
             ty,
+            open_template_pattern: self.open_template_patterns.get(&p.ty.span).cloned(),
             optional: p.optional,
             has_default: p.default.is_some(),
             default: p.default.clone(),
@@ -10602,6 +10813,15 @@ impl<'a> Checker<'a> {
         // Constraints are resolved only the first time a `TypeParam` is seen;
         // a later re-entry reuses what was already resolved for its id.
         for (i, id) in newly_created {
+            let mut keyof_parameters = Vec::new();
+            for constraint in &params[i].constraints {
+                self.collect_deferred_keyof_type_params(constraint, &mut keyof_parameters);
+            }
+            keyof_parameters.sort_unstable();
+            keyof_parameters.dedup();
+            if !keyof_parameters.is_empty() {
+                self.deferred_keyof_constraints.insert(id, keyof_parameters);
+            }
             let constraints: Vec<Type> = params[i]
                 .constraints
                 .iter()
@@ -10614,6 +10834,26 @@ impl<'a> Checker<'a> {
         }
 
         ids
+    }
+
+    fn collect_deferred_keyof_type_params(&self, reference: &TypeRef, out: &mut Vec<u32>) {
+        if reference.name == "keyof"
+            && let Some(argument) = reference.arguments.first()
+            && let Some(id) = self.lookup_type_param(&argument.name)
+            && argument.arguments.is_empty()
+            && argument.union_with.is_empty()
+            && argument.intersection_with.is_empty()
+        {
+            out.push(id);
+        }
+        for nested in reference
+            .arguments
+            .iter()
+            .chain(&reference.union_with)
+            .chain(&reference.intersection_with)
+        {
+            self.collect_deferred_keyof_type_params(nested, out);
+        }
     }
 
     fn leave_type_params(&mut self) {
@@ -10654,6 +10894,35 @@ impl<'a> Checker<'a> {
                 }
                 TypeExpr::Named { .. } => {}
             }
+        }
+        if let Some((enum_name, variant_name)) = reference.name.rsplit_once('.')
+            && let Some(enumeration) = self.enums.iter().find(|item| item.name == enum_name)
+            && let Some(variant) = enumeration
+                .variants
+                .iter()
+                .find(|item| item.name == variant_name)
+        {
+            if !variant.associated.is_empty() {
+                self.error(
+                    codes::INVALID_CONSTANT_TYPE,
+                    reference.span,
+                    format!("enum case `{}` requires associated values", reference.name),
+                    "singleton type syntax accepts direct enum cases without payloads",
+                    None,
+                );
+                return Type::UNKNOWN;
+            }
+            return self.resolve_singleton_value(
+                CanonicalConst {
+                    type_identity: enumeration.name.clone(),
+                    value: crate::constant_value::ConstValue::Enum {
+                        enum_identity: enumeration.name.clone(),
+                        variant_identity: format!("{}::{}", enumeration.name, variant.name),
+                        fields: Vec::new(),
+                    },
+                },
+                reference.span,
+            );
         }
         if reference.name == "keyof" {
             return self.resolve_keyof_type_ref(reference);
@@ -10811,6 +11080,18 @@ impl<'a> Checker<'a> {
         }
         self.remove_intersection_supertypes(&mut members);
         Self::sort_bases(&mut members);
+        if let Some((property, left, right)) = self.structural_intersection_conflict(&members) {
+            let left_name = self.name(left);
+            let right_name = self.name(right);
+            self.error(
+                codes::TYPE_MISMATCH,
+                reference.span,
+                format!("structural intersection property `{property}` has conflicting types"),
+                format!("the intersected shapes require both `{left_name}` and `{right_name}`"),
+                Some("give the property one compatible type in every constituent".into()),
+            );
+            return Type::UNKNOWN;
+        }
         if members.len() > 1 && !self.intersection_has_object_representation(&members) {
             self.not_lowered(
                 reference.span,
@@ -10836,6 +11117,7 @@ impl<'a> Checker<'a> {
                 nullable,
                 function,
                 fixed_size,
+                template,
                 span,
             } => {
                 let mut reference = TypeRef::new(name.clone(), *span);
@@ -10843,6 +11125,7 @@ impl<'a> Checker<'a> {
                 reference.nullable = *nullable;
                 reference.function = function.clone();
                 reference.fixed_size = fixed_size.clone();
+                reference.template = template.clone();
                 self.resolve_type(&reference)
             }
             TypeExpr::Value { value, span } => self.resolve_singleton_literal(value, *span),
@@ -11024,6 +11307,18 @@ impl<'a> Checker<'a> {
         }
         self.remove_intersection_supertypes(&mut members);
         Self::sort_bases(&mut members);
+        if let Some((property, left, right)) = self.structural_intersection_conflict(&members) {
+            let left_name = self.name(left);
+            let right_name = self.name(right);
+            self.error(
+                codes::TYPE_MISMATCH,
+                span,
+                format!("structural intersection property `{property}` has conflicting types"),
+                format!("the intersected shapes require both `{left_name}` and `{right_name}`"),
+                Some("give the property one compatible type in every constituent".into()),
+            );
+            return Type::UNKNOWN;
+        }
         if members.len() > 1 && !self.intersection_has_object_representation(&members) {
             self.not_lowered(
                 span,
@@ -11145,7 +11440,41 @@ impl<'a> Checker<'a> {
         (self.intersections.len() - 1) as u32
     }
 
+    fn structural_intersection_conflict(&self, members: &[Base]) -> Option<(String, Type, Type)> {
+        if !members
+            .iter()
+            .all(|member| matches!(member, Base::Shape(_) | Base::Object))
+        {
+            return None;
+        }
+        let mut properties: HashMap<String, Type> = HashMap::new();
+        for member in members {
+            let Base::Shape(shape_id) = member else {
+                continue;
+            };
+            for property in &self.structural_types.get(*shape_id as usize)?.properties {
+                if let Some(previous) = properties.get(&property.name).copied() {
+                    if previous != property.ty {
+                        return Some((property.name.clone(), previous, property.ty));
+                    }
+                } else {
+                    properties.insert(property.name.clone(), property.ty);
+                }
+            }
+        }
+        None
+    }
+
     fn intersection_has_object_representation(&self, members: &[Base]) -> bool {
+        // Anonymous structural shapes are managed object references at
+        // runtime. Intersecting only shapes (and the common Object view)
+        // therefore keeps the original reference and needs no new layout.
+        if members
+            .iter()
+            .all(|member| matches!(member, Base::Shape(_) | Base::Object))
+        {
+            return true;
+        }
         if members.iter().any(|member| {
             !matches!(
                 member,
@@ -11198,6 +11527,41 @@ impl<'a> Checker<'a> {
     }
 
     fn resolve_singleton_literal(&mut self, value: &TypeValue, span: Span) -> Type {
+        if let TypeValue::Temporal { kind, text } = value {
+            let parsed = match kind {
+                TemporalType::Date => zirk_runtime_core::temporal::parse_date_text(text)
+                    .map(crate::constant_value::ConstValue::Date)
+                    .map(|value| ("Date", value)),
+                TemporalType::Time => zirk_runtime_core::temporal::parse_time_text(text)
+                    .map(crate::constant_value::ConstValue::Time)
+                    .map(|value| ("Time", value)),
+                TemporalType::DateTime => zirk_runtime_core::temporal::parse_datetime_text(text)
+                    .map(crate::constant_value::ConstValue::DateTime)
+                    .map(|value| ("DateTime", value)),
+            };
+            let Some((type_identity, value)) = parsed else {
+                let type_name = match kind {
+                    TemporalType::Date => "Date",
+                    TemporalType::Time => "Time",
+                    TemporalType::DateTime => "DateTime",
+                };
+                self.error(
+                    codes::INVALID_CONSTANT_TYPE,
+                    span,
+                    format!("invalid {type_name} literal `{text}`"),
+                    "use a valid ISO calendar date or clock value",
+                    Some("check the month/day range or the 24-hour clock range".into()),
+                );
+                return Type::UNKNOWN;
+            };
+            return self.resolve_singleton_value(
+                CanonicalConst {
+                    type_identity: type_identity.to_string(),
+                    value,
+                },
+                span,
+            );
+        }
         let expression = match value {
             TypeValue::Int(value) => Expr::Int(value.clone()),
             TypeValue::Float(value) => Expr::Float(value.clone()),
@@ -11206,6 +11570,7 @@ impl<'a> Checker<'a> {
             TypeValue::Char(value) => Expr::Char(value.clone()),
             TypeValue::Boolean(value) => Expr::Bool(value.clone()),
             TypeValue::Null(value) => Expr::Null(value.clone()),
+            TypeValue::Temporal { .. } => unreachable!("temporal values return above"),
         };
         let mut budget = crate::type_budget::TypeComputationBudget::default();
         let enum_variants = self.const_enum_variants();
@@ -11223,7 +11588,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn resolve_pattern_singleton_literal(&mut self, value: &TypeValue, _span: Span) -> Type {
+    fn resolve_pattern_singleton_literal(&mut self, value: &TypeValue, span: Span) -> Type {
+        if matches!(value, TypeValue::Temporal { .. }) {
+            return self.resolve_singleton_literal(value, span);
+        }
         let expression = match value {
             TypeValue::Int(value) => Expr::Int(value.clone()),
             TypeValue::Float(value) => Expr::Float(value.clone()),
@@ -11232,6 +11600,7 @@ impl<'a> Checker<'a> {
             TypeValue::Char(value) => Expr::Char(value.clone()),
             TypeValue::Boolean(value) => Expr::Bool(value.clone()),
             TypeValue::Null(value) => Expr::Null(value.clone()),
+            TypeValue::Temporal { .. } => unreachable!("temporal values return above"),
         };
         self.evaluate_pattern_constant(&expression)
     }
@@ -12875,6 +13244,13 @@ impl<'a> Checker<'a> {
             );
             return Type::UNKNOWN;
         }
+        if matches!(operand.base, Base::Param(_)) {
+            // The exact key set is recovered after generic call inference;
+            // inside the generic declaration the safe upper bound is String.
+            // Calls constrained by `keyof T` perform the deferred membership
+            // check against the concrete T before contextual typing.
+            return Type::STRING;
+        }
         let cache_key = (operand, self.this_type, self.current_class_body);
         if let Some(cached) = self.keyof_memo.borrow().get(&cache_key).copied() {
             return cached;
@@ -13056,6 +13432,35 @@ impl<'a> Checker<'a> {
         let key_type = self.resolve_type(&reference.arguments[1]);
         if receiver.is_unknown() || key_type.is_unknown() {
             return Type::UNKNOWN;
+        }
+        if let Base::Param(key_param) = key_type.base {
+            if let Some((&deferred, _)) =
+                self.deferred_indexed_accesses
+                    .iter()
+                    .find(|(_, (existing_receiver, key, _))| {
+                        *existing_receiver == receiver && *key == key_param
+                    })
+            {
+                return Type::of(Base::Param(deferred));
+            }
+            let deferred = self.type_params.len() as u32;
+            let deferred_name = format!(
+                "{}[{}]",
+                self.name(receiver),
+                self.type_params
+                    .get(key_param as usize)
+                    .map_or("K", |parameter| parameter.name.as_str())
+            );
+            self.type_params.push(TypeParamInfo {
+                name: deferred_name,
+                constraints: Vec::new(),
+                variance: Variance::Invariant,
+                default: None,
+                span: reference.span,
+            });
+            self.deferred_indexed_accesses
+                .insert(deferred, (receiver, key_param, reference.span));
+            return Type::of(Base::Param(deferred));
         }
         let Some(keys) = self.indexed_key_names(key_type) else {
             self.error(
@@ -13387,6 +13792,56 @@ impl<'a> Checker<'a> {
                 };
                 let ty = self.resolve_type(argument);
                 let Some(values) = self.template_string_values(ty) else {
+                    if let Base::Param(type_param) = ty.base
+                        && let Some(parameter_span) = self.current_open_template_parameter
+                    {
+                        if alternatives.len() != 1 {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                reference.span,
+                                "open template pattern has an ambiguous prefix",
+                                "finite interpolations before an open hole can produce more than one prefix",
+                                Some("use one open interpolation with fixed literal text around it".into()),
+                            );
+                            return Type::UNKNOWN;
+                        }
+                        let Some(suffix) = Self::template_literal_suffix(bytes, cursor) else {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                reference.span,
+                                "open template inference supports one interpolation hole",
+                                "a second interpolation follows the generic key",
+                                Some(
+                                    "keep one inferred type parameter inside a template type"
+                                        .into(),
+                                ),
+                            );
+                            return Type::UNKNOWN;
+                        };
+                        let prefix = alternatives.pop().unwrap_or_default();
+                        if prefix.is_empty() && suffix.is_empty() {
+                            self.error(
+                                codes::TYPE_MISMATCH,
+                                reference.span,
+                                "open template pattern needs fixed text",
+                                "an unconstrained `{K}` pattern cannot infer a unique key from a string",
+                                Some("add a fixed prefix or suffix, such as `{K}Changed`".into()),
+                            );
+                            return Type::UNKNOWN;
+                        }
+                        self.open_template_patterns.insert(
+                            parameter_span,
+                            OpenTemplatePattern {
+                                type_param,
+                                prefix,
+                                suffix,
+                                span: reference.span,
+                            },
+                        );
+                        let result = Type::STRING;
+                        self.template_memo.borrow_mut().insert(cache_key, result);
+                        return result;
+                    }
                     self.error(codes::TYPE_MISMATCH, argument.span, "template interpolation requires a finite singleton string-convertible type", format!("found `{}`", self.name(ty)), None);
                     return Type::UNKNOWN;
                 };
@@ -13437,6 +13892,32 @@ impl<'a> Checker<'a> {
         };
         self.template_memo.borrow_mut().insert(cache_key, result);
         result
+    }
+
+    fn template_literal_suffix(bytes: &[u8], mut cursor: usize) -> Option<String> {
+        let mut suffix = String::new();
+        while cursor < bytes.len() {
+            if bytes[cursor] != b'L' {
+                return None;
+            }
+            cursor += 1;
+            let number_start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            let number = std::str::from_utf8(bytes.get(number_start..cursor)?)
+                .ok()?
+                .parse::<usize>()
+                .ok()?;
+            if bytes.get(cursor) != Some(&b':') {
+                return None;
+            }
+            cursor += 1;
+            let end = cursor.checked_add(number)?;
+            suffix.push_str(std::str::from_utf8(bytes.get(cursor..end)?).ok()?);
+            cursor = end;
+        }
+        Some(suffix)
     }
 
     fn template_string_values(&self, ty: Type) -> Option<Vec<String>> {
@@ -13815,7 +14296,11 @@ impl<'a> Checker<'a> {
         if let Some(id) = self.recursive_alias_shapes.get(name).copied() {
             return Type::of(Base::Shape(id));
         }
-        const MAX_ALIAS_UNFOLDING_DEPTH: usize = 256;
+        // Alias resolution is recursive in the checker. A depth of 256 can
+        // overflow the default 2 MiB test/compiler thread stack before this
+        // diagnostic runs, so cap source alias unfolding well below that
+        // platform-dependent failure point.
+        const MAX_ALIAS_UNFOLDING_DEPTH: usize = 64;
         if self.resolving_aliases.len() >= MAX_ALIAS_UNFOLDING_DEPTH {
             self.error(
                 codes::TYPE_COMPUTATION_LIMIT,
@@ -14307,6 +14792,48 @@ impl<'a> Checker<'a> {
                 replacement.without_null()
             };
         }
+        if let Base::Param(id) = ty.base
+            && let Some((receiver, key, span)) = self.deferred_indexed_accesses.get(&id).copied()
+        {
+            let receiver = self.substitute_type(receiver, subst);
+            let key_type = self.substitute_type(Type::of(Base::Param(key)), subst);
+            if let Some(key_name) = self.singleton_string(key_type)
+                && let Some(property) = self.indexed_property_type(receiver, &key_name, span)
+            {
+                return if ty.nullable {
+                    property.as_nullable()
+                } else {
+                    property
+                };
+            }
+            if let Base::Param(key) = key_type.base {
+                if let Some((&existing, _)) = self.deferred_indexed_accesses.iter().find(
+                    |(_, (known_receiver, known_key, _))| {
+                        *known_receiver == receiver && *known_key == key
+                    },
+                ) {
+                    return Type::of(Base::Param(existing));
+                }
+                let placeholder = self.type_params.len() as u32;
+                let deferred_name = format!(
+                    "{}[{}]",
+                    self.name(receiver),
+                    self.type_params
+                        .get(key as usize)
+                        .map_or("K", |parameter| parameter.name.as_str())
+                );
+                self.type_params.push(TypeParamInfo {
+                    name: deferred_name,
+                    constraints: Vec::new(),
+                    variance: Variance::Invariant,
+                    default: None,
+                    span,
+                });
+                self.deferred_indexed_accesses
+                    .insert(placeholder, (receiver, key, span));
+                return Type::of(Base::Param(placeholder));
+            }
+        }
 
         let base = match ty.base {
             Base::ContractInstance(inst_id) => {
@@ -14345,6 +14872,32 @@ impl<'a> Checker<'a> {
                     args,
                 }))
             }
+            Base::Function(function_id) => {
+                let function = self.fn_types[function_id as usize].clone();
+                let params = function
+                    .params
+                    .into_iter()
+                    .map(|param| self.substitute_type(param, subst))
+                    .collect();
+                let returns = self.substitute_type(function.returns, subst);
+                Base::Function(self.intern_fn_type(FnType { params, returns }))
+            }
+            Base::Union(union_id) => {
+                let members = self.unions[union_id as usize].clone();
+                let members = members
+                    .into_iter()
+                    .map(|member| self.substitute_type(Type::of(member), subst).base)
+                    .collect();
+                Base::Union(self.intern_union(members))
+            }
+            Base::Intersection(intersection_id) => {
+                let members = self.intersections[intersection_id as usize].clone();
+                let members = members
+                    .into_iter()
+                    .map(|member| self.substitute_type(Type::of(member), subst).base)
+                    .collect();
+                Base::Intersection(self.intern_intersection(members))
+            }
             other => other,
         };
 
@@ -14352,6 +14905,49 @@ impl<'a> Checker<'a> {
             base,
             nullable: ty.nullable,
             borrowed_scope: ty.borrowed_scope,
+        }
+    }
+
+    /// Compares generic signature types after their method parameters have
+    /// been alpha-renamed. Deferred indexed accesses retain their receiver
+    /// and key relation, so distinct synthetic placeholder IDs are equal
+    /// exactly when those two components are equal.
+    fn same_generic_signature_type(&self, left: Type, right: Type) -> bool {
+        if left == right {
+            return true;
+        }
+        if left.nullable != right.nullable {
+            return false;
+        }
+        match (left.base, right.base) {
+            (Base::Function(left), Base::Function(right)) => {
+                let (Some(left), Some(right)) = (
+                    self.fn_types.get(left as usize),
+                    self.fn_types.get(right as usize),
+                ) else {
+                    return false;
+                };
+                left.params.len() == right.params.len()
+                    && left
+                        .params
+                        .iter()
+                        .zip(&right.params)
+                        .all(|(a, b)| self.same_generic_signature_type(*a, *b))
+                    && self.same_generic_signature_type(left.returns, right.returns)
+            }
+            (Base::Param(left), Base::Param(right)) => {
+                match (
+                    self.deferred_indexed_accesses.get(&left),
+                    self.deferred_indexed_accesses.get(&right),
+                ) {
+                    (Some((left_receiver, left_key, _)), Some((right_receiver, right_key, _))) => {
+                        left_key == right_key
+                            && self.same_generic_signature_type(*left_receiver, *right_receiver)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -17440,6 +18036,29 @@ impl<'a> Checker<'a> {
             );
             return Type::UNKNOWN;
         }
+        if let Base::Intersection(_) = object.base
+            && let Some(property) =
+                self.structural_properties_for_relation(object)
+                    .and_then(|properties| {
+                        properties
+                            .into_iter()
+                            .find(|property| property.name == field.name.name)
+                    })
+        {
+            if property.readonly {
+                self.error(
+                    codes::ASSIGN_TO_IMMUTABLE,
+                    field.name.span,
+                    format!("cannot assign to `{}`", field.name.name),
+                    "at least one structural intersection constituent marks the property read-only",
+                    Some(
+                        "remove `inmut` from every constituent if this view should allow writes"
+                            .into(),
+                    ),
+                );
+            }
+            return property.ty;
+        }
         let ty = self.member_type(object, &field.name, field.object.span(), false);
         let contract_property = match object.base {
             Base::Contract(id) => self.contracts[id as usize]
@@ -18813,7 +19432,13 @@ impl<'a> Checker<'a> {
             Expr::Ternary(e) => self.check_ternary(e, expected),
             Expr::Increment(e) => self.check_increment(e),
             Expr::Match(e) => self.check_match(e, true, expected),
-            Expr::Lambda(e) => self.check_lambda(e),
+            Expr::Lambda(e) => {
+                let previous_expected = self.expected_type;
+                self.expected_type = expected;
+                let ty = self.check_lambda(e);
+                self.expected_type = previous_expected;
+                ty
+            }
             Expr::Variant(e) => self.check_variant(e),
             Expr::Println(e) => {
                 let member = if e.newline { "println" } else { "print" };
@@ -18949,7 +19574,7 @@ impl<'a> Checker<'a> {
 
     /// Selects the exact literal alternative supplied by an expected finite
     /// union. This preserves precision for function arguments and assignments
-    /// such as `const(1) | const(2)` while leaving non-constant expressions to
+    /// such as `1 | 2` while leaving non-constant expressions to
     /// ordinary assignability checking.
     fn expected_union_constant_member(&mut self, expr: &Expr, expected: Type) -> Option<Type> {
         let Base::Union(union_id) = expected.without_null().base else {
@@ -20852,6 +21477,13 @@ impl<'a> Checker<'a> {
             return Type::OBJECT;
         }
 
+        if let Some(expected_intersection) = expected.map(Type::without_null)
+            && let Base::Intersection(intersection_id) = expected_intersection.base
+        {
+            self.check_object_literal_intersection(literal, intersection_id);
+            return expected_intersection;
+        }
+
         if let Some(expected_union) = expected.map(Type::without_null)
             && let Base::Union(union_id) = expected_union.base
         {
@@ -20986,26 +21618,64 @@ impl<'a> Checker<'a> {
                 self.check_object_literal_contract(literal, Type::of(selected));
             }
             Base::Intersection(id) => {
-                let Some(properties) = self.structural_properties_for_relation(Type::of(selected))
-                else {
-                    return Type::UNKNOWN;
-                };
-                let shape_id = self.intern_structural_type(StructuralType { properties });
-                self.check_object_literal_shape(literal, shape_id);
-                for member in self
-                    .intersections
-                    .get(id as usize)
-                    .cloned()
-                    .unwrap_or_default()
-                {
-                    if matches!(member, Base::Contract(_) | Base::ContractInstance(_)) {
-                        self.check_object_literal_contract(literal, Type::of(member));
-                    }
-                }
+                self.check_object_literal_intersection(literal, id);
             }
             _ => unreachable!("candidate collection admits only structural union members"),
         }
         Type::of(selected)
+    }
+
+    fn check_object_literal_intersection(
+        &mut self,
+        literal: &ObjectLiteralExpr,
+        intersection_id: u32,
+    ) {
+        let members = self
+            .intersections
+            .get(intersection_id as usize)
+            .cloned()
+            .unwrap_or_default();
+        if members
+            .iter()
+            .any(|member| matches!(member, Base::Class(_) | Base::Instance(_)))
+        {
+            self.error(
+                codes::TYPE_MISMATCH,
+                literal.span,
+                "an object literal cannot satisfy a nominal class intersection",
+                "a class constituent requires a value constructed from that class",
+                Some("construct the class value, then use it through the intersection type".into()),
+            );
+            for element in &literal.elements {
+                if let ObjectLiteralElement::Field(field) = element {
+                    self.check_expr(&field.value);
+                }
+            }
+            return;
+        }
+        let intersection_type = Type::of(Base::Intersection(intersection_id));
+        let Some(properties) = self.structural_properties_for_relation(intersection_type) else {
+            self.error(
+                codes::TYPE_MISMATCH,
+                literal.span,
+                "object literal cannot satisfy this structural intersection",
+                "the intersection has conflicting properties or includes a nominal class requirement",
+                Some("construct a value of the required class, or make the structural property requirements compatible".into()),
+            );
+            for element in &literal.elements {
+                if let ObjectLiteralElement::Field(field) = element {
+                    self.check_expr(&field.value);
+                }
+            }
+            return;
+        };
+        let shape_id = self.intern_structural_type(StructuralType { properties });
+        self.check_object_literal_shape(literal, shape_id);
+        for member in members {
+            if matches!(member, Base::Contract(_) | Base::ContractInstance(_)) {
+                self.check_object_literal_contract(literal, Type::of(member));
+            }
+        }
     }
 
     /// Performs a diagnostic-free candidate pass. It uses only statically
@@ -22246,6 +22916,16 @@ impl<'a> Checker<'a> {
         };
 
         for arm in &expr.arms {
+            if matches!(
+                arm.pattern,
+                Pattern::Tuple(_) | Pattern::Collection(_) | Pattern::Object(_)
+            ) {
+                self.not_lowered(
+                    arm.pattern.span(),
+                    "tuple, collection, or record matching patterns",
+                    "use the supported literal, enum-variant, or wildcard patterns until pattern testing is lowered",
+                );
+            }
             self.flow_state.restore(incoming_flow.clone());
             let arm_scrutinee = self.match_arm_scrutinee(&arm.pattern, remaining, scrutinee);
             self.match_arm_types
@@ -24776,6 +25456,7 @@ impl<'a> Checker<'a> {
             .map(|f| ParamInfo {
                 name: f.name.clone(),
                 ty: f.ty,
+                open_template_pattern: None,
                 optional: false,
                 has_default: false,
                 default: None,
@@ -25388,7 +26069,25 @@ impl<'a> Checker<'a> {
         let mut params: Vec<ParamInfo> = expr
             .params
             .iter()
-            .map(|parameter| self.resolve_param(parameter))
+            .map(|parameter| {
+                let contextually_typed = parameter.ty.name == "Unknown"
+                    && parameter.ty.arguments.is_empty()
+                    && parameter.ty.union_with.is_empty()
+                    && parameter.ty.intersection_with.is_empty();
+                if contextually_typed {
+                    ParamInfo {
+                        name: parameter.name.name.clone(),
+                        ty: Type::UNKNOWN,
+                        open_template_pattern: None,
+                        optional: parameter.optional,
+                        has_default: parameter.default.is_some(),
+                        default: parameter.default.clone(),
+                        variadic: parameter.variadic,
+                    }
+                } else {
+                    self.resolve_param(parameter)
+                }
+            })
             .collect();
         if let Some(contextual_params) = contextual_params {
             for ((parameter, info), contextual) in
@@ -25599,6 +26298,7 @@ impl<'a> Checker<'a> {
             .method(&method.name)
             .cloned()
             .unwrap_or(method);
+        self.record_semantic_reference(field.name.span, method.span, ReferenceRole::MemberCall);
 
         if method.is_static {
             self.error(
@@ -25620,10 +26320,14 @@ impl<'a> Checker<'a> {
             returns: method.returns,
             shared: true,
             span: method.span,
-            type_params: Vec::new(),
+            type_params: method.type_params.clone(),
             throws: method.throws.clone(),
         };
-        self.check_direct_call(expr, &signature)
+        let result = self.check_direct_call(expr, &signature);
+        if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
+            call.owner_contract = Some(id);
+        }
+        result
     }
 
     /// `s.m(...)` where `s` is a generic contract instantiation
@@ -25681,6 +26385,7 @@ impl<'a> Checker<'a> {
             .method(&method.name)
             .cloned()
             .unwrap_or(method);
+        self.record_semantic_reference(field.name.span, method.span, ReferenceRole::MemberCall);
 
         if method.is_static {
             self.error(
@@ -25709,10 +26414,17 @@ impl<'a> Checker<'a> {
             returns: self.substitute_type(method.returns, &subst),
             shared: true,
             span: method.span,
-            type_params: Vec::new(),
+            type_params: method.type_params.clone(),
             throws: method.throws.clone(),
         };
-        self.check_direct_call(expr, &signature)
+        let seed = subst.iter().copied().collect::<HashMap<_, _>>();
+        let result = self
+            .check_direct_call_with_subst_seeded(expr, &signature, seed, self.expected_type)
+            .0;
+        if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
+            call.owner_contract = Some(instance.contract);
+        }
+        result
     }
 
     /// `super(...)`, which runs the base's constructor on this instance.
@@ -26587,6 +27299,7 @@ impl<'a> Checker<'a> {
                 .map(|ty| ParamInfo {
                     name: "_".into(),
                     ty: *ty,
+                    open_template_pattern: None,
                     optional: false,
                     has_default: false,
                     default: None,
@@ -26680,6 +27393,14 @@ impl<'a> Checker<'a> {
             .cloned()
             .unwrap_or(method);
         self.record_semantic_reference(field.name.span, method.span, ReferenceRole::MemberCall);
+
+        if method.overridden && !method.type_params.is_empty() {
+            self.not_lowered(
+                field.name.span,
+                "generic virtual method dispatch",
+                "generic instance methods are currently specialized only when the concrete method target is known",
+            );
+        }
 
         if method.is_static {
             self.error(
@@ -26795,7 +27516,10 @@ impl<'a> Checker<'a> {
             self.record_direct_function_call(target, expr.span);
         }
 
-        let result = self.check_direct_call(expr, &signature);
+        let seed = subst.iter().copied().collect::<HashMap<_, _>>();
+        let result = self
+            .check_direct_call_with_subst_seeded(expr, &signature, seed, self.expected_type)
+            .0;
         if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
             call.owner_class = Some(method.owner);
             call.is_static_method = false;
@@ -27738,6 +28462,7 @@ impl<'a> Checker<'a> {
                     // representation either way.
                     name: "length".to_string(),
                     ty: Type::INT32,
+                    open_template_pattern: None,
                     optional: false,
                     has_default: false,
                     default: None,
@@ -27771,6 +28496,7 @@ impl<'a> Checker<'a> {
                 .map(|(name, ty)| ParamInfo {
                     name: name.to_string(),
                     ty,
+                    open_template_pattern: None,
                     optional: false,
                     has_default: false,
                     default: None,
@@ -32376,6 +33102,7 @@ impl<'a> Checker<'a> {
                         .map(|&ty| ParamInfo {
                             name: "_".to_string(),
                             ty,
+                            open_template_pattern: None,
                             optional: false,
                             has_default: false,
                             default: None,
@@ -32883,14 +33610,23 @@ impl<'a> Checker<'a> {
         let slots = self.match_arguments(expr, signature, &seed);
         let substitution =
             self.infer_type_params(expr.span, &name, signature, &slots, seed, expected);
-        if !signature.type_params.is_empty() {
+        if !signature.type_params.is_empty()
+            && !self.failed_open_template_calls.contains(&expr.span)
+        {
+            let argument_types = signature
+                .params
+                .iter()
+                .map(|parameter| self.substitute(parameter.ty, &substitution))
+                .collect();
             self.generic_call_substitutions.insert(
                 expr.span,
                 GenericCallInfo {
                     callable: signature.name.clone(),
                     owner_class: None,
+                    owner_contract: None,
                     is_static_method: false,
                     substitutions: substitution.clone(),
+                    argument_types,
                 },
             );
         }
@@ -32910,7 +33646,20 @@ impl<'a> Checker<'a> {
 
             match slot {
                 ArgSlot::Given { ty, span } => {
-                    if self.reject_dependent_escape(param_ty, *ty, *span, &param.name) {
+                    let actual_ty = if ty.is_unknown()
+                        && let Some(argument) =
+                            expr.args.iter().find(|argument| argument.span == *span)
+                        && matches!(argument.value, Expr::Lambda(_))
+                    {
+                        let previous_expected = self.expected_type;
+                        self.expected_type = Some(param_ty);
+                        let checked = self.check_expr(&argument.value);
+                        self.expected_type = previous_expected;
+                        checked
+                    } else {
+                        *ty
+                    };
+                    if self.reject_dependent_escape(param_ty, actual_ty, *span, &param.name) {
                         continue;
                     }
                     // Passing a concrete capturing lambda directly to a
@@ -32922,9 +33671,9 @@ impl<'a> Checker<'a> {
                     // Keep indirect values and stored closures subject to
                     // the existing D13/D14 restriction.
                     let direct_capturing_lambda = matches!(
-                        (param_ty.base, ty.base),
+                        (param_ty.base, actual_ty.base),
                         (Base::Function(_), Base::Function(actual_id))
-                            if self.callable_assignable(param_ty, *ty)
+                            if self.callable_assignable(param_ty, actual_ty)
                                 && self.capturing_lambda_span(actual_id).is_some_and(|lambda_span| {
                                     expr.args.iter().any(|argument| {
                                         matches!(&argument.value, Expr::Lambda(lambda) if lambda.span == lambda_span)
@@ -32936,7 +33685,7 @@ impl<'a> Checker<'a> {
                     }
                     self.expect_assignable(
                         param_ty,
-                        *ty,
+                        actual_ty,
                         *span,
                         &format!("argument `{}`", param.name),
                     );
@@ -32994,6 +33743,7 @@ impl<'a> Checker<'a> {
         name: &str,
     ) {
         match declared.base {
+            Base::Param(id) if self.deferred_indexed_accesses.contains_key(&id) => {}
             Base::Param(id) => match substitution.get(&id) {
                 Some(&solved) if solved != actual => {
                     let a = self.name(solved);
@@ -33191,6 +33941,7 @@ impl<'a> Checker<'a> {
         }
 
         let mut substitution: HashMap<u32, Type> = seed;
+        let mut open_template_argument_spans: HashMap<u32, Span> = HashMap::new();
         if let Some(expected) = expected.filter(|expected| !expected.is_unknown()) {
             self.unify_declared_with_actual(
                 signature.returns,
@@ -33213,9 +33964,61 @@ impl<'a> Checker<'a> {
             if actual.is_unknown() {
                 continue;
             }
-
-            self.unify_declared_with_actual(param.ty, actual, &mut substitution, call_span, name);
+            if let Some(pattern) = &param.open_template_pattern {
+                let argument_span = match slot {
+                    ArgSlot::Given { span, .. } => *span,
+                    ArgSlot::Variadic(items) => {
+                        items.first().map(|(_, span)| *span).unwrap_or(pattern.span)
+                    }
+                    _ => pattern.span,
+                };
+                let Some(key) = self.match_open_template_argument(
+                    pattern,
+                    actual,
+                    argument_span,
+                    name,
+                    call_span,
+                ) else {
+                    continue;
+                };
+                let inferred = self.intern_singleton_value(CanonicalConst {
+                    type_identity: "String".into(),
+                    value: ConstValue::String(key),
+                });
+                match substitution.get(&pattern.type_param).copied() {
+                    Some(previous) if previous != inferred => {
+                        self.failed_open_template_calls.insert(call_span);
+                        self.error(
+                            codes::TYPE_MISMATCH,
+                            argument_span,
+                            format!("`{name}` cannot infer one template key"),
+                            "the open template pattern conflicts with another constraint on its type parameter",
+                            None,
+                        );
+                    }
+                    _ => {
+                        substitution.insert(pattern.type_param, inferred);
+                        open_template_argument_spans.insert(pattern.type_param, argument_span);
+                    }
+                }
+            } else {
+                self.unify_declared_with_actual(
+                    param.ty,
+                    actual,
+                    &mut substitution,
+                    call_span,
+                    name,
+                );
+            }
         }
+
+        let invalid_open_keys = self.resolve_deferred_indexed_accesses(
+            signature,
+            &mut substitution,
+            &open_template_argument_spans,
+            name,
+            call_span,
+        );
 
         for &id in &signature.type_params {
             let solved = if let Some(&solved) = substitution.get(&id) {
@@ -33258,9 +34061,217 @@ impl<'a> Checker<'a> {
                     None,
                 );
             }
+            if let Some(receivers) = self.deferred_keyof_constraints.get(&id).cloned() {
+                if invalid_open_keys.contains(&id) {
+                    continue;
+                }
+                let key_span = open_template_argument_spans
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(call_span);
+                let key_name = self.singleton_string(solved);
+                for receiver_id in receivers {
+                    let Some(receiver) = substitution.get(&receiver_id).copied() else {
+                        continue;
+                    };
+                    let keys = self.keyof_member_names(receiver, &mut HashSet::new());
+                    if keys.len()
+                        > crate::type_budget::BudgetKind::NormalizationMembers.limit() as usize
+                    {
+                        self.failed_open_template_calls.insert(call_span);
+                        self.error(
+                            codes::TYPE_COMPUTATION_LIMIT,
+                            key_span,
+                            "open template key relation limit exceeded",
+                            format!(
+                                "{} receiver keys exceed the deterministic limit of {}",
+                                keys.len(),
+                                crate::type_budget::BudgetKind::NormalizationMembers.limit()
+                            ),
+                            None,
+                        );
+                        continue;
+                    }
+                    if key_name
+                        .as_ref()
+                        .is_some_and(|key| keys.iter().any(|candidate| candidate == key))
+                    {
+                        continue;
+                    }
+                    let param_name = self.type_params[id as usize].name.clone();
+                    let receiver_name = self.name(receiver);
+                    self.failed_open_template_calls.insert(call_span);
+                    self.error(
+                        codes::TYPE_MISMATCH,
+                        key_span,
+                        format!("inferred key does not exist on `{receiver_name}`"),
+                        format!("`{param_name}` must be one of the receiver's declared keys"),
+                        Some("use an event name whose key is present on the receiver".into()),
+                    );
+                }
+            }
         }
 
         substitution
+    }
+
+    fn match_open_template_argument(
+        &mut self,
+        pattern: &OpenTemplatePattern,
+        actual: Type,
+        argument_span: Span,
+        callable: &str,
+        call_span: Span,
+    ) -> Option<String> {
+        let value = match actual.base {
+            Base::Singleton(id) => {
+                self.singleton_values
+                    .get(id as usize)
+                    .and_then(|constant| match &constant.value {
+                        ConstValue::String(value) => Some(value.clone()),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        let Some(value) = value else {
+            self.failed_open_template_calls.insert(call_span);
+            let actual_name = self.name(actual);
+            self.error(
+                codes::TYPE_MISMATCH,
+                argument_span,
+                format!("`{callable}` needs a concrete string for open template inference"),
+                format!(
+                    "found `{actual_name}`; a broad `String` cannot determine the template key"
+                ),
+                Some("pass a string literal matching the declared prefix and suffix".into()),
+            );
+            return None;
+        };
+
+        let mut budget = crate::type_budget::TypeComputationBudget::default();
+        let pattern_bytes = pattern.prefix.len().saturating_add(pattern.suffix.len()) as u64;
+        if let Err(exceeded) = budget.charge(
+            crate::type_budget::BudgetKind::TemplateSourceBytes,
+            value.len() as u64 + pattern_bytes,
+        ) {
+            self.failed_open_template_calls.insert(call_span);
+            self.error(
+                codes::TYPE_COMPUTATION_LIMIT,
+                argument_span,
+                "open template matching limit exceeded",
+                exceeded.to_string(),
+                None,
+            );
+            return None;
+        }
+
+        let matches = value.starts_with(&pattern.prefix)
+            && value.ends_with(&pattern.suffix)
+            && value.len() >= pattern.prefix.len() + pattern.suffix.len();
+        if !matches {
+            self.failed_open_template_calls.insert(call_span);
+            self.error(
+                codes::TYPE_MISMATCH,
+                argument_span,
+                format!("string does not match `{callable}`'s open template"),
+                format!(
+                    "expected fixed prefix {:?} and suffix {:?}",
+                    pattern.prefix, pattern.suffix
+                ),
+                Some("change the string literal so it matches the declared template".into()),
+            );
+            return None;
+        }
+
+        let end = value.len() - pattern.suffix.len();
+        Some(value[pattern.prefix.len()..end].to_owned())
+    }
+
+    fn singleton_string(&self, ty: Type) -> Option<String> {
+        let Base::Singleton(id) = ty.base else {
+            return None;
+        };
+        self.singleton_values
+            .get(id as usize)
+            .and_then(|constant| match &constant.value {
+                ConstValue::String(value) => Some(value.clone()),
+                _ => None,
+            })
+    }
+
+    /// Resolve deferred `T[K]` placeholders for this callable after ordinary
+    /// and template-driven inference has solved both T and K. The synthetic
+    /// placeholder is substituted into callback signatures before contextual
+    /// checking and is erased during IR specialization.
+    fn resolve_deferred_indexed_accesses(
+        &mut self,
+        signature: &Signature,
+        substitution: &mut HashMap<u32, Type>,
+        argument_spans: &HashMap<u32, Span>,
+        callable: &str,
+        call_span: Span,
+    ) -> HashSet<u32> {
+        let callable_params: HashSet<u32> = signature.type_params.iter().copied().collect();
+        let pending: Vec<_> = self
+            .deferred_indexed_accesses
+            .iter()
+            .filter_map(|(&placeholder, &(receiver, key, span))| {
+                let receiver_is_resolvable = match receiver.base {
+                    Base::Param(id) => {
+                        callable_params.contains(&id) || substitution.contains_key(&id)
+                    }
+                    _ => true,
+                };
+                (receiver_is_resolvable && callable_params.contains(&key)).then_some((
+                    placeholder,
+                    receiver,
+                    key,
+                    span,
+                ))
+            })
+            .collect();
+        let mut invalid_keys = HashSet::new();
+        for (placeholder, receiver_type, key_id, source_span) in pending {
+            let receiver = self.substitute(receiver_type, substitution);
+            let Some(key) = substitution.get(&key_id).copied() else {
+                continue;
+            };
+            if receiver.is_unknown() {
+                continue;
+            }
+            let key_span = argument_spans.get(&key_id).copied().unwrap_or(call_span);
+            let Some(key_name) = self.singleton_string(key) else {
+                self.failed_open_template_calls.insert(call_span);
+                let key_type = self.name(key);
+                self.error(
+                    codes::TYPE_MISMATCH,
+                    key_span,
+                    format!("`{callable}` cannot resolve an indexed callback type"),
+                    format!("the inferred key has type `{key_type}`, not a string singleton"),
+                    Some("pass a literal event name so the property key can be inferred".into()),
+                );
+                invalid_keys.insert(key_id);
+                substitution.insert(placeholder, Type::UNKNOWN);
+                continue;
+            };
+            if let Some(property) = self.indexed_property_type(receiver, &key_name, source_span) {
+                substitution.insert(placeholder, property);
+            } else {
+                self.failed_open_template_calls.insert(call_span);
+                let receiver_name = self.name(receiver);
+                self.error(
+                    codes::UNKNOWN_MEMBER,
+                    key_span,
+                    format!("`{receiver_name}` has no property `{key_name}`"),
+                    "the inferred template key must name a property on the receiver",
+                    Some("use an event name whose key exists on the receiver".into()),
+                );
+                invalid_keys.insert(key_id);
+                substitution.insert(placeholder, Type::UNKNOWN);
+            }
+        }
+        invalid_keys
     }
 
     /// Replaces a callable's own type parameter with what it was inferred
@@ -33486,6 +34497,22 @@ impl<'a> Checker<'a> {
         self.result_type_arguments(resolved).is_some()
     }
 
+    fn has_deferred_indexed_callback_type(&self, ty: Type) -> bool {
+        let Base::Function(id) = ty.base else {
+            return false;
+        };
+        let Some(function) = self.fn_types.get(id as usize) else {
+            return false;
+        };
+        function
+            .params
+            .iter()
+            .chain(std::iter::once(&function.returns))
+            .any(|ty| {
+                matches!(ty.base, Base::Param(id) if self.deferred_indexed_accesses.contains_key(&id))
+            })
+    }
+
     fn match_arguments(
         &mut self,
         expr: &CallExpr,
@@ -33573,13 +34600,48 @@ impl<'a> Checker<'a> {
                                 | Expr::Call(_)
                                 | Expr::Field(_)
                         ))
+                    || (matches!(
+                        t.base,
+                        Base::Object
+                            | Base::Union(_)
+                            | Base::Shape(_)
+                            | Base::Contract(_)
+                            | Base::ContractInstance(_)
+                            | Base::Intersection(_)
+                    ) && matches!(&arg.value, Expr::Object(_)))
             });
             if parameter_index.is_some_and(|index| {
                 self.call_parameter_expects_result(expr, signature, index, context_substitution)
             }) {
                 self.preserve_result_exprs.insert(arg.value.span());
             }
-            let ty = self.check_expr(&arg.value);
+            // An unannotated callback that mentions a deferred `T[K]` cannot
+            // be checked until ordinary and event-key inference have solved
+            // that indexed type. Its slot is checked after substitution.
+            let deferred_indexed_lambda = matches!(arg.value, Expr::Lambda(_))
+                && parameter_index
+                    .and_then(|index| signature.params.get(index))
+                    .is_some_and(|parameter| self.has_deferred_indexed_callback_type(parameter.ty));
+            let mut ty = if deferred_indexed_lambda {
+                Type::UNKNOWN
+            } else {
+                self.check_expr(&arg.value)
+            };
+            if !deferred_indexed_lambda
+                && parameter_index
+                    .and_then(|index| signature.params.get(index))
+                    .is_some_and(|parameter| parameter.open_template_pattern.is_some())
+                && let Expr::Str(literal) = &arg.value
+            {
+                // String expressions normally widen immediately to `String`.
+                // A template-pattern parameter is the one inference context
+                // that needs the exact source literal to invert its fixed
+                // prefix/suffix without enumerating a string domain.
+                ty = self.intern_singleton_value(CanonicalConst {
+                    type_identity: "String".into(),
+                    value: ConstValue::String(literal.value.clone()),
+                });
+            }
 
             if arg.is_spread {
                 if seen_named {

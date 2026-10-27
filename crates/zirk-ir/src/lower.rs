@@ -74,6 +74,12 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         specialize_generic_functions(&program.functions, &mut checked);
     let generic_static_method_specializations =
         specialize_generic_static_methods(program, &mut checked);
+    let contract_method_specialization_keys = contract_method_specialization_keys(&checked);
+    let generic_contract_method_specializations = specialize_generic_contract_methods(
+        program,
+        &checked,
+        &contract_method_specialization_keys,
+    );
     // Generic bodies can mention compound types such as `Result<T, E>` in a
     // match even when no call-site signature mentions that exact
     // instantiation. Materialize those layouts under each monomorphization
@@ -94,6 +100,21 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         }
     }
     for (_, _, declaration, _, substitution) in &generic_static_method_specializations {
+        let types = checked
+            .expr_types
+            .iter()
+            .filter(|(span, _)| {
+                span.file == declaration.span.file
+                    && span.start >= declaration.span.start
+                    && span.end <= declaration.span.end
+            })
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        for ty in types {
+            materialize_specialized_type(&mut checked, ty, substitution);
+        }
+    }
+    for (_, _, declaration, _, substitution) in &generic_contract_method_specializations {
         let types = checked
             .expr_types
             .iter()
@@ -252,12 +273,14 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 methods: {
                     let mut table = vec![String::new(); class.methods.len()];
                     for method in &class.methods {
-                        table[method.index] =
-                            if class.kind == ast::ClassKind::Abstract || method.is_static {
-                                UNREACHABLE_ABSTRACT_METHOD.to_string()
-                            } else {
-                                body_symbol(checked, method)
-                            };
+                        table[method.index] = if class.kind == ast::ClassKind::Abstract
+                            || method.is_static
+                            || !method.type_params.is_empty()
+                        {
+                            UNREACHABLE_ABSTRACT_METHOD.to_string()
+                        } else {
+                            body_symbol(checked, method)
+                        };
                     }
                     table
                 },
@@ -277,7 +300,37 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 let supplied = class
                                     .method(&required.name)
                                     .expect("the checker verified conformance");
-                                body_symbol(checked, supplied)
+                                if !required.type_params.is_empty() {
+                                    UNREACHABLE_ABSTRACT_METHOD.to_string()
+                                } else {
+                                    body_symbol(checked, supplied)
+                                }
+                            })
+                            .collect(),
+                        specializations: contract_method_specialization_keys
+                            .iter()
+                            .filter(|(contract_id, _, _)| contract_id == id)
+                            .map(|(_, method_index, arguments)| {
+                                let required = checked.contracts[*id as usize]
+                                    .methods
+                                    .iter()
+                                    .find(|method| method.index as u32 == *method_index)
+                                    .expect("specialization refers to a contract method");
+                                class
+                                    .method(&required.name)
+                                    .filter(|supplied| {
+                                        supplied.type_params.len() == arguments.len()
+                                            && supplied.from_contract.is_none()
+                                    })
+                                    .map(|supplied| {
+                                        generic_method_symbol(
+                                            &checked.classes[supplied.owner as usize].name,
+                                            &supplied.name,
+                                            arguments,
+                                            false,
+                                        )
+                                    })
+                                    .unwrap_or_else(|| UNREACHABLE_ABSTRACT_METHOD.to_string())
                             })
                             .collect(),
                     })
@@ -304,6 +357,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             contracts: vec![ContractTable {
                 contract,
                 methods: vec![stringifiable_box_to_string_symbol()],
+                specializations: Vec::new(),
             }],
             ancestors: vec![id],
         });
@@ -2067,7 +2121,17 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .collect();
 
     for (index, shape) in checked.fn_types.iter().enumerate() {
-        if capturing_fn_types.contains(&(index as u32)) {
+        if capturing_fn_types.contains(&(index as u32))
+            || shape
+                .params
+                .iter()
+                .chain(std::iter::once(&shape.returns))
+                .any(|ty| type_contains_param(checked, *ty, &mut HashSet::new()))
+        {
+            // A callable shape that still mentions a generic parameter is a
+            // checker template, not a runtime closure value. Its concrete
+            // instantiation gets a separate closure layout during generic
+            // specialization; this table slot is unreachable at runtime.
             module.closures.push(ClosureLayout {
                 captures: Vec::new(),
                 params: Vec::new(),
@@ -2184,6 +2248,22 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
     }
 
     for (class_id, class, method, symbol, substitution) in &generic_static_method_specializations {
+        let body = method.body.as_ref().expect("specialized method has a body");
+        let lowering = FunctionLowering::new(
+            &mut module,
+            checked,
+            &declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .with_type_substitution(substitution.clone());
+        let (lowered, lifted) = lowering.run_method(class, method, body, *class_id, Some(symbol));
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
+    }
+
+    for (class_id, class, method, symbol, substitution) in &generic_contract_method_specializations
+    {
         let body = method.body.as_ref().expect("specialized method has a body");
         let lowering = FunctionLowering::new(
             &mut module,
@@ -2745,6 +2825,143 @@ type GenericStaticMethodSpecialization = (
     HashMap<u32, Type>,
 );
 
+type ContractMethodSpecializationKey = (u32, u32, Vec<Type>);
+
+type GenericContractMethodSpecialization = (
+    u32,
+    ast::ClassDecl,
+    ast::MethodDecl,
+    String,
+    HashMap<u32, Type>,
+);
+
+/// Collects the finite set of generic contract-method instantiations actually
+/// used in the checked program. The order is stable and is shared by calls
+/// and every implementing object's dispatch table.
+fn contract_method_specialization_keys(
+    checked: &CheckedProgram,
+) -> Vec<ContractMethodSpecializationKey> {
+    let mut keys = Vec::new();
+    for call in checked
+        .generic_call_substitutions
+        .values()
+        .filter(|call| call.owner_contract.is_some())
+    {
+        let Some(contract_id) = call.owner_contract else {
+            continue;
+        };
+        let Some(contract) = checked.contracts.get(contract_id as usize) else {
+            continue;
+        };
+        let Some(method) = contract.method(&call.callable) else {
+            continue;
+        };
+        let Some(arguments) = method
+            .type_params
+            .iter()
+            .map(|parameter| call.substitutions.get(parameter).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if arguments
+            .iter()
+            .any(|argument| type_contains_param(checked, *argument, &mut HashSet::new()))
+        {
+            continue;
+        }
+        let key = (contract_id, method.index as u32, arguments);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.sort_by_key(|(contract, method, arguments)| {
+        (*contract, *method, format!("{arguments:?}"))
+    });
+    keys
+}
+
+fn contract_method_specialization_index(
+    checked: &CheckedProgram,
+    contract_id: u32,
+    method_index: u32,
+    arguments: &[Type],
+) -> Option<u32> {
+    contract_method_specialization_keys(checked)
+        .into_iter()
+        .filter(|(contract, _, _)| *contract == contract_id)
+        .position(|(_, method, types)| method == method_index && types == arguments)
+        .map(|index| index as u32)
+}
+
+fn specialize_generic_contract_methods(
+    program: &ast::Program,
+    checked: &CheckedProgram,
+    keys: &[ContractMethodSpecializationKey],
+) -> Vec<GenericContractMethodSpecialization> {
+    let declarations = class_decls(program, checked);
+    let mut specializations = Vec::new();
+    let mut emitted = HashSet::new();
+    for (contract_id, method_index, arguments) in keys {
+        let Some(contract) = checked.contracts.get(*contract_id as usize) else {
+            continue;
+        };
+        let Some(required) = contract
+            .methods
+            .iter()
+            .find(|method| method.index as u32 == *method_index)
+        else {
+            continue;
+        };
+        for class_info in &checked.classes {
+            if !class_info.contracts.contains(contract_id) || !class_info.type_params.is_empty() {
+                continue;
+            }
+            let Some(supplied) = class_info.method(&required.name) else {
+                continue;
+            };
+            if supplied.from_contract.is_some() || supplied.type_params.len() != arguments.len() {
+                continue;
+            }
+            let Some(class) = declarations.get(&supplied.owner) else {
+                continue;
+            };
+            let Some(method) = class
+                .methods
+                .iter()
+                .find(|method| method.name.name == supplied.name && method.body.is_some())
+            else {
+                continue;
+            };
+            let substitution: HashMap<_, _> = supplied
+                .type_params
+                .iter()
+                .copied()
+                .zip(arguments.iter().copied())
+                .collect();
+            let symbol = generic_method_symbol(
+                &checked.classes[supplied.owner as usize].name,
+                &supplied.name,
+                arguments,
+                false,
+            );
+            if !emitted.insert(symbol.clone()) {
+                continue;
+            }
+            let mut method = method.clone();
+            method.type_params.clear();
+            specializations.push((
+                supplied.owner,
+                (*class).clone(),
+                method,
+                symbol,
+                substitution,
+            ));
+        }
+    }
+    specializations
+}
+
 /// Emits one static-method body per concrete generic call. Restricting this
 /// first slice to non-generic owners and direct type-parameter ABI positions
 /// keeps class specialization and nested generic-layout rules independent.
@@ -2756,7 +2973,7 @@ fn specialize_generic_static_methods(
     let calls: Vec<_> = checked
         .generic_call_substitutions
         .values()
-        .filter(|call| call.is_static_method && call.owner_class.is_some())
+        .filter(|call| call.owner_class.is_some())
         .cloned()
         .collect();
     let mut specializations = Vec::new();
@@ -2775,7 +2992,7 @@ fn specialize_generic_static_methods(
         let Some(method_info) = class_info.method(&call.callable).cloned() else {
             continue;
         };
-        if !method_info.is_static || method_info.type_params.is_empty() {
+        if method_info.is_static != call.is_static_method || method_info.type_params.is_empty() {
             continue;
         }
         let Some(arguments) = method_info
@@ -2824,7 +3041,12 @@ fn specialize_generic_static_methods(
         if method_decl.body.is_none() {
             continue;
         }
-        let symbol = generic_static_method_symbol(&class_info.name, &method_info.name, &arguments);
+        let symbol = generic_method_symbol(
+            &class_info.name,
+            &method_info.name,
+            &arguments,
+            method_info.is_static,
+        );
         if !emitted.insert(symbol.clone()) {
             continue;
         }
@@ -2835,12 +3057,16 @@ fn specialize_generic_static_methods(
     specializations
 }
 
-fn generic_static_method_symbol(class: &str, method: &str, arguments: &[Type]) -> String {
+fn generic_method_symbol(class: &str, method: &str, arguments: &[Type], is_static: bool) -> String {
     let mut hasher = DefaultHasher::new();
     arguments.hash(&mut hasher);
     format!(
         "{}$generic${:016x}",
-        static_method_symbol(class, method),
+        if is_static {
+            static_method_symbol(class, method)
+        } else {
+            method_symbol(class, method)
+        },
         hasher.finish()
     )
 }
@@ -2891,12 +3117,17 @@ fn specialize_generic_functions(
         }
 
         let symbol = generic_function_symbol(&call.callable, &arguments);
-        let substitution: HashMap<_, _> = signature
-            .type_params
-            .iter()
-            .copied()
-            .zip(arguments.iter().copied())
-            .collect();
+        // Keep synthetic substitutions such as a deferred `T[K]` placeholder
+        // alongside ordinary generic arguments. They are part of the checked
+        // callback signature but never become runtime type metadata.
+        let mut substitution = call.substitutions.clone();
+        substitution.extend(
+            signature
+                .type_params
+                .iter()
+                .copied()
+                .zip(arguments.iter().copied()),
+        );
         let mut specialized_signature = signature.clone();
         specialized_signature.name = symbol.clone();
         specialized_signature.type_params.clear();
@@ -2946,6 +3177,76 @@ fn generic_function_symbol(name: &str, arguments: &[Type]) -> String {
 /// without ever declaring that exact `Result<Concrete, E>` in its own
 /// signature. IR layouts are indexed by the checker's intern tables, so add
 /// these concrete instances before building the module layouts.
+#[derive(Clone, Copy)]
+enum UnaryTypeTable {
+    Job,
+    Channel,
+    Atomic,
+    Mutex,
+    Pointer,
+    Weak,
+    NativeSlice,
+    NativeSliceMut,
+    Dependent,
+    Pin,
+    Array,
+    List,
+    Range,
+    Set,
+}
+
+fn materialize_unary_type(
+    checked: &mut CheckedProgram,
+    table: UnaryTypeTable,
+    id: u32,
+    substitution: &HashMap<u32, Type>,
+) -> Option<u32> {
+    let inner = match table {
+        UnaryTypeTable::Job => checked.job_types.get(id as usize),
+        UnaryTypeTable::Channel => checked.channel_types.get(id as usize),
+        UnaryTypeTable::Atomic => checked.atomic_types.get(id as usize),
+        UnaryTypeTable::Mutex => checked.mutex_types.get(id as usize),
+        UnaryTypeTable::Pointer => checked.pointer_types.get(id as usize),
+        UnaryTypeTable::Weak => checked.weak_types.get(id as usize),
+        UnaryTypeTable::NativeSlice => checked.native_slice_types.get(id as usize),
+        UnaryTypeTable::NativeSliceMut => checked.native_slice_mut_types.get(id as usize),
+        UnaryTypeTable::Dependent => checked.dependent_types.get(id as usize),
+        UnaryTypeTable::Pin => checked.pin_types.get(id as usize),
+        UnaryTypeTable::Array => checked.array_types.get(id as usize),
+        UnaryTypeTable::List => checked.list_types.get(id as usize),
+        UnaryTypeTable::Range => checked.range_types.get(id as usize),
+        UnaryTypeTable::Set => checked.set_types.get(id as usize),
+    }
+    .copied()?;
+    let inner = materialize_specialized_type(checked, inner, substitution);
+    let table = match table {
+        UnaryTypeTable::Job => &mut checked.job_types,
+        UnaryTypeTable::Channel => &mut checked.channel_types,
+        UnaryTypeTable::Atomic => &mut checked.atomic_types,
+        UnaryTypeTable::Mutex => &mut checked.mutex_types,
+        UnaryTypeTable::Pointer => &mut checked.pointer_types,
+        UnaryTypeTable::Weak => &mut checked.weak_types,
+        UnaryTypeTable::NativeSlice => &mut checked.native_slice_types,
+        UnaryTypeTable::NativeSliceMut => &mut checked.native_slice_mut_types,
+        UnaryTypeTable::Dependent => &mut checked.dependent_types,
+        UnaryTypeTable::Pin => &mut checked.pin_types,
+        UnaryTypeTable::Array => &mut checked.array_types,
+        UnaryTypeTable::List => &mut checked.list_types,
+        UnaryTypeTable::Range => &mut checked.range_types,
+        UnaryTypeTable::Set => &mut checked.set_types,
+    };
+    Some(
+        table
+            .iter()
+            .position(|candidate| *candidate == inner)
+            .unwrap_or_else(|| {
+                let id = table.len() as u32;
+                table.push(inner);
+                id as usize
+            }) as u32,
+    )
+}
+
 fn materialize_specialized_type(
     checked: &mut CheckedProgram,
     ty: Type,
@@ -3101,6 +3402,179 @@ fn materialize_specialized_type(
                     Base::Union(union_id as u32)
                 }
             }
+        }
+        Base::Function(id) => {
+            let Some(function) = checked.fn_types.get(id as usize).cloned() else {
+                return ty;
+            };
+            let params = function
+                .params
+                .iter()
+                .map(|parameter| materialize_specialized_type(checked, *parameter, substitution))
+                .collect::<Vec<_>>();
+            let returns = materialize_specialized_type(checked, function.returns, substitution);
+            if params == function.params && returns == function.returns {
+                Base::Function(id)
+            } else {
+                let function_id = checked
+                    .fn_types
+                    .iter()
+                    .position(|candidate| {
+                        candidate.params == params && candidate.returns == returns
+                    })
+                    .unwrap_or_else(|| {
+                        let function_id = checked.fn_types.len() as u32;
+                        checked.fn_types.push(zirk_sema::FnType { params, returns });
+                        function_id as usize
+                    });
+                Base::Function(function_id as u32)
+            }
+        }
+        Base::Job(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Job, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Job(id)
+        }
+        Base::Channel(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::Channel, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Channel(id)
+        }
+        Base::Atomic(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::Atomic, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Atomic(id)
+        }
+        Base::Mutex(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Mutex, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Mutex(id)
+        }
+        Base::Pointer(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::Pointer, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Pointer(id)
+        }
+        Base::Weak(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Weak, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Weak(id)
+        }
+        Base::NativeSlice(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::NativeSlice, id, substitution)
+            else {
+                return ty;
+            };
+            Base::NativeSlice(id)
+        }
+        Base::NativeSliceMut(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::NativeSliceMut, id, substitution)
+            else {
+                return ty;
+            };
+            Base::NativeSliceMut(id)
+        }
+        Base::Dependent(id) => {
+            let Some(id) =
+                materialize_unary_type(checked, UnaryTypeTable::Dependent, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Dependent(id)
+        }
+        Base::Pin(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Pin, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Pin(id)
+        }
+        Base::Array(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Array, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Array(id)
+        }
+        Base::List(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::List, id, substitution)
+            else {
+                return ty;
+            };
+            Base::List(id)
+        }
+        Base::Range(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Range, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Range(id)
+        }
+        Base::Set(id) => {
+            let Some(id) = materialize_unary_type(checked, UnaryTypeTable::Set, id, substitution)
+            else {
+                return ty;
+            };
+            Base::Set(id)
+        }
+        Base::Map(id) => {
+            let Some(map) = checked.map_types.get(id as usize).cloned() else {
+                return ty;
+            };
+            let key = materialize_specialized_type(checked, map.key, substitution);
+            let value = materialize_specialized_type(checked, map.value, substitution);
+            let map_id = checked
+                .map_types
+                .iter()
+                .position(|candidate| candidate.key == key && candidate.value == value)
+                .unwrap_or_else(|| {
+                    let map_id = checked.map_types.len() as u32;
+                    let mut map = map;
+                    map.key = key;
+                    map.value = value;
+                    checked.map_types.push(map);
+                    map_id as usize
+                });
+            Base::Map(map_id as u32)
+        }
+        Base::Tuple(id) => {
+            let Some(tuple) = checked.tuple_types.get(id as usize).cloned() else {
+                return ty;
+            };
+            let elements = tuple
+                .elements
+                .iter()
+                .map(|element| materialize_specialized_type(checked, *element, substitution))
+                .collect::<Vec<_>>();
+            let tuple_id = checked
+                .tuple_types
+                .iter()
+                .position(|candidate| candidate.elements == elements)
+                .unwrap_or_else(|| {
+                    let tuple_id = checked.tuple_types.len() as u32;
+                    let mut tuple = tuple;
+                    tuple.elements = elements;
+                    checked.tuple_types.push(tuple);
+                    tuple_id as usize
+                });
+            Base::Tuple(tuple_id as u32)
         }
         Base::Shape(id) => {
             let Some(mut shape) = checked.structural_types.get(id as usize).cloned() else {
@@ -4169,6 +4643,12 @@ fn ir_type(
                         _ => None,
                     })
                 })
+                .or_else(|| {
+                    members
+                        .iter()
+                        .all(|member| matches!(member, Base::Shape(_) | Base::Object))
+                        .then_some(IrType::ObjectAny)
+                })
                 .expect("the checker only lowers object-reference intersections")
         }
         Base::Singleton(id) => union_member_ir_type(
@@ -5095,6 +5575,33 @@ impl<'a> FunctionLowering<'a> {
                 None
             }
         }) {
+            if let ast::TypeValue::Temporal { kind, text } = value {
+                let constant = match kind {
+                    ast::TemporalType::Date => zirk_runtime_core::temporal::parse_date_text(text)
+                        .map(zirk_sema::constant_value::ConstValue::Date)
+                        .map(|value| ("Date", value)),
+                    ast::TemporalType::Time => zirk_runtime_core::temporal::parse_time_text(text)
+                        .map(zirk_sema::constant_value::ConstValue::Time)
+                        .map(|value| ("Time", value)),
+                    ast::TemporalType::DateTime => {
+                        zirk_runtime_core::temporal::parse_datetime_text(text)
+                            .map(zirk_sema::constant_value::ConstValue::DateTime)
+                            .map(|value| ("DateTime", value))
+                    }
+                }
+                .expect("a checked temporal literal parses during lowering");
+                let canonical = zirk_sema::constant_value::CanonicalConst {
+                    type_identity: constant.0.into(),
+                    value: constant.1,
+                };
+                let id = self
+                    .checked
+                    .singleton_values
+                    .iter()
+                    .position(|candidate| *candidate == canonical)
+                    .expect("the checker interned every temporal singleton it type-checked");
+                return Type::of(Base::Singleton(id as u32));
+            }
             let expression = match value {
                 ast::TypeValue::Int(value) => ast::Expr::Int(value.clone()),
                 ast::TypeValue::Float(value) => ast::Expr::Float(value.clone()),
@@ -5103,6 +5610,7 @@ impl<'a> FunctionLowering<'a> {
                 ast::TypeValue::Char(value) => ast::Expr::Char(value.clone()),
                 ast::TypeValue::Boolean(value) => ast::Expr::Bool(value.clone()),
                 ast::TypeValue::Null(value) => ast::Expr::Null(value.clone()),
+                ast::TypeValue::Temporal { .. } => unreachable!("temporal values return above"),
             };
             let constant = zirk_sema::const_eval::evaluate_with_enum_variants(
                 &expression,
@@ -5184,10 +5692,18 @@ impl<'a> FunctionLowering<'a> {
                     base => bases.push(base),
                 }
             }
+            // The checker stores union members in canonical order, whereas a
+            // source alias preserves its written order. Compare normalized
+            // sets instead of assuming those orderings coincide.
+            bases.sort_by_key(|base| union_member_canonical_key(*base, self.checked));
+            bases.dedup();
             self.checked
                 .unions
                 .iter()
-                .position(|candidate| *candidate == bases)
+                .position(|candidate| {
+                    candidate.len() == bases.len()
+                        && candidate.iter().all(|member| bases.contains(member))
+                })
                 .map(|id| {
                     let mut ty = Type::of(Base::Union(id as u32));
                     ty.nullable = nullable || reference.nullable;
@@ -8881,6 +9397,7 @@ impl<'a> FunctionLowering<'a> {
                 object: iterable,
                 contract: iterable_contract,
                 index: iterator_index,
+                specialization: None,
                 args: Vec::new(),
             },
             iterator_ty,
@@ -8910,6 +9427,7 @@ impl<'a> FunctionLowering<'a> {
                 object: held_iterator,
                 contract: iterator_contract,
                 index: next_index,
+                specialization: None,
                 args: Vec::new(),
             },
             iteration_ty,
@@ -9288,6 +9806,15 @@ impl<'a> FunctionLowering<'a> {
                         let payload = self.module.mutex_types[mutex_type as usize];
                         let view = self.emit(InstKind::Load(slot), ty, span);
                         self.emit(InstKind::BorrowViewLoad { view }, payload, span)
+                    } else if let IrType::Union(_) = ty
+                        && let Some(narrowed) = self.checked.expr_types.get(&span).copied()
+                        && !narrowed.is_unknown()
+                        && matches!(narrowed.without_null().base, Base::Union(_))
+                        && self.ir_type(narrowed) != ty
+                        && let Some(value) =
+                            self.lower_union_subset_narrowing(slot, ty, narrowed, span)
+                    {
+                        value
                     } else if let IrType::Union(_) = ty
                         && let Some(narrowed) = self.checked.expr_types.get(&span).copied()
                         && !narrowed.is_unknown()
@@ -18151,6 +18678,14 @@ impl<'a> FunctionLowering<'a> {
                 .enumerate()
                 .filter(|(_, arm)| self.union_pattern_matches_base(*base, &arm.pattern))
                 .collect();
+            if matching_arms.is_empty() {
+                self.terminate(Terminator::Jump(
+                    fallback_block
+                        .or(unmatched_block)
+                        .expect("fallback or unreachable block"),
+                ));
+                continue;
+            }
             for (position, (arm_index, arm)) in matching_arms.iter().enumerate() {
                 let loaded = self.emit(InstKind::Load(value_slot), scrutinee_type, arm.span);
                 let payload = self.emit(
@@ -18232,11 +18767,6 @@ impl<'a> FunctionLowering<'a> {
                 });
                 self.current = next;
             }
-            self.terminate(Terminator::Jump(
-                fallback_block
-                    .or(unmatched_block)
-                    .expect("fallback or unreachable block"),
-            ));
         }
 
         for (index, arm) in expr.arms.iter().enumerate() {
@@ -21780,7 +22310,7 @@ impl<'a> FunctionLowering<'a> {
         let args = self.lower_args_for_params(call, &params);
         let callee = arguments
             .as_deref()
-            .map(|types| generic_static_method_symbol(&class.name, &method.name, types))
+            .map(|types| generic_method_symbol(&class.name, &method.name, types, true))
             .unwrap_or_else(|| static_method_symbol(&class.name, &method.name));
         Some(self.emit(InstKind::Call { callee, args }, returns, span))
     }
@@ -21868,12 +22398,6 @@ impl<'a> FunctionLowering<'a> {
         // The parameter types are similarly the concrete types the checker
         // saw at the call site, so `T` in `put(x: T)` becomes the
         // instantiated `Int32`/`String`/etc. for this receiver.
-        let params: Vec<IrType> = call
-            .args
-            .iter()
-            .map(|arg| self.type_of(&arg.value, arg.value.span()))
-            .collect();
-
         let receiver = if intersection_receiver {
             let object = self.lower_expr(&field.object);
             // The intersection retains a single object address. Re-type that
@@ -21883,16 +22407,33 @@ impl<'a> FunctionLowering<'a> {
         } else {
             self.lower_expr(&field.object)
         };
-        let mut args = Vec::new();
-        for (arg, ty) in call.args.iter().zip(params) {
-            args.push(self.lower_expr_as(&arg.value, ty));
+        let call_info = self.checked.generic_call_substitutions.get(&span);
+        let specialization = call_info.and_then(|call_info| {
+            let contract_method = self.checked.contracts[id as usize]
+                .methods
+                .iter()
+                .find(|candidate| candidate.index as u32 == index)?;
+            let arguments = contract_method
+                .type_params
+                .iter()
+                .map(|parameter| call_info.substitutions.get(parameter).copied())
+                .collect::<Option<Vec<_>>>()?;
+            contract_method_specialization_index(self.checked, id, index, &arguments)
+        });
+        let mut params = method.params.clone();
+        if let Some(call_info) = call_info {
+            for (param, argument_type) in params.iter_mut().zip(&call_info.argument_types) {
+                param.ty = *argument_type;
+            }
         }
+        let args = self.lower_args_for_params(call, &params);
 
         Some(self.emit(
             InstKind::CallContract {
                 object: receiver,
                 contract: id,
                 index,
+                specialization,
                 args,
             },
             returns,
@@ -21971,8 +22512,42 @@ impl<'a> FunctionLowering<'a> {
         // The body lives where it was declared, which is not always the class
         // being called through: an inherited method keeps its owner, and an
         // adopted trait default belongs to the trait.
-        let name = body_symbol(self.checked, method);
-        let returns = self.ir_type(method.returns);
+        let generic = self
+            .checked
+            .generic_call_substitutions
+            .get(&span)
+            .filter(|call| !call.is_static_method && call.owner_class == Some(method.owner));
+        let type_arguments = generic.and_then(|call| {
+            method
+                .type_params
+                .iter()
+                .map(|parameter| call.substitutions.get(parameter).copied())
+                .collect::<Option<Vec<_>>>()
+        });
+        let specialization = generic
+            .map(|call| call.substitutions.clone())
+            .unwrap_or_default();
+        let name = type_arguments
+            .as_deref()
+            .filter(|_| !method.overridden)
+            .map(|types| {
+                generic_method_symbol(
+                    &self.checked.classes[method.owner as usize].name,
+                    &method.name,
+                    types,
+                    false,
+                )
+            })
+            .unwrap_or_else(|| body_symbol(self.checked, method));
+        let returns = self
+            .checked
+            .result_projections
+            .get(&span)
+            .copied()
+            .or_else(|| self.checked.expr_types.get(&span).copied())
+            .filter(|ty| !ty.is_unknown())
+            .map(|ty| self.ir_type(ty))
+            .unwrap_or_else(|| self.ir_type(method.returns));
 
         let virtual_index = method.overridden.then_some(method.index as u32);
 
@@ -21982,7 +22557,16 @@ impl<'a> FunctionLowering<'a> {
         // survive to the `Call` that lives on the far side of it.
         let will_branch = call.args.iter().any(|arg| self.opens_blocks(&arg.value));
         let receiver = self.lower_and_hold(&field.object, will_branch);
-        let args = self.lower_args_for_params(call, &method.params);
+        let params = method
+            .params
+            .iter()
+            .cloned()
+            .map(|mut param| {
+                param.ty = substitute_specialized_type(self.checked, param.ty, &specialization);
+                param
+            })
+            .collect::<Vec<_>>();
+        let args = self.lower_args_for_params(call, &params);
         let receiver = self.reload(receiver, field.object.span());
 
         // A method some subclass redefines has no statically known target, so
@@ -28675,7 +29259,10 @@ impl<'a> FunctionLowering<'a> {
                 e.safe
                     || self.opens_blocks(&e.object)
                     || self.semantic_type(&e.object).is_some_and(|ty| {
-                        matches!(ty.without_null().base, Base::Shape(_) | Base::Union(_))
+                        matches!(
+                            ty.without_null().base,
+                            Base::Shape(_) | Base::Intersection(_) | Base::Union(_)
+                        )
                     })
             }
             // `receiver[index]` (roadmap Phase 4e, `fase-4e-native-slice`,
@@ -30063,16 +30650,12 @@ impl<'a> FunctionLowering<'a> {
         if self.type_of(&expr.object, expr.object.span()) == IrType::ObjectAny {
             let object = self.lower_expr(&expr.object);
             let key = self.const_string(&expr.name.name, expr.name.span);
-            if let Some(Base::Shape(shape_id)) = self
+            if let Some(property) = self
                 .checked
                 .expr_types
                 .get(&expr.object.span())
-                .map(|ty| ty.without_null().base)
-                && let Some(property) = self.checked.structural_types[shape_id as usize]
-                    .properties
-                    .iter()
-                    .find(|property| property.name == expr.name.name)
-                    .cloned()
+                .copied()
+                .and_then(|ty| self.structural_property_for_lowering(ty, &expr.name.name))
             {
                 return self.lower_shape_property_get(
                     object,
@@ -31093,6 +31676,7 @@ impl<'a> FunctionLowering<'a> {
                     object: unwrapped,
                     contract,
                     index,
+                    specialization: None,
                     args,
                 },
                 returns,
@@ -31995,6 +32579,55 @@ impl<'a> FunctionLowering<'a> {
             expected,
             span,
         )
+    }
+
+    fn structural_property_for_lowering(
+        &self,
+        ty: zirk_sema::Type,
+        name: &str,
+    ) -> Option<zirk_sema::StructuralProperty> {
+        match ty.without_null().base {
+            Base::Shape(shape_id) => self
+                .checked
+                .structural_types
+                .get(shape_id as usize)?
+                .properties
+                .iter()
+                .find(|property| property.name == name)
+                .cloned(),
+            Base::Intersection(intersection_id) => {
+                let members = self.checked.intersections.get(intersection_id as usize)?;
+                let mut combined: Option<zirk_sema::StructuralProperty> = None;
+                for member in members {
+                    let property = match member {
+                        Base::Shape(shape_id) => self
+                            .checked
+                            .structural_types
+                            .get(*shape_id as usize)?
+                            .properties
+                            .iter()
+                            .find(|property| property.name == name)
+                            .cloned(),
+                        Base::Object => None,
+                        _ => return None,
+                    };
+                    let Some(property) = property else {
+                        continue;
+                    };
+                    if let Some(existing) = combined.as_mut() {
+                        if existing.ty != property.ty {
+                            return None;
+                        }
+                        existing.optional &= property.optional;
+                        existing.readonly |= property.readonly;
+                    } else {
+                        combined = Some(property);
+                    }
+                }
+                combined
+            }
+            _ => None,
+        }
     }
 
     /// Reads a statically checked structural property from its open-object
@@ -32932,6 +33565,95 @@ impl<'a> FunctionLowering<'a> {
         }
     }
 
+    /// Materializes a flow-refined subset of a stored union into its own
+    /// canonical layout. The slot retains the declared union representation;
+    /// after a discriminant test rules out alternatives, a narrower union has
+    /// a different tag map and cannot be retyped as the original value.
+    fn lower_union_subset_narrowing(
+        &mut self,
+        slot: SlotId,
+        source_type: IrType,
+        target_semantic_type: zirk_sema::Type,
+        span: Span,
+    ) -> Option<Operand> {
+        let IrType::Union(source_representation) = source_type else {
+            return None;
+        };
+        let IrType::Union(target_representation) = self.ir_type(target_semantic_type) else {
+            return None;
+        };
+        let (source_id, source_layout) = self
+            .module
+            .union_type_for_representation(source_representation)?;
+        let source_layout = source_layout.clone();
+        let (target_id, target_layout) = self
+            .module
+            .union_type_for_representation(target_representation)?;
+        let target_layout = target_layout.clone();
+
+        let mut target_alternatives = Vec::with_capacity(source_layout.alternatives.len());
+        for key in &source_layout.canonical_alternatives {
+            target_alternatives.push(
+                target_layout
+                    .canonical_alternatives
+                    .iter()
+                    .position(|candidate| candidate == key),
+            );
+        }
+        if source_layout.canonical_alternatives == target_layout.canonical_alternatives {
+            return Some(self.emit(InstKind::Load(slot), source_type, span));
+        }
+        if !target_alternatives.iter().any(Option::is_some) {
+            return None;
+        }
+
+        let target_type = IrType::Union(target_representation);
+        let result = self.declare_slot("<flow_narrowed_union>", target_type, span);
+        let join = self.new_block();
+        let branches = (0..source_layout.alternatives.len())
+            .map(|_| self.new_block())
+            .collect::<Vec<_>>();
+        let source = self.emit(InstKind::Load(slot), source_type, span);
+        self.terminate(Terminator::UnionDispatch {
+            value: source,
+            union_id: source_id,
+            targets: branches.clone(),
+        });
+
+        for (source_alternative, block) in branches.into_iter().enumerate() {
+            self.current = block;
+            let Some(target_alternative) = target_alternatives[source_alternative] else {
+                // Semantic flow proves these tags impossible on this edge.
+                self.terminate(Terminator::Unreachable);
+                continue;
+            };
+            let source = self.emit(InstKind::Load(slot), source_type, span);
+            let payload = self.emit(
+                InstKind::UnionProject {
+                    value: source,
+                    union_id: source_id,
+                    alternative: source_alternative as u32,
+                },
+                source_layout.alternatives[source_alternative],
+                span,
+            );
+            let narrowed = self.emit(
+                InstKind::UnionInject {
+                    union_id: target_id,
+                    alternative: target_alternative as u32,
+                    payload,
+                },
+                target_type,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result, narrowed), span);
+            self.terminate(Terminator::Jump(join));
+        }
+
+        self.current = join;
+        Some(self.emit(InstKind::Load(result), target_type, span))
+    }
+
     /// Lowers `cond ? a : b`.
     ///
     /// The same shape as the `if` expression — two blocks writing one slot —
@@ -33222,6 +33944,21 @@ impl<'a> FunctionLowering<'a> {
             {
                 let span = expr.span();
                 let name = self.callee_name(e).to_string();
+                if let Some((specialized_name, signature)) =
+                    self.generic_function_specialization(e, &name)
+                {
+                    let args = self.lower_args_for_params(e, &signature.params);
+                    let result = self.emit(
+                        InstKind::Call {
+                            callee: specialized_name,
+                            args,
+                        },
+                        IrType::Void,
+                        span,
+                    );
+                    self.lower_throws_check(result, IrType::Void, span);
+                    return;
+                }
                 let args = self.lower_args(e);
                 let result = self.emit(InstKind::Call { callee: name, args }, IrType::Void, span);
                 self.lower_throws_check(result, IrType::Void, span);
@@ -33328,6 +34065,7 @@ impl<'a> FunctionLowering<'a> {
                     object: operand,
                     contract: id,
                     index,
+                    specialization: None,
                     args: Vec::new(),
                 },
                 IrType::String,

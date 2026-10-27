@@ -336,7 +336,9 @@ fn emit_inner<'ctx>(
             for table in &layout.contracts {
                 let symbol = format!("zk.itable.{}.{}", layout.name, table.contract);
                 fields.push(word.const_int(u64::from(table.contract), false).into());
-                fields.push(table_of(&table.methods, &symbol).into());
+                let mut dispatch = table.methods.clone();
+                dispatch.extend(table.specializations.iter().cloned());
+                fields.push(table_of(&dispatch, &symbol).into());
             }
 
             // Appended after the contract tables (`fase-4e-colector-mark-sweep`,
@@ -5478,6 +5480,7 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 object,
                 contract,
                 index,
+                specialization,
                 args,
             } => {
                 let receiver = self.operand(*object).into_pointer_value();
@@ -5542,7 +5545,19 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .basic()
                     .expect("contract table lookup returns a pointer")
                     .into_pointer_value();
-                let offset = self.context.i32_type().const_int(u64::from(*index), false);
+                let dispatch_index = specialization.map_or(*index, |specialization| {
+                    let base_count = self
+                        .module
+                        .contracts
+                        .get(*contract as usize)
+                        .map_or(0, |layout| layout.methods.len())
+                        as u32;
+                    base_count + specialization
+                });
+                let offset = self
+                    .context
+                    .i32_type()
+                    .const_int(u64::from(dispatch_index), false);
                 let slot = unsafe {
                     self.builder
                         .build_in_bounds_gep(ptr, table, &[offset], "method_slot")

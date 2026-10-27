@@ -2105,6 +2105,38 @@ fn repeating_the_same_instantiation_reuses_one_layout() {
 }
 
 #[test]
+fn open_template_patterns_erase_and_indexed_callback_types_specialize_in_ir() {
+    let module = compile(
+        "fn on<T, K from String & keyof T>(value: T, event: \"{K}Changed\", new_value: T[K], callback: Fn(T[K]) => Void): Void { callback(new_value); }\n\
+         fn main(): Void {\n\
+             inmut person: { age: Int32; name: String } = { age: 42, name: \"Ada\" };\n\
+             on(person, \"ageChanged\", person.age, (age): Void => {});\n\
+         }",
+    );
+
+    let specialized = module
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("on$generic$"))
+        .expect("the event pattern call emits a concrete specialization");
+    let parameter_types = specialized
+        .params
+        .iter()
+        .map(|slot| specialized.slots[slot.0 as usize].ty)
+        .collect::<Vec<_>>();
+    assert_eq!(parameter_types[1], IrType::String);
+    assert_eq!(parameter_types[2], IrType::Int(IntWidth::I32));
+    let IrType::Callable(callback) = parameter_types[3] else {
+        panic!("callback must be a concrete callable ABI type");
+    };
+    assert_eq!(
+        module.closures[callback as usize].params,
+        [IrType::Int(IntWidth::I32)]
+    );
+    assert_eq!(module.closures[callback as usize].returns, IrType::Void);
+}
+
+#[test]
 fn two_different_instantiations_get_two_layouts() {
     let module = compile(&format!(
         "{BOX}\nfn main(): Void {{
@@ -2351,9 +2383,9 @@ fn scalar_union_layout_keeps_source_identity_and_injects_every_alternative() {
 #[test]
 fn singleton_union_match_lowers_temporal_and_numeric_patterns() {
     let module = compile(
-        "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+        "type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          type Wait = 250ms | 1s;\n\
-         type Number = const(1) | const(2);\n\
+         type Number = 1 | 2;\n\
          fn day(value: Day): String { return match value { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; }; }\n\
          fn wait(value: Wait): String { return match value { 250ms => \"short\"; 1s => \"long\"; }; }\n\
          fn number(value: Number): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\

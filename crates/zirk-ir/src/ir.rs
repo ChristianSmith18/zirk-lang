@@ -759,6 +759,9 @@ pub struct ContractTable {
     pub contract: u32,
     /// One symbol per contract method, in the contract's own order.
     pub methods: Vec<String>,
+    /// Monomorphized entries for generic contract methods. The vector order
+    /// matches `CallContract.specialization` for this contract.
+    pub specializations: Vec<String>,
 }
 
 /// Runtime-visible operation names for structural contract views.
@@ -1545,6 +1548,9 @@ pub enum InstKind {
         object: Operand,
         contract: u32,
         index: u32,
+        /// Index into the contract table's monomorphized entries, when this
+        /// call inferred all method-local type arguments.
+        specialization: Option<u32>,
         args: Vec<Operand>,
     },
     /// Calls method `index` through the object's own table.

@@ -164,7 +164,9 @@ type's own contract-method bodies (a trait's inherited default already
 expects a pointer receiver, so needs none). Verified against the scenario
 that specifically rules out a static-monomorphization alternative: two
 different concrete `record` adopters dispatched correctly through the same
-unchanged, non-generic call site. Generic contracts remain.
+unchanged, non-generic call site. Generic method calls through parameterized
+contracts now specialize their class implementations for in-program native
+and interpreter dispatch; package-boundary specialization metadata remains.
 
 - `class`, `construct`, visibility (`public`/`private`/`protected`), single
   inheritance, interfaces, traits.
@@ -178,13 +180,16 @@ unchanged, non-generic call site. Generic contracts remain.
 **Output:** the object-oriented subset of the spec working, including basic
 generics.
 
-The separate native type-algebra work now supplies recursive n-ary unions and
+The separate native type-algebra work supplies recursive n-ary unions and
 intersections, canonical singleton values and constant evaluation, structural
-type expressions, generic type operators, and flow narrowing. Semantic support
-is substantially broader than native lowering: scalar/string and enum-constant
-tagged unions have focused execution coverage, while structural shape values,
-some nominal/scalar combinations, cross-target runtime ABI execution, and
-several GC-storage boundaries remain open. See the current
+type expressions, generic type operators, and flow narrowing. Focused
+macOS ARM64 native/interpreter cases now cover discriminated structural unions,
+a structural/scalar union through a function, identity-preserving structural
+intersections, and captured structural payloads. One-hole open template
+inference also resolves a key such as `"age"` from `"ageChanged"` and uses
+`T[K]` to check the callback. The full structural alternative/container ABI,
+some mixed nominal/scalar combinations, cross-target runtime ABI execution,
+and additional GC-storage boundaries remain open. See the current
 [feature-status](ZIRK_FEATURE_STATUS.md) and
 [limitations](../handbook/13-appendices/07-current-limitations.md) before
 assigning additional delivery work.

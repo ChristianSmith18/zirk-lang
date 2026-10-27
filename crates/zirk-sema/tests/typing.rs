@@ -2903,13 +2903,13 @@ fn union_object_literals_collect_candidates_and_contextualize_nested_values() {
         "type Enabled = { active: true; payload: { amount: Int8 } };\n\
          type Disabled = { active: false; payload: { reason: String } };\n\
          type Choice = Enabled | Disabled;\n\
+         fn consume(value: Choice): Void { }\n\
          fn choose(): Choice { return { active: true, payload: { amount: 7 } }; }\n\
-         fn main(): Void { }",
+         fn main(): Void { consume({ active: true, payload: { amount: 7 } }); }",
     );
     let output = sink.render(RenderStyle::Human);
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
     let _ = sources;
 
     let ambiguous = rejected(
@@ -2968,35 +2968,34 @@ fn union_object_literals_collect_candidates_and_contextualize_nested_values() {
     );
 
     let singleton_candidates = "enum Shade { Red, Blue }\n\
-         const fn scale(value: Int32): Int32 { return value * 2; }\n\
-         type FloatLeft = { choice: const(1.5f64); left: Int32 };\n\
-         type FloatRight = { choice: const(2.5f64); right: Int32 };\n\
-         type DateLeft = { choice: const(Date(2026, 12, 25)); left: Int32 };\n\
-         type DateRight = { choice: const(Date(2027, 1, 1)); right: Int32 };\n\
-         type TimeLeft = { choice: const(Time(9, 30)); left: Int32 };\n\
-         type TimeRight = { choice: const(Time(17, 0)); right: Int32 };\n\
-         type DateTimeLeft = { choice: const(DateTime(Date(2026, 12, 25), Time(9, 30))); left: Int32 };\n\
-         type DateTimeRight = { choice: const(DateTime(Date(2027, 1, 1), Time(0, 0))); right: Int32 };\n\
-         type EnumLeft = { choice: const(Shade.Red); left: Int32 };\n\
-         type EnumRight = { choice: const(Shade.Blue); right: Int32 };\n\
-         type ValueLeft = { choice: const({ x: 1 }); left: Int32 };\n\
-         type ValueRight = { choice: const({ x: 2 }); right: Int32 };\n\
-         type ConstFnLeft = { choice: const(scale(3)); left: Int32 };\n\
-         type ConstFnRight = { choice: const(scale(4)); right: Int32 };\n\
+         type FloatLeft = { choice: 1.5f64; left: Int32 };\n\
+         type FloatRight = { choice: 2.5f64; right: Int32 };\n\
+         type DateLeft = { choice: Date(2026, 12, 25); left: Int32 };\n\
+         type DateRight = { choice: Date(2027, 1, 1); right: Int32 };\n\
+         type TimeLeft = { choice: Time(9, 30); left: Int32 };\n\
+         type TimeRight = { choice: Time(17, 0); right: Int32 };\n\
+         type DateTimeLeft = { choice: DateTime(Date(2026, 12, 25), Time(9, 30)); left: Int32 };\n\
+         type DateTimeRight = { choice: DateTime(Date(2027, 1, 1), Time(0, 0)); right: Int32 };\n\
+         type EnumLeft = { choice: Shade.Red; left: Int32 };\n\
+         type EnumRight = { choice: Shade.Blue; right: Int32 };\n\
+         type ValueLeft = { choice: { x: 1 }; left: Int32 };\n\
+         type ValueRight = { choice: { x: 2 }; right: Int32 };\n\
+         type DirectLeft = { choice: 6; left: Int32 };\n\
+         type DirectRight = { choice: 8; right: Int32 };\n\
          type FloatChoice = FloatLeft | FloatRight;\n\
          type DateChoice = DateLeft | DateRight;\n\
          type TimeChoice = TimeLeft | TimeRight;\n\
          type DateTimeChoice = DateTimeLeft | DateTimeRight;\n\
          type EnumChoice = EnumLeft | EnumRight;\n\
          type ValueChoice = ValueLeft | ValueRight;\n\
-         type ConstFnChoice = ConstFnLeft | ConstFnRight;\n\
+         type DirectChoice = DirectLeft | DirectRight;\n\
          fn float_choice(): FloatChoice { return { choice: 1.5f64, left: 1 }; }\n\
          fn date_choice(): DateChoice { return { choice: Date(2026, 12, 25), left: 1 }; }\n\
          fn time_choice(): TimeChoice { return { choice: Time(9, 30), left: 1 }; }\n\
          fn datetime_choice(): DateTimeChoice { return { choice: DateTime(Date(2026, 12, 25), Time(9, 30)), left: 1 }; }\n\
          fn enum_choice(): EnumChoice { return { choice: Shade.Red, left: 1 }; }\n\
          fn value_choice(): ValueChoice { return { choice: { x: 1 }, left: 1 }; }\n\
-         fn const_fn_choice(): ConstFnChoice { return { choice: scale(3), left: 1 }; }\n\
+         fn direct_choice(): DirectChoice { return { choice: 6, left: 1 }; }\n\
          fn main(): Void { }";
     let (_, singleton_sink) = parse_and_check(singleton_candidates);
     let singleton_output = singleton_sink.render(RenderStyle::Human);
@@ -3010,7 +3009,7 @@ fn union_object_literals_collect_candidates_and_contextualize_nested_values() {
     );
 
     let wrong_discriminant = rejected(
-        "type One = { tag: const(1); one: Int32 }; type Two = { tag: const(2); two: Int32 }; type Choice = One | Two; fn choose(): Choice { return { tag: 3, one: 1 }; } fn main(): Void { }",
+        "type One = { tag: 1; one: Int32 }; type Two = { tag: 2; two: Int32 }; type Choice = One | Two; fn choose(): Choice { return { tag: 3, one: 1 }; } fn main(): Void { }",
     );
     assert!(
         wrong_discriminant.contains("matches no alternative"),
@@ -3075,9 +3074,9 @@ fn type_algebra_diagnostics_keep_codes_locations_causes_and_next_steps() {
             codes::TYPE_MISMATCH,
         ),
         (
-            "invalid temporal literal",
-            "type InvalidValue = const(Time(25, 0)); fn take(value: InvalidValue): Void { } fn main(): Void { }",
-            codes::INVALID_CONSTANT_TYPE,
+            "bare temporal type literal",
+            "type InvalidValue = 25:00; fn take(value: InvalidValue): Void { } fn main(): Void { }",
+            zirk_parser::codes::UNEXPECTED_TOKEN,
         ),
         (
             "impossible type predicate",
@@ -3131,7 +3130,7 @@ fn type_algebra_diagnostics_keep_codes_locations_causes_and_next_steps() {
 #[test]
 fn composite_type_diagnostics_bound_their_utf8_display() {
     let alternatives = (0..8)
-        .map(|index| format!("const(\"{}-{index}\")", "🙂".repeat(80)))
+        .map(|index| format!("\"{}-{index}\"", "🙂".repeat(80)))
         .collect::<Vec<_>>()
         .join(" | ");
     let source = format!(
@@ -3312,7 +3311,7 @@ fn type_predicates_are_inferred_only_from_direct_safe_type_tests() {
 
 #[test]
 fn match_bindings_receive_remaining_singletons_and_structural_candidates() {
-    let source = "type One = const(1); type Two = const(2); type Choice = One | Two;\n\
+    let source = "type One = 1; type Two = 2; type Choice = One | Two;\n\
          fn select(value: Choice): Int32 { match value { 1 => 10, remaining => { let two: Two = remaining; return 20; } } }\n\
          type HasLabel = { label: String }; type HasCode = { code: Int32 };\n\
          type RecordChoice = HasLabel | HasCode;\n\
@@ -3335,8 +3334,8 @@ fn match_bindings_receive_remaining_singletons_and_structural_candidates() {
 #[test]
 fn finite_match_exhaustiveness_covers_nullable_mixed_and_temporal_domains() {
     let accepted = "enum Shade { Red, Blue }\n\
-         type One = const(1); type Mixed = One | Shade;\n\
-         type Holiday = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type One = 1; type Mixed = One | Shade;\n\
+         type Holiday = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          fn boolean(value: Boolean?): Int32 { return match value { true => 1, false => 0, null => 2 }; }\n\
          fn mixed(value: Mixed): Int32 { return match value { 1 => 1, Shade.Red => 2, Shade.Blue => 3 }; }\n\
          fn holiday(value: Holiday): Int32 { return match value { Date(2026, 12, 25) => 1, Date(2027, 1, 1) => 2 }; }\n\
@@ -3365,7 +3364,7 @@ fn finite_match_exhaustiveness_covers_nullable_mixed_and_temporal_domains() {
 #[test]
 fn duplicate_and_impossible_match_patterns_report_unreachable_arms() {
     let duplicate = rejected(
-        "type Choice = const(1) | const(2); fn classify(value: Choice): Int32 { return match value { 1 => 1, 1 => 2, _ => 3 }; } fn main(): Void { }",
+        "type Choice = 1 | 2; fn classify(value: Choice): Int32 { return match value { 1 => 1, 1 => 2, _ => 3 }; } fn main(): Void { }",
     );
     assert!(
         duplicate.contains(codes::UNREACHABLE_PATTERN.as_str()),
@@ -3373,7 +3372,7 @@ fn duplicate_and_impossible_match_patterns_report_unreachable_arms() {
     );
 
     let impossible = rejected(
-        "type One = const(1); fn classify(value: One): Int32 { return match value { 2 => 2, _ => 1 }; } fn main(): Void { }",
+        "type One = 1; fn classify(value: One): Int32 { return match value { 2 => 2, _ => 1 }; } fn main(): Void { }",
     );
     assert!(
         impossible.contains(codes::UNREACHABLE_PATTERN.as_str()),
@@ -3474,11 +3473,11 @@ fn union_object_literal_spreads_use_only_their_declared_discriminant_type() {
 
 #[test]
 fn if_branches_narrow_booleans_null_and_finite_singleton_unions() {
-    let source = "type Choice = const(1) | const(2);\n\
+    let source = "type Choice = 1 | 2;\n\
          fn inspect(flag: Boolean, maybe: String?, choice: Choice): Void {\n\
-             if flag { mut yes: const(true) = flag; } else { mut no: const(false) = flag; }\n\
+             if flag { mut yes: true = flag; } else { mut no: false = flag; }\n\
              if maybe != null { mut text: String = maybe; } else { }\n\
-             if choice == 1 { mut one: const(1) = choice; } else { mut two: const(2) = choice; }\n\
+             if choice == 1 { mut one: 1 = choice; } else { mut two: 2 = choice; }\n\
          }\n\
          fn main(): Void { }";
     let (_, diagnostics) = parse_and_check(source);
@@ -6928,7 +6927,7 @@ fn normalization_budget_reports_source_location_without_interning_a_partial_unio
 
 #[test]
 fn temporal_singleton_patterns_cover_canonical_union_members() {
-    let source = "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+    let source = "type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          type Wait = 250ms | 1s;\n\
          fn classify(day: Day): String {\n\
              return match day { Date(2026, 12, 25) => \"holiday\"; Date(2027, 1, 1) => \"new year\"; };\n\
@@ -6952,7 +6951,7 @@ fn temporal_singleton_patterns_cover_canonical_union_members() {
         "each Date constructor pattern must match its singleton alternative: {diagnostics:?}"
     );
 
-    let missing_source = "type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+    let missing_source = "type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          fn classify(day: Day): String {\n\
              return match day { Date(2026, 12, 25) => \"holiday\"; };\n\
          }\n\
@@ -6968,13 +6967,13 @@ fn temporal_singleton_patterns_cover_canonical_union_members() {
 
 #[test]
 fn finite_singleton_unions_are_exhaustive_across_value_families() {
-    let source = "type NumberChoice = const(1) | const(2);\n\
-         type WordChoice = const(\"one\") | const(\"two\");\n\
-         type FloatChoice = const(1.5f64) | const(2.5f64);\n\
-         type CharChoice = const('a') | const('b');\n\
+    let source = "type NumberChoice = 1 | 2;\n\
+         type WordChoice = \"one\" | \"two\";\n\
+         type FloatChoice = 1.5f64 | 2.5f64;\n\
+         type CharChoice = 'a' | 'b';\n\
          type FlagChoice = true | false;\n\
-         type TimeChoice = const(Time(9, 30)) | const(Time(17, 0));\n\
-         type EventChoice = const(DateTime(Date(2026, 12, 25), Time(9, 30))) | const(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
+         type TimeChoice = Time(9, 30) | Time(17, 0);\n\
+         type EventChoice = DateTime(Date(2026, 12, 25), Time(9, 30)) | DateTime(Date(2027, 1, 1), Time(0, 0));\n\
          fn number(value: NumberChoice): String { return match value { 1 => \"one\"; 2 => \"two\"; }; }\n\
          fn word(value: WordChoice): String { return match value { \"one\" => \"first\"; \"two\" => \"second\"; }; }\n\
          fn float(value: FloatChoice): String { return match value { 1.5f64 => \"first\"; 2.5f64 => \"second\"; }; }\n\
@@ -6992,7 +6991,7 @@ fn finite_singleton_unions_are_exhaustive_across_value_families() {
         "all finite members across these domains are covered: {diagnostics:?}"
     );
 
-    let missing_source = "type WordChoice = const(\"one\") | const(\"two\");\n\
+    let missing_source = "type WordChoice = \"one\" | \"two\";\n\
          fn word(value: WordChoice): String { return match value { \"one\" => \"first\"; }; }\n\
          fn main(): Void { }";
     let (_sources, missing_sink) = parse_and_check(missing_source);
@@ -7184,7 +7183,7 @@ fn singleton_type_values_are_canonical_and_reused_by_constants() {
         "test.zrk",
         "class Holder {\n\
              yes_a: true; yes_b: true; no: false;\n\
-             computed: const(1 + 2); written: 3;\n\
+             computed: 3; written: 3;\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -7217,14 +7216,14 @@ fn singleton_type_values_are_canonical_and_reused_by_constants() {
 }
 
 #[test]
-fn tuple_constant_singletons_are_interned_through_type_resolution() {
+fn tuple_types_are_written_as_types_without_literal_wrappers() {
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new(
         "test.zrk",
         "class Holder {\n\
-             first: const((3, (true, \"ready\")));\n\
-             same: const((3, (true, \"ready\")));\n\
-             other: const((3, (false, \"ready\")));\n\
+             first: Tuple<Int32, Tuple<Boolean, String>>;\n\
+             same: Tuple<Int32, Tuple<Boolean, String>>;\n\
+             other: Tuple<Int32, Tuple<Boolean, String>>;\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -7239,25 +7238,19 @@ fn tuple_constant_singletons_are_interned_through_type_resolution() {
         .find(|class| class.name == "Holder")
         .unwrap();
     assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
-    assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
-    let Base::Singleton(id) = holder.fields[0].ty.base else {
-        panic!("tuple constants must be interned as singleton types");
-    };
-    assert!(matches!(
-        checked.singleton_values[id as usize].value,
-        zirk_sema::constant_value::ConstValue::Tuple { .. }
-    ));
+    assert_eq!(holder.fields[0].ty, holder.fields[2].ty);
+    assert!(!matches!(holder.fields[0].ty.base, Base::Singleton(_)));
 }
 
 #[test]
-fn immutable_object_constant_singletons_intern_nested_values_by_shape() {
+fn direct_object_type_shapes_keep_literal_discriminants() {
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new(
         "test.zrk",
         "class Holder {\n\
-             first: const({ x: 3, nested: (true, \"ready\") });\n\
-             same: const({ nested: (true, \"ready\"), x: 3 });\n\
-             other: const({ x: 4, nested: (true, \"ready\") });\n\
+             first: { x: 3; nested: String };\n\
+             same: { nested: String; x: 3 };\n\
+             other: { x: 4; nested: String };\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -7269,8 +7262,8 @@ fn immutable_object_constant_singletons_intern_nested_values_by_shape() {
     assert!(
         sink.diagnostics()
             .iter()
-            .all(|diagnostic| diagnostic.code == codes::NOT_LOWERED),
-        "object constants should resolve canonically; only runtime lowering is pending: {}",
+            .all(|diagnostic| diagnostic.code != codes::TYPE_MISMATCH),
+        "literal-valued object type shapes should remain valid: {}",
         sink.render(RenderStyle::Human)
     );
     let holder = checked
@@ -7280,31 +7273,20 @@ fn immutable_object_constant_singletons_intern_nested_values_by_shape() {
         .unwrap();
     assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
     assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
-    let Base::Singleton(id) = holder.fields[0].ty.base else {
-        panic!("immutable aggregate constants must intern as singleton types");
-    };
-    let zirk_sema::constant_value::ConstValue::Aggregate { fields, .. } =
-        &checked.singleton_values[id as usize].value
-    else {
-        panic!("expected canonical immutable aggregate value");
-    };
-    assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].0, "nested");
-    assert_eq!(fields[1].0, "x");
+    assert!(!matches!(holder.fields[0].ty.base, Base::Singleton(_)));
 }
 
 #[test]
-fn enum_variant_constants_are_typed_and_interned_by_variant_and_payload() {
+fn enum_case_literals_are_typed_and_interned_directly() {
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new(
         "test.zrk",
-        "enum Color { Red, Blue }\n\
-         enum Shape { Circle(radius: Int32, color: Color), Point }\n\
+        "enum Shade { Red, Blue }\n\
          class Holder {\n\
-             first: const(Shape.Circle(3, Color.Red));\n\
-             same: const(Shape.Circle(3, Color.Red));\n\
-             other_color: const(Shape.Circle(3, Color.Blue));\n\
-             other_variant: const(Shape.Point);\n\
+             first: Shade.Red;\n\
+             same: Shade.Red;\n\
+             other_color: Shade.Blue;\n\
+             other_variant: Shade.Blue;\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -7327,7 +7309,7 @@ fn enum_variant_constants_are_typed_and_interned_by_variant_and_payload() {
         .unwrap();
     assert_eq!(holder.fields[0].ty, holder.fields[1].ty);
     assert_ne!(holder.fields[0].ty, holder.fields[2].ty);
-    assert_ne!(holder.fields[0].ty, holder.fields[3].ty);
+    assert_eq!(holder.fields[2].ty, holder.fields[3].ty);
     let Base::Singleton(id) = holder.fields[0].ty.base else {
         panic!("enum constants must be represented as singleton types");
     };
@@ -7336,36 +7318,28 @@ fn enum_variant_constants_are_typed_and_interned_by_variant_and_payload() {
     else {
         panic!("expected canonical algebraic enum value");
     };
-    assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].type_identity, "Int32");
-    assert_eq!(fields[1].type_identity, "Color");
+    assert!(fields.is_empty());
 }
 
 #[test]
-fn const_class_construction_is_rejected_as_runtime_identity() {
+fn constructor_calls_are_rejected_as_singleton_type_syntax() {
     let (_sources, sink) = parse_and_check(
         "class Box { value: Int32; construct(value: Int32) { this.value = value; } }\n\
-         type Boxed = const(Box(1));\n\
+         type Boxed = Box(1);\n\
          fn take(value: Boxed): Void { }\n\
          fn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .find(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
         .unwrap_or_else(|| {
             panic!(
                 "class identity must not become a singleton: {}",
                 sink.render(RenderStyle::Human)
             )
         });
-    assert!(
-        diagnostic
-            .message
-            .contains("not declared and verified as a pure constant function"),
-        "class constructors must fail clearly as unverified runtime operations: {}",
-        diagnostic.message
-    );
+    assert!(diagnostic.message.contains("type"));
 }
 
 #[test]
@@ -7373,7 +7347,7 @@ fn satisfies_checks_assignability_and_preserves_singleton_type() {
     let mut sources = SourceMap::new();
     sources.add(SourceFile::new(
         "test.zrk",
-        "type Three = const(3);\n\
+        "type Three = 3;\n\
          fn check(value: Three): Three { return value satisfies Int32; }\n\
          fn main(): Void { }",
     ));
@@ -7443,8 +7417,8 @@ fn mutable_numeric_literals_widen_to_the_primitive_for_reassignment() {
 fn expected_union_context_selects_and_retains_literal_alternatives() {
     accepted(
         "type Value = Int32 | String;\n\
-         type Number = const(1) | const(2);\n\
-         type Day = const(Date(2026, 12, 25)) | const(Date(2027, 1, 1));\n\
+         type Number = 1 | 2;\n\
+         type Day = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
          fn take(value: Value): Void { }\n\
          fn take_number(value: Number): Void { }\n\
          fn take_day(value: Day): Void { }\n\
@@ -7461,7 +7435,7 @@ fn expected_union_context_selects_and_retains_literal_alternatives() {
 
 #[test]
 fn explicit_singleton_annotation_rejects_a_different_value_after_widening() {
-    let output = rejected("fn main(): Void { mut one: const(1) = 1; one = 2; }");
+    let output = rejected("fn main(): Void { mut one: 1 = 1; one = 2; }");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
@@ -7473,7 +7447,7 @@ fn primitive_union_members_absorb_owned_singletons() {
         "class Holder {\n\
              numeric: Int32 | 3;\n\
              text: String | \"ready\";\n\
-             day: Date | const(Date(2026, 12, 25));\n\
+             day: Date | Date(2026, 12, 25);\n\
              flags: true | false;\n\
          }\n\
          fn main(): Void { }",
@@ -7507,11 +7481,11 @@ fn primitive_and_enum_union_coverage_absorbs_singleton_members() {
              text: String | \"ready\";\n\
              character: Char | 'x';\n\
              duration: Duration | 1s;\n\
-             date: Date | const(Date(2026, 12, 25));\n\
-             time: Time | const(Time(9, 30));\n\
-             datetime: DateTime | const(DateTime(2026, 12, 25, 9, 30));\n\
+             date: Date | Date(2026, 12, 25);\n\
+             time: Time | Time(9, 30);\n\
+             datetime: DateTime | DateTime(Date(2026, 12, 25), Time(9, 30));\n\
              flag: Boolean | true;\n\
-             color: Color | const(Color.Red);\n\
+             color: Color | Color.Red;\n\
              both_flags: true | false;\n\
          }\n\
          fn main(): Void { }",
@@ -7548,8 +7522,8 @@ fn integer_singletons_fit_only_representable_signed_and_unsigned_targets() {
     let (_sources, sink) = parse_and_check(
         "fn take_i8(value: Int8): Void { }\n\
          fn take_u8(value: UInt8): Void { }\n\
-         fn signed(value: const(-128)): Void { take_i8(value); }\n\
-         fn unsigned(value: const(255)): Void { take_u8(value); }\n\
+         fn signed(value: -128): Void { take_i8(value); }\n\
+         fn unsigned(value: 255): Void { take_u8(value); }\n\
          fn main(): Void { }",
     );
     assert!(
@@ -7563,19 +7537,19 @@ fn integer_singletons_fit_only_representable_signed_and_unsigned_targets() {
     for (source, expected) in [
         (
             "fn take_i8(value: Int8): Void { }\n\
-             fn too_small(value: const(-129)): Void { take_i8(value); }\n\
+             fn too_small(value: -129): Void { take_i8(value); }\n\
              fn main(): Void { }",
             "Int8",
         ),
         (
             "fn take_u8(value: UInt8): Void { }\n\
-             fn negative(value: const(-1)): Void { take_u8(value); }\n\
+             fn negative(value: -1): Void { take_u8(value); }\n\
              fn main(): Void { }",
             "UInt8",
         ),
         (
             "fn take_u8(value: UInt8): Void { }\n\
-             fn too_large(value: const(256)): Void { take_u8(value); }\n\
+             fn too_large(value: 256): Void { take_u8(value); }\n\
              fn main(): Void { }",
             "UInt8",
         ),
@@ -7727,7 +7701,7 @@ fn singleton_boolean_and_temporal_values_flow_into_union_nodes() {
              flag: true | false;\n\
              one_flag: true;\n\
              covered_flag: Boolean | false;\n\
-             day: const(Date(2026, 12, 25)) | const(Date(2026, 12, 26));\n\
+             day: Date(2026, 12, 25) | Date(2026, 12, 26);\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -7829,7 +7803,6 @@ fn union_reads_allow_common_structural_fields_and_join_their_types() {
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
     // The present runtime prototype does not lower arbitrary nominal unions;
     // this test isolates the static common-field rule from that separate gate.
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
     let _ = sources;
 }
 
@@ -7857,7 +7830,6 @@ fn union_method_calls_merge_safe_parameter_and_return_types() {
     let output = sink.render(RenderStyle::Human);
     assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
     let _ = sources;
 
     let incompatible_argument = rejected(
@@ -7936,7 +7908,6 @@ fn union_writes_allow_only_a_shared_required_mutable_field() {
     let output = sink.render(RenderStyle::Human);
     assert!(!output.contains(codes::UNKNOWN_MEMBER.as_str()), "{output}");
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]
@@ -7980,7 +7951,6 @@ fn union_writes_accept_values_compatible_with_every_destination() {
     );
     let output = sink.render(RenderStyle::Human);
     assert!(!output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
     let _ = sources;
 
     let unsafe_value = rejected(
@@ -8018,13 +7988,39 @@ fn named_contracts_and_structural_shapes_share_property_relations() {
 }
 
 #[test]
-fn invalid_union_type_is_not_lowered_yet() {
-    let output = rejected(
+fn structural_shape_intersections_compose_property_capabilities_and_reject_conflicts() {
+    accepted(
+        "type OptionalId = { id?: Int32; name: String };\n\
+         type ReadonlyId = { inmut id: Int32; active: Boolean };\n\
+         type Combined = OptionalId & ReadonlyId;\n\
+         fn read(value: Combined): Int32 { return value.id; }\n\
+         fn main(): Void { }",
+    );
+
+    let readonly_write = rejected(
+        "type Mutable = { id: Int32 }; type Frozen = { inmut id: Int32 }; type Combined = Mutable & Frozen; fn update(value: Combined): Void { value.id = 7; } fn main(): Void { }",
+    );
+    assert!(
+        readonly_write.contains(codes::ASSIGN_TO_IMMUTABLE.as_str()),
+        "a read-only constituent must make the combined view read-only: {readonly_write}"
+    );
+
+    let conflict = rejected(
+        "type Text = { value: String }; type Number = { value: Int32 }; type Conflict = Text & Number; fn read(value: Conflict): Void { } fn main(): Void { }",
+    );
+    assert!(
+        conflict.contains("structural intersection property `value` has conflicting types"),
+        "conflicting property requirements need a declaration-level diagnostic: {conflict}"
+    );
+}
+
+#[test]
+fn nominal_union_types_are_supported() {
+    accepted(
         "class Left { } class Right { }\n\
          fn f(x: Left | Right): Void { }\n\
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]
@@ -8155,45 +8151,38 @@ fn anonymous_shapes_preserve_properties_and_intern_independent_of_source_order()
 }
 
 #[test]
-fn scalar_literal_type_expressions_lower_while_shapes_remain_gated() {
+fn scalar_and_structural_type_expressions_lower() {
     accepted(
         "fn flag(value: true | false): Void { }\n\
-         fn date(value: const(Date(2026, 12, 25))): Void { }\n\
+         fn date(value: Date(2026, 12, 25)): Void { }\n\
          fn main(): Void { flag(true); date(Date(2026, 12, 25)); }",
     );
-    let output = rejected(
+    accepted(
         "fn f(x: { inmut id: String; name?: String }): Void { }\n\
          fn main(): Void { }",
     );
-    assert!(output.contains(codes::NOT_LOWERED.as_str()), "{output}");
 }
 
 #[test]
-fn invalid_constant_type_arithmetic_reports_a_source_diagnostic() {
+fn computed_expressions_are_rejected_in_singleton_type_position() {
     let (_sources, sink) = parse_and_check(
-        "type BeyondInt32 = const(2147483647 + 1);\nfn f(value: BeyondInt32): Void { }\nfn main(): Void { }",
+        "type Computed = 2147483647 + 1;\nfn f(value: Computed): Void { }\nfn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
-        .expect("invalid constant arithmetic has a dedicated diagnostic");
-    assert!(diagnostic.message.contains("Overflow"));
-    let location = diagnostic
-        .location
-        .as_ref()
-        .expect("diagnostic is source located");
-    assert_eq!(location.file, "test.zrk");
-    assert_eq!(location.line, 1);
+        .find(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
+        .expect("computed expressions are not singleton type atoms");
+    assert!(diagnostic.message.contains("expected"));
 
     let (_sources, sink) = parse_and_check(
-        "type InvalidTime = const(Time(25, 0));\nfn f(value: InvalidTime): Void { }\nfn main(): Void { }",
+        "type InvalidTime = 25:00;\nfn f(value: InvalidTime): Void { }\nfn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
-        .expect("invalid clock time has a dedicated constant diagnostic");
+        .find(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
+        .expect("bare clock literals are rejected in type position");
     let location = diagnostic
         .location
         .as_ref()
@@ -8203,61 +8192,58 @@ fn invalid_constant_type_arithmetic_reports_a_source_diagnostic() {
 }
 
 #[test]
-fn constant_type_effect_rejection_is_a_source_diagnostic() {
+fn call_expressions_are_rejected_in_singleton_type_position() {
     let (_sources, sink) = parse_and_check(
-        "type FromEnvironment = const(Env.get(\"PATH\"));\nfn f(value: FromEnvironment): Void { }\nfn main(): Void { }",
+        "type FromEnvironment = Env.get(\"PATH\");\nfn f(value: FromEnvironment): Void { }\nfn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
-        .expect("environment access is rejected in constant type position");
-    assert!(diagnostic.message.contains("DisallowedEffect"));
-    assert!(diagnostic.message.contains("environment access"));
+        .find(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
+        .expect("function calls are rejected as type atoms");
+    assert!(diagnostic.message.contains("call"));
     let location = diagnostic.location.as_ref().expect("source location");
     assert_eq!(location.file, "test.zrk");
     assert_eq!(location.line, 1);
 }
 
 #[test]
-fn const_functions_evaluate_with_typed_parameters_and_return_values() {
-    let (_sources, sink) = parse_and_check(
-        "const fn add(left: Int32, right: Int32): Int32 { return left + right; }\ntype Three = const(add(1, 2));\nfn f(value: Three): Void { }\nfn main(): Void { }",
-    );
+fn direct_literal_types_need_no_constant_function_calls() {
+    let (_sources, sink) =
+        parse_and_check("type Three = 3;\nfn f(value: Three): Void { }\nfn main(): Void { }");
     assert!(
         !sink
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
-        "valid pure const call should be evaluated, diagnostics: {}",
+        "a direct singleton literal should resolve, diagnostics: {}",
         sink.render(RenderStyle::Human)
     );
 
-    let (_sources, sink) = parse_and_check(
-        "const fn double(value: Int32): Int32 { return value + value; }\nconst fn triple(value: Int32): Int32 { return double(value) + value; }\ntype Six = const(triple(2));\nfn f(value: Six): Void { }\nfn main(): Void { }",
-    );
+    let (_sources, sink) =
+        parse_and_check("type Six = 6;\nfn f(value: Six): Void { }\nfn main(): Void { }");
     assert!(
         !sink
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
-        "forward and nested const calls should evaluate: {}",
+        "direct numeric singleton aliases should resolve: {}",
         sink.render(RenderStyle::Human)
     );
 }
 
 #[test]
-fn ordinary_functions_and_effectful_const_functions_are_rejected_in_const_types() {
+fn ordinary_function_calls_are_rejected_in_types_and_const_functions_still_check_effects() {
     let (_sources, sink) = parse_and_check(
-        "fn ordinary(value: Int32): Int32 { return value; }\ntype A = const(ordinary(1));\nfn f(value: A): Void { }\nfn main(): Void { }",
+        "fn ordinary(value: Int32): Int32 { return value; }\ntype A = ordinary(1);\nfn f(value: A): Void { }\nfn main(): Void { }",
     );
     let invalid: Vec<_> = sink
         .diagnostics()
         .iter()
-        .filter(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
+        .filter(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
         .collect();
     assert_eq!(invalid.len(), 1, "{}", sink.render(RenderStyle::Human));
-    assert!(invalid[0].message.contains("not declared and verified"));
+    assert!(invalid[0].message.contains("call"));
 
     let (_sources, sink) = parse_and_check(
         "const fn unused_impure(): String { return Env.get(\"PATH\"); }\nfn main(): Void { }",
@@ -8273,30 +8259,29 @@ fn ordinary_functions_and_effectful_const_functions_are_rejected_in_const_types(
 }
 
 #[test]
-fn constant_numeric_arithmetic_uses_runtime_decimal_rules() {
+fn direct_numeric_type_literals_preserve_exact_values() {
     let (_sources, sink) = parse_and_check(
-        "type Quotient = const(3 / 4);\ntype Mixed = const(1 + 0.5);\ntype Repeating = const(1.0 / 3.0);\nfn f(a: Quotient, b: Mixed, c: Repeating): Void { }\nfn main(): Void { }",
+        "type Quotient = 0.75;\ntype Mixed = 1.5;\ntype Repeating = 0.3333333333333333333333333333333333;\nfn f(a: Quotient, b: Mixed, c: Repeating): Void { }\nfn main(): Void { }",
     );
     assert!(
         !sink
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
-        "well-defined arithmetic constants must evaluate without invalid-value diagnostics: {}",
+        "direct fractional literals must resolve without invalid-value diagnostics: {}",
         sink.render(RenderStyle::Human)
     );
 
     let (_sources, sink) = parse_and_check(
-        "type DivideByZero = const(3 / 0);\nfn f(a: DivideByZero): Void { }\nfn main(): Void { }",
+        "type DivideByZero = 3 / 0;\nfn f(a: DivideByZero): Void { }\nfn main(): Void { }",
     );
-    let diagnostic = sink
-        .diagnostics()
-        .iter()
-        .find(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE)
-        .expect("division by zero is rejected during constant evaluation");
-    let location = diagnostic.location.as_ref().expect("source location");
-    assert_eq!(location.file, "test.zrk");
-    assert_eq!(location.line, 1);
+    assert!(
+        sink.diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN),
+        "arithmetic must be rejected before type evaluation: {}",
+        sink.render(RenderStyle::Human)
+    );
 }
 
 #[test]
@@ -8305,11 +8290,11 @@ fn decimal_singletons_normalize_scale_without_binary_float_conversion() {
     sources.add(SourceFile::new(
         "decimal-singletons.zrk",
         "class Amounts {\n\
-             one_decimal: const(1.0);\n\
-             one_with_extra_scale: const(1.00);\n\
-             nearby: const(1.01);\n\
-             zero_scaled: const(0.000);\n\
-             zero_plain: const(0.0);\n\
+             one_decimal: 1.0;\n\
+             one_with_extra_scale: 1.00;\n\
+             nearby: 1.01;\n\
+             zero_scaled: 0.000;\n\
+             zero_plain: 0.0;\n\
          }\n\
          fn main(): Void { }",
     ));
@@ -8341,10 +8326,10 @@ fn float_singletons_allow_exact_widening_but_not_narrowing() {
         "fn take_f32(value: Float32): Void { }\n\
          fn take_f64(value: Float64): Void { }\n\
          fn take_f128(value: Float128): Void { }\n\
-         fn f16(value: const(1.5f16)): Void { take_f16(value); take_f32(value); take_f64(value); take_f128(value); }\n\
+         fn f16(value: 1.5f16): Void { take_f16(value); take_f32(value); take_f64(value); take_f128(value); }\n\
          fn take_f16(value: Float16): Void { }\n\
-         fn f32(value: const(1.5f32)): Void { take_f64(value); take_f128(value); }\n\
-         fn f64(value: const(1.5f64)): Void { take_f128(value); }\n\
+         fn f32(value: 1.5f32): Void { take_f64(value); take_f128(value); }\n\
+         fn f64(value: 1.5f64): Void { take_f128(value); }\n\
          fn main(): Void { }",
     );
     assert!(
@@ -8359,7 +8344,7 @@ fn float_singletons_allow_exact_widening_but_not_narrowing() {
     for (literal, target) in [("1.5f32", "Float16"), ("1.5f64", "Float32")] {
         let source = format!(
             "fn take(value: {target}): Void {{ }}\n\
-             fn f(singleton: const({literal})): Void {{ take(singleton); }}\n\
+             fn f(singleton: {literal}): Void {{ take(singleton); }}\n\
              fn main(): Void {{ }}"
         );
         let (_sources, sink) = parse_and_check(&source);
@@ -8374,46 +8359,33 @@ fn float_singletons_allow_exact_widening_but_not_narrowing() {
 }
 
 #[test]
-fn constant_uint128_can_construct_and_evaluate_the_full_unsigned_range() {
-    let source = "type HighBit = const(UInt128(1) << 127);\ntype Max = const(((UInt128(1) << 127) - UInt128(1)) * UInt128(2) + UInt128(1));\nfn f(high: HighBit, max: Max): Void { }\nfn main(): Void { }";
+fn direct_uint128_singletons_cover_the_full_unsigned_range() {
+    let source = "type HighBit = 170141183460469231731687303715884105728u128;\ntype Max = 340282366920938463463374607431768211455u128;\nfn f(high: HighBit, max: Max): Void { }\nfn main(): Void { }";
     let (_sources, sink) = parse_and_check(source);
     assert!(
         !sink
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == codes::INVALID_CONSTANT_TYPE),
-        "typed UInt128 construction and exact arithmetic should evaluate: {}",
+        "direct UInt128 literal types should resolve: {}",
         sink.render(RenderStyle::Human)
     );
 }
 
 #[test]
-fn constant_expression_depth_limit_is_source_located() {
-    let source = format!(
-        "type TooDeep = const({}1);\nfn f(value: TooDeep): Void {{ }}\nfn main(): Void {{ }}",
-        "~".repeat(129)
-    );
-    let (_sources, sink) = parse_and_check(&source);
-    let diagnostic = sink
-        .diagnostics()
-        .iter()
-        .find(|diagnostic| diagnostic.code == codes::TYPE_COMPUTATION_LIMIT)
-        .expect("deep constant expressions report the stable budget diagnostic");
-    assert!(diagnostic.message.contains("constant call depth"));
-    let location = diagnostic.location.as_ref().expect("source location");
-    assert_eq!(location.file, "test.zrk");
-    assert_eq!(location.line, 1);
-
+fn computed_type_expressions_are_rejected_at_the_source() {
     let (_sources, sink) = parse_and_check(
-        "type TooLarge = const(\"x\" * 1048577);\nfn f(value: TooLarge): Void { }\nfn main(): Void { }",
+        "type Computed = 1 + 1;\nfn f(value: Computed): Void { }\nfn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
         .iter()
-        .find(|diagnostic| diagnostic.code == codes::TYPE_COMPUTATION_LIMIT)
-        .expect("oversized constant strings report the stable budget diagnostic");
-    assert!(diagnostic.message.contains("canonical constant size"));
-    let location = diagnostic.location.as_ref().expect("source location");
+        .find(|diagnostic| diagnostic.code == zirk_parser::codes::UNEXPECTED_TOKEN)
+        .expect("computed expressions are not singleton type atoms");
+    let location = diagnostic
+        .location
+        .as_ref()
+        .expect("diagnostic source location");
     assert_eq!(location.file, "test.zrk");
     assert_eq!(location.line, 1);
 }
@@ -8421,7 +8393,7 @@ fn constant_expression_depth_limit_is_source_located() {
 #[test]
 fn invalid_constant_temporal_constructor_reports_its_location() {
     let (_sources, sink) = parse_and_check(
-        "type Holiday = const(Date(2024, 2, 30));\nfn f(value: Holiday): Void { }\nfn main(): Void { }",
+        "type Holiday = Date(2024, 2, 30);\nfn f(value: Holiday): Void { }\nfn main(): Void { }",
     );
     let diagnostic = sink
         .diagnostics()
@@ -8434,6 +8406,31 @@ fn invalid_constant_temporal_constructor_reports_its_location() {
         .expect("diagnostic is source located");
     assert_eq!(location.file, "test.zrk");
     assert_eq!(location.line, 1);
+}
+
+#[test]
+fn temporal_constructor_type_values_share_identity_with_runtime_values() {
+    let (_sources, sink) = parse_and_check(
+        "type Holiday = Date(2026, 12, 25) | Date(2027, 1, 1);\n\
+         type OfficeTime = Time(9, 30) | Time(17, 0);\n\
+         type Meeting = DateTime(Date(2026, 12, 25), Time(9, 30)) | DateTime(Date(2027, 1, 1), Time(0, 0));\n\
+         fn take_day(value: Holiday): Void { }\n\
+         fn take_time(value: OfficeTime): Void { }\n\
+         fn take_meeting(value: Meeting): Void { }\n\
+         fn main(): Void {\n\
+             take_day(Date(2026, 12, 25));\n\
+             take_day(Date(2027, 1, 1));\n\
+             take_time(Time(9, 30));\n\
+             take_time(Time(17, 0));\n\
+             take_meeting(DateTime(Date(2026, 12, 25), Time(9, 30)));\n\
+             take_meeting(DateTime(Date(2027, 1, 1), Time(0, 0)));\n\
+         }",
+    );
+    assert!(
+        !sink.has_errors(),
+        "temporal constructor alternatives must match runtime temporal values: {}",
+        sink.render(RenderStyle::Human)
+    );
 }
 
 // --- Casts -----------------------------------------------------------------
@@ -12130,6 +12127,162 @@ fn template_literal_types_expand_finite_string_numeric_and_boolean_unions() {
     assert!(
         limited.contains("template literal expansion limit exceeded"),
         "cross products must stop at the deterministic budget: {limited}"
+    );
+}
+
+#[test]
+fn open_template_inference_resolves_keyof_and_contextual_indexed_callbacks() {
+    fn checked(source_text: &str) -> (zirk_sema::CheckedProgram, DiagnosticSink) {
+        let mut sources = SourceMap::new();
+        sources.add(SourceFile::new("open-template.zrk", source_text));
+        let source = sources.entry();
+        let mut sink = DiagnosticSink::new();
+        let tokens = tokenize(source, &mut sink);
+        let program = parse(source, &tokens, &mut sink);
+        let program = check(&sources, &program, &mut sink);
+        (program, sink)
+    }
+
+    let valid = "fn on<T, K from String & keyof T>(value: T, event: \"{K}Changed\", callback: Fn(T[K]) => Void): Void { }\n\
+        fn main(): Void {\n\
+            inmut person: { age: Int32 } = { age: 1 };\n\
+            on(person, \"ageChanged\", (age): Void => { inmut number: Int32 = age; });\n\
+        }";
+    let (_, diagnostics) = checked(valid);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        diagnostics.is_empty(),
+        "a fixed-suffix event should infer K and contextualize T[K] as Int32: {output}"
+    );
+
+    let wrong_callback = valid.replace("inmut number: Int32 = age", "inmut text: String = age");
+    let (_, diagnostics) = checked(&wrong_callback);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        output.contains(codes::TYPE_MISMATCH.as_str()),
+        "callback parameter must use the indexed property type: {output}"
+    );
+
+    let missing_key = valid.replace("ageChanged", "heightChanged");
+    let (program, diagnostics) = checked(&missing_key);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        output.contains("has no property `height`")
+            || output.contains("inferred key does not exist"),
+        "a key absent from T must be rejected at the event argument: {output}"
+    );
+    assert!(
+        program.generic_call_substitutions.is_empty(),
+        "a failed open-template relation must not publish a partial generic substitution"
+    );
+
+    let broad_string = "fn on<T, K from String & keyof T>(value: T, event: \"{K}Changed\", callback: Fn(T[K]) => Void): Void { }\n\
+        fn main(): Void {\n\
+            inmut person: { age: Int32 } = { age: 1 };\n\
+            inmut event: String = \"ageChanged\";\n\
+            on(person, event, (age): Void => { });\n\
+        }";
+    let (_, diagnostics) = checked(broad_string);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        output.contains("broad `String` cannot determine the template key"),
+        "open interpolation inference must not guess from broad String: {output}"
+    );
+
+    let wrong_suffix = valid.replace("ageChanged", "ageUpdated");
+    let (_, diagnostics) = checked(&wrong_suffix);
+    let output = diagnostics.render(RenderStyle::Human);
+    assert!(
+        output.contains("does not match `on`'s open template"),
+        "a nonmatching suffix needs a focused diagnostic: {output}"
+    );
+
+    let multiple_holes =
+        rejected("fn take<K>(event: \"{K}Changed{K}\"): Void { } fn main(): Void { }");
+    assert!(
+        multiple_holes.contains("open template inference supports one interpolation hole"),
+        "multiple open holes must be rejected deterministically: {multiple_holes}"
+    );
+
+    let ambiguous_prefix = rejected(
+        "type Prefix = \"a\" | \"b\"; fn take<K>(event: \"{Prefix}{K}Changed\"): Void { } fn main(): Void { }",
+    );
+    assert!(
+        ambiguous_prefix.contains("open template pattern has an ambiguous prefix"),
+        "finite alternatives before an open hole must not pick a prefix arbitrarily: {ambiguous_prefix}"
+    );
+
+    let conflict = rejected(
+        "fn take<T, K from String & keyof T>(value: T, key: K, event: \"{K}Changed\"): Void { }\n\
+         fn main(): Void { inmut person: { age: Int32; name: String } = { age: 1, name: \"Ada\" }; inmut key: \"name\" = \"name\"; take(person, key, \"ageChanged\"); }",
+    );
+    assert!(
+        conflict.contains("cannot infer one template key"),
+        "ordinary and template-derived constraints must agree: {conflict}"
+    );
+}
+
+#[test]
+fn generic_contract_method_infers_open_template_event_and_checks_implementation() {
+    let source = "type Person = { age: Int32; name: String; };\n\
+        contract Watched<T> { on<K from String & keyof T>(event: \"{K}Changed\", callback: Fn(T[K]) => Void): Void; }\n\
+        class PersonWatcher implements Watched<Person> { on<K from String & keyof Person>(event: \"{K}Changed\", callback: Fn(Person[K]) => Void): Void { } }\n\
+        fn attach(person: Watched<Person>): Void { person.on(\"ageChanged\", (age): Void => { inmut number: Int32 = age; }); }\n\
+        fn main(): Void { }";
+    let (_, sink) = parse_and_check(source);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        !output.contains(codes::TYPE_MISMATCH.as_str()),
+        "generic contract implementation and contextual callback should type-check: {output}"
+    );
+    assert!(
+        !output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "the instantiated contract method should be visible: {output}"
+    );
+
+    let invalid_key = source.replace("ageChanged", "heightChanged");
+    let (_, sink) = parse_and_check(&invalid_key);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        output.contains(codes::TYPE_MISMATCH.as_str())
+            || output.contains(codes::UNKNOWN_MEMBER.as_str()),
+        "an event that does not name a key of T must be rejected: {output}"
+    );
+
+    let wrong_bound = source.replace(
+        "on<K from String & keyof Person>",
+        "on<K from String & keyof Person & \"age\">",
+    );
+    let (_, sink) = parse_and_check(&wrong_bound);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        output.contains(codes::TYPE_MISMATCH.as_str()),
+        "an implementation with a weaker generic bound must not satisfy Watched<Person>: {output}"
+    );
+}
+
+#[test]
+fn open_template_matching_stops_at_the_deterministic_source_budget() {
+    let key = "a".repeat(zirk_sema::type_budget::BudgetKind::TemplateSourceBytes.limit() as usize);
+    let source_text = format!(
+        "fn on<T, K from String & keyof T>(value: T, event: \"{{K}}Changed\"): Void {{ }}\n\
+         fn main(): Void {{ inmut person: {{ age: Int32 }} = {{ age: 1 }}; on(person, \"{key}Changed\"); }}"
+    );
+    let mut sources = SourceMap::new();
+    sources.add(SourceFile::new("open-template-budget.zrk", source_text));
+    let source = sources.entry();
+    let mut sink = DiagnosticSink::new();
+    let tokens = tokenize(source, &mut sink);
+    let program = parse(source, &tokens, &mut sink);
+    let checked = check(&sources, &program, &mut sink);
+    let output = sink.render(RenderStyle::Human);
+    assert!(
+        output.contains("E0482") && output.contains("open template matching limit exceeded"),
+        "an over-budget event must fail with the stable computation-limit diagnostic: {output}"
+    );
+    assert!(
+        checked.generic_call_substitutions.is_empty(),
+        "budget failure must not publish a partial template substitution"
     );
 }
 

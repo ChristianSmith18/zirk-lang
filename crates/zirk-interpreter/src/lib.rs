@@ -3335,6 +3335,7 @@ impl<'module> Interpreter<'module> {
                 object,
                 contract,
                 index,
+                specialization,
                 args,
             } => {
                 let receiver = self.value(frame_index, *object)?;
@@ -3349,7 +3350,12 @@ impl<'module> Interpreter<'module> {
                 let class_callee = class_layout
                     .and_then(|layout| self.module.objects.get(layout as usize))
                     .and_then(|layout| layout.contracts.iter().find(|table| table.contract == *contract))
-                    .and_then(|table| table.methods.get(*index as usize))
+                    .and_then(|table| match specialization {
+                        Some(specialization) => table
+                            .specializations
+                            .get(*specialization as usize),
+                        None => table.methods.get(*index as usize),
+                    })
                     .cloned();
                 if let Some(callee) = class_callee {
                     self.push_dispatch_frame(
@@ -10589,7 +10595,7 @@ mod tests {
 
     #[test]
     fn virtual_and_contract_calls_use_the_runtime_layout_tables() {
-        use zirk_ir::{ContractTable, ObjectLayout};
+        use zirk_ir::{ContractLayout, ContractTable, ObjectLayout};
         let span = Span::empty(0);
         let object_type = IrType::Object(0);
         let int_type = IrType::Int(IntWidth::I32);
@@ -10648,6 +10654,7 @@ mod tests {
                                     object: Operand(ValueId(0)),
                                     contract: 0,
                                     index: 0,
+                                    specialization: None,
                                     args: Vec::new(),
                                 },
                                 ty: int_type,
@@ -10670,8 +10677,13 @@ mod tests {
                 contracts: vec![ContractTable {
                     contract: 0,
                     methods: vec!["contract_override".into()],
+                    specializations: Vec::new(),
                 }],
                 ancestors: Vec::new(),
+            }],
+            contracts: vec![ContractLayout {
+                name: "Readable".into(),
+                methods: vec!["read".into()],
             }],
             ..Module::default()
         };

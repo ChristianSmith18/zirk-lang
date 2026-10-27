@@ -3,7 +3,7 @@
 import { stdout } from std.io;
 
 type DisplayValue = Int32 | String | Boolean;
-type HttpCode = const(200) | const(404) | const(503);
+type HttpCode = 200 | 404 | 503;
 
 fn describe(value: DisplayValue): String {
     return match value {

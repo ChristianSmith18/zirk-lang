@@ -16,6 +16,9 @@
       "include": "#durations"
     },
     {
+      "include": "#temporal-literals"
+    },
+    {
       "include": "#numbers"
     },
     {
@@ -546,6 +549,22 @@
     "key-value-separators": {
       "name": "punctuation.separator.key-value.zirk",
       "match": ":"
+    },
+    "temporal-literals": {
+      "patterns": [
+        {
+          "name": "constant.other.temporal.datetime.zirk",
+          "match": "\\b[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]+)?)?\\b"
+        },
+        {
+          "name": "constant.other.temporal.date.zirk",
+          "match": "\\b[0-9]{4}-[0-9]{2}-[0-9]{2}\\b"
+        },
+        {
+          "name": "constant.other.temporal.time.zirk",
+          "match": "\\b[0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]+)?)?\\b"
+        }
+      ]
     }
   }
 }

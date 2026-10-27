@@ -9,6 +9,7 @@ license.workspace = true
 zirk-diagnostics.workspace = true
 zirk-sema.workspace = true
 zirk-ast.workspace = true
+zirk-runtime-core.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

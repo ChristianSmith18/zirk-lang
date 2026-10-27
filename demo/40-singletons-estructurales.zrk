@@ -2,9 +2,8 @@
 // Se valida con `zirk check`; algunas formas compuestas aún tienen límites de
 // ejecución nativa según docs/init/ZIRK_FEATURE_STATUS.md.
 
-type Coordinates = const((3, (true, "ready")))
-                 | const((4, (false, "paused")));
+type Coordinates = Tuple<Int32, Tuple<Boolean, String>>;
 
-type EnabledConfig = const({ enabled: true, retries: 3 });
-type DisabledConfig = const({ enabled: false, retries: 0 });
+type EnabledConfig = { enabled: true; retries: 3 };
+type DisabledConfig = { enabled: false; retries: 0 };
 type Config = EnabledConfig | DisabledConfig;

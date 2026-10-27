@@ -121,13 +121,12 @@ fn compile_internal(
     }
 
     if let Some(project) = project.as_ref()
-        && let Err(error) =
-            validate_package_union_abis(&ir, &program, &sources, &module_roots, project)
+        && let Err(error) = validate_package_abis(&ir, &program, &sources, &module_roots, project)
     {
         sink.emit(
             Diagnostic::error(
                 codes::PACKAGE_RESOLUTION,
-                "a dependency's union ABI is incompatible with this project",
+                "a dependency's package ABI is incompatible with this project",
             )
             .with_cause(error)
             .with_help("rebuild the dependency and project with the same Zirk compiler"),
@@ -202,7 +201,16 @@ fn compile_internal(
 /// omitted from package source-integrity hashes. Portable `.zpkg` packaging
 /// can carry these same bounded bytes when that artifact format is introduced.
 const COMPILED_PACKAGE_UNION_METADATA: &str = "union-package-metadata.zku";
+const COMPILED_PACKAGE_GENERIC_CONTRACT_METADATA: &str = "generic-contract-metadata.zkc";
 const MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct GenericContractPackageMetadata {
+    schema: u16,
+    contracts: std::collections::BTreeMap<String, String>,
+}
+
+const GENERIC_CONTRACT_PACKAGE_METADATA_SCHEMA: u16 = 1;
 
 /// Returns the public union layouts whose declarations belong to a package.
 fn package_public_union_layouts(
@@ -266,7 +274,7 @@ fn package_public_union_layouts_within(
 /// without a compiled sidecar remain source packages and use the current
 /// verified graph's metadata; an existing sidecar is authoritative and stale
 /// fingerprints fail closed with rebuild guidance.
-fn validate_package_union_abis(
+fn validate_package_abis(
     ir: &zirk_ir::Module,
     program: &zirk_ast::Program,
     sources: &zirk_diagnostics::SourceMap,
@@ -282,50 +290,165 @@ fn validate_package_union_abis(
             .ok_or_else(|| format!("dependency `{package_name}` has no package manifest root"))?;
         let required_unions =
             package_public_union_layouts_within(ir, program, sources, package_source_root)?;
-        if required_unions.is_empty() {
-            continue;
-        }
-
-        let metadata_path = package_root
-            .join("build")
-            .join(COMPILED_PACKAGE_UNION_METADATA);
-        let package_metadata = match std::fs::symlink_metadata(&metadata_path) {
-            Ok(info) => {
-                if !info.file_type().is_file() {
-                    return Err(format!(
-                        "dependency `{package_name}` union metadata `{}` is not a regular file",
-                        metadata_path.display()
-                    ));
-                }
-                if info.len() > MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES {
-                    return Err(format!(
-                        "dependency `{package_name}` union metadata exceeds the 64 MiB limit"
-                    ));
-                }
-                std::fs::read(&metadata_path).map_err(|error| {
+        if !required_unions.is_empty() {
+            let metadata_path = package_root
+                .join("build")
+                .join(COMPILED_PACKAGE_UNION_METADATA);
+            let package_metadata = match std::fs::symlink_metadata(&metadata_path) {
+                Ok(info) => {
+                    if !info.file_type().is_file() {
+                        return Err(format!(
+                            "dependency `{package_name}` union metadata `{}` is not a regular file",
+                            metadata_path.display()
+                        ));
+                    }
+                    if info.len() > MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES {
+                        return Err(format!(
+                            "dependency `{package_name}` union metadata exceeds the 64 MiB limit"
+                        ));
+                    }
+                    std::fs::read(&metadata_path).map_err(|error| {
                     format!(
                         "could not read dependency `{package_name}` union metadata `{}`: {error}",
                         metadata_path.display()
                     )
                 })?
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                zirk_ir::UnionPackageMetadata::current(required_unions.clone())
-                    .and_then(|metadata| metadata.encode())
-                    .map_err(|error| format!("dependency `{package_name}`: {error}"))?
-            }
-            Err(error) => {
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    zirk_ir::UnionPackageMetadata::current(required_unions.clone())
+                        .and_then(|metadata| metadata.encode())
+                        .map_err(|error| format!("dependency `{package_name}`: {error}"))?
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "could not inspect dependency `{package_name}` union metadata `{}`: {error}",
+                        metadata_path.display()
+                    ));
+                }
+            };
+            zirk_ir::validate_package_union_imports(&package_metadata, &required_unions)
+                .map_err(|error| format!("dependency `{package_name}`: {error}"))?;
+        }
+
+        let required_contracts =
+            package_public_generic_contracts_within(program, sources, &package_root)?;
+        if !required_contracts.is_empty() {
+            let contract_metadata_path = package_root
+                .join("build")
+                .join(COMPILED_PACKAGE_GENERIC_CONTRACT_METADATA);
+            let bytes = read_bounded_package_metadata(
+                &contract_metadata_path,
+                package_name,
+                "generic contract",
+            )?;
+            let metadata: GenericContractPackageMetadata = serde_json::from_slice(&bytes)
+                .map_err(|error| {
+                    format!(
+                        "dependency `{package_name}` generic contract metadata is invalid: {error}; rebuild the package"
+                    )
+                })?;
+            if metadata.schema != GENERIC_CONTRACT_PACKAGE_METADATA_SCHEMA {
                 return Err(format!(
-                    "could not inspect dependency `{package_name}` union metadata `{}`: {error}",
-                    metadata_path.display()
+                    "dependency `{package_name}` generic contract metadata schema {} is unsupported; rebuild the package",
+                    metadata.schema
                 ));
             }
-        };
-        zirk_ir::validate_package_union_imports(&package_metadata, &required_unions)
-            .map_err(|error| format!("dependency `{package_name}`: {error}"))?;
+            for (contract, expected) in required_contracts {
+                match metadata.contracts.get(&contract) {
+                    Some(actual) if actual == &expected => {}
+                    Some(_) => {
+                        return Err(format!(
+                            "dependency `{package_name}` exports an incompatible generic contract `{contract}`; rebuild the package"
+                        ));
+                    }
+                    None => {
+                        return Err(format!(
+                            "dependency `{package_name}` does not provide generic contract metadata for `{contract}`; rebuild the package"
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn read_bounded_package_metadata(
+    path: &Path,
+    package_name: &str,
+    metadata_kind: &str,
+) -> Result<Vec<u8>, String> {
+    let info = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "dependency `{package_name}` has no compiled {metadata_kind} metadata; build the dependency package first"
+            )
+        } else {
+            format!(
+                "could not inspect dependency `{package_name}` {metadata_kind} metadata `{}`: {error}",
+                path.display()
+            )
+        }
+    })?;
+    if !info.file_type().is_file() {
+        return Err(format!(
+            "dependency `{package_name}` {metadata_kind} metadata `{}` is not a regular file",
+            path.display()
+        ));
+    }
+    if info.len() > MAX_COMPILED_PACKAGE_UNION_METADATA_BYTES {
+        return Err(format!(
+            "dependency `{package_name}` {metadata_kind} metadata exceeds the 64 MiB limit"
+        ));
+    }
+    std::fs::read(path).map_err(|error| {
+        format!(
+            "could not read dependency `{package_name}` {metadata_kind} metadata `{}`: {error}",
+            path.display()
+        )
+    })
+}
+
+fn package_public_generic_contracts_within(
+    program: &zirk_ast::Program,
+    sources: &zirk_diagnostics::SourceMap,
+    package_root: &Path,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    use sha2::{Digest, Sha256};
+
+    let package_root = package_root
+        .canonicalize()
+        .unwrap_or_else(|_| package_root.to_path_buf());
+    let mut contracts = std::collections::BTreeMap::new();
+    for contract in &program.contracts {
+        if !contract.shared
+            || !contract
+                .methods
+                .iter()
+                .any(|method| !method.type_params.is_empty())
+        {
+            continue;
+        }
+        let source_path = PathBuf::from(sources.location(contract.span).file);
+        let canonical_source = source_path.canonicalize().unwrap_or(source_path);
+        let Ok(relative_source) = canonical_source.strip_prefix(&package_root) else {
+            continue;
+        };
+        let identity = format!(
+            "{}::{}",
+            relative_source.to_string_lossy(),
+            contract.name.name
+        );
+        let source = sources.slice(contract.span);
+        let fingerprint = Sha256::digest(source.as_bytes());
+        let fingerprint = fingerprint
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        contracts.insert(identity, fingerprint);
+    }
+    Ok(contracts)
 }
 
 fn package_manifest_root(package_source_root: &Path) -> Option<PathBuf> {
@@ -383,6 +506,49 @@ fn write_compiled_package_union_metadata(
     std::fs::rename(&temporary, &destination).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         format!("could not replace `{}`: {error}", destination.display())
+    })?;
+    let generic_contracts =
+        package_public_generic_contracts_within(program, sources, &project.root)?;
+    let contract_metadata = GenericContractPackageMetadata {
+        schema: GENERIC_CONTRACT_PACKAGE_METADATA_SCHEMA,
+        contracts: generic_contracts,
+    };
+    let contract_bytes = serde_json::to_vec(&contract_metadata)
+        .map_err(|error| format!("could not encode generic contract metadata: {error}"))?;
+    let contract_destination = build_dir.join(COMPILED_PACKAGE_GENERIC_CONTRACT_METADATA);
+    let contract_temporary = build_dir.join(format!(
+        ".{COMPILED_PACKAGE_GENERIC_CONTRACT_METADATA}.{}.tmp",
+        std::process::id()
+    ));
+    if let Ok(info) = std::fs::symlink_metadata(&contract_temporary)
+        && !info.file_type().is_file()
+    {
+        return Err(format!(
+            "temporary metadata path `{}` is not a regular file",
+            contract_temporary.display()
+        ));
+    }
+    std::fs::write(&contract_temporary, contract_bytes).map_err(|error| {
+        format!(
+            "could not write `{}`: {error}",
+            contract_temporary.display()
+        )
+    })?;
+    if let Ok(info) = std::fs::symlink_metadata(&contract_destination)
+        && !info.file_type().is_file()
+    {
+        let _ = std::fs::remove_file(&contract_temporary);
+        return Err(format!(
+            "metadata path `{}` is not a regular file",
+            contract_destination.display()
+        ));
+    }
+    std::fs::rename(&contract_temporary, &contract_destination).map_err(|error| {
+        let _ = std::fs::remove_file(&contract_temporary);
+        format!(
+            "could not replace `{}`: {error}",
+            contract_destination.display()
+        )
     })?;
     Ok(())
 }

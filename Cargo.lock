@@ -2640,6 +2640,7 @@ dependencies = [
  "zirk-diagnostics",
  "zirk-lexer",
  "zirk-parser",
+ "zirk-runtime-core",
  "zirk-sema",
 ]
 

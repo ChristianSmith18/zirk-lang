@@ -1189,6 +1189,10 @@ impl ContractType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractMethod {
     pub name: String,
+    /// Method-local type parameters, distinct from the enclosing contract's.
+    pub type_params: Vec<u32>,
+    /// Resolved `from` constraints for each method-local parameter.
+    pub type_param_constraints: Vec<Vec<Type>>,
     pub params: Vec<crate::scope::ParamInfo>,
     pub returns: Type,
     pub span: zirk_diagnostics::Span,

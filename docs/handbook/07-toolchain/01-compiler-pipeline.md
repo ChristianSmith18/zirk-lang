@@ -28,8 +28,13 @@ LLVM IR → object → linker → native artifact
 > implemented subset. The persistent lossless tree, fine-grained incremental
 > frontend, per-module name resolution, and many later language features remain
 > target architecture. `zirk check` and the standalone LLVM-independent
-> `zirk-check` frontend are available. Generic contract dispatch remains partial;
-> consult [`ZIRK_FEATURE_STATUS.md`](../../init/ZIRK_FEATURE_STATUS.md) for its
+> `zirk-check` frontend are available. Generic contract method calls specialize
+> and dispatch through class contract tables for in-program native and
+> interpreter execution. Exported package metadata fingerprints generic
+> contract signatures in `build/generic-contract-metadata.zkc` and rejects
+> stale signatures before client emission. The full target matrix remains
+> incomplete. Consult
+> [`ZIRK_FEATURE_STATUS.md`](../../init/ZIRK_FEATURE_STATUS.md) for its
 > exact pipeline boundary and the [compiler improvement roadmap](../../COMPILER_IMPROVEMENT_ROADMAP.md)
 > for remaining work.
 

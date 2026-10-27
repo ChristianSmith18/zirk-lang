@@ -2613,6 +2613,7 @@ fn verify_instruction(
             object,
             contract,
             index,
+            specialization,
             ..
         } => {
             let reachable = match type_of(object) {
@@ -2629,6 +2630,46 @@ fn verify_instruction(
                     "{position}: calls method {index} of contract {contract} through {:?}, which does not satisfy it",
                     type_of(object)
                 ));
+            }
+            if module
+                .contracts
+                .get(*contract as usize)
+                .is_none_or(|layout| *index as usize >= layout.methods.len())
+            {
+                report(format!(
+                    "{position}: calls missing method {index} of contract {contract}"
+                ));
+            }
+            if let Some(specialization) = specialization {
+                let has_slot = match type_of(object) {
+                    Some(IrType::Object(id)) => module
+                        .objects
+                        .get(id as usize)
+                        .and_then(|object| {
+                            object
+                                .contracts
+                                .iter()
+                                .find(|table| table.contract == *contract)
+                        })
+                        .is_some_and(|table| {
+                            (*specialization as usize) < table.specializations.len()
+                        }),
+                    Some(IrType::Contract(_)) => module.objects.iter().any(|object| {
+                        object
+                            .contracts
+                            .iter()
+                            .find(|table| table.contract == *contract)
+                            .is_some_and(|table| {
+                                (*specialization as usize) < table.specializations.len()
+                            })
+                    }),
+                    _ => false,
+                };
+                if !has_slot {
+                    report(format!(
+                        "{position}: contract {contract} has no generic specialization slot {specialization}"
+                    ));
+                }
             }
         }
 
@@ -2697,10 +2738,24 @@ fn verify_instruction(
                     if let Some(value) = type_of(operand)
                         && value != s.ty
                     {
+                        let actual_layout = match value {
+                            IrType::Union(id) => module
+                                .union_type_for_representation(id)
+                                .map(|(_, layout)| &layout.alternatives),
+                            _ => None,
+                        };
+                        let expected_layout = match s.ty {
+                            IrType::Union(id) => module
+                                .union_type_for_representation(id)
+                                .map(|(_, layout)| &layout.alternatives),
+                            _ => None,
+                        };
                         report(format!(
-                            "{position}: stores {} into a slot of type {}",
+                            "{position}: stores {} ({value:?}; alternatives {actual_layout:?}) into slot `{}` of type {} ({:?}; alternatives {expected_layout:?})",
                             value.as_str(),
-                            s.ty.as_str()
+                            s.name,
+                            s.ty.as_str(),
+                            s.ty
                         ));
                     }
                 }
