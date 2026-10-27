@@ -2921,6 +2921,24 @@ impl<'module> Interpreter<'module> {
                 let text = self.render_value(frame_index, *operand)?;
                 self.allocate_string(text).map(|id| Some(Value::Heap(id)))
             }
+            InstKind::Float128Format { value, spec } => {
+                let Value::Float {
+                    width: FloatWidth::F128,
+                    text,
+                } = self.value(frame_index, *value)?
+                else {
+                    return Err(ExecutionFault::Internal(
+                        "Float128Format reads a non-Float128 value".into(),
+                    ));
+                };
+                let spec = self.string_operand(frame_index, *spec)?;
+                let text = zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
+                    .and_then(|value| value.format(&spec))
+                    .map_err(|error| {
+                        ExecutionFault::Internal(format!("Float128 format failed: {error:?}"))
+                    })?;
+                self.allocate_string(text).map(|id| Some(Value::Heap(id)))
+            }
             InstKind::Load(slot) => self.frames[frame_index]
                 .slots
                 .get(slot.0 as usize)
@@ -7108,7 +7126,7 @@ impl<'module> Interpreter<'module> {
                 width: FloatWidth::F128,
                 text,
             } => zirk_runtime_core::binary_float::Float128::from_wire_or_decimal(&text)
-                .map(|value| value.display_f64().to_string())
+                .and_then(zirk_runtime_core::binary_float::Float128::to_decimal_string)
                 .map_err(|error| {
                     ExecutionFault::Internal(format!("cannot render Float128: {error:?}"))
                 }),
@@ -7784,6 +7802,31 @@ impl<'module> Interpreter<'module> {
     fn runtime_value_equals(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Heap(left), Value::Heap(right)) => self.value_equals(*left, *right),
+            (
+                Value::Float {
+                    width: left_width,
+                    text: left,
+                },
+                Value::Float {
+                    width: right_width,
+                    text: right,
+                },
+            ) if left_width == right_width => {
+                if *left_width == FloatWidth::F128 {
+                    use zirk_runtime_core::binary_float::Float128;
+                    match (
+                        Float128::from_wire_or_decimal(left),
+                        Float128::from_wire_or_decimal(right),
+                    ) {
+                        (Ok(left), Ok(right)) => {
+                            left.compare(right) == Ok(std::cmp::Ordering::Equal)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    matches!((left.parse::<f64>(), right.parse::<f64>()), (Ok(left), Ok(right)) if left == right)
+                }
+            }
             _ => left == right,
         }
     }
@@ -7837,6 +7880,12 @@ impl<'module> Interpreter<'module> {
             let left = Float128::from_wire_or_decimal(left).map_err(invalid)?;
             let right = Float128::from_wire_or_decimal(right).map_err(invalid)?;
             use BinaryOp::*;
+            if (left.is_nan() || right.is_nan()) && matches!(op, Eq | NotEq | Lt | LtEq | Gt | GtEq)
+            {
+                // Ordered LLVM floating predicates are false for NaN;
+                // guard_nan then raises the source-level FloatNanError.
+                return Ok(Value::Boolean(false));
+            }
             let comparison = left.compare(right).map_err(|error| {
                 Self::arithmetic_error(format!("Float128 comparison failed: {error:?}"))
             });
@@ -8189,6 +8238,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::LoadField { .. }
         | InstKind::StoreField { .. }
         | InstKind::ToString(_)
+        | InstKind::Float128Format { .. }
         | InstKind::MakeClosure { .. }
         | InstKind::CallClosure { .. }
         | InstKind::MakeCallable { .. }

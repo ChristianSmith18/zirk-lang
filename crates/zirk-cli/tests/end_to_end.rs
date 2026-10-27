@@ -330,6 +330,34 @@ fn bundled_http_server_event_encoder_preserves_bounded_sse_framing() {
 // --- Valid programs ---------------------------------------------------------
 
 #[test]
+fn ordered_map_set_basics_match_the_native_runtime_contract() {
+    let source = corpus("valid").join("ordered_map_set_basics.zrk");
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("ordered map and set fixture has expected output");
+    let output = zirk("run", &source, "ordered_map_set_basics", &[]);
+    assert_eq!(
+        output.status, 0,
+        "ordered_map_set_basics failed.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn float128_printing_keeps_precision_beyond_float64() {
+    let source = corpus("valid").join("float128_prints.zrk");
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("Float128 fixture has expected output");
+    let output = zirk("run", &source, "float128_prints", &[]);
+    assert_eq!(
+        output.status, 0,
+        "float128_prints failed.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
 fn dynamic_object_properties_read_write_and_raise_catchable_missing_errors() {
     for name in [
         "dynamic_object_named_read",

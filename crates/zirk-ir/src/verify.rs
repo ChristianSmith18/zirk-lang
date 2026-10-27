@@ -216,6 +216,7 @@ fn has_intrinsic_borrow_boundary(kind: &InstKind) -> bool {
             | InstKind::Concat { .. }
             | InstKind::Repeat { .. }
             | InstKind::ToString(_)
+            | InstKind::Float128Format { .. }
             | InstKind::Println(_)
             | InstKind::Print(_)
             | InstKind::PrintlnStderr(_)
@@ -3153,6 +3154,15 @@ fn verify_instruction(
                 && value == IrType::Void
             {
                 report(format!("{position}: ToString applied to Void"));
+            }
+        }
+        InstKind::Float128Format { value, spec } => {
+            expect(inst.ty, IrType::String, position, "Float128Format", report);
+            if type_of(value) != Some(IrType::Float(crate::FloatWidth::F128)) {
+                report(format!("{position}: Float128Format value is not Float128"));
+            }
+            if type_of(spec) != Some(IrType::String) {
+                report(format!("{position}: Float128Format spec is not String"));
             }
         }
 
@@ -8681,6 +8691,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],
         InstKind::Call { args, .. } => args.clone(),
         InstKind::ToString(operand) => vec![*operand],
+        InstKind::Float128Format { value, spec } => vec![*value, *spec],
         InstKind::Println(operand)
         | InstKind::Print(operand)
         | InstKind::PrintlnStderr(operand)

@@ -885,16 +885,9 @@ pub unsafe extern "C" fn zirk_float_format(value: f64, spec: *const c_void) -> *
 }
 
 /// Converts the raw bit pattern of an IEEE 754 binary128 (`Float128`)
-/// value to the nearest `f64`, entirely in integer arithmetic.
-///
-/// `Float128` printing (`ToString`) truncates to `Float64` for display,
-/// since Rust has no stable `f128` type to format through. The natural
-/// alternative — an LLVM `fptrunc` from `fp128` straight to `double` —
-/// depends on the target's quad-precision libcalls (`__trunctfdf2` and
-/// friends); on the Windows/MSVC target those are unreliable (observed:
-/// truncating `1.5_Float128` silently produced `0.0`). Decoding the bit
-/// pattern by hand sidesteps hardware/libcall quad-float support
-/// entirely, so the result is identical on every target.
+/// value to the nearest `f64`, entirely in integer arithmetic. This remains
+/// the bridge for explicit conversions and legacy scalar helpers; display
+/// uses `zirk_float128_to_string` and retains binary128 precision.
 #[cfg(test)]
 fn f128_bits_to_f64(bits: u128) -> f64 {
     let sign = (bits >> 127) & 1;
@@ -969,9 +962,8 @@ fn f128_bits_to_f64(bits: u128) -> f64 {
     f64::from_bits(bits64)
 }
 
-/// `Float128.to_string()`'s bridge to `Float64`'s formatter: converts the
-/// bit pattern of `bits` (a `Float128` reinterpreted as `i128`/`u128`, not
-/// numerically converted) to the nearest `f64`.
+/// Converts the bit pattern of `bits` (a `Float128` reinterpreted as
+/// `i128`/`u128`, not numerically converted) to the nearest `f64`.
 ///
 /// # Safety
 ///
@@ -979,6 +971,39 @@ fn f128_bits_to_f64(bits: u128) -> f64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn zirk_float128_to_f64(bits: *const i128) -> f64 {
     core_scalar::float128_bits_to_f64(unsafe { *bits } as u128)
+}
+
+/// Formats a `Float128` value without narrowing it to `Float64`.
+///
+/// # Safety
+///
+/// `bits` must point to the raw `i128` bit pattern of a `Float128` value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_to_string(bits: *const i128) -> *mut c_void {
+    let value = zirk_runtime_core::binary_float::Float128::from_bits(unsafe { *bits } as u128);
+    match value.to_decimal_string() {
+        Ok(text) => alloc_owned(&text),
+        Err(error) => alloc_owned(&format!("<invalid Float128: {error:?}>")),
+    }
+}
+
+/// Formats a binary128 value according to a Zirk float-format specifier.
+///
+/// # Safety
+/// `bits` and `spec` must point to valid runtime values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_format(
+    bits: *const i128,
+    spec: *const c_void,
+) -> *mut c_void {
+    let value = zirk_runtime_core::binary_float::Float128::from_bits(unsafe { *bits } as u128);
+    let spec = unsafe { borrow(spec) }
+        .map(|string| unsafe { string.as_str() })
+        .unwrap_or("");
+    match value.format(spec) {
+        Ok(text) => alloc_owned(&text),
+        Err(error) => alloc_owned(&format!("<invalid Float128: {error:?}>")),
+    }
 }
 
 /// Encodes `value` as the raw bit pattern of the equivalent IEEE 754
@@ -1034,6 +1059,110 @@ pub unsafe extern "C" fn zirk_f64_to_float128(out: *mut i128, value: f64) {
     unsafe { *out = core_scalar::f64_to_float128_bits(value) as i128 };
 }
 
+/// Converts an already width-normalized integer bit pattern to binary128.
+///
+/// # Safety
+/// `out` and `value` must point to valid, non-aliasing `i128` slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_from_integer(
+    out: *mut i128,
+    value: *const i128,
+    signed: i32,
+) {
+    let value = unsafe { *value } as u128;
+    let result = if signed != 0 {
+        zirk_runtime_core::binary_float::Float128::from_i128(value as i128)
+    } else {
+        zirk_runtime_core::binary_float::Float128::from_u128(value)
+    };
+    unsafe { *out = result.to_bits() as i128 };
+}
+
+/// Performs a binary128 arithmetic operation using pointer-based bits so
+/// targets without an LLVM `fp128` ABI do not need compiler runtime symbols.
+/// Operation ids are 0 add, 1 subtract, 2 multiply, 3 divide, and 4 remainder.
+/// Returns zero on success and one for an invalid operation/result.
+///
+/// # Safety
+/// All pointers must be valid `i128` bit-pattern slots; `out` may alias neither
+/// input because the helper writes only after reading both operands.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_binary(
+    operation: i32,
+    left: *const i128,
+    right: *const i128,
+    out: *mut i128,
+) -> i32 {
+    use zirk_runtime_core::binary_float::Float128;
+    let left = Float128::from_bits(unsafe { *left } as u128);
+    let right = Float128::from_bits(unsafe { *right } as u128);
+    let result = match operation {
+        0 => left.add(right),
+        1 => left.sub(right),
+        2 => left.mul(right),
+        3 => left.div(right),
+        4 => left.rem(right),
+        _ => return 1,
+    };
+    let Ok(result) = result else {
+        return 1;
+    };
+    unsafe { *out = result.to_bits() as i128 };
+    0
+}
+
+/// Applies an ordered binary128 comparison using pointer-based bit patterns.
+/// Predicate ids are 0 equal, 1 not-equal, 2 less, 3 less-or-equal, 4 greater,
+/// and 5 greater-or-equal. All ordered predicates are false for NaN.
+///
+/// # Safety
+/// `left` and `right` must point to valid `i128` bit patterns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_compare(
+    predicate: i32,
+    left: *const i128,
+    right: *const i128,
+) -> i32 {
+    use std::cmp::Ordering;
+    use zirk_runtime_core::binary_float::Float128;
+    let left = Float128::from_bits(unsafe { *left } as u128);
+    let right = Float128::from_bits(unsafe { *right } as u128);
+    let Ok(ordering) = left.compare(right) else {
+        return 0;
+    };
+    matches!(
+        (predicate, ordering),
+        (0, Ordering::Equal)
+            | (1, Ordering::Less | Ordering::Greater)
+            | (2, Ordering::Less)
+            | (3, Ordering::Less | Ordering::Equal)
+            | (4, Ordering::Greater)
+            | (5, Ordering::Greater | Ordering::Equal)
+    ) as i32
+}
+
+/// Truncates a binary128 value to an integer while checking the destination
+/// width. The returned `u128` is the destination's two's-complement bit
+/// pattern for signed values. Returns zero on success and one on overflow or
+/// a non-finite source.
+///
+/// # Safety
+/// `bits` and `out` must point to valid, non-aliasing `i128` slots.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_float128_to_integer(
+    bits: *const i128,
+    out: *mut i128,
+    width: i32,
+    signed: i32,
+) -> i32 {
+    let value = zirk_runtime_core::binary_float::Float128::from_bits(unsafe { *bits } as u128);
+    let Ok(value) = value.trunc_to_integer_bits(width as u32, signed != 0) else {
+        return 1;
+    };
+    unsafe { *out = value as i128 };
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,5 +1208,40 @@ mod tests {
         ));
         assert_eq!(core_scalar::parse_float("NaN"), None);
         assert_eq!(core_scalar::parse_float(" 1.5 "), Some(1.5));
+    }
+
+    #[test]
+    fn float128_runtime_formatters_keep_binary128_bits() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let values = [
+            zirk_runtime_core::binary_float::Float128::zero(true),
+            zirk_runtime_core::binary_float::Float128::from_bits(1),
+            zirk_runtime_core::binary_float::Float128::from_bits(1_u128 << 112),
+            zirk_runtime_core::binary_float::Float128::from_bits(
+                (0x7ffe_u128 << 112) | ((1_u128 << 112) - 1),
+            ),
+            zirk_runtime_core::binary_float::Float128::from_bits(0x7fff_u128 << 112),
+        ];
+        for value in values {
+            let bits = value.to_bits() as i128;
+            let rendered = unsafe { zirk_float128_to_string(&bits) };
+            let text = unsafe { (*crate::string::payload_ptr(rendered)).as_str().to_owned() };
+            assert_eq!(
+                text,
+                value.to_decimal_string().unwrap(),
+                "runtime rendering for {value:?}"
+            );
+        }
+
+        let value = zirk_runtime_core::binary_float::Float128::from_decimal("1.23456").unwrap();
+        let bits = value.to_bits() as i128;
+        let spec = crate::string::alloc_owned(".3");
+        let rendered = unsafe { zirk_float128_format(&bits, spec) };
+        assert_eq!(
+            unsafe { (*crate::string::payload_ptr(rendered)).as_str() },
+            "1.235"
+        );
+        crate::collector::reset_state_for_tests();
     }
 }

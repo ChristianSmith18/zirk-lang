@@ -6020,7 +6020,53 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     unreachable!("IntToFloat always declares a Float destination")
                 };
                 let target_ty = self.float_type(target_width);
-                let converted = if source_signed {
+                let converted = if target_width == ir::FloatWidth::F128 {
+                    let value_bits = value.get_type().get_bit_width();
+                    let value_i128 = if value_bits == 128 {
+                        value
+                    } else if source_signed {
+                        self.builder
+                            .build_int_s_extend(value, self.context.i128_type(), "i128.sext")
+                            .expect("sign extend integer for binary128 conversion")
+                    } else {
+                        self.builder
+                            .build_int_z_extend(value, self.context.i128_type(), "i128.zext")
+                            .expect("zero extend integer for binary128 conversion")
+                    };
+                    let input = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.from_int.input")
+                        .expect("allocate integer conversion input");
+                    let output = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.from_int.output")
+                        .expect("allocate binary128 conversion result");
+                    self.builder
+                        .build_store(input, value_i128)
+                        .expect("store integer conversion input");
+                    self.builder
+                        .build_call(
+                            self.runtime.float128_from_integer,
+                            &[
+                                output.into(),
+                                input.into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(source_signed as u64, false)
+                                    .into(),
+                            ],
+                            "f128.from_int",
+                        )
+                        .expect("call portable integer-to-Float128 helper");
+                    let bits = self
+                        .builder
+                        .build_load(self.context.i128_type(), output, "f128.from_int.bits")
+                        .expect("load binary128 conversion result");
+                    self.builder
+                        .build_bit_cast(bits, target_ty, "f128.from_int.value")
+                        .expect("restore binary128 integer conversion")
+                        .into_float_value()
+                } else if source_signed {
                     self.builder
                         .build_signed_int_to_float(value, target_ty, "sitofp")
                         .expect("signed int to float")
@@ -6050,91 +6096,170 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             .expect("every IntWidth is nonzero"),
                     )
                     .expect("every IntWidth is a valid LLVM integer width");
-                let trunc_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trunc")
-                    .expect("LLVM provides llvm.trunc for every supported float width");
-                let trunc_function = trunc_intrinsic
-                    .get_declaration(self.llvm, &[value.get_type().into()])
-                    .expect("llvm.trunc accepts each supported float width");
-                let truncated = self
-                    .builder
-                    .build_call(trunc_function, &[value.into()], "float_to_int_truncated")
-                    .expect("truncate float before checked integer conversion")
-                    .try_as_basic_value()
-                    .basic()
-                    .expect("llvm.trunc returns a float")
-                    .into_float_value();
-                let float_ty = value.get_type();
-                let exponent = if target_width.signed() {
-                    target_width.bits() - 1
-                } else {
-                    target_width.bits()
-                };
-                let upper_integer = if exponent == 128 {
-                    "340282366920938463463374607431768211456".to_string()
-                } else {
-                    (1_u128 << exponent).to_string()
-                };
-                let upper = unsafe { float_ty.const_float_from_string(&upper_integer) };
-                let lower = if target_width.signed() {
-                    unsafe { float_ty.const_float_from_string(&format!("-{upper_integer}")) }
-                } else {
-                    float_ty.const_zero()
-                };
-                let at_or_above_lower = self
-                    .builder
-                    .build_float_compare(
-                        inkwell::FloatPredicate::OGE,
-                        truncated,
-                        lower,
-                        "float_to_int_lower_ok",
-                    )
-                    .expect("compare float conversion lower bound");
-                let below_upper = self
-                    .builder
-                    .build_float_compare(
-                        inkwell::FloatPredicate::OLT,
-                        truncated,
-                        upper,
-                        "float_to_int_upper_ok",
-                    )
-                    .expect("compare float conversion upper bound");
-                let in_range = self
-                    .builder
-                    .build_and(at_or_above_lower, below_upper, "float_to_int_in_range")
-                    .expect("combine float conversion range checks");
-                let function = self
-                    .builder
-                    .get_insert_block()
-                    .expect("float conversion is emitted inside a block")
-                    .get_parent()
-                    .expect("float conversion block belongs to a function");
-                let valid = self
-                    .context
-                    .append_basic_block(function, "float_to_int_valid");
-                let invalid = self
-                    .context
-                    .append_basic_block(function, "float_to_int_invalid");
-                self.builder
-                    .build_conditional_branch(in_range, valid, invalid)
-                    .expect("branch on checked float conversion range");
-                self.builder.position_at_end(invalid);
-                self.builder
-                    .build_call(self.runtime.invalid_cast, &[], "invalid_float_to_int")
-                    .expect("report out-of-range float-to-integer conversion");
-                self.builder
-                    .build_unreachable()
-                    .expect("invalid cast handler does not return");
-                self.builder.position_at_end(valid);
-                let converted = if target_width.signed() {
+                let converted = if self.value_types[&operand.0]
+                    == ir::IrType::Float(ir::FloatWidth::F128)
+                {
+                    let input = self.float128_bits_slot(value, "f128.to_int.input");
+                    let output = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "f128.to_int.output")
+                        .expect("allocate checked Float128 conversion result");
+                    let status = self
+                        .builder
+                        .build_call(
+                            self.runtime.float128_to_integer,
+                            &[
+                                input.into(),
+                                output.into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(target_width.bits() as u64, false)
+                                    .into(),
+                                self.context
+                                    .i32_type()
+                                    .const_int(target_width.signed() as u64, false)
+                                    .into(),
+                            ],
+                            "f128.to_int.status",
+                        )
+                        .expect("call checked Float128-to-integer helper")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("Float128 conversion returns a status")
+                        .into_int_value();
+                    let valid = self
+                        .builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            status,
+                            self.context.i32_type().const_zero(),
+                            "f128.to_int.valid",
+                        )
+                        .expect("compare Float128 conversion status");
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .expect("Float128 conversion emitted inside a block")
+                        .get_parent()
+                        .expect("Float128 conversion block belongs to a function");
+                    let success = self
+                        .context
+                        .append_basic_block(function, "f128.to_int.success");
+                    let failure = self
+                        .context
+                        .append_basic_block(function, "f128.to_int.failure");
                     self.builder
-                        .build_float_to_signed_int(truncated, target_ty, "fptosi")
-                        .expect("float to signed int")
-                } else {
+                        .build_conditional_branch(valid, success, failure)
+                        .expect("branch on Float128 conversion status");
+                    self.builder.position_at_end(failure);
                     self.builder
-                        .build_float_to_unsigned_int(truncated, target_ty, "fptoui")
-                        .expect("float to unsigned int")
+                        .build_call(self.runtime.invalid_cast, &[], "f128.to_int.failure")
+                        .expect("report invalid Float128-to-integer conversion");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid Float128 conversion handler does not return");
+                    self.builder.position_at_end(success);
+                    let bits = self
+                        .builder
+                        .build_load(self.context.i128_type(), output, "f128.to_int.bits")
+                        .expect("load Float128 conversion result bits")
+                        .into_int_value();
+                    let converted = if target_width.bits() == 128 {
+                        bits
+                    } else {
+                        self.builder
+                            .build_int_truncate(bits, target_ty, "f128.to_int")
+                            .expect("truncate checked Float128 result to target width")
+                    };
+                    converted.into()
+                } else {
+                    let trunc_intrinsic = inkwell::intrinsics::Intrinsic::find("llvm.trunc")
+                        .expect("LLVM provides llvm.trunc for every supported float width");
+                    let trunc_function = trunc_intrinsic
+                        .get_declaration(self.llvm, &[value.get_type().into()])
+                        .expect("llvm.trunc accepts each supported float width");
+                    let truncated = self
+                        .builder
+                        .build_call(trunc_function, &[value.into()], "float_to_int_truncated")
+                        .expect("truncate float before checked integer conversion")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("llvm.trunc returns a float")
+                        .into_float_value();
+                    let float_ty = value.get_type();
+                    let exponent = if target_width.signed() {
+                        target_width.bits() - 1
+                    } else {
+                        target_width.bits()
+                    };
+                    let upper_integer = if exponent == 128 {
+                        "340282366920938463463374607431768211456".to_string()
+                    } else {
+                        (1_u128 << exponent).to_string()
+                    };
+                    let upper = unsafe { float_ty.const_float_from_string(&upper_integer) };
+                    let lower = if target_width.signed() {
+                        unsafe { float_ty.const_float_from_string(&format!("-{upper_integer}")) }
+                    } else {
+                        float_ty.const_zero()
+                    };
+                    let at_or_above_lower = self
+                        .builder
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OGE,
+                            truncated,
+                            lower,
+                            "float_to_int_lower_ok",
+                        )
+                        .expect("compare float conversion lower bound");
+                    let below_upper = self
+                        .builder
+                        .build_float_compare(
+                            inkwell::FloatPredicate::OLT,
+                            truncated,
+                            upper,
+                            "float_to_int_upper_ok",
+                        )
+                        .expect("compare float conversion upper bound");
+                    let in_range = self
+                        .builder
+                        .build_and(at_or_above_lower, below_upper, "float_to_int_in_range")
+                        .expect("combine float conversion range checks");
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .expect("float conversion is emitted inside a block")
+                        .get_parent()
+                        .expect("float conversion block belongs to a function");
+                    let valid = self
+                        .context
+                        .append_basic_block(function, "float_to_int_valid");
+                    let invalid = self
+                        .context
+                        .append_basic_block(function, "float_to_int_invalid");
+                    self.builder
+                        .build_conditional_branch(in_range, valid, invalid)
+                        .expect("branch on checked float conversion range");
+                    self.builder.position_at_end(invalid);
+                    self.builder
+                        .build_call(self.runtime.invalid_cast, &[], "invalid_float_to_int")
+                        .expect("report out-of-range float-to-integer conversion");
+                    self.builder
+                        .build_unreachable()
+                        .expect("invalid cast handler does not return");
+                    self.builder.position_at_end(valid);
+                    let converted = if target_width.signed() {
+                        self.builder
+                            .build_float_to_signed_int(truncated, target_ty, "fptosi")
+                            .expect("float to signed int")
+                    } else {
+                        self.builder
+                            .build_float_to_unsigned_int(truncated, target_ty, "fptoui")
+                            .expect("float to unsigned int")
+                    };
+                    converted.into()
                 };
-                Some(converted.into())
+                Some(converted)
             }
 
             // An exact base-ten `Float` literal: the digits are parsed once,
@@ -7555,6 +7680,28 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         &[(value, ir::IrType::Decimal)],
                         ir::IrType::String,
                     ))
+                } else if self.value_types[&operand.0] == ir::IrType::Float(ir::FloatWidth::F128) {
+                    let value = self.operand(*operand).into_float_value();
+                    let bits = self
+                        .builder
+                        .build_bit_cast(value, self.context.i128_type(), "to_string.f128_bits")
+                        .expect("bitcast Float128 to its exact bit representation");
+                    let slot = self
+                        .builder
+                        .build_alloca(self.context.i128_type(), "to_string.f128")
+                        .expect("stack slot for a Float128 conversion");
+                    self.builder
+                        .build_store(slot, bits)
+                        .expect("store Float128 bits for formatting");
+                    let call = self
+                        .builder
+                        .build_call(self.runtime.float128_to_string, &[slot.into()], "str")
+                        .expect("call to the binary128 formatter");
+                    Some(
+                        call.try_as_basic_value()
+                            .basic()
+                            .expect("the binary128 formatter returns a String"),
+                    )
                 } else {
                     let mut value = self.operand(*operand);
                     let converter = match self.value_types[&operand.0] {
@@ -7596,36 +7743,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         ir::IrType::Float(width) => match width {
                             ir::FloatWidth::F32 => self.runtime.str_from_f32,
                             ir::FloatWidth::F64 => self.runtime.str_from_f64,
-                            // `F16` is caught by the dedicated arm above —
-                            // never reaches here, but the match still needs
-                            // it to stay exhaustive. `Float128` has no stable
-                            // Rust primitive to format through, so it is
-                            // truncated to `Float64` for printing. This is a
-                            // lossy conversion for values that are not exactly
-                            // representable in `f64`; it is a pragmatic
-                            // bridge rather than an exact formatter.
-                            //
-                            // The truncation itself is done by hand in
-                            // `zirk-runtime` (`zirk_float128_to_f64`,
-                            // decoding the raw bit pattern), not through
-                            // LLVM's native `fptrunc fp128 to double`: that
-                            // instruction depends on the target's
-                            // quad-precision libcalls (`__trunctfdf2`),
-                            // which are unreliable on Windows/MSVC
-                            // (confirmed: `1.5_Float128` silently printed
-                            // `0`). A `bitcast` to `i128` is always exact —
-                            // same bit width, no arithmetic — so the value
-                            // crosses the FFI boundary by the same
-                            // pointer-passing convention `declare_extern_fn`
-                            // already uses for `zirk_int_*`/128-bit values.
-                            // `zirk_float128_to_f64` is declared directly on
-                            // `self.runtime` (like `str_from_f64`), not
-                            // through the `ir::ExternFn` list, since no
-                            // user-visible IR ever names it — `emit_f128_to_f64`
-                            // does the spill to a stack slot by hand.
+                            // `F128` is handled by the direct binary128
+                            // formatter above; it must never reach this path.
                             ir::FloatWidth::F128 => {
-                                value = self.emit_f128_to_f64(value.into_float_value()).into();
-                                self.runtime.str_from_f64
+                                unreachable!("Float128 ToString uses its direct formatter")
                             }
                             ir::FloatWidth::F16 => {
                                 unreachable!("ToString over Float16 reaches the F16 arm")
@@ -7668,6 +7789,34 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             .expect("the converter returns a value"),
                     )
                 }
+            }
+
+            ir::InstKind::Float128Format { value, spec } => {
+                let value = self.operand(*value).into_float_value();
+                let bits = self
+                    .builder
+                    .build_bit_cast(value, self.context.i128_type(), "format.f128_bits")
+                    .expect("bitcast Float128 to its exact bit representation");
+                let slot = self
+                    .builder
+                    .build_alloca(self.context.i128_type(), "format.f128")
+                    .expect("stack slot for Float128 formatting");
+                self.builder
+                    .build_store(slot, bits)
+                    .expect("store Float128 bits for formatting");
+                let call = self
+                    .builder
+                    .build_call(
+                        self.runtime.float128_format,
+                        &[slot.into(), self.operand(*spec).into()],
+                        "formatted.f128",
+                    )
+                    .expect("call to the direct binary128 format helper");
+                Some(
+                    call.try_as_basic_value()
+                        .basic()
+                        .expect("the binary128 format helper returns a String"),
+                )
             }
 
             ir::InstKind::Println(operand) => {
@@ -16118,7 +16267,15 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         }
 
         if left.is_float_value() {
-            return self.emit_float_binary(op, left.into_float_value(), right.into_float_value());
+            let ir::IrType::Float(width) = left_ty else {
+                unreachable!("LLVM float value has a Float IR type")
+            };
+            return self.emit_float_binary(
+                op,
+                left.into_float_value(),
+                right.into_float_value(),
+                width,
+            );
         }
 
         if left_ty == ir::IrType::Decimal
@@ -16608,8 +16765,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         op: ir::BinaryOp,
         left: FloatValue<'ctx>,
         right: FloatValue<'ctx>,
+        width: ir::FloatWidth,
     ) -> BasicValueEnum<'ctx> {
         use ir::BinaryOp::*;
+
+        if width == ir::FloatWidth::F128 {
+            return self.emit_float128_binary(op, left, right);
+        }
 
         match op {
             Add => self
@@ -16649,6 +16811,137 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 unreachable!("operator {op:?} over Float")
             }
         }
+    }
+
+    fn float128_bits_slot(&mut self, value: FloatValue<'ctx>, name: &str) -> PointerValue<'ctx> {
+        let bits = self
+            .builder
+            .build_bit_cast(value, self.context.i128_type(), &format!("{name}.bits"))
+            .expect("bitcast binary128 value to its bit representation");
+        let slot = self
+            .builder
+            .build_alloca(self.context.i128_type(), &format!("{name}.slot"))
+            .expect("allocate binary128 bit slot");
+        self.builder
+            .build_store(slot, bits)
+            .expect("store binary128 bits");
+        slot
+    }
+
+    fn emit_float128_binary(
+        &mut self,
+        op: ir::BinaryOp,
+        left: FloatValue<'ctx>,
+        right: FloatValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        use ir::BinaryOp::*;
+        let left = self.float128_bits_slot(left, "f128.left");
+        let right = self.float128_bits_slot(right, "f128.right");
+        let (operation, is_comparison) = match op {
+            Add => (0, false),
+            Sub => (1, false),
+            Mul => (2, false),
+            Div => (3, false),
+            Rem => (4, false),
+            Eq => (0, true),
+            NotEq => (1, true),
+            Lt => (2, true),
+            LtEq => (3, true),
+            Gt => (4, true),
+            GtEq => (5, true),
+            Identical | And | Or | BitAnd | BitOr | BitXor | Shl | Shr => {
+                unreachable!("operator {op:?} over Float128")
+            }
+        };
+        if is_comparison {
+            let call = self
+                .builder
+                .build_call(
+                    self.runtime.float128_compare,
+                    &[
+                        self.context.i32_type().const_int(operation, false).into(),
+                        left.into(),
+                        right.into(),
+                    ],
+                    "f128.compare",
+                )
+                .expect("call portable Float128 comparison helper")
+                .try_as_basic_value()
+                .basic()
+                .expect("Float128 comparison returns a Boolean status")
+                .into_int_value();
+            return self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    call,
+                    self.context.i32_type().const_zero(),
+                    "f128.compare.bool",
+                )
+                .expect("convert Float128 comparison status to Boolean")
+                .into();
+        }
+
+        let output = self
+            .builder
+            .build_alloca(self.context.i128_type(), "f128.result.slot")
+            .expect("allocate Float128 result bits");
+        let status = self
+            .builder
+            .build_call(
+                self.runtime.float128_binary,
+                &[
+                    self.context.i32_type().const_int(operation, false).into(),
+                    left.into(),
+                    right.into(),
+                    output.into(),
+                ],
+                "f128.binary.status",
+            )
+            .expect("call portable Float128 arithmetic helper")
+            .try_as_basic_value()
+            .basic()
+            .expect("Float128 arithmetic returns status")
+            .into_int_value();
+        let valid = self
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.context.i32_type().const_zero(),
+                "f128.binary.valid",
+            )
+            .expect("compare Float128 arithmetic status");
+        let function = self
+            .builder
+            .get_insert_block()
+            .expect("Float128 arithmetic emitted inside a block")
+            .get_parent()
+            .expect("Float128 arithmetic block belongs to a function");
+        let success = self
+            .context
+            .append_basic_block(function, "f128.binary.success");
+        let failure = self
+            .context
+            .append_basic_block(function, "f128.binary.failure");
+        self.builder
+            .build_conditional_branch(valid, success, failure)
+            .expect("branch on Float128 arithmetic status");
+        self.builder.position_at_end(failure);
+        self.builder
+            .build_call(self.runtime.invalid_cast, &[], "f128.binary.failure")
+            .expect("report unsupported Float128 arithmetic result");
+        self.builder
+            .build_unreachable()
+            .expect("invalid Float128 arithmetic handler does not return");
+        self.builder.position_at_end(success);
+        let bits = self
+            .builder
+            .build_load(self.context.i128_type(), output, "f128.result.bits")
+            .expect("load Float128 result bits");
+        self.builder
+            .build_bit_cast(bits, self.context.f128_type(), "f128.result")
+            .expect("restore binary128 floating value")
     }
 
     fn compare_float(

@@ -181,11 +181,23 @@ pub mod symbols {
     /// Converts a `Float64` into a `String`.
     pub const STR_FROM_F64: &str = "zirk_str_from_f64";
     /// Converts a `Float128`'s raw bits (taken by pointer, like
-    /// `STR_FROM_I128`) to the nearest `Float64`, for `ToString`.
+    /// `STR_FROM_I128`) to the nearest `Float64` for explicit conversions.
     pub const FLOAT128_TO_F64: &str = "zirk_float128_to_f64";
+    /// Formats a `Float128`'s raw bits directly as a lossless String.
+    pub const FLOAT128_TO_STRING: &str = "zirk_float128_to_string";
+    /// Formats the raw binary128 bits directly using a Zirk float specifier.
+    pub const FLOAT128_FORMAT: &str = "zirk_float128_format";
     /// Widens a `Float64` to `Float128`'s raw bits, written through an
     /// out-pointer like every other 128-bit runtime result.
     pub const F64_TO_FLOAT128: &str = "zirk_f64_to_float128";
+    /// Performs binary128 arithmetic through the portable runtime helper.
+    pub const FLOAT128_BINARY: &str = "zirk_float128_binary";
+    /// Compares binary128 values without target-specific `fp128` libcalls.
+    pub const FLOAT128_COMPARE: &str = "zirk_float128_compare";
+    /// Converts binary128 to a checked-width integer via a pointer-based ABI.
+    pub const FLOAT128_TO_INTEGER: &str = "zirk_float128_to_integer";
+    /// Converts any signed/unsigned integer bit pattern to binary128.
+    pub const FLOAT128_FROM_INTEGER: &str = "zirk_float128_from_integer";
     /// Formats a `Float64` according to a `spec` string.
     pub const FLOAT_FORMAT: &str = "zirk_float_format";
     /// Converts a `Boolean` into a `String`.
@@ -720,7 +732,13 @@ pub struct Runtime<'ctx> {
     pub str_from_f32: FunctionValue<'ctx>,
     pub str_from_f64: FunctionValue<'ctx>,
     pub float128_to_f64: FunctionValue<'ctx>,
+    pub float128_to_string: FunctionValue<'ctx>,
+    pub float128_format: FunctionValue<'ctx>,
     pub f64_to_float128: FunctionValue<'ctx>,
+    pub float128_binary: FunctionValue<'ctx>,
+    pub float128_compare: FunctionValue<'ctx>,
+    pub float128_to_integer: FunctionValue<'ctx>,
+    pub float128_from_integer: FunctionValue<'ctx>,
     pub float_format: FunctionValue<'ctx>,
     pub str_from_bool: FunctionValue<'ctx>,
     pub str_grapheme_offset: FunctionValue<'ctx>,
@@ -1477,11 +1495,61 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         context.f64_type().fn_type(&[ptr.into()], false),
         external,
     );
+    let float128_to_string = module.add_function(
+        symbols::FLOAT128_TO_STRING,
+        ptr.fn_type(&[ptr.into()], false),
+        external,
+    );
+    let float128_format = module.add_function(
+        symbols::FLOAT128_FORMAT,
+        ptr.fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
     let f64_to_float128 = module.add_function(
         symbols::F64_TO_FLOAT128,
         context
             .void_type()
             .fn_type(&[ptr.into(), context.f64_type().into()], false),
+        external,
+    );
+    let float128_binary = module.add_function(
+        symbols::FLOAT128_BINARY,
+        context.i32_type().fn_type(
+            &[
+                context.i32_type().into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let float128_compare = module.add_function(
+        symbols::FLOAT128_COMPARE,
+        context
+            .i32_type()
+            .fn_type(&[context.i32_type().into(), ptr.into(), ptr.into()], false),
+        external,
+    );
+    let float128_to_integer = module.add_function(
+        symbols::FLOAT128_TO_INTEGER,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                context.i32_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let float128_from_integer = module.add_function(
+        symbols::FLOAT128_FROM_INTEGER,
+        context
+            .void_type()
+            .fn_type(&[ptr.into(), ptr.into(), context.i32_type().into()], false),
         external,
     );
     let float_format = module.add_function(
@@ -3295,7 +3363,13 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         str_from_f32,
         str_from_f64,
         float128_to_f64,
+        float128_to_string,
+        float128_format,
         f64_to_float128,
+        float128_binary,
+        float128_compare,
+        float128_to_integer,
+        float128_from_integer,
         float_format,
         str_from_bool,
         str_grapheme_offset,

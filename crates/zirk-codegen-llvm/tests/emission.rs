@@ -1552,13 +1552,109 @@ fn checked_float_to_integer_emission_covers_wide_signed_and_unsigned_bounds() {
          }",
     );
     assert!(
-        ir.contains("0xL0000000000000000407F000000000000"),
-        "UInt128's exclusive upper bound is exact 2^128, not a rounded UInt128::MAX:\n{ir}"
+        ir.contains(&format!("call i32 @{}", symbols::FLOAT128_TO_INTEGER)),
+        "Float128-to-integer conversions must use the portable helper:\n{ir}"
     );
-    assert!(ir.contains("fcmp oge fp128"), "{ir}");
-    assert!(ir.contains("fcmp olt fp128"), "{ir}");
-    assert!(ir.contains("fptosi fp128"), "{ir}");
-    assert!(ir.contains("fptoui fp128"), "{ir}");
+    assert!(
+        !ir.contains("fcmp oge fp128")
+            && !ir.contains("fcmp olt fp128")
+            && !ir.contains("fptosi fp128")
+            && !ir.contains("fptoui fp128"),
+        "Float128 casts must not depend on target fp128 libcalls:\n{ir}"
+    );
+}
+
+#[test]
+fn float128_format_emission_calls_the_direct_binary128_helper() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+             mut value: Float128 = 1.23456;\n\
+             stdout.println(value.format(\".3\"));\n\
+         }",
+    );
+    assert!(
+        ir.contains(&format!("call ptr @{}", symbols::FLOAT128_FORMAT)),
+        "Float128.format must call the direct-precision helper:\n{ir}"
+    );
+    assert!(
+        !ir.contains("call double @zirk_float128_to_f64"),
+        "formatting must not narrow binary128 through binary64:\n{ir}"
+    );
+}
+
+#[test]
+fn float128_arithmetic_and_comparison_use_portable_runtime_helpers() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+             mut left: Float128 = 1.5;\n\
+             mut right: Float128 = 0.25;\n\
+             mut sum: Float128 = left + right;\n\
+             mut greater: Boolean = sum > left;\n\
+         }",
+    );
+    assert!(
+        ir.contains(&format!("call i32 @{}", symbols::FLOAT128_BINARY)),
+        "Float128 arithmetic must use the ABI-safe binary128 helper:\n{ir}"
+    );
+    assert!(
+        ir.contains(&format!("call i32 @{}", symbols::FLOAT128_COMPARE)),
+        "Float128 comparisons must use the ABI-safe binary128 helper:\n{ir}"
+    );
+    assert!(
+        !ir.contains("fadd fp128") && !ir.contains("fcmp ogt fp128"),
+        "binary128 operations must not lower to target compiler-runtime calls:\n{ir}"
+    );
+}
+
+#[test]
+fn float128_runtime_helper_calls_emit_for_all_nine_targets() {
+    let context = Context::create();
+    let ir = checked_ir(
+        "fn main(): Void {\n\
+             mut left: Float128 = 123456789012345678901234567890;\n\
+             mut right: Float128 = 0.25;\n\
+             mut sum: Float128 = left + right;\n\
+             mut greater: Boolean = sum > left;\n\
+             mut integer: Int128 = sum as Int128;\n\
+         }",
+    );
+    let llvm = emit(&context, &ir, "float128_target_matrix");
+    verify_llvm_module(&llvm);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "zirk-float128-target-matrix-{}-{nonce}",
+        std::process::id()
+    ));
+    for target in zirk_codegen_llvm::TARGETS {
+        let path = root.with_extension(format!("{}.o", target.name));
+        emit_object_for_triple(&llvm, target.triple, &path)
+            .unwrap_or_else(|error| panic!("{}: {}", target.name, error.render()));
+        assert!(path.is_file(), "{} object was not emitted", target.name);
+        std::fs::remove_file(path).expect("remove emitted Float128 object");
+    }
+}
+
+#[test]
+fn integer_to_float128_uses_the_portable_precision_preserving_helper() {
+    let ir = llvm_ir(
+        "fn main(): Void {\n\
+             mut signed: Int128 = -123456789012345678901234567890;\n\
+             mut signed_float: Float128 = signed as Float128;\n\
+             mut unsigned: UInt128 = 123456789012345678901234567890;\n\
+             mut unsigned_float: Float128 = unsigned as Float128;\n\
+         }",
+    );
+    assert!(
+        ir.contains(&format!("call void @{}", symbols::FLOAT128_FROM_INTEGER)),
+        "integer-to-Float128 conversions must use the portable helper:\n{ir}"
+    );
+    assert!(
+        !ir.contains("sitofp i") && !ir.contains("uitofp i"),
+        "integer-to-Float128 conversions must not use LLVM fp128 conversion:\n{ir}"
+    );
 }
 
 #[test]

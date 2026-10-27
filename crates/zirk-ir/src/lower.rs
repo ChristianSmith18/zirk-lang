@@ -24613,6 +24613,17 @@ impl<'a> FunctionLowering<'a> {
         let receiver_ir = IrType::Float(width);
         let f64_ty = IrType::Float(FloatWidth::F64);
         let receiver = self.lower_expr(&field.object);
+        if width == FloatWidth::F128 && name == "format" && call.args.len() == 1 {
+            let spec = self.lower_expr_as(&call.args[0].value, IrType::String);
+            return Some(self.emit(
+                InstKind::Float128Format {
+                    value: receiver,
+                    spec,
+                },
+                IrType::String,
+                span,
+            ));
+        }
         let wide = if receiver_ir == f64_ty {
             receiver
         } else {

@@ -1671,6 +1671,11 @@ pub enum InstKind {
     /// is what keeps `Println` receiving a `String` always, and it is the shape
     /// that becomes a real trait call once traits exist in Phase 3.
     ToString(Operand),
+    /// `Float128.format(spec)` formats the binary128 bits directly.
+    Float128Format {
+        value: Operand,
+        spec: Operand,
+    },
     /// `stdout.println`, an intrinsic while there is no stdlib (design D4).
     ///
     /// Its operand is **always** a `String`: the lowering inserts a `ToString`
