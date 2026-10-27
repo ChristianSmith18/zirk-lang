@@ -64,8 +64,8 @@
 - [x] 8.2 Update type-system and compiler-pipeline documentation to distinguish semantic acceptance, portable-IR support, interpreter support, native support, and target/package ABI evidence.
 - [x] 8.3 Update feature status, current limitations, and roadmap after reviewing the support matrix; unsupported target/runtime evidence remains explicitly marked as incomplete.
 - [x] 8.4 Add the public `Watched<T>.on<K ...>` example after generic contract methods are implemented, and verify the handbook, demo, CLI, and LSP all show the inferred callback property type.
-- [ ] 8.5 Commit the authoritative Zirk documentation/status changes, run `./scripts/sync-website-content.sh` from the clean committed state, and review the generated `../zirk-lang-site` diff and status catalog; verify website content references the exact Zirk source revision and checksums.
-- [ ] 8.6 Commit website synchronization separately and validate both repositories; verify each commit contains only its repository's intended changes and report both revisions.
+- [x] 8.5 Commit the authoritative Zirk documentation/status changes at `7d1b7e6482e14ce49aae856cdb5e5fe5838b4e89`, run `./scripts/sync-website-content.sh --audit-date 2026-10-27`, and review the generated `../zirk-lang-site` diff and status catalog; the generator validated 374 documents/routes and recorded the exact source revision and checksums.
+- [x] 8.6 Commit website synchronization separately at `bb88dfc2d8096656acb36b981a51efc32022810c`; `git diff --check` passed and both repositories were clean after their intended commits.
 
 ## 9. Integrated validation
 

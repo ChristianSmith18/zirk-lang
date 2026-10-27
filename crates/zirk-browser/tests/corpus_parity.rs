@@ -227,6 +227,26 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
 }
 
 #[test]
+fn structural_open_template_generic_contract_demo_runs_in_browser() {
+    let response = zirk_browser::run(Request {
+        api_version: zirk_browser::API_VERSION,
+        trace: None,
+        source: include_str!("../../../demo/42-uniones-estructurales-y-plantillas-abiertas.zrk")
+            .to_owned(),
+        virtual_name: "demo/42-uniones-estructurales-y-plantillas-abiertas.zrk".into(),
+        limits: None,
+    });
+    let output = response
+        .output
+        .iter()
+        .map(|event| event.text.as_str())
+        .collect::<String>();
+    assert_eq!(response.failure, None, "{:?}", response.diagnostics);
+    assert_eq!(response.completion, Some(Completion::Completed));
+    assert_eq!(output, "number 42\ntext ready\nflag true\nAda:8\n42\n");
+}
+
+#[test]
 fn object_model_catalog_evidence_exists_and_agrees_with_the_exclusions() {
     #[derive(serde::Deserialize)]
     struct Catalog {

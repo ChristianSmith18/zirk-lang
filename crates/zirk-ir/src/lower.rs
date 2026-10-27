@@ -4659,7 +4659,7 @@ fn ir_type(
         ),
         Base::Shape(_) => IrType::ObjectAny,
         Base::Unknown | Base::Null | Base::Param(_) => {
-            unreachable!("lowering received a construct the checker should have rejected")
+            unreachable!("lowering received unsupported runtime type {ty:?}")
         }
     };
 
@@ -22344,12 +22344,12 @@ impl<'a> FunctionLowering<'a> {
                 }?;
                 Some(Type::of(base))
             })?;
-        let (id, intersection_receiver) = match receiver_type.base {
-            Base::Contract(id) => (id, false),
-            Base::ContractInstance(instance) => (
-                self.checked.contract_instances[instance as usize].contract,
-                false,
-            ),
+        let (id, intersection_receiver, receiver_arguments) = match receiver_type.base {
+            Base::Contract(id) => (id, false, Vec::new()),
+            Base::ContractInstance(instance) => {
+                let instance = &self.checked.contract_instances[instance as usize];
+                (instance.contract, false, instance.args.clone())
+            }
             Base::Intersection(intersection) => {
                 let contract = self.checked.intersections[intersection as usize]
                     .iter()
@@ -22359,7 +22359,7 @@ impl<'a> FunctionLowering<'a> {
                                 .method(&field.name.name)
                                 .is_some() =>
                         {
-                            Some(*id)
+                            Some((*id, Vec::new()))
                         }
                         Base::ContractInstance(instance)
                             if self.checked.contracts[self.checked.contract_instances
@@ -22369,11 +22369,12 @@ impl<'a> FunctionLowering<'a> {
                                 .method(&field.name.name)
                                 .is_some() =>
                         {
-                            Some(self.checked.contract_instances[*instance as usize].contract)
+                            let instance = &self.checked.contract_instances[*instance as usize];
+                            Some((instance.contract, instance.args.clone()))
                         }
                         _ => None,
                     })?;
-                (contract, true)
+                (contract.0, true, contract.1)
             }
             _ => return None,
         };
@@ -22381,20 +22382,40 @@ impl<'a> FunctionLowering<'a> {
         let contract = &self.checked.contracts[id as usize];
         let method = contract.method(&field.name.name)?;
         let index = method.index as u32;
+        let mut substitution = self.type_substitution.clone();
+        for (parameter, argument) in contract.type_params.iter().zip(receiver_arguments) {
+            substitution.insert(
+                *parameter,
+                substitute_specialized_type(self.checked, argument, &self.type_substitution),
+            );
+        }
+        let call_info = self.checked.generic_call_substitutions.get(&span);
+        if let Some(call_info) = call_info {
+            for (parameter, argument) in &call_info.substitutions {
+                substitution.insert(
+                    *parameter,
+                    substitute_specialized_type(self.checked, *argument, &substitution),
+                );
+            }
+        }
         // The method's declared return type may name the contract's own
         // type parameter (`Iterator<T>.next(): Iteration<T>`) — the call
         // site knows the substitution (`it.next()` on `Iterator<Int32>`
         // produces `Iteration<Int32>`), so the checker's recorded type wins
         // whenever it recorded one.
-        let returns = self
+        let returns_type = self
             .checked
             .result_projections
             .get(&span)
             .copied()
             .or_else(|| self.checked.expr_types.get(&span).copied())
             .filter(|ty| !ty.is_unknown())
-            .map(|ty| self.ir_type(ty))
-            .unwrap_or_else(|| self.ir_type(method.returns));
+            .unwrap_or(method.returns);
+        let returns = self.ir_type(substitute_specialized_type(
+            self.checked,
+            returns_type,
+            &substitution,
+        ));
         // The parameter types are similarly the concrete types the checker
         // saw at the call site, so `T` in `put(x: T)` becomes the
         // instantiated `Int32`/`String`/etc. for this receiver.
@@ -22407,7 +22428,6 @@ impl<'a> FunctionLowering<'a> {
         } else {
             self.lower_expr(&field.object)
         };
-        let call_info = self.checked.generic_call_substitutions.get(&span);
         let specialization = call_info.and_then(|call_info| {
             let contract_method = self.checked.contracts[id as usize]
                 .methods
@@ -22416,14 +22436,28 @@ impl<'a> FunctionLowering<'a> {
             let arguments = contract_method
                 .type_params
                 .iter()
-                .map(|parameter| call_info.substitutions.get(parameter).copied())
+                .map(|parameter| {
+                    call_info
+                        .substitutions
+                        .get(parameter)
+                        .copied()
+                        .map(|ty| substitute_specialized_type(self.checked, ty, &substitution))
+                })
                 .collect::<Option<Vec<_>>>()?;
             contract_method_specialization_index(self.checked, id, index, &arguments)
         });
-        let mut params = method.params.clone();
+        let mut params = method
+            .params
+            .iter()
+            .cloned()
+            .map(|mut param| {
+                param.ty = substitute_specialized_type(self.checked, param.ty, &substitution);
+                param
+            })
+            .collect::<Vec<_>>();
         if let Some(call_info) = call_info {
             for (param, argument_type) in params.iter_mut().zip(&call_info.argument_types) {
-                param.ty = *argument_type;
+                param.ty = substitute_specialized_type(self.checked, *argument_type, &substitution);
             }
         }
         let args = self.lower_args_for_params(call, &params);
