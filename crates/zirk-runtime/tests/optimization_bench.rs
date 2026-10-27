@@ -46,6 +46,8 @@ mod map;
 mod memory;
 #[path = "../src/ordered.rs"]
 mod ordered;
+#[path = "../src/priority_queue.rs"]
+mod priority_queue;
 // This benchmark compiles selected runtime modules into a deliberately
 // minimal test crate. None of its measured task paths own network resources.
 mod network_api {
@@ -105,6 +107,7 @@ pub use journal::{
 pub use list::*;
 pub use memory::{zirk_rt_alloc, zirk_rt_dependent_base, zirk_rt_pin_object, zirk_rt_unpin_object};
 pub use pool::{zirk_rt_pool_join, zirk_rt_pool_submit, zirk_rt_safepoint_poll};
+pub use priority_queue::*;
 pub use range::{
     zirk_range_element_at, zirk_range_end, zirk_range_inclusive, zirk_range_length, zirk_range_new,
     zirk_range_slice, zirk_range_start, zirk_range_step,

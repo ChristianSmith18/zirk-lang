@@ -149,6 +149,15 @@ const EXCLUDED: &[(&str, &str)] = &[
     ),
 ];
 
+/// Native corpus programs that the frontend currently rejects before browser
+/// execution. Keep these separate from browser capability exclusions so a
+/// source-level diagnostic is not mistaken for a runtime capability failure.
+const SOURCE_REJECTED: &[(&str, &str, &str)] = &[(
+    "tuple_basics",
+    "E0423",
+    "tuple, collection, or record matching patterns is not compilable yet",
+)];
+
 fn corpus_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../zirk-cli/tests/corpus/valid")
 }
@@ -165,6 +174,7 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
     let mut problems = Vec::new();
     let mut passed = 0usize;
     let mut excluded_seen = 0usize;
+    let mut source_rejected_seen = 0usize;
     for path in programs {
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
         let expected_path = path.with_extension("out");
@@ -184,6 +194,23 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
             .iter()
             .map(|event| event.text.as_str())
             .collect();
+        if let Some((_, code, message)) = SOURCE_REJECTED
+            .iter()
+            .find(|(rejected, _, _)| *rejected == name)
+        {
+            let expected_diagnostic = response
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == *code && diagnostic.message.contains(message));
+            if !expected_diagnostic || !output.is_empty() || response.completion.is_some() {
+                problems.push(format!(
+                    "{name}: expected source rejection {code} containing `{message}` before execution"
+                ));
+            } else {
+                source_rejected_seen += 1;
+            }
+            continue;
+        }
         let excluded = EXCLUDED.iter().find(|(excluded, _)| *excluded == name);
         match (excluded, &response.failure) {
             (None, None) => {
@@ -223,6 +250,7 @@ fn native_corpus_runs_in_the_browser_or_is_explicitly_excluded() {
 
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
     assert_eq!(excluded_seen, EXCLUDED.len());
+    assert_eq!(source_rejected_seen, SOURCE_REJECTED.len());
     assert!(passed > 150, "unexpectedly small corpus: {passed}");
 }
 

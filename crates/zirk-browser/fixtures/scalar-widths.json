@@ -2,7 +2,7 @@
   "name": "scalar-widths",
   "source": "import { stdout } from std.io;\nfn main(): Void { stdout.println(0.1f16 + 0.2f16); stdout.println(0.1f32 + 0.2f32); stdout.println(Float128(1) + 1.92592994438723585305597794258492732e-34f128); }",
   "virtualName": "fixtures/scalar-widths.zrk",
-  "expectedOutput": ["0.2998047\n", "0.3\n", "1\n"],
+  "expectedOutput": ["0.2998047\n", "0.3\n", "1.00000000000000000000000000000000019\n"],
   "completion": "completed",
   "exclusions": []
 }

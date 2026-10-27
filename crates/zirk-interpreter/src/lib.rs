@@ -8780,6 +8780,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::MapLength(_)
         | InstKind::MapVersion(_)
         | InstKind::MapKeys(_)
+        | InstKind::MapSortedKeys(_)
         | InstKind::MapValues(_)
         | InstKind::MapEntries(_)
         | InstKind::MapIsEmpty(_)
@@ -8790,6 +8791,7 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::MapRemove { .. }
         | InstKind::SetLength(_)
         | InstKind::SetValues(_)
+        | InstKind::SetSortedElements(_)
         | InstKind::SetIsEmpty(_)
         | InstKind::SetClear(_)
         | InstKind::SetOperation { .. }
