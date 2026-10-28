@@ -72,7 +72,7 @@ fn main(): Void {
     inmut outcome: Result<Int32, LookupError> = map.get(1);
     inmut keys: Array<Int32> = map.keys(); // insertion-order snapshot
     inmut values: Array<Int32> = map.values(); // insertion-order snapshot
-    inmut entries: Array<Tuple<Int32, Int32>> = map.entries();
+    inmut entries: Array<Tuple<Int32, Int32 >> = map.entries();
 
     mut set: Set<Int32> = Set();
     inmut inserted: Boolean = set.add(8);

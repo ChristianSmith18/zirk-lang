@@ -26,11 +26,11 @@ type Active = true | false;
 type Holiday = Date(2026, 12, 25) | Date(2027, 1, 1);
 type OfficeTime = Time(9, 0) | Time(17, 30);
 type Meeting = DateTime(Date(2026, 12, 25), Time(9, 30))
-             | DateTime(Date(2026, 12, 25), Time(10, 0));
+| DateTime(Date(2026, 12, 25), Time(10, 0));
 type ConstructedHoliday = Date(2026, 12, 25) | Date(2027, 1, 1);
 type ConstructedTime = Time(9, 0) | Time(17, 30);
 type ConstructedMeeting = DateTime(Date(2026, 12, 25), Time(9, 30))
-                       | DateTime(Date(2026, 12, 25), Time(10, 0));
+| DateTime(Date(2026, 12, 25), Time(10, 0));
 ```
 
 The owning type is part of each value's identity. Singleton alternatives are

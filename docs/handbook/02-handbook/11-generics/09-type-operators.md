@@ -77,13 +77,13 @@ fn on<T, K from String & keyof T>(
     value: T,
     event: "{K}Changed",
     new_value: T[K],
-    callback: Fn(T[K]) => Void
+    callback: Fn(T[K]) => Void,
 ): Void {
     callback(new_value);
 }
 
 inmut person: { age: Int32; name: String } = { age: 42, name: "Ada" };
-on(person, "ageChanged", person.age, (age): Void => {
+on(person, "ageChanged", person.age,(age): Void => {
     stdout.println(age.to_string());
 }); // K is "age"; age is Int32
 ```
@@ -103,17 +103,17 @@ the event relationship without a separate helper function:
 type Person = { age: Int32; name: String };
 
 contract Watched<T> {
-    on<K from String & keyof T>(
-        event: "{K}Changed",
-        callback: Fn(T[K]) => Void
-    ): Void;
+    on<K from String & keyof T>(event: "{K}Changed", callback: Fn(T[K]) => Void): Void;
 }
 
 fn report_age(age: Int32): Void { }
 fn connect(person: Watched<Person>): Void {
-    person.on("ageChanged", (age): Void => {
+    person.on(
+        "ageChanged",
+        (age): Void => {
         report_age(age); // age is inferred as Int32
-    });
+    },
+    );
 }
 ```
 
