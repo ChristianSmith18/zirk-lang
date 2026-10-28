@@ -60,20 +60,20 @@ impl Float128 {
     }
 
     pub const fn infinity(negative: bool) -> Self {
-        Self(((negative as u128) << 127) | (EXPONENT_MASK as u128) << FRACTION_BITS)
+        Self(((negative as u128) << 127) | EXPONENT_MASK << FRACTION_BITS)
     }
 
     pub const fn quiet_nan() -> Self {
-        Self(((EXPONENT_MASK as u128) << FRACTION_BITS) | (1_u128 << (FRACTION_BITS - 1)))
+        Self((EXPONENT_MASK << FRACTION_BITS) | (1_u128 << (FRACTION_BITS - 1)))
     }
 
     pub const fn is_nan(self) -> bool {
-        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK as u128
+        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK
             && (self.0 & FRACTION_MASK) != 0
     }
 
     pub const fn is_infinite(self) -> bool {
-        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK as u128
+        ((self.0 >> FRACTION_BITS) & EXPONENT_MASK) == EXPONENT_MASK
             && (self.0 & FRACTION_MASK) == 0
     }
 

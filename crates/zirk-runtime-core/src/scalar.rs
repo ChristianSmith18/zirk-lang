@@ -61,7 +61,7 @@ pub fn float16_bits(value: f64) -> u16 {
         let halfway = 1_u64 << (shift - 1);
         truncated + u64::from(remainder > halfway || (remainder == halfway && truncated & 1 == 1))
     };
-    let bits = if unbiased >= -14 {
+    if unbiased >= -14 {
         let mut target_exponent = unbiased + 15;
         let rounded = round_shift(significand, 42);
         if rounded == 1 << 11 {
@@ -83,8 +83,7 @@ pub fn float16_bits(value: f64) -> u16 {
         } else {
             sign | rounded as u16
         }
-    };
-    bits
+    }
 }
 
 /// Widens an IEEE-754 binary16 payload exactly to binary64.
