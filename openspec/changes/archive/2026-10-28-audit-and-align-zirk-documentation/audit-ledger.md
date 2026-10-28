@@ -34,7 +34,7 @@ Audit date: 2026-10-28.
 
 ## Per-file outcome inventory
 
-Outcome legend: `Updated` means a discrepancy was corrected; `No discrepancy found` means the maintained file was scanned/reviewed and no current unsupported contradiction was found; `Historical preserved` means dated material remains clearly a historical snapshot. `Pending site sync` indicates an owned site source is edited but regeneration and validation are still pending.
+Outcome legend: `Updated` means a discrepancy was corrected; `No discrepancy found` means the maintained file was scanned/reviewed and no current unsupported contradiction was found; `Historical preserved` means dated material remains clearly a historical snapshot. Companion-site rows record whether each source changed or was reviewed unchanged; the completed regeneration and validation evidence is recorded below.
 
 ### Maintained project guidance
 
@@ -603,12 +603,12 @@ Outcome legend: `Updated` means a discrepancy was corrected; `No discrepancy fou
 
 | Path | Audit outcome |
 |---|---|
-| `../zirk-lang-site/tools/project-status/catalog.ts` | Updated; regenerate from the committed source revision and validate before commit. |
-| `../zirk-lang-site/tools/project-status/generate.ts` | Review target; sync/validation is pending. |
-| `../zirk-lang-site/tools/project-status/generate.spec.ts` | Review target; sync/validation is pending. |
-| `../zirk-lang-site/content/project-status-source.json` | Review target; sync/validation is pending. |
-| `../zirk-lang-site/content/handbook-source.json` | Review target; sync/validation is pending. |
-| `../zirk-lang-site/src/generated/project-status.generated.ts` | Review target; sync/validation is pending. |
+| `../zirk-lang-site/tools/project-status/catalog.ts` | Updated for the audited statuses and committed with the generated site synchronization. |
+| `../zirk-lang-site/tools/project-status/generate.ts` | Reviewed; no generator edit was needed. The supported sync path regenerated the imports and the production build passed. |
+| `../zirk-lang-site/tools/project-status/generate.spec.ts` | Reviewed and exercised by the site tool test suite (12 files, 82 tests passed); no spec edit was needed. |
+| `../zirk-lang-site/content/project-status-source.json` | Regenerated from the committed compiler documentation and updated with the reviewed source revision and checksums. |
+| `../zirk-lang-site/content/handbook-source.json` | Regenerated from the committed compiler documentation and updated with the reviewed source revision and digest. |
+| `../zirk-lang-site/src/generated/project-status.generated.ts` | Regenerated from the reviewed catalog and source descriptor; committed with the site synchronization. |
 
 ## Exclusions and separate classifications
 
