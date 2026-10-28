@@ -1,12 +1,12 @@
 # `std.sync`
 
-> **Implementation status — partially delivered.** The compiler exposes the
-> scalar `Atomic<T>` source API described in the [Atomics chapter](../02-handbook/18-concurrency/13-atomics.md).
-> `Mutex`, `RwLock`, `Semaphore`, `Barrier`, `Once`, and `ConditionVariable`
-> remain unavailable as Zirk source APIs. See the
+> **Implementation status — partially delivered.** `Mutex<T>.with` and scalar
+> `Atomic<T>` are compiler-known Zirk source APIs; `RwLock`, `Semaphore`,
+> `Barrier`, `Once`, and `ConditionVariable` remain unavailable. There is no
+> importable `std.sync` package in the current toolchain. See the
 > [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md).
 
-`std.sync` provides scoped synchronization for shared state: `Mutex<T>`,
+The target `std.sync` module provides scoped synchronization for shared state: `Mutex<T>`,
 `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `ConditionVariable` and supported
 atomics. It does not make standard collections implicitly thread-safe.
 

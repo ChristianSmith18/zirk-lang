@@ -121,19 +121,20 @@ inmut values: Int32[4] = [1, 2, 3, 4];
 
 inmut doubled = values.map((n) => n * 2);          // Array<Int32>
 inmut evens = values.filter((n) => n.is_even());   // Array<Int32>
-inmut sum = values.reduce((acc, n) => acc + n, 0); // Int32
+inmut sum = values.reduce(0, (acc: Int32, n: Int32): Int32 => acc + n); // Int32
 ```
 
-`map` on a fixed-size `T[N]` produces a same-length array; `filter`, `take`,
-`skip`, and `reverse` produce an `Array<T>` whose length is determined at
-runtime because it cannot be known statically. Use `to_list()` when you need a
-resizable collection.
+`map` on a fixed-size `T[N]` produces a same-length array; `filter` produces
+an `Array<T>` whose length is determined at runtime. `reverse` mutates the
+array in place. `take` and `skip` remain specified. Use `to_list()` when you
+need a resizable collection once that conversion is available.
 
 The compiler lowers `Array.map` directly into one exactly-sized contiguous
 allocation and indexed writes. It does not use a growable `List` buffer, so it
 is the preferred representation when the cardinality is stable.
 
-For lazy pipelines, use `.iterator()` and a terminal such as `.collect()`.
+Sequence pipelines execute eagerly and preserve the array result family for
+`map`/`filter`; `collect()` materializes the values as a `List<T>`.
 
 ## When to choose an array
 
@@ -173,18 +174,23 @@ removed. A managed reference: assignment aliases, `clone()` separates.
 | `a[start:end:step]` | `Array<T>` | Copying slice (safe code) | implemented |
 | `a.fill(value)` | `Void` | Overwrite every element | specified |
 | `a.copy_from(source)` | `Void` | Equal-length bulk copy | specified |
-| `a.contains(value)` | `Boolean` | Membership (`T from Equatable`) | specified |
+| `a.contains(value)` | `Boolean` | Membership | implemented |
 | `a.find(predicate)` | `T?` | First matching element | specified |
-| `a.map(fn)` | `Array<U>` | Eager transform; result length matches source for `T[N]` | specified |
-| `a.filter(fn)` | `Array<T>` | Eager selection; result length is dynamic | specified |
+| `a.map(fn)` | `Array<U>` | Eager transform; result length matches source | implemented |
+| `a.filter(fn)` | `Array<T>` | Eager selection; result length is dynamic | implemented |
+| `a.for_each(fn)` | `Void` | Eager side-effecting traversal | implemented |
 | `a.flat_map(fn)` | `Array<U>` | Map then flatten one level | specified |
-| `a.reduce(fn, initial)` | `U` | Left fold over elements | specified |
+| `a.reduce(initial, fn)` | `U` | Left fold over elements | implemented |
+| `a.sum()` / `a.count()` | numeric `T` / `Int32` | Numeric sum / element count | implemented |
 | `a.take(n)` | `Array<T>` | First `n` elements | specified |
 | `a.skip(n)` | `Array<T>` | Elements after the first `n` | specified |
-| `a.reverse()` | `Array<T>` | Reversed copy | specified |
+| `a.reverse()` | `Void` | Reverse this array in place | implemented |
+| `a.first()` / `a.last()` | `T?` | Read the first or last element | implemented |
+| `a.sort()` / `a.sort_by(cmp)` | `Void` | Stable natural or comparator sort in place | implemented |
+| `a.collect()` | `List<T>` | Materialize a sequence pipeline as a list | implemented |
 | `a.to_list()` | `List<T>` | Materializes as a list | specified |
 | `a.to_set()` | `Set<T>` | Materializes as a set | specified |
-| `a.iterator()` | `Iterator<T>` | Lazy single-pass iterator | specified |
+| `a.iterator()` | `Iterator<T>` | Lazy single-pass iterator | implemented |
 | `a.clone()` | `Array<T>` | Independent logical copy | implemented |
 | `a.to_string()` | `String` | Rendering | implemented |
 
@@ -202,7 +208,7 @@ mut middle = values[1:4];       // copy: [25, 30, 40]
 // Eager chain on the array itself.
 mut doubled = values.map((x) => x * 2);            // Array<Int32>
 mut evens = values.filter((x) => x.is_even());    // Array<Int32>, dynamic length
-mut sum = values.reduce((acc, x) => acc + x, 0);  // Int32
+mut sum = values.reduce(0, (acc: Int32, x: Int32): Int32 => acc + x);  // Int32
 
 mut copy = values.clone();
 copy is values;                 // false

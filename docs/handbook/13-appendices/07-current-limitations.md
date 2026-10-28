@@ -17,8 +17,8 @@ use content equality; and aggregate key/element layouts without a supported
 `Hash`/`Equal` derivation are rejected by semantic analysis. Nullable layouts,
 byte-canonical tuples, and payload enums with recursively eligible fields are
 supported. Tuple fields requiring content-based String/Char equality,
-structural-record keys, union keys/elements, and nullable Decimal remain
-unsupported. Map and Set traversal is insertion-ordered; Map exposes typed
+other structural aggregate keys, union keys/elements, and nullable Decimal
+remain unsupported. Map and Set traversal is insertion-ordered; Map exposes typed
 key/value/entry snapshots, Set exposes ordered algebra and `for … in`,
 `Map.set` returns `Void`, and `Set.add` returns whether it inserted a new item.
 Deque, FIFO Queue, LIFO Stack, and stable minimum-first PriorityQueue have
@@ -69,33 +69,25 @@ Current high-impact delivery limits include:
   stress coverage at additional specialized managed-container boundaries
   remain incomplete.
 
-- `.zkinit` now has a typed project model, `zirk init`/`-y`, project-aware
+- `.zkinit` has a typed project model, `zirk init`/`-y`, project-aware
   entry selection without a required source `fn main`, dependency/dev-dependency
   graphs, typed application globals, and one `requires` capability list. Runtime
   consent is exact-resource and operation-local. Runtime enforcement covers
   environment/secrets, networking, and `std.fs`/`std.path`, including bounded
   directory/link/temp/lock/watch APIs and task-suspending async file/directory
   operations. Browser execution still rejects filesystem effects; Windows
-  filesystem behavior has compile-only evidence in this change, and process
-  APIs remain unavailable. See the
+  process APIs remain unavailable. Target-specific filesystem evidence is
+  recorded in the status catalog. See the
   [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) and project
-  chapters for the tested surface. Focused native filesystem conformance passes
-  on macOS ARM64, Linux x86_64, Linux ARM64, and Windows x86_64 in
-  [CI run 40230912316](https://github.com/ChristianSmith18/zirk-lang/actions/runs/40230912316)
-  at source revision `add179e6`. The workflow is not fully green: native jobs
-  later fail at the repository-wide canonical-format check, and the independent
-  browser Fetch HTTP job fails. Browser filesystem preflight tests pass locally.
+  chapters for the current tested surface and its target-specific evidence.
 
-- `std.environment`, `std.net`, and `std.http` are bundled native previews;
-  the archived first delivery passes full-workspace native CI on macOS ARM64,
-  Linux x86_64, Linux ARM64, and Windows x86_64 (run 39359107965, compiler
-  revision b28daa7). A separate extension is in progress for UDP, local
-  sockets, interface snapshots, extended TLS, HTTP/3/QUIC, and injected browser
-  Fetch. Its working-tree evidence and remaining target gates are listed in the
-  [standard-library status catalog](../../init/ZIRK_FEATURE_STATUS.md). The
-  broader Phase 7 library remains partial; the [module
-  index](../04-standard-library/19-standard-library-indexes.md) describes the
-  public APIs.
+- `std.environment`, `std.net`, `std.http`, and `std.json` have bundled source
+  packages. The native networking preview includes UDP, local sockets,
+  interface snapshots, authenticated TLS, HTTP/3/QUIC, and the documented
+  HTTP/Fetch boundary. The broader standard library remains partial. Consult
+  the [standard-library status catalog](../../init/ZIRK_FEATURE_STATUS.md) for
+  status evidence; the [module index](../04-standard-library/19-standard-library-indexes.md)
+  and owning chapters document the public APIs.
 
 - Package roots, local/vendored dependency traversal, `share mod`, logical
   package imports and lock metadata validation are delivered. Registry/Git
@@ -129,14 +121,15 @@ Current high-impact delivery limits include:
   (`Weak.from`, `.upgrade(): T?`, `.is_alive`) — a small collector-tracked
   indirection cell whose target is cleared before the collector frees it,
   never after, so `.upgrade()`/`.is_alive` never observe reclaimed memory.
-  Deep `clone()` is delivered for `class` receivers: compiler-derived when
-  every field is itself `Clone`, preserving internal sharing and cycles
+  Deep `clone()` is delivered for `class` and algebraic enum values when
+  their reachable fields/payloads implement `Clone`. Enum cloning dispatches
+  on the active discriminant and reads only that variant's initialized
+  payload. Class cloning is compiler-derived when every field is itself
+  `Clone`, preserving internal sharing and cycles
   through a runtime memoization map, and rejected at compile time when the
   field graph reaches a `Pointer<T>`, `Resource`, or other non-`Clone`
-  member. `record` and enum-typed fields do not yet derive
-  `Clone` (records have no identity of their own; a pre-existing codegen
-  gap leaves an enum's inactive-variant fields uninitialized in a way the
-  shared field-offset walk would read unconditionally). `Dependent<T>` lifetime
+  member. Legacy `record` declarations have been removed; enums with a
+  non-`Clone` payload still do not satisfy `Clone`. `Dependent<T>` lifetime
   and escape analysis rejects returns, field stores, closure captures, and
   non-dependent parameter passing; valid local use runs end-to-end. `Pin<T>`
   supports construction with `Pin(obj)`, automatic unpin for field and method
@@ -157,120 +150,31 @@ Current high-impact delivery limits include:
   nested inside `unsafe {}` that handles the exception locally does not
   trigger a rollback; early `return`/`break`/`continue` out of `unsafe {}`
   now also rolls the active journal back before the jump.
-  `NativeSlice<T>`/`NativeSliceMut<T>`
-  are delivered: validated bounded views constructed only via
-  `pointer.as_slice(length)`/`.as_slice_mut(length)` (both `unsafe`,
-  returning `Result<view, NativeError>`), checking nullability, alignment,
-  extent, and (for the syntactically direct `Pointer.from(place).as_slice(n)`
-  shape only) known extent against the real underlying storage; using an
-  already-constructed view needs no `unsafe`, with bounds checks active on
-  every index; the `Pointer<T>` escape rule now also covers both view
-  types. `String[index]` returning a `Char` is supported, with bounds
-  checking and negative-index rejection, and `array-list-tuple-duration-regex`
-  adds the `String[index] = c` write, `[start:end:step]` slicing, and the
-  `trim`/`search`/`contains`/`starts_with`/`ends_with`/`substring` methods
-  (`split` returns `List<String>` and lands with `List<T>`). Delivering
-  indexing also meant adding `expr[index]` as a genuine new
-  postfix expression grammar (`Expr::Index`) — indexing did not exist
-  anywhere in the compiler before, and is now dispatched by receiver type
-  (today: `String`, `NativeSlice<T>`/`NativeSliceMut<T>`) so the
-  `Array<T>`/`List<T>` of `array-list-tuple-duration-regex` register their
-  own support without another grammar change. Volatile access, untagged native-union access (no union type
-  exists), language-level atomics and their source-level ordering contract,
-  native-library-linking manifest, and general provenance tracking for a
-  view's known extent beyond the one recognized syntactic shape also
-  remain.
-- Several Phase 3 constructs parse and type-check more broadly than they lower.
-  Delivered since: a user-declared `abstract class` now dispatches dynamically
-  through its concrete adopters (`fase-3-abstract-dispatch`), reusing the same
-  vtable mechanism the compiler's own `Throwable` hierarchy already proved —
-  fixing, along the way, three latent gaps in the general class-declaration
-  path (method `overridden` flags never set for a user abstract class,
-  method-index seeding scoped only to the three native exception classes,
-  hierarchy ordering that ignored `implements`) and a pre-existing diagnostic
-  bug (`MISSING_OVERRIDE` reported instead of `MISSING_IMPLEMENTATION` when no
-  override at all was supplied). Derived structural equality for
-  `record` is also delivered (`fase-3-structural-equality`):
-  `==`/`!=` compares every field, recursing into a nested `record` field,
-  and short-circuits on the first difference — a `class`-typed
-  field compares by its own existing rule (its `_equals` if declared,
-  otherwise `is`). A field whose type doesn't fit a scalar, nested-value,
-  or object shape (for example `T?` or an algebraic enum payload) still
-  reports `NOT_LOWERED`, now scoped to that specific field rather than
-  rejecting the whole comparison. A user-declared generic enum
-  (`fase-3-generic-enums`) also instantiates and lowers now, for a flat
-  single- or multi-type-parameter shape (`enum Either<L, R> { ... }`),
-  reusing the same specialization mechanism already proven by
-  `Result<T,E>`. Two real, deeper gaps were found and reported rather than
-  fixed as part of that change (both judged out of its own "verify an
-  existing mechanism" scope): a variant payload naming another generic
-  instantiation (`Bar<Baz<T>>`) — since fixed by `fase-3-generic-substitution-recursion`
-  (`infer_type_params`/`substitute` now recurse into a nested instantiation's
-  own type arguments the same way `substitute_type` already did, closing a
-  gap shared by every generic function/method call, not just enums); and a
-  self-referencing enum declaration could not be declared at all, because
-  enum declaration resolved variant field types before registering the
-  enum's own name. `fase-3-recursive-enums` closed the declaration-order
-  half of that: an enum and a class (or two enums) can now reference each
-  other regardless of order, the same way two classes already could. A
-  genuinely self-referential enum field (`enum IntList { Nil; Cons(head:
-  Int32; tail: IntList); }`) still cannot be constructed or used — every
-  enum lowers to an inline-flattened struct with no indirection anywhere
-  in the pipeline, so such a field asks for an infinitely-sized type. That
-  implementation attempt found this crashed the compiler with a real stack
-  overflow; it is now a clean compile-time diagnostic naming the cycle
-  instead. Delivering actual construction/pattern-matching needs automatic
-  heap indirection ("boxing") for such a field — a new `IrType` case plus
-  runtime/GC integration — tracked as its own future change.
-  `fase-3-value-type-contract-dispatch` closed the last large open design
-  question from Phase 3: a `record` implementing a contract now dispatches
-  correctly through a contract-typed reference. Converting a value to a
-  contract-typed reference boxes it into an ordinary, collector-tracked
-  heap allocation with a real descriptor, built by reusing the exact same
-  object-layout construction a `class` already goes through — no new,
-  divergent descriptor builder, and `CallContract`'s own existing dispatch
-  needed zero changes. A real bug was found and fixed along the way: a
-  value type's own method is compiled expecting `this` by value, but
-  `CallContract` always calls through a pointer, so pointing a contract
-  table straight at the value's own method silently miscompiled — fixed
-  with a small per-method unboxing thunk, needed for a `record`'s own
-  method bodies (a trait's inherited default already expects a pointer
-  receiver). The Phase 3 OOP closing slice then delivered user generic
-  contracts end-to-end — `class Box<T> implements Container<T>` and generic
-  records dispatch through `Container<...>`-typed references, including
-  members that name the contract's own `T` — plus `static` methods and
-  fields on `class`, field initializers `field: Type = expr;`, the nullable
-  cast `as?`, `TraitName.super.method()`, contract composition through
-  `implements` on `interface`/`trait` (transitive, generic-aware, with cycle
-  and signature diagnostics), trailing type-parameter defaults `<T = Int32>`
-  checked against `from`, comparison operators as reserved-method contracts
-  (`_less`/`_less_equal`/`_greater`/`_greater_equal`, `!=` via `_equals`),
-  and positional `in`/`out` variance verification. Still open in this area:
-  trait default methods under generic substitution, a nested instantiation
-  as a contract argument (`Container<Box<T>>`, rejected with a diagnostic),
-  type-parameter defaults and bodies for user-defined generic functions, and
-  `static` members on `record`/`enum`.
-- `array-list-tuple-duration-regex` delivers the everyday data surface:
-  `Tuple(A, B, ...)` values with constant indexing and destructuring,
-  `Duration` as an `i64`-nanosecond primitive with `ns`–`w` literal
-  suffixes, and `Regex` as a native reference type with `re'...'`
-  literals, `matches`, `find` (a `Regex.Match?` with positional and named
-  `group`), and `replace`. `Array<T>` (fixed-capacity) and `List<T>`
-  (resizable) are native collector-tracked reference collections with
-  bounds-checked indexing, `length`/`is_empty`, and `for ... in`
-  iteration; their delivery is completing in parallel within the same
-  change. `value class` and record value semantics are removed; use Object, class, tuple, or enum according to identity and shape.
-  Also delivered inside the change: `Regex.split` and
-  `Regex.find_all(text): List<Regex.Match>` for match iteration
-  (`matches(text)` keeps its `Boolean` meaning), `re'...'` patterns in
-  `match` arms, `Range<T>` (`start`, `end`, `step`, colon steps, inferred
-  direction, slicing, expansion, and `Iterable<T>` for integer `T` and
-  `Duration`), derived `Clone` for
-  enum, `String` writes `s[i] = c` and slicing
-  `s[start:end:step]`, and lowering of user-defined generic `implements
-  Contract<T>` satisfaction (contract members that name the contract's own
-  `T` were since covered by the Phase 3 OOP closing slice described above).
-  `String.split` remains pending.
+  `NativeSlice<T>`/`NativeSliceMut<T>` are delivered as validated bounded views;
+  see the native-slice chapter for provenance and pointer limits. Indexing is
+  dispatched for `String`, `Array<T>`, `List<T>`, and native slices. Text and
+  collection chapters document the delivered mutation, slicing, and
+  transformation methods. Volatile access and untagged native-union access
+  remain unsupported; language unions use tagged layouts. A native-library
+  linking manifest and general provenance tracking beyond the recognized
+  native-slice construction shape also remain open.
+- Some Phase 3 implementation notes below were written for the former
+  `record`/`interface` model and are historical. Those declarations were
+  removed; current language and pipeline status is in the feature catalog.
+  Current type-system gaps include broader union/intersection alternative and
+  container combinations, full narrowing/match/error/cleanup paths, nested
+  generic contract arguments, generic function bodies/defaults, trait defaults
+  under generic substitution, and construction of recursively self-referential
+  enum payloads. Unsupported lowering combinations must diagnose before
+  backend emission. See the feature catalog for host, target, and verification
+  scope; a focused host test does not establish the full target matrix.
+- The core tuple, Array/List/Range, String/Char/Regex, and sequence collection
+  families are delivered for their scoped contracts. `Deque`, `Queue`, `Stack`,
+  and `PriorityQueue` are implemented with native/interpreter parity. Map/Set
+  still reject aggregate key/element combinations without canonical
+  `Hash`/`Equal` derivation. These compiler-known collection types do not imply
+  an importable `std.collections` package. See the collection chapter and
+  feature catalog for exact supported combinations.
 - Exact `Decimal` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full
   28-digit budget the rational operations use. `Decimal.format(spec)` and an
@@ -285,8 +189,8 @@ Current high-impact delivery limits include:
   cooperative at runtime safe points and interruptible waits; it does not
   preempt arbitrary loops or blocking native calls. The runtime's `Transfer`
   / `Share` and effect checks do not yet establish general end-to-end race
-  freedom. `RwLock`, `Semaphore`, `Barrier`, and `Once` are not available as
-  source APIs. Native `Thread.run(fn)` is available on supported 64-bit targets
+  freedom. `RwLock`, `Semaphore`, `Barrier`, `Once`, and `ConditionVariable` are
+  not available as source APIs. Native `Thread.run(fn)` is available on supported 64-bit targets
   with a 64-worker/1,024-queued-callback bound;
   blocking FFI calls without a proven collector transition remain rejected.
   Source `Atomic<T>` supports Boolean
@@ -301,8 +205,8 @@ Current high-impact delivery limits include:
   target. Background and service APIs are public and tested. Shutdown drains
   and reports unfinished work according to the owning runtime component; it
   does not forcibly terminate arbitrary running native work. `Thread<T>`,
-  `RwLock<T>`, `Semaphore`, `Barrier`, and `Once<T>` remain unavailable as
-  source APIs. Windows execution evidence covers x86_64 CI only; other
+  `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, and `ConditionVariable` remain
+  unavailable as source APIs. Windows execution evidence covers x86_64 CI only; other
   non-host target builds remain compile-only unless separately recorded.
 - Other standard-library, packaging, developer-tooling, decorator, and public
   documentation surfaces are specified ahead of full compiler/runtime

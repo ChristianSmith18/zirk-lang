@@ -1,5 +1,11 @@
 # Standard Library Coverage Map
 
+> **Historical editorial inventory:** this map records documentation depth and
+> planning gaps from the original handbook Block One review. Its “Initial gap”
+> column and task references are historical; use the [feature status
+> catalog](../../init/ZIRK_FEATURE_STATUS.md) and current module chapters for
+> implementation status.
+
 This editorial inventory maps every normative area in `ZIRK_STDLIB_SPEC.md` to its handbook owner. A file's existence does not imply completion. Status here describes documentation depth, not compiler implementation.
 
 | Normative area | Handbook owner | Required contract | Initial gap before Block One |

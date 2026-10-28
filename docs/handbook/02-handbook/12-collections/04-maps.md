@@ -12,7 +12,7 @@ mut users: Map<UserId, User> = Map();
 users.set(user.id, user);
 ```
 
-Key types must satisfy the map's equality and hashing or ordering contract.
+Key types must satisfy the map's equality and hashing contract.
 Lookup absence is reported by `get(key): Result<V, LookupError>`. Nullable
 value contexts project that result to `V?`; callers that need diagnostics can
 match the Result directly.
@@ -22,7 +22,7 @@ position; removing and reinserting it places it at the end. Iterating a map
 directly yields `Tuple<K, V>` entries in that order. `keys()`, `values()` and
 `entries()` return typed insertion-order snapshots.
 
-`K` must meet the selected equality/hash or ordering contracts. `V` has no blanket capability requirement. Assignment aliases the map; `clone()` creates an independent map according to key/value clone contracts. Insert, update, and removal are referent mutations and are unavailable through strict aliases.
+`K` must meet the map's coherent equality/hash contract. `V` has no blanket capability requirement. Assignment aliases the map; `clone()` creates an independent map according to key/value clone contracts. Insert, update, and removal are referent mutations and are unavailable through strict aliases.
 
 ## API
 
@@ -35,7 +35,7 @@ Unique key/value associations; insertion-order iteration; `K` requires coherent
 > a defined runtime layout, including nullable text. Heterogeneous tuples and
 > payload enums derive key equality from recursively eligible, byte-canonical
 > fields; embedded `String` and `Char` fields are not yet eligible because
-> their equality is content-based. Nullable Decimal, other derived record keys,
+> their equality is content-based. Nullable Decimal, other structural aggregate keys,
 > and union keys remain unsupported. Layout-aware Map values and aggregate
 > snapshots are implemented; eager transformations are still pending.
 
@@ -50,7 +50,8 @@ Unique key/value associations; insertion-order iteration; `K` requires coherent
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `Map()` / `Map<K,V>(entries)` | `Map<K,V>` | Construction | specified |
+| `Map()` | `Map<K,V>` | Empty map construction | implemented |
+| `Map<K,V>(entries)` | `Map<K,V>` | Construction from entries | specified |
 | `m[key]` | `V` | Checked lookup; absence is a typed error | specified |
 | `m.get(key)` | `Result<V, LookupError>` (or `V?` in nullable value context) | Safe lookup; preserve or project absence | implemented |
 | `m.set(key, value)` | `Void` | Inserts or replaces; replacement retains insertion position | implemented |

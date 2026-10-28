@@ -33,7 +33,7 @@ types. Use exhaustive `match`, a `Result` combinator or `or_throw`.
 
 ## Typed configuration
 
-Public APIs prefer enums, option records and named arguments over magic strings
+Public APIs prefer enums, configuration objects and named arguments over magic strings
 or positional Boolean clusters:
 
 ```zirk

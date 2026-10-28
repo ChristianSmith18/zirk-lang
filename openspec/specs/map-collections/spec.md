@@ -81,7 +81,7 @@ All integer widths, `Boolean`, `Char`, `String`, `Decimal`, `Float16`, `Float32`
 - **THEN** they compare equal, produce the same hash, and identify one association
 
 #### Scenario: Derived aggregate key uses all active fields
-- **WHEN** a tuple, closed record, payload enum, nullable, or union key derives Hash and Equal
+- **WHEN** a tuple, structural aggregate, payload enum, nullable, or union key derives Hash and Equal
 - **THEN** equality and hashing use the same fields and active alternative, and equal keys retrieve the same association
 
 #### Scenario: Nullable text keys use content equality and preserve null
@@ -94,7 +94,7 @@ All integer widths, `Boolean`, `Char`, `String`, `Decimal`, `Float16`, `Float32`
 
 
 ### Requirement: Map storage preserves each generic value layout
-Every accepted `Map<K, V>` SHALL store and retrieve keys and values according to their complete Zirk type layouts. Storage SHALL preserve scalar width, nullability, tuple and record fields, enum discriminants and payloads, union tags and active payloads, collection handles, class identity, and all managed references. It SHALL NOT truncate an entry to one machine word or reinterpret payload bytes as pointers. Key hashing and equality SHALL satisfy the declared `Hash` and `Equal` implementations, including equal-values-have-equal-hashes coherence.
+Every accepted `Map<K, V>` SHALL store and retrieve keys and values according to their complete Zirk type layouts. Storage SHALL preserve scalar width, nullability, tuple and structural aggregate fields, enum discriminants and payloads, union tags and active payloads, collection handles, class identity, and all managed references. It SHALL NOT truncate an entry to one machine word or reinterpret payload bytes as pointers. Key hashing and equality SHALL satisfy the declared `Hash` and `Equal` implementations, including equal-values-have-equal-hashes coherence.
 
 #### Scenario: Aggregate values round-trip
 - **WHEN** a map stores and retrieves a tuple, nullable value, payload enum, or structural union value

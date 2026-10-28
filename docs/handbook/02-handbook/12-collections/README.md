@@ -6,13 +6,13 @@ This unit covers arrays, fixed arrays, lists, maps, sets, ranges, indexing, slic
 
 `Array`, `List`, `Map`, and `Set` are shared native reference types. Assignment creates an alias. `inmut` prevents rebinding while still allowing permitted referent mutation; `inmut::strict` freezes the reachable collection and forbids mutable aliases. Use `clone()` for an independent deep copy. Element and key types must satisfy each operation's generic contracts.
 
-`List<T>` and `Array<T>` also expose eager, chainable transformations such as
-`map`, `filter`, `flat_map`, `reduce`, `take`, `skip`, and `reverse` directly on
-the collection, as well as terminal conversions like `to_list`, `to_array`, and
-`to_set`. The last method in the chain determines the result family. For lazy,
-single-pass pipelines, use `.iterator()` and `collect()`.
+`List<T>` and `Array<T>` expose eager `map`, `filter`, `for_each`, `reduce`,
+`sum`, and `count`, plus membership, sorting, reversing, and nullable first/last
+access. `Range<T>` supports the sequence pipeline and can materialize as a
+`List<T>` with `collect()`. Additional operations and cross-family conversions
+remain specified; see the per-type API tables.
 
-> **Implementation status:** `Array<T>` (fixed-capacity) and `List<T>` (resizable) are delivered as collector-tracked native reference collections with bounds-checked indexing, `get` returning typed `Result`, `length`/`is_empty`, and `for ... in` through `Iterable<T>`. `Map<K,V>` and `Set<T>` provide lookup, insertion, membership, and removal for supported hashable keys/elements. See the API tables for current per-operation status; `Range<T>` remains pending.
+> **Implementation status:** `Array<T>` (fixed-capacity), `List<T>` (resizable), and `Range<T>` are delivered as compiler-known sequence surfaces. Arrays and lists provide collector-tracked storage, checked indexing, `get`, and iteration; eager sequence operations are listed in their API tables. `Map<K,V>` and `Set<T>` provide lookup, insertion, membership, and removal for supported hashable keys/elements. These surfaces do not imply an importable `std.collections` package.
 
 ---
 

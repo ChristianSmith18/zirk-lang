@@ -28,8 +28,10 @@ diagnostics in English.** The rationale is in
 You are helping build **Zirk**, a compiled, object-oriented programming language
 with static typing and inference, high level by default and with optional
 low-level access. It compiles to native binaries via LLVM. Structured
-concurrency (`task`/`await`) and multicore parallelism
-(`parallel`/`parallel for`/`thread`) are first-class features.
+concurrency and multicore parallelism (`concurrent`/`spawn`,
+`parallel`/`parallel for`) are first-class features. The old `task`/`await`
+syntax and source `thread` construct were removed; consult the current feature
+catalog for delivered concurrency APIs.
 
 Philosophy: **easy by default, explicit when you need control.**
 
@@ -178,13 +180,15 @@ Two more, which produce no diagnostic because they are not user-visible:
 
 ## Phase 3 — complete
 
-**Zirk is object-oriented.** `class`, `construct`, visibility
-(`public`/`private`/`protected`), single inheritance with `super`/`#override`,
-interfaces and traits (with reusable default bodies), generics with `from`
-constraints (specialized per instantiation, not erased), records (inline, no
-allocation), algebraic enums with associated data, and checked casts (`as`)
-all compile to a native binary and run. (`value class` was later removed by
-`array-list-tuple-duration-regex` as redundant with `record`.)
+> **Historical snapshot:** this section and other phase summaries below retain
+> earlier implementation notes. The former `record`/`interface` declarations
+> were removed, and later deliveries supersede statements that conflict with
+> `docs/init/ZIRK_FEATURE_STATUS.md` or the current limitations. Consult those
+> current status documents before deciding that an API exists.
+
+**Current object model:** `class`, `Object`, `contract`, traits, generics,
+algebraic enums, and checked casts are described by the current normative
+specifications. Legacy `record` and `interface` declarations are removed.
 
 The three debts Phase 2 deferred to this phase are retired: `?.` (both a field
 and a method through it), `+` on `String`, and `for ... in` over a type's own
@@ -317,25 +321,15 @@ stack traces.
 
 ## Phase status
 
-Phase 4d — callable and binding completion — is **complete for its scoped
-delivery** (`fase-4d-callables` and `fase-4d-declaraciones-multiples` are
-archived and verified). Phase 4e — managed memory and unsafe boundaries —
-delivered the non-moving mark-sweep collector, `Weak<T>`, deep `clone()`,
-`Pointer<T>`/`extern "C"`, transactional `unsafe {}`/`commit {}`, and
-`NativeSlice<T>`/`NativeSliceMut<T>`. The active change is
-**`array-list-tuple-duration-regex`**: `Tuple`, `Duration`, `Regex`
-(`re'...'` with `matches`/`find`/`replace`), the `String` mutation and
-search surface, `Char` classification/normalization, and `type` alias
-lowering are delivered; `Array<T>`/`List<T>` are being delivered in the same
-change; `Range<T>`, derived `Clone` for `record`/`enum`, user-defined generic
-contract lowering, and `Regex.split`/`String.split` (pending `List<T>`)
-remain. It also removes `value class` — use `record`.
+The roadmap provides historical sequencing and scoped closeout notes. For
+current delivery, target evidence, and remaining gaps, use
+`docs/init/ZIRK_FEATURE_STATUS.md`, `docs/handbook/13-appendices/07-current-limitations.md`,
+and `openspec list`. Do not infer current work from an old phase snapshot.
 
-The per-feature, per-pipeline-stage source of truth is
-`docs/init/ZIRK_FEATURE_STATUS.md`. Use it instead of this prompt's high-level
-phase summaries when you need to know whether a specific language construct is
-already implemented. The prompt keeps the phase narrative; the catalog keeps the
-authoritative feature matrix.
+The former `array-list-tuple-duration-regex` and concurrency delivery changes
+are historical records; they are not the current active change. Legacy
+`value class`, `record`, and `interface` declarations are removed. Use
+`Object`, `class`, `contract`, tuples, or enums according to identity and shape.
 
 ## Expected working style
 

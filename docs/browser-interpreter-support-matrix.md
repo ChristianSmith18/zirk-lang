@@ -1,7 +1,7 @@
 # Browser interpreter support matrix
 
-This is the source-of-truth policy for `add-browser-ir-interpreter`, audited
-against `crates/zirk-ir/src/ir.rs` at revision `7183e15`. "Direct" means the
+This is the source-of-truth policy for the browser IR interpreter, reviewed
+against `crates/zirk-ir/src/ir.rs` on 2026-10-28. "Direct" means the
 interpreter owns the operation. "Runtime-core" means it is executable after
 the platform-neutral semantic helper exists. "Excluded" means browser
 preflight must issue a capability diagnostic.
@@ -10,9 +10,10 @@ The browser interpreter executes the delivered scalar, text, collection and
 object-model surface: integers, binary floats, exact decimal `Float`, booleans,
 nullable values, strings and chars; variables, branches, loops, direct and
 indirect calls, closures; classes with constructors, inheritance, `#override`,
-abstract classes, interfaces, traits with default implementations, static
-members, nested/`inner`/local classes, generic classes, records, enums and typed
-exceptions; `List`, `Map`, `Set`, `Array`, ranges, regexes and temporal values;
+abstract classes, structural contracts, traits with default implementations,
+static members, nested/`inner`/local classes, generic classes, open `Object`
+values, tuples, algebraic enums and typed exceptions; `List`, `Map`, `Set`,
+`Array`, ranges, regexes and temporal values;
 arithmetic, comparisons, conversions, `to_string`, and `stdout.print` /
 `stdout.println`. `print(x)` is executable: lowering already inserts `ToString`
 for non-strings.

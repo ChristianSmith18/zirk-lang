@@ -11,8 +11,10 @@ attempts += 1;
 Mutability is local permission, not a request for shared unsynchronized state.
 At the implemented `parallel` boundary, mutable reference captures are rejected.
 This does not establish a general mutable-global race check. Managed `thread`
-and the `Mutex`, `RwLock`, `Semaphore`, `Barrier`, and `Once` APIs remain
-unavailable; scalar `Atomic<T>` is available for supported target widths.
+`Thread.run`, scoped `Mutex<T>.with`, and scalar `Atomic<T>` are delivered for
+their documented target scopes. The general `Thread<T>` lifecycle API and
+`RwLock`, `Semaphore`, `Barrier`, `Once`, and `ConditionVariable` remain
+unavailable.
 
 `mut` does not erase the type. This is invalid:
 

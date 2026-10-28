@@ -1,13 +1,13 @@
 # Cancellation and Cleanup
 
-> **Implementation status:** cancellation is delivered for `concurrent`/
-> `spawn` branches and cooperative channel/timer waits. Cancellation is
-> cooperative; GC safepoint polling does not itself check cancellation, and a
-> non-cooperative call can delay it. The broader contract below for resource
-> ownership, cancellation-triggered closure, and related diagnostics remains
-> partially implemented; see the [feature-status catalog](../../../init/ZIRK_FEATURE_STATUS.md).
+> **Implementation status:** `match with` cleanup responds to cooperative
+> cancellation and waits for required close actions. Cancellation remains
+> cooperative; a non-cooperative call can delay it. See the
+> [feature-status catalog](../../../init/ZIRK_FEATURE_STATUS.md).
 
-Cancellation is cooperative and observed at safe points. Before a cancelled task finishes, its resource scopes close and the runtime waits for required cleanup.
+Cancellation is cooperative and observed at defined checks and interruptible
+waits. Before a cancelled task finishes, its resource scopes close and the
+runtime waits for required cleanup.
 
 Cleanup should be bounded and cancellation-aware without abandoning invariants. A second shutdown signal or exhausted limit may force controlled termination, so cleanup cannot assume unlimited time.
 

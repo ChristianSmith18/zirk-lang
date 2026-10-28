@@ -41,7 +41,8 @@ Conditions must be Boolean; integers are not secretly true or false. Later, `mat
 
 1. Program structure, bindings, everyday types, and nullability.
 2. Operators, control flow, and functions.
-3. Classes, interfaces, records, enums, generics, and collections.
+3. Classes, contracts, traits, enums, generics, and collections. The former
+   `record` and `interface` declaration forms have been removed.
 4. Errors and resources before concurrency.
 5. Projects, permissions, tests, and packages after the core language.
 

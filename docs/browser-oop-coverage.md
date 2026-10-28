@@ -1,4 +1,11 @@
-# Browser object-model coverage
+# Historical browser object-model audit (2026-10-23)
+
+> This report records the `browser-oop-conformance` audit snapshot. Its fixture
+> counts, catalog rows, and defect notes describe that revision, not the current
+> browser interpreter. Later work changed the language object model and
+> collection/runtime behavior. Use the current browser support matrix and
+> feature-status catalog for today's delivery claims; preserve this report as
+> historical verification evidence.
 
 Evidence for what the browser interpreter runs of Zirk's object-oriented
 surface, produced by the `browser-oop-conformance` OpenSpec change. Native

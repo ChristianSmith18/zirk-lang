@@ -5,6 +5,14 @@ Unions accept any number of alternatives. The compiler flattens nested unions,
 removes duplicates and `Never`, and removes alternatives already covered by a
 wider member. Order and alias spelling do not change the canonical union.
 
+> **Runtime boundary:** type formation and semantic checking cover more
+> combinations than the current executable representation. Lowering, native
+> and interpreter parity, target coverage, and GC tracing remain dependent on
+> the alternative families and containing operation. Unsupported combinations
+> must be diagnosed before backend emission. See the [feature-status
+> matrix](../../11-reference/12-feature-status.md) for the tested families and
+> remaining gaps.
+
 ```zirk
 fn normalize(value: String | Int32): String {
     return match value {

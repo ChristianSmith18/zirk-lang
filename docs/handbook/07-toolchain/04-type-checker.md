@@ -94,7 +94,7 @@ value only within the path justified by the condition. A nullable result cannot
 silently become non-null because an earlier alias was checked.
 
 Match checking computes the remaining domain for booleans, nullability, enums,
-unions, records/payloads, results, and other accepted patterns. Unreachable or
+unions, object/payload patterns, results, and other accepted patterns. Unreachable or
 non-exhaustive arms receive targeted diagnostics. Regex and open-domain patterns
 require a catch-all where exhaustiveness cannot be proven.
 

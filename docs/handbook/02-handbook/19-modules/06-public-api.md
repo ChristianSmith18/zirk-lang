@@ -1,6 +1,6 @@
 # Public API
 
-A package's public API consists of published types, signatures, traits, interfaces, decorator contracts, explicitly generated public descriptors/members, and documentation—not private implementation details or erased decorator applications.
+A package's public API consists of published types, signatures, contracts, traits, decorator contracts, explicitly generated public descriptors/members, and documentation—not private implementation details or erased decorator applications.
 
 Visibility, `share`, and package boundaries all participate. Public API is recorded as typed metadata in `.zpkg` and drives compatibility and dependent compilation.
 

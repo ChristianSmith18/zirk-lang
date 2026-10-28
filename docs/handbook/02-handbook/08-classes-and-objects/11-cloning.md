@@ -19,7 +19,12 @@ first is second; // true
 
 An explicit clone produces an independent logical object when the class
 implements `Clone` (derived automatically when every field is itself
-`Clone`, or written explicitly as `implements Clone`):
+`Clone`, or written explicitly as `implements Clone`). The compiler also
+derives `Clone` for an algebraic enum when every payload is cloneable; lowering
+dispatches on the active variant and reads only its initialized payload. A
+class field of such an enum is cloneable under the same condition. Fields or
+payloads containing a `Pointer<T>`, `Resource`, or other non-`Clone` value
+remain compile-time errors.
 
 ```zirk
 mut independent = first.clone();

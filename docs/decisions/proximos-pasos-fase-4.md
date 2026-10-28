@@ -1,5 +1,11 @@
 # Next steps after `fase-4a`/`fase-4b`/`fase-4c`
 
+> **Historical planning snapshot — August 20, 2026.** This document records the
+> proposed next steps at that date; it is not the current roadmap or delivery
+> inventory. Use `docs/init/ZIRK_ROADMAP.md` and
+> `docs/init/ZIRK_FEATURE_STATUS.md` for current plans and implementation
+> evidence.
+
 - **Status:** planning document (not an ADR, fixes no decision)
 - **Date:** August 20, 2026
 - **Context:** pure research and planning — does not touch `crates/*/src/*.rs`
@@ -290,8 +296,9 @@ runtime. Only module extraction remains an optional maintainability investment.
 
 ### 6.4 Value types and variance (closed)
 
-- **Status:** `value class` was removed; use `record` for value semantics or
-  `class` for identity. Declared `in`/`out` variance is checked positionally by
+- **Status:** `value class` and `record` declarations were removed; use tuples
+  or enums for closed value aggregates and `class` for identity. Declared
+  `in`/`out` variance is checked positionally by
   sema. The former scope question and verification task are obsolete.
 
 The active compiler improvements and their current completion states are tracked

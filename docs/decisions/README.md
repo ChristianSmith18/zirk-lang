@@ -27,7 +27,7 @@ ADRs are the **durable source** of decisions. The `design.md` of each OpenSpec c
 | [ADR-021](./ADR-021-package-and-module-boundaries.md) | Package and module boundaries | accepted |
 | [ADR-022](./ADR-022-browser-execution-trace.md) | Browser execution trace is an observation channel | accepted |
 | [ADR-023](./ADR-023-concurrency-completion-contracts.md) | Safe completion contracts for Phase 5 concurrency | accepted |
-| [ADR-027](./ADR-027-contract-object-model.md) | Structural contracts and open dynamic objects replace interfaces and records | accepted; implementation in progress |
+| [ADR-027](./ADR-027-contract-object-model.md) | Structural contracts and open dynamic objects replace interfaces and records | accepted; implementation delivered in scoped change |
 
 ## Status of Phase 0 pending items
 

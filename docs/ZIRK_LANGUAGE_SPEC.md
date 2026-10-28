@@ -234,10 +234,11 @@ aliases. Conditional distribution applies to a naked type parameter and may
 be suppressed by grouping. Inferred variables are scoped to the true branch;
 operators respect ordinary visibility and cannot expose private members.
 Standard utilities include property selection, omission, partial/required and
-read-only transforms, finite-key record construction, union extraction and
-exclusion, null removal, callable parameter/result extraction, and applicable
-task-result unwrapping. Generic inference combines argument, receiver,
-expected-result, callable-context, and constraint evidence; it respects
+read-only transforms, finite-key `Record<K, V>` mapped-object construction,
+union extraction and exclusion, null removal, callable parameter/result
+extraction, and applicable task-result unwrapping. Generic inference combines
+argument, receiver, expected-result, callable-context, and constraint
+evidence; it respects
 declared variance and reports incompatible ambiguity rather than choosing the
 first candidate. These operators have no runtime representation.
 

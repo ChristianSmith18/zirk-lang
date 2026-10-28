@@ -28,9 +28,10 @@ Static methods never dispatch virtually and a static body cannot reference
 do to instance members.
 
 > **Implementation status:** `static` methods and fields on `class` are
-> implemented, including `this`-free bodies and class-name access. `static`
-> members on `record` and `enum` declarations are specified but not yet
-> implemented.
+> implemented, including `this`-free bodies and class-name access. Enum static
+> helpers such as `count`, `keys`, `values`, and name/value lookup are also
+> implemented for their documented enum families. `record`
+> declarations have been removed.
 
 Static mutable state is not a substitute for application globals and remains subject to concurrency safety. Prefer explicit dependencies over hidden process-wide state.
 

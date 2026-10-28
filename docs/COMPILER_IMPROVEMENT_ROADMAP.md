@@ -66,8 +66,9 @@ authoritative.
 
 - `String`/`Char` collector-managed lifetime strategy is closed by the managed
   mark-sweep implementation.
-- `value class` was removed from the language surface; use `record` for value
-  semantics or `class` for identity. The earlier open design question is void.
+- `value class` and `record` declarations were removed from the language
+  surface; use tuples or enums for closed value aggregates and `class` for
+  identity. The earlier open design question is void.
 - Declared generic variance is checked positionally in the current sema.
 - Runtime thread-safety and synchronization need to be audited per new primitive;
   the blanket pre-concurrency audit item is no longer a current compiler task.

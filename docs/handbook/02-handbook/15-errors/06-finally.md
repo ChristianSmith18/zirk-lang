@@ -12,12 +12,12 @@ original throwable stays primary; `throw;` inside a catch preserves exact
 identity and trace, and wrapping constructs a new throwable with the original
 as `cause`.
 
-> **Implementation status:** `suppressed` (recording a cleanup failure that
-> occurs while another throwable is already propagating) is normative but not
-> implemented — `Error` has no `suppressed` member yet, since it needs
-> `List<T>`, a Phase 7 collection that does not exist. `stack_trace()` exists
-> and is callable, but every override returns an empty `StackTrace` with no
-> captured frames; real frame capture is unimplemented.
+> **Implementation status:** `Throwable.suppressed()` and `stack_trace()` are
+> delivered. The runtime links a newly thrown exception inside a `catch` to
+> the exception being handled. `stack_trace()` currently returns and caches a
+> placeholder string rather than captured frames. Automatic suppression of a
+> resource close failure while a different exception is propagating remains
+> specified work; see [resource close errors](../16-resources/04-close-and-flush-errors.md).
 
 ---
 

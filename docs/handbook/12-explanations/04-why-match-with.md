@@ -1,8 +1,8 @@
 # Why `match with`?
 
-External resources have acquisition errors, scoped use, exactly-once close, possible close errors, and cancellation behavior. `match with` gives that lifecycle one compiler-verifiable construct and prevents direct or indirect escape.
+External resources have acquisition errors, scoped use, exactly-once close, possible close errors, and cancellation behavior. `match with` gives that lifecycle one compiler-verifiable construct and prevents illegal escape. The implementation supports grouped acquisition, explicit transfer, close-error composition, and cancellation-aware cleanup. Cancellation remains cooperative, so non-cooperative work can delay cleanup.
 
-It also defines grouped acquisition order, reverse unwind, explicit transfer,
+It also guarantees grouped acquisition order, reverse unwind, explicit transfer,
 non-clonability and lossless body/close failure composition. Automatic memory
 management cannot replace this observable external lifecycle.
 

@@ -1,9 +1,12 @@
 # Standard Library Index
 
-Initial modules are `std.io`, `std.fs`, `std.path`, `std.process`, `std.net`,
+The 1.x module catalog includes `std.io`, `std.fs`, `std.path`, `std.process`, `std.net`,
 `std.http`, `std.json`, `std.crypto`, `std.time`, `std.thread`, `std.sync`,
 `std.collections`, `std.testing`, `std.reflect`, `std.system`, and
-`std.environment` (`Environment`, preferred alias `Env`). Structured task
+`std.environment` (`Environment`, preferred alias `Env`). This is the target
+module catalog, not a claim that each name is an importable package. For
+example, collections and synchronization are compiler-known language surfaces
+without importable `std.collections` or `std.sync` packages. Structured task
 operations and CPU parallelism are language surfaces, not importable
 `std.task` or `std.parallel` modules.
 

@@ -1,10 +1,11 @@
 # `std.thread`
 
-> **Implementation status — specified, not implemented.** This chapter defines
-> the future `std.thread` contract; the current compiler does not expose
-> `Thread<T>` or a Zirk thread-creation/join API. See the [feature status
-> catalog](../../init/ZIRK_FEATURE_STATUS.md) for delivered concurrency
-> capabilities and remaining work.
+> **Implementation status — partially delivered.** `Thread.run(fn)` executes a
+> zero-argument callback on the managed native worker pool and joins its result.
+> The general `Thread<T>` handle, naming, stack sizing, cancellation and
+> task-aware `join()` lifecycle described below remain specified only. See the
+> [feature status catalog](../../init/ZIRK_FEATURE_STATUS.md) for target and
+> evidence boundaries.
 
 `Thread<T>` represents an operating-system thread for native affinity, special
 stack/runtime requirements or blocking work that cannot use the standard pool.

@@ -113,9 +113,9 @@ reports its managed-scope/outcome capability exclusion.
 The checker derives conservative `Transfer` and `Share` properties for the
 represented type graph and enforces them at supported boundaries, including
 spawn, channels, `parallel`, and `Parallel.each`. This is not a complete gate
-for every proposed concurrency API: managed threads and synchronization
-handles are not available, and `Concurrent.of(...).first()` / `.settled()` are
-lowered only for homogeneous direct thunk pipelines. Derivation covers concrete scalar and aggregate/container types,
+for every proposed concurrency API: managed `Thread.run`, scoped
+`Mutex<T>.with`, and scalar `Atomic<T>` are available, while general
+`Thread<T>` handles and other synchronization APIs are not; `Concurrent.of(...).first()` / `.settled()` are lowered only for homogeneous direct thunk pipelines. Derivation covers concrete scalar and aggregate/container types,
 tuples, unions, and checked classes/enums with generic substitution. Unknown
 or open contracts, function values without capture provenance, task handles,
 pointers, weak/native views, and opaque native handles conservatively fail the

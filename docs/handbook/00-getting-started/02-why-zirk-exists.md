@@ -22,7 +22,7 @@ But some operations change the risk profile of a program. Zirk makes those opera
 - optional values use `T?` rather than allowing universal `null`;
 - expected failures use `Result<T, E>` rather than being hidden in ordinary return values;
 - applications and packages declare capability requirements, while users approve exact resources at protected operation boundaries;
-- structured scopes, CPU parallelism, and typed channels have distinct constructs; managed OS threads are not currently exposed;
+- structured scopes, CPU parallelism, typed channels, `Thread.run`, scalar atomics, and scoped `Mutex<T>.with` have distinct constructs; general thread handles and other synchronizers remain specified only;
 - cross-target builds name their target and reject incompatible native dependencies early.
 
 The boundary is the feature. It tells readers where ordinary reasoning stops and additional obligations begin.
@@ -39,9 +39,10 @@ Native output is not a promise that every cross-compilation combination always w
 
 The implemented concurrency surface names the operations currently available:
 `concurrent { ... }`, `spawn` with `Job<T>`, `Timer`, CPU-oriented `parallel`,
-and typed `Channel<T>`. The former `task`, `await`, and `select` constructs were
-removed. Managed OS threads and synchronization primitives are not currently
-available as Zirk APIs.
+and typed `Channel<T>`. `Thread.run`, scalar `Atomic<T>`, and scoped
+`Mutex<T>.with` are also delivered. The former `task`, `await`, and `select`
+constructs were removed; general `Thread<T>` handles and other synchronizers
+remain unavailable.
 
 This separation helps readers reason about structured scheduling, cancellation,
 and CPU work. The cooperative executor is not an asynchronous I/O reactor;
@@ -58,7 +59,7 @@ Zirk's safety model therefore spans several dimensions:
 - **Memory safety:** safe code excludes use-after-free and undefined behavior.
 - **Concurrency safety:** unsafe shared mutable access must be rejected or synchronized.
 - **Resource safety:** `Resource<E>` and `match with` give cleanup observable language semantics.
-- **Capability safety:** applications and packages declare one finite `requires` list; users approve an exact resource when a protected operation is attempted. Filesystem and process APIs remain unavailable today.
+- **Capability safety:** applications and packages declare one finite `requires` list; users approve an exact resource when a protected operation is attempted. The delivered filesystem APIs enforce these grants; process execution remains unavailable.
 - **Build safety:** locked dependencies, hashes, targets, and reproducible inputs are part of the project model.
 
 These guarantees interact. For example, a file operation is not only an I/O call: it may require a declared permission, may block or support cancellation, returns a typed failure, and produces a resource whose lifetime must be closed on every exit path.
@@ -67,7 +68,7 @@ These guarantees interact. For example, a file operation is not only an I/O call
 
 Static types are most useful when they communicate intent without overwhelming local code. Zirk supports inference where a type is unambiguous, while preserving annotations at important API boundaries.
 
-Its type model includes nullable types, typed results, unions, generics, classes, records, interfaces, traits, enums with associated values, and fundamental values that all participate semantically in the object model. The compiler may represent simple values inline; “everything belongs to a class” does not imply that every integer requires a heap allocation.
+Its type model includes nullable types, typed results, unions, generics, classes, contracts, traits, enums with associated values, and fundamental values that all participate semantically in the object model. The compiler may represent simple values inline; “everything belongs to a class” does not imply that every integer requires a heap allocation. Legacy `record` and `interface` declarations have been removed; `Object` provides open data and `contract` expresses structural requirements.
 
 Zirk also avoids some forms of convenience when they obscure behavior. There is no numeric truthiness, no `undefined`, no implicit lossy conversion, and no traditional function overloading in 1.x. Different names, generics, or union types keep call resolution visible.
 

@@ -10,19 +10,18 @@ compiler-owned host bindings, see the [standard library source and host
 boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 
 > **Concurrency status:** entries marked **delivered** describe compiler/runtime
-> capabilities available today. `std.thread` and `std.sync` below are specified
-> target APIs, not available Zirk source APIs. Scalar `Atomic<T>` is available
-> as a compiler-known source type; it is not evidence that the rest of `std.sync`
-> is implemented. See the [feature
+> capabilities available today. `Thread.run` is delivered, while the general
+> `Thread` lifecycle API remains specified only. `Mutex<T>.with` and scalar `Atomic<T>` are
+> compiler-known source APIs; the other synchronization primitives remain
+> specified only. There is no importable `std.sync` package. See the [feature
 > status catalog](../../init/ZIRK_FEATURE_STATUS.md) for the current matrix.
 >
-> `std.environment`, `std.net`, and `std.http` now have bundled, compiler-owned
-> source packages with bounded native previews. The implemented subset passes
-> full-workspace native CI on macOS ARM64, Linux x86_64, Linux ARM64, and
-> Windows x86_64 (run 39359107965, compiler revision b28daa7); broader target
-> contracts remain in progress. The delivered networking subset includes permission-
-> checked DNS, TCP, authenticated TLS, HTTP/1.1, and bounded multiplexed
-> HTTP/2; UDP, local sockets, and interface inspection remain deferred. HTTP
+> `std.environment`, `std.net`, `std.http`, and `std.json` have bundled source
+> packages. Native networking previews include permission-checked DNS, TCP,
+> UDP, local sockets, interface inspection, authenticated TLS, HTTP/1.1,
+> HTTP/2, and optional HTTP/3. The precise target and test scope is recorded in
+> the feature-status catalog and each module chapter; object emission and
+> emulated runs are not native execution evidence. HTTP
 > supports bounded requests and response streaming, pooling, cookies, proxies,
 > retries, caching, multipart resources, middleware cancellation, and SSE.
 > Remaining gaps include externally triggered long-lived server shutdown and
@@ -68,9 +67,9 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | Build, format, search, or match text | [`std.text`](05a-std-text.md) | native `String`/`Char`, `std.encoding` |
 | Store and transform in-memory values | [`std.collections`](06-std-collections.md) | iteration and functional-style handbook |
 | Work with dates, time zones, clocks, or timers | [`std.time`](07-std-time.md) | temporal-types handbook, structured branches |
-| Coordinate concurrent work (**delivered:** `concurrent`, `spawn`, `Job<T>`, channels) | structured-concurrency handbook | `std.sync` remains specified, not implemented |
-| Use a dedicated system thread (**specified, not implemented**) | [`std.thread`](09-std-thread.md) | future `std.sync` contract |
-| Protect shared state (**specified, not implemented**) | [`std.sync`](10-std-sync.md) | future atomics and memory-safety contract |
+| Coordinate concurrent work (**delivered:** `concurrent`, `spawn`, `Job<T>`, channels) | structured-concurrency handbook | `std.sync` has delivered `Mutex<T>.with` and `Atomic<T>`; other synchronizers remain specified only |
+| Run a thread body (**delivered:** `Thread.run`) | [`std.thread`](09-std-thread.md) | general `Thread` lifecycle API remains specified only |
+| Protect shared state (**partial:** `Mutex<T>.with`, scalar `Atomic<T>`) | [`std.sync`](10-std-sync.md) | read/write locks, semaphores, barriers, once and condition variables remain specified only |
 | Parallelize CPU work (**delivered**) | [Parallel CPU operations](10a-std-parallel.md) | worker-pool operations and collections |
 | Resolve DNS or use TCP, UDP, TLS, or local sockets | [`std.net`](11-std-net.md) | permissions, structured branches |
 | Build an HTTP client/server, SSE, or WebSocket endpoint | [`std.http`](12-std-http.md) | `std.net`, `std.json`, `std.crypto` |
@@ -92,15 +91,15 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | `std.path` | Partial delivery: immutable `Path`, lexical operations, absolute and canonical queries | `filesystem.read` for absolute paths; `filesystem.metadata` for canonicalization |
 | `std.process` | **Specified, not implemented:** `Process`, `ChildProcess`, `ProcessResult`, pipelines | process; shell separately |
 | `std.text` | **Partial language surface; no importable package:** regex and selected `String`/`Char` operations are delivered; builder, formatting, and Unicode helpers remain specified | none |
-| `std.collections` | **Partial language surface; no importable package:** `Array`, `List`, `Range`, and limited `Map`/`Set` operations are delivered; queues and broader generic contracts remain specified | none |
+| `std.collections` | **Compiler-known language surface; no importable package:** `Array`, `List`, `Range`, `Deque`, `Queue`, `Stack`, `PriorityQueue`, and partial `Map`/`Set` operations are delivered; aggregate `Hash`/`Equal` combinations remain incomplete | none |
 | `std.time` | **Partial language surface; no importable package:** `Duration`, timers, and civil date/time operations are delivered; zone-aware time and clocks remain specified | clock/time-zone access where scoped |
 | `std.task` | No delivered public module API; concurrent scopes, `Job<T>`, timers and channels use the current compiler/runtime surface | inherited from work |
-| `std.thread` | **Specified, not implemented:** dedicated thread creation, join and transfer | planned thread/system capability |
-| `std.sync` | **Specified, not implemented:** mutex, read/write lock, semaphore, barrier and once; scalar `Atomic<T>` is available as a language type | shared-state coordination; see atomic limitations |
+| `std.thread` | **Partial compiler-known surface; no importable package:** `Thread.run` is delivered; general `Thread<T>` creation, join and transfer remain specified | thread/system capability |
+| `std.sync` | **Partial compiler-known language surface; no importable package:** `Mutex<T>.with` and scalar `Atomic<T>` are delivered; read/write lock, semaphore, barrier, once, and condition variable remain specified only | shared-state coordination; see synchronization limitations |
 | CPU parallelism (language surface; no importable `std.parallel` module) | `parallel {}`, `.parallel` collection adapter, `Parallel.each` | inherited from work |
-| `std.net` | **Preview:** IP/host-port addresses, DNS resolution, TCP and authenticated TLS streams/listeners. UDP, local sockets and interfaces are deferred. | network connect/listen |
-| `std.http` | **Preview:** bounded client/server, HTTP/1.1 and TLS HTTP/2, URLs, headers, streaming bodies, cookies, SSE, multipart, middleware and WebSocket paths; consult the module chapter for target evidence and remaining gaps. | network connect/listen |
-| `std.json` | **Specified, not implemented:** exact tree, parse/stringify, typed codecs and streams | none by itself |
+| `std.net` | **Native preview:** addresses, DNS, TCP/UDP, local sockets, interface snapshots, and authenticated TLS streams/listeners; consult the module chapter for target evidence and remaining gaps. | network connect/listen |
+| `std.http` | **Native preview:** bounded clients/servers, HTTP/1.1, HTTP/2 and optional HTTP/3, URLs, headers, streaming bodies, cookies, SSE, multipart, middleware, and WebSocket paths; consult the module chapter for target evidence and remaining gaps. | network connect/listen |
+| `std.json` | **Delivered basic package:** strict parse/stringify and manual `JSONCodec<T>`; generated codecs, configurable limits, JSONPath/JSONPointer, streaming, pretty/canonical output, schemas, and JSON5 remain undelivered | none by itself |
 | `std.crypto` | **Specified, not implemented:** CSPRNG, hashes, passwords/KDF, MAC, AEAD, signatures and KEM | providers/storage/network only |
 | `std.testing` | **Specified, not implemented:** assertions, suites, fixtures, snapshots and benchmarks | only effects used by test |
 | `std.reflect` | **Specified, not implemented:** safe `Type` identity and `TypeKind` | none |
@@ -119,15 +118,17 @@ This index lists prominent entry types rather than every helper or enum.
 | `Process`, `ChildProcess`, `ProcessResult` | [`std.process`](05-std-process.md) | commands and managed child lifetime |
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
 | collection families | [`std.collections`](06-std-collections.md) | owned/reference collections and iterators |
-| `Date`, `Time`, `DateTime`, `Instant`, `Duration`, `Period` | [`std.time`](07-std-time.md) | civil and monotonic temporal domains |
+| `Date`, `Time`, `DateTime`, `Duration` | [`std.time`](07-std-time.md) | delivered civil values and elapsed durations |
+| `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift` | [`std.time`](07-std-time.md) | specified temporal contracts, not yet delivered |
 | `Channel<T>`, `concurrent`, `Job<T>`, `Timer` | structured-concurrency handbook | delivered structured concurrent work |
 | `Thread<T>` | [`std.thread`](09-std-thread.md) | **Specified, not implemented:** explicit dedicated OS thread |
-| `Mutex<T>`, `RWLock<T>`, `Semaphore` | [`std.sync`](10-std-sync.md) | **Specified, not implemented:** shared-state coordination |
+| `Mutex<T>` | [`std.sync`](10-std-sync.md) | Delivered compiler-known scoped `with` API; no importable `std.sync` package |
+| `RWLock<T>`, `Semaphore`, `Barrier`, `Once<T>`, `ConditionVariable` | [`std.sync`](10-std-sync.md) | Specified, not implemented |
 | `Atomic<T>` | [Atomics](../02-handbook/18-concurrency/13-atomics.md) | Native scalar source API; target-supported Boolean and signed/unsigned integers through 64 bits, GC-inline payload; no pointer atomics |
 | `IPAddress`, `SocketAddress`, `HostPortAddress` | [`std.net`](11-std-net.md) | current immutable address preview |
 | `DNS`, `TCPStream`, `TCPListener`, `TCPReadResult<T>` | [`std.net`](11-std-net.md) | current resolver and TCP transport preview, including numeric TCP peer addresses and typed stream reads |
 | `TLSStream`, `TLSListener`, `TLSReadResult<T>` | [`std.net`](11-std-net.md) | current authenticated TLS preview with typed stream reads; generic `TLSConfiguration` is not exposed |
-| `UDPSocket`, local-socket and interface APIs | [`std.net`](11-std-net.md) | specified contract; deferred from the current preview |
+| `UDPSocket`, local-socket and interface APIs | [`std.net`](11-std-net.md) | Delivered in the native preview; consult target evidence in the module chapter |
 | `URL`, `HTTPMethod`, `HTTPStatus`, `HTTPHeaders` | [`std.http`](12-std-http.md) | HTTP message identity and bounded metadata, including explicitly sensitive fields |
 | `HTTPBody`, `HTTPRedirectPolicy`, `HTTPClientOptions`, `HTTPJsonParsable<T>`, `HTTPJsonSerializable<T>`, `decode_json<T>` | [`std.http`](12-std-http.md) | closed request-body representations, opt-in redirect policy, bounded client policy, explicit JSON contracts, and typed JSON decoding |
 | `HTTPClient`, `HTTPServer`, `HTTPRequest`, `HTTPResponse`, `HTTPRedirectResult`, `HTTPStreamResponse` | [`std.http`](12-std-http.md) | HTTP transport/application boundaries, opt-in redirect history, and the response compatibility alias |
@@ -200,11 +201,11 @@ project-level authorization model.
 | blocking operation | runs on the calling thread unless its API documents otherwise | no managed blocking pool or cancellation guarantee is available |
 | `concurrent` scope / `Job<T>` wait | **Delivered:** suspends the current branch or consumes its job result | scope joins or cancels owned branches on exit |
 | channel send/receive/drain | **Delivered:** send/receive suspend under backpressure; drain receives until closed or cancelled | bounded/rendezvous/growable behavior; `select` is unavailable |
-| thread join | **Specified, not implemented:** intended task-aware join contract | no Zirk thread API is currently available |
-| mutex/lock acquisition | **Specified, not implemented:** intended synchronization contract | no Zirk lock API is currently available |
+| `Thread.run` | **Delivered:** launches and joins the scoped system-thread body | general thread handles and task-aware join remain unavailable |
+| `Mutex<T>.with` | **Delivered:** scoped mutable borrow under the managed cooperative mutex | no public `RwLock`, semaphore, barrier, once, or condition-variable API |
 | parallel collection work | **Delivered:** managed worker pool | stops scheduling, joins started work, preserves input order where specified |
-| DNS/connect/TLS | **Delivered preview:** bounded DNS/TCP/TLS work suspends the owning task and closes task-owned resources; the implemented native subset passes full-workspace CI on all four supported targets | cancellation and transport cleanup follow the APIs documented in `std.net` |
-| HTTP body/pool/server | **Delivered preview:** bounded HTTP/1.1 and TLS HTTP/2 requests, streamed bodies, shared clients, finite listener scopes and cancellation paths are implemented; the implemented native subset passes full-workspace CI on all four supported targets | per-request backpressure and task-owned cleanup; see `std.http` for scope-specific guarantees |
+| DNS/connect/TLS | **Delivered preview:** bounded DNS/TCP/TLS work suspends the owning task and closes task-owned resources; the 2026-10-22 evidence snapshot has focused native conformance across targets and composite full-suite results | CI evidence is composite across revisions; cancellation and transport cleanup follow `std.net` |
+| HTTP body/pool/server | **Delivered preview:** bounded HTTP/1.1 and TLS HTTP/2 requests, streamed bodies, shared clients, finite listener scopes and cancellation paths are implemented | target evidence and the Windows HTTP/3 WebSocket cleanup failure are recorded in the dated feature-status snapshot; see `std.http` for scope-specific guarantees |
 | timers/sleep | **Delivered:** cooperative timer service | cancellation removes the timer waiter |
 | filesystem watcher | `std.fs::FileWatcher.next_async` suspends the task on supported native targets | bounded queue reports overflow; Windows lock/watch APIs are typed unsupported; browser preflight excludes filesystem effects |
 | test case/fixture | target runner contract | runner-scoped timeout and leak handling are not general guarantees yet |

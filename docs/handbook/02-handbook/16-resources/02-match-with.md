@@ -16,15 +16,15 @@ The file closes before the expression delivers its value. Closure occurs on
 normal completion, `return`, a propagating exception, and a `break` or
 `continue` that leaves the scope.
 
-Grouped acquisition (`match a with x, b with y { ... }`, opening left-to-right
-and closing right-to-left with earlier resources closed before a later open's
-error branch runs) is normative but not implemented — one `match ... with`
-manages a single acquisition today. Nesting one `match with` inside another
-arm's body works, since each is an ordinary expression.
+Grouped acquisition (`match a with x, b with y { ... }`) opens resources
+left-to-right and closes them right-to-left, including earlier resources when
+a later acquisition fails.
 
-> **Implementation status:** cancellation-triggered closure is normative but
-> not implemented — Zirk has no concurrency primitives yet (roadmap Phase 5),
-> so there is nothing to cancel a resource scope.
+> **Implementation status:** single and grouped acquisition, deterministic
+> cleanup, `ResourceFailure` body/close error composition, explicit transfer,
+> use-after-transfer rejection, and cancellation-aware cleanup are delivered
+> end-to-end. Cancellation remains cooperative, so a non-cooperative operation
+> can delay cleanup. See the [feature status catalog](../../../init/ZIRK_FEATURE_STATUS.md).
 
 ---
 

@@ -10,11 +10,11 @@ Do not translate lifetimes or smart pointers mechanically. Begin with values and
 
 ## Resource lifetime is distinct from memory lifetime
 
-Files, sockets, and other external handles implement `Resource<E>`. `match with` acquires a resource and guarantees closure on every path, including return, exception, error, and cancellation. Zirk 1.x deliberately avoids general `defer` and destructor-based cleanup as the primary public contract.
+Files, sockets, and other external handles implement `Resource<E>`. `match with` acquires and closes a resource on ordinary exit, return, exception, error, and cooperative cancellation; grouped acquisition and explicit transfer are also supported. A non-cooperative operation can delay cancellation cleanup. Zirk 1.x deliberately avoids general `defer` and destructor-based cleanup as the primary public contract.
 
 ## Concurrency communicates intent
 
-Use `concurrent { ... }`, `spawn`, and `Job<T>` for structured concurrent work; use `parallel` for CPU parallelism. Typed channels are available for communication. The former `task` syntax was removed. Managed `thread`, `sync`, mutex, and language-level atomic APIs remain unavailable; do not assume a general compiler check for unsynchronized mutable global access.
+Use `concurrent { ... }`, `spawn`, and `Job<T>` for structured concurrent work; use `parallel` for CPU parallelism. Typed channels are available for communication. `Thread.run`, scalar `Atomic<T>`, and scoped `Mutex<T>.with` are delivered source APIs; the general `Thread` lifecycle API and other synchronizers remain unavailable. The former `task` syntax was removed. Do not assume a general compiler check for unsynchronized mutable global access.
 
 ## Native boundaries
 

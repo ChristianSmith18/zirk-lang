@@ -1,10 +1,10 @@
 # Inheritance
 
-A class may extend one class and implement multiple interfaces or traits. Multiple class inheritance is excluded from Zirk 1.x.
+A class may extend one class and implement multiple contracts or traits. Multiple class inheritance is excluded from Zirk 1.x.
 
 Inheritance should preserve substitutability: callers using the base contract must remain correct for the subtype. Reuse alone is better served by composition or traits.
 
-Classes are inheritable by default. Declaring `final class` seals a class against `extends` (it may still implement contracts and be instantiated), and a `final` method cannot be overridden. `final` combined with `abstract` on the same class is contradictory and rejected; `final` never applies to fields, constructors, interfaces, traits, or records.
+Classes are inheritable by default. Declaring `final class` seals a class against `extends` (it may still implement contracts and be instantiated), and a `final` method cannot be overridden. `final` combined with `abstract` on the same class is contradictory and rejected; `final` never applies to fields, constructors, contracts, traits, or tuples.
 
 ```zirk
 class User {

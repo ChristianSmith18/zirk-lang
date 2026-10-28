@@ -93,6 +93,12 @@ still without classes or concurrency.
 
 ## Phase 3 — Objects and the type system
 
+> **Historical implementation notes:** this phase narrative preserves decisions
+> and work from the former `record`/`interface` model. Those declarations were
+> later removed. References below to record equality, dispatch, or cloning
+> describe historical work, not current language support. Use
+> `ZIRK_FEATURE_STATUS.md` and current limitations for today's delivery state.
+
 **Status: complete for its scoped delivery.** The archived
 `fase-3-objects-and-type-system` change recorded remaining pipeline
 limitations for generic contracts/enums, abstract dispatch, value-type
@@ -237,9 +243,9 @@ family, while interpolation needs Phase 3's contracts.
 parse, type-check, lower, and run end-to-end for their assigned features. Native
 tagged unions are now implemented separately for selected type families; this
 work does not imply complete alternative-family, target-runtime, or GC-boundary
-coverage. Remaining follow-up work includes volatile access, `Atomic<T>`,
-general slice provenance beyond the direct shape, and `record`/`enum` `Clone`
-derivation.
+coverage. Remaining follow-up work includes volatile access and general slice
+provenance beyond the direct shape. Enums with cloneable payloads already
+implement `Clone`; legacy record declarations were removed.
 
 ### Phase 4a — Expected errors
 
@@ -334,8 +340,8 @@ analysis, and `Pin<T>` automatic pin/unpin are delivered.**
   rejects returns, field stores, closure captures, and non-dependent parameter
   passing; valid local use runs end-to-end. `Pin<T>` supports construction with
   `Pin(obj)`, automatic unpin for field/method access, and rejects reassignment
-  of the pinned variable. `record` and enum-typed fields remain
-  excluded from `Clone` derivation for now.
+  of the pinned variable. Algebraic enums implement `Clone` when their payload
+  types do; legacy record declarations were removed.
 - [x] Implement `inmut::strict` with reachable-alias analysis — **delivered**:
   a field declared `inmut::strict` is unwritable through any projection
   regardless of the container's mutability, and mutating method calls with an
@@ -484,9 +490,9 @@ Phase 5) → `std.json` → `std.net`/`std.http` (the largest of them all) →
 `std.crypto` → `std.testing` (`@test`/`@e2e`/`@bench`) → `std.reflect` →
 `std.system`.
 
-`std.environment`, `std.net`, and `std.http` now have compiler-bundled source
-packages and native runtime previews under the active
-`deliver-std-http-and-environment` change. These previews cover permission-
+`std.environment`, `std.net`, `std.http`, and `std.json` have compiler-bundled
+source packages and native runtime previews; their delivery changes are
+archived, not active. These previews cover permission-
 checked environment reads and typed parsing, address/DNS/TCP/TLS operations,
 and bounded HTTP/1.1 clients, routing, URL-encoded forms, multipart parsing and
 in-memory request building, and HTTP/1.1 plus bounded multiplexed HTTP/2 over
@@ -581,7 +587,8 @@ distinction changes who implements them:
   8601 `to_string()`, civil arithmetic and the host-clock `today`/`now_*`
   statics — is implemented in `date-and-time-types`. This phase completes
   the remaining zone-aware types (`Instant`, `ZonedDateTime`, `TimeZone`,
-  `Period`), their IANA data, and the `std.time` API.
+  `Period`), their IANA data, and the specified `std.time` surface (which is
+  not currently an importable package).
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>`,
   `Deque<T>`, `Queue<T>`, `Stack<T>`, and `PriorityQueue<T>` — are native
   reference types. Array/List, ordered Map/Set, and Deque/FIFO/LIFO/priority
@@ -590,9 +597,12 @@ distinction changes who implements them:
   Queue/Stack operations are amortized O(1); PriorityQueue uses a stable min-heap
   with O(log n) enqueue/dequeue and O(n log n) ordered iteration. Map/Set support
   scalar and reference keys/elements, nullable layouts, byte-canonical tuple
-  keys, and eligible payload enums. Structural-record keys, union keys, tuple
-  fields requiring content-based String/Char equality, and nullable Decimal
+  keys, and eligible payload enums. Structural aggregate keys, union keys,
+  and tuple fields requiring content-based
+  String/Char equality, and nullable Decimal
   remain rejected until canonical derived Hash/Equal descriptors are available.
+  These collection families are compiler-known language surfaces; there is no
+  importable `std.collections` package.
 
 `String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
 the search/trim/`substring` methods are delivered in

@@ -35,7 +35,7 @@ Unique values under `T`'s equality/hash contract; insertion-order iteration.
 > text, are supported. Heterogeneous tuples and payload enums derive equality
 > from recursively eligible, byte-canonical fields; embedded `String` and
 > `Char` fields are not yet eligible because their equality is content-based.
-> Nullable Decimal, other derived record elements, and union elements remain
+> Nullable Decimal, other structural aggregate elements, and union elements remain
 > unsupported.
 
 ### Properties
@@ -49,7 +49,8 @@ Unique values under `T`'s equality/hash contract; insertion-order iteration.
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `Set()` / `Set(e0, e1, …)` | `Set<T>` | Construction | specified |
+| `Set()` | `Set<T>` | Empty set construction | implemented |
+| `Set(e0, e1, …)` | `Set<T>` | Construction from values | specified |
 | `s.add(value)` | `Boolean` | `true` when newly inserted | implemented |
 | `s.remove(value)` | `Boolean` | `true` when present | implemented |
 | `s.contains(value)` | `Boolean` | Membership | implemented |
@@ -65,11 +66,11 @@ Unique values under `T`'s equality/hash contract; insertion-order iteration.
 | `s.to_array()` | `Array<T>` | Materializes as an array | specified |
 | `for value in s` | `T` per iteration | Insertion-order snapshot | implemented |
 | `s.clone()` | `Set<T>` | Independent set | specified |
-| `s.to_string()` | `String` | Rendering | specified |
+| `s.to_string()` | `String` | Rendering | implemented |
 
 Mutable class elements use identity, so changing their fields does not change
-membership. Composite value elements remain unsupported by the current
-runtime representation.
+membership. Composite value shapes outside the eligible tuple and payload-enum
+subset are still rejected by semantic analysis.
 
 ### Examples
 

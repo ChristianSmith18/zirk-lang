@@ -1,6 +1,6 @@
 # Destructuring Patterns
 
-Direct destructuring supports records and tuples. It binds independent
+Direct destructuring supports object values and tuples. It binds independent
 projected values.
 
 ```zirk

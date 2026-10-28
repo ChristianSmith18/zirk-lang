@@ -30,14 +30,14 @@ Ranges use `start..end`, `start..=end`, `start..end:step` or
 `start..=end:step`; non-literal bounds and steps use `{...}`. Range construction
 does not use `.reverse()`. Slices use `[start:end:step]`. Multiple patterns use comma before
 one shared `=>` body. Traditional enums may map cases with `->`; algebraic enum
-patterns may destructure nested records. This summary does not replace the
+patterns may destructure nested enum payloads and tuples. This summary does not replace the
 machine-readable grammar or its complete precedence and recovery rules.
 
 Type expressions include names, generic application (`List<String>`), fixed
 arrays (`Decimal[4]`), tuples (`Tuple(String, Int)`), unions (`A | B`), nullable
 shorthand (`T?`), and callable types (`Function(P...) => R`, preferably
 `Fn(P...) => R`). Conversion uses type construction syntax. Concrete classes
-use `extends`; interfaces, traits, and state-free abstract requirement classes
+use `extends`; contracts, traits, and state-free abstract requirement classes
 use `implements`. Postfix assignment targets must be places; indexed or sliced
 assignment obeys permissions and equal-width replacement rules.
 

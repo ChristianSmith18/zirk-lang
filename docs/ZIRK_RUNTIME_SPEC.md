@@ -85,10 +85,9 @@ scheduling turn. It never preempts a running task — a task yields only at a sa
 point (a suspending `Job.wait`, channel operation, timer wait, or compiler
 safepoint poll in a loop). This is distinct from the separately delivered
 CPU worker pool used by `parallel` regions (see §6): the general task scheduler
-does not yet use multicore scheduling or work stealing, and there is no I/O
-reactor. I/O calls still block, and managed language threads (`Thread.run`)
-remain unavailable. The multicore scheduler and reactor described above are
-roadmap Phase 5 steps 4–6.
+does not use multicore scheduling or work stealing, and there is no I/O
+reactor. Synchronous I/O calls still block. Managed `Thread.run` is a separate
+delivered API backed by its own worker pool (see §7).
 
 Each managed executor task runs as a **stackful coroutine** (`ADR-017`): it owns a
 heap-allocated stack (fixed 128 KiB) with an OS guard page, and suspension performs
@@ -246,13 +245,20 @@ The separate `Thread<T>` handle API remains unavailable.
 
 `Thread.run` invokes its callback on a real managed operating-system worker:
 
-```text
-mut native_thread = thread "worker" {
-    process();
-};
+```zirk
+import { stdout } from std.io;
 
-native_thread.join();
+fn compute(): Int32 {
+    return 42;
+}
+
+fn main(): Void {
+    stdout.println(Thread.run(compute));
+}
 ```
+
+The call waits for the callback and returns its result; it does not expose a
+general thread handle or a user-controlled join operation.
 
 A thread has an optional name, a result, `join` and a cooperative cancellation
 request where applicable. It cannot be implicitly abandoned when its scope ends.
@@ -269,13 +275,15 @@ built from a supervised thread/task and one or more channels.
 Channels are implemented as listed in the feature status catalog. Scalar
 `Atomic<T>` is available for Boolean and signed/unsigned integers through 64
 bits when the target provides the matching atomic width. Its payload is stored
-inline in the GC-managed object; pointer atomics are unsupported. The public
-`Mutex`, `RwLock`, `Semaphore`, `Barrier`, and `Once` APIs remain unavailable.
+inline in the GC-managed object; pointer atomics are unsupported. The scoped
+`Mutex<T>.with` source API is delivered. `RwLock`, `Semaphore`, `Barrier`, and
+`Once` remain specified but unavailable as public source APIs; there is no
+importable `std.sync` package.
 
 `Channel<T>` is a typed queue for communication between cooperative branches.
-Channel operations inside `parallel` regions are rejected because pool
-callbacks cannot suspend; communication with the parallel worker pool or
-managed OS threads is not currently exposed:
+Channel operations inside `parallel` regions and `Thread.run` callbacks are
+rejected because those callbacks cannot suspend. Channels do not communicate
+with the separate managed worker pool:
 
 ```text
 mut messages: Channel<String> = Channel();

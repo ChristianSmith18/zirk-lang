@@ -1,6 +1,6 @@
 # Plantilla de definición del lenguaje de programación Zirk
 
-> **Nota de vigencia:** este documento conserva decisiones y ejemplos históricos. El nombre vigente del archivo de configuración de proyecto es `.zkinit`; las referencias a `init.zrk` que siguen corresponden al diseño anterior y no deben copiarse en proyectos nuevos.
+> **Nota de vigencia:** este documento conserva decisiones y ejemplos históricos, incluidos diseños de tipos que ya no forman parte del lenguaje. `record`, `interface`, `value class`, `task` y otras formas descritas en checkpoints antiguos no deben copiarse en proyectos nuevos. Consulta `ZIRK_LANGUAGE_SPEC.md`, `CORE_LANGUAGE_SEMANTICS.md` y el handbook para la sintaxis vigente. El archivo actual de configuración de proyecto es `.zkinit`; las referencias a `init.zrk` corresponden al diseño anterior.
 
 > **Checkpoint de identidad — 12 de agosto de 2026.** El lenguaje adopta oficialmente el nombre **Zirk**, la extensión de código fuente **`.zrk`**, el comando de CLI **`zirk`**, el lockfile **`zirk.lock`** y el contenedor de paquetes **`.zpkg`**.
 >

@@ -1,6 +1,6 @@
 # Zirk for TypeScript Programmers
 
-Zirk and TypeScript share readable type annotations, inference, unions, nullable modeling, classes, interfaces, and familiar expression syntax. The resemblance is useful, but Zirk is not TypeScript with a native backend.
+Zirk and TypeScript share readable type annotations, inference, unions, nullable modeling, classes, and familiar expression syntax. Zirk uses structural contracts and traits rather than TypeScript-style interface declarations; the resemblance is useful, but Zirk is not TypeScript with a native backend.
 
 ## Recalibrate the execution model
 
@@ -16,15 +16,16 @@ inmut visible = selected ?? label;
 
 ## Learn the declarations, not just their spelling
 
-`mut`, `inmut`, and `inmut::strict` distinguish reassignment, stable binding, and deep immutability. `inmut` is not simply `const`: it respects the mutability contract of the referenced type. Zirk has nominally declared classes, interfaces, traits, records, and algebraic enums; consult each contract rather than assuming TypeScript's structural assignability.
+`mut`, `inmut`, and `inmut::strict` distinguish reassignment, stable binding, and deep immutability. `inmut` is not simply `const`: it respects the mutability contract of the referenced type. Zirk has nominal classes, structural `contract` declarations, traits, open `Object` values, and algebraic enums; the former `interface` and `record` declarations were removed. Consult each contract rather than assuming TypeScript's structural assignability.
 
 ## Replace Promise intuition
 
 Zirk 1.x has no `async fn`; the former `task`, `await`, and `select` syntax was
 removed. Structured work uses `concurrent { ... }`, `spawn`, and `Job<T>`;
 `Timer` provides the delivered timer operations, while `parallel` requests CPU
-work. Typed channels are available. Managed OS threads and language-level
-synchronization primitives are not currently exposed, and synchronous I/O can
+work. Typed channels, managed `Thread.run`, scalar atomics, and scoped
+`Mutex<T>.with` are available. The general `Thread<T>` lifecycle and other
+synchronization primitives remain specified only, and synchronous I/O can
 block the cooperative executor.
 
 ## Replace exception-only failure intuition

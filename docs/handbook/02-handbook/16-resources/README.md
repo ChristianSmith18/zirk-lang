@@ -1,6 +1,6 @@
 # Resources
 
-Memory lifetime and external-resource lifetime are different. Files, sockets, and handles implement `Resource<E>` and use `match with` so closure occurs exactly once across success, error, exception, return, and cancellation.
+Memory lifetime and external-resource lifetime are different. Files, sockets, and handles implement `Resource<E>` and use `match with` for deterministic closure across ordinary exit, error, exception, return, and cooperative cancellation. Grouped acquisition, transfer, use-after-transfer checking, and body/close failure composition are delivered; cancellation can still wait on non-cooperative work.
 
 Resource responsibility is compiler-tracked without public ownership syntax.
 Transfer, duplication, dependent lifetime, container extraction, and combined

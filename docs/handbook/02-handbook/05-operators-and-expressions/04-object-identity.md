@@ -8,7 +8,7 @@ if cached_user is requested_user {
 }
 ```
 
-Identity is not structural equality. Two records may hold equal fields while remaining distinct values; immutable value-like types may have no observable identity at all.
+Identity is not structural equality. Two objects may hold equal fields while remaining distinct values; immutable value-like types may have no observable identity at all.
 
 Do not use `is` as a performance shortcut for `==` unless the type contract explicitly supports that reasoning. Compiler representation changes must not alter observable identity semantics.
 

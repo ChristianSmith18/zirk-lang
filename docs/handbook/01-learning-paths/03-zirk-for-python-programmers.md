@@ -1,6 +1,6 @@
 # Zirk for Python Programmers
 
-Zirk favors readable code and strong tooling, but its program model differs fundamentally from Python's dynamic runtime. Types are checked before native code is produced, imports are resolved as part of a compiled project, and implicit runtime flexibility is replaced by explicit unions, generics, interfaces, and conversions.
+Zirk favors readable code and strong tooling, but its program model differs fundamentally from Python's dynamic runtime. Types are checked before native code is produced, imports are resolved as part of a compiled project, and implicit runtime flexibility is replaced by explicit unions, generics, structural contracts, and conversions.
 
 ## Types exist before execution
 
@@ -18,7 +18,7 @@ There is no universal `None`-like inhabitant and no `undefined`. `null` is valid
 
 ## Objects have declared contracts
 
-Classes, interfaces, traits, records, and enums serve different purposes. Prefer algebraic enums and `match` when the set of variants is closed. Prefer an interface or trait when multiple types share a behavior contract. Do not rely on accidental duck typing.
+Classes, contracts, traits, and enums serve different purposes. Prefer algebraic enums and `match` when the set of variants is closed. Prefer a structural `contract` when multiple types share a shape, and a trait when they share reusable behavior. The former `record` and `interface` declarations were removed; do not rely on accidental duck typing.
 
 Slices accept Python-shaped omitted components, including `[::]`, `[n:w]`, and
 `[::-1]`, but explicit out-of-range bounds are errors rather than clamped. A
@@ -27,7 +27,7 @@ R`, and closed-domain `match` is exhaustive with no pattern guards.
 
 ## Effects belong to the project
 
-Applications and libraries declare capabilities in one finite `requires` list. At runtime, users approve exact resources when currently protected network, environment, or secret operations are reached. Filesystem and process APIs are not exposed yet. Native resources also have explicit cleanup contracts rather than depending on nondeterministic object finalization.
+Applications and libraries declare capabilities in one finite `requires` list. At runtime, users approve exact resources when protected filesystem, network, environment, or secret operations are reached. Process APIs are not exposed yet. Native resources also have explicit cleanup contracts rather than depending on nondeterministic object finalization.
 
 ## Recommended route
 

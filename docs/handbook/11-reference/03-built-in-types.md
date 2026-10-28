@@ -15,14 +15,14 @@ examples, and advice on choosing a type, begin with
 | Logic | `Boolean` | value; only `true` or `false` | `false` |
 | Text unit | `Char` | one Unicode grapheme value | invalid without an explicit value |
 | Text | `String` | mutable, shared reference; grapheme-indexed | `""` |
-| Temporal values | `Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Duration`, `Period` | immutable value types; nanosecond precision where applicable | type-specific or explicit |
-| Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Range<T>` | native reference containers except value-like `Range` | empty where meaningful |
+| Temporal values | `Date`, `Time`, `DateTime`, `Duration` (delivered); `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift` (specified) | immutable value types; nanosecond precision where applicable | type-specific or explicit |
+| Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Deque<T>`, `Queue<T>`, `Stack<T>`, `PriorityQueue<T>`, `Range<T>` | native reference containers except value-like `Range`; Map/Set aggregate Hash/Equal coverage is partial; no importable `std.collections` package | empty where meaningful |
 | Callable | `Function(P...) => R`; `Fn(P...) => R` | signature-compatible callable identity with compiler-managed environment | no implicit default |
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[N]` access | component defaults where explicitly constructed |
 | Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `T?` | no implicit default |
 | Native memory | `Pointer<T>`, `NativeSlice<T>`, `NativeSliceMut<T>` | unsafe raw address or bounded dependent native view | null only for raw pointer |
-| Concurrency | `Job<T>`, `Channel<T>`; `Thread<T>` planned | `Job<T>` is a one-consume branch handle; channels are delivered; managed threads remain gated | no implicit default |
-| Synchronization | `Atomic<T>`; `Mutex<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>` planned | `Atomic<T>` supports target-provided Boolean and signed/unsigned integer atomic widths through 64 bits; other listed synchronization primitives have no Zirk source API yet | `Atomic<T>` requires an explicit supported scalar initializer |
+| Concurrency | `Job<T>`, `Channel<T>`, `Thread.run`; `Thread<T>` lifecycle specified | `Job<T>` is a one-consume branch handle; channels and managed callback execution are delivered | no implicit default |
+| Synchronization | `Atomic<T>`, `Mutex<T>.with`; `RwLock<T>`, `Semaphore`, `Barrier`, `Once<T>` specified | `Atomic<T>` supports target-provided Boolean and signed/unsigned integer atomic widths through 64 bits; mutex access is scoped | `Atomic<T>` requires an explicit supported scalar initializer |
 | Special | `Null`, `Void`, `Never`, `Object` | absence, no result, no return, and semantic root | varies |
 
 `Decimal` is the exact base-ten fractional type. `Float` is an alias for `Float64`, the opt-in IEEE 754 binary family.
@@ -111,7 +111,7 @@ Every inhabited value exposes `type` and `to_string()`. Equality, hashing, order
 - Use `UInt*` only when the domain and boundary genuinely require a non-negative binary integer.
 - Use `Decimal` for everyday fractional values, money and exact base-ten domains; use `Float`/`Float*` for graphics, DSP, ML and C interop.
 - Use `Char` for one user-perceived Unicode grapheme and `String` for text.
-- Choose temporal types by meaning, not formatting: a birthday is a `Date`, an elapsed timeout is a `Duration`, and a globally scheduled event is a `ZonedDateTime` or `Instant`.
+- Choose temporal types by meaning, not formatting: a birthday is a delivered `Date`, an elapsed timeout is a delivered `Duration`, and a globally scheduled event will need the specified `ZonedDateTime` or `Instant` APIs when they are delivered.
 - Use `List<T>` when the size changes, `Array<T>` or `T[n]` when it is fixed, `Pointer<T>` only inside `unsafe`, and `Weak<T>` when you do not want to keep an object alive.
 
 See also [Type Member Index](./13-type-member-index.md), [Temporal Reference](./14-temporal-reference.md), and [Choosing a Type](../02-handbook/03-everyday-types/01f-choosing-a-type.md).

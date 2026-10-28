@@ -48,7 +48,10 @@ Distributable package: `.zpkg`
 > earlier Decimal, immutable-String, code-point Char and undifferentiated Date
 > descriptions.
 
-> **Authorial core-language checkpoint — 16 August 2026.** The writable
+> **Historical authorial core-language checkpoint — 16 August 2026.** This
+> dated snapshot does not supersede later accepted changes; in particular, the
+> former `record` and `interface` declaration forms have since been removed.
+> The writable
 > callable type is `Function(P...) => R`, conventionally `Fn(P...) => R`;
 > compatible functions, lambdas and methods adapt to it and closures may escape
 > under compiler-managed storage. Assigning, passing, returning or capturing a
@@ -62,9 +65,10 @@ Distributable package: `.zpkg`
 > `Box<T>`. Tuples, records, data-only enums, normalized unions, exhaustive
 > guard-free matching, collection copying, `Iteration<T>` and Python-shaped
 > omitted slice components follow the detailed language specification. These
-> are final language semantics even when delivery belongs to a later phase.
+> were the authorial semantics at that checkpoint, even where delivery belonged
+> to a later phase.
 
-> **Authorial failure, resource, and permission checkpoint — 16 August 2026.**
+> **Historical authorial failure, resource, and permission target checkpoint — 16 August 2026.**
 > `Result<T,E>` is mandatory for expected failure; explicit exceptions are
 > checked through `throws`, while typed implicit `RuntimeError` safety failures
 > remain catchable without signature noise. Pattern-shaped `catch`, exact

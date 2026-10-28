@@ -12,8 +12,10 @@ obey the same typing, visibility, compatibility, permissions, and dead-code
 rules as handwritten code.
 
 > **Implementation status:** this chapter defines the target Zirk 1.x
-> reflection boundary. Basic type identity is part of the language/runtime
-> contract. Descriptor shapes belong to the libraries that generate them.
+> reflection boundary. Basic `type()` identity is delivered as a type-name
+> string. The `Type` object, `TypeKind`, and importable `std.reflect` package
+> remain specified only; examples below describe that target API. Descriptor
+> shapes belong to the libraries that generate them.
 
 ## Import
 
@@ -36,11 +38,11 @@ identity of the declared type `T`:
 inmut account: Account = AdminAccount();
 
 account.type (); // AdminAccount.type()
-Account.type (); // TypeKind.Interface
+Account.type (); // TypeKind.Contract
 AdminAccount.type (); // TypeKind.Class
 ```
 
-This distinction supports interface-typed values without hiding their concrete
+This distinction supports contract-typed values without hiding their concrete
 runtime identity.
 
 ## Comparing types
@@ -109,11 +111,10 @@ enum TypeKind {
     Primitive;
     Class;
     AbstractClass;
-    Interface;
+    Contract;
     Trait;
-    Record;
-    ValueClass;
     Enum;
+    Tuple;
     Union;
     Function;
     Collection;
@@ -126,8 +127,8 @@ application does not instantiate or assign a kind manually:
 
 ```zirk
 User.type ().kind; // TypeKind.Class
-Repository.type ().kind; // TypeKind.Interface
-Point.type ().kind; // TypeKind.Record
+Repository.type ().kind; // TypeKind.Contract
+Point.type ().kind; // TypeKind.Tuple
 Status.type ().kind; // TypeKind.Enum
 ```
 
@@ -171,7 +172,7 @@ if AdminAccount.type().extends(BaseAccount) {
 ```
 
 These operations accept declared types, not names. `implements` covers the
-language's applicable interface, trait, and contract conformance. `extends`
+language's applicable contract and trait conformance. `extends`
 covers class inheritance. They do not enumerate implementations, reveal private
 members, or manufacture a value satisfying the relationship.
 

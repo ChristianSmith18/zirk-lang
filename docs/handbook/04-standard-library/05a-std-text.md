@@ -5,13 +5,12 @@ safe regular expressions and Unicode algorithms. Everyday transformations stay
 on the native types; the module owns operations that need an auxiliary type or
 compiled program.
 
-> **Implementation status:** accepted Zirk 1.x contract. `array-list-tuple-duration-regex`
-> delivered the `re'...'` literal, `Regex` with `matches`/`find`/`replace`
-> (including positional and named capture groups on `Regex.Match`), and the
-> native `String`/`Char` method surface. `Regex.split`, `String.split`
-> (pending `List<T>`), `matches` iteration, regex patterns in `match`,
-> formatting, and some Unicode facilities remain ahead of the current
-> compiler/runtime.
+> **Implementation status:** `array-list-tuple-duration-regex` delivered the
+> `re'...'` literal, `Regex` matching/search/replacement, splitting and match
+> iteration, regex patterns in `match`, and the native `String`/`Char` method
+> surface. Formatting and some Unicode facilities remain ahead of the current
+> compiler/runtime. See the [feature status
+> catalog](../../init/ZIRK_FEATURE_STATUS.md).
 
 ## Building text
 

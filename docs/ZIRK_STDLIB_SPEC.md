@@ -250,7 +250,7 @@ equality for scalars, normalized equality for floating signed zero, and
 identity equality for mutable class references. NaN remains an invalid scalar
 value. Nullable keys distinguish null from non-null values. Tuples and payload
 enums derive equality only when every field has a canonical stored equality
-layout; unsupported tuple text fields, structural records, and unions are
+layout; tuple text fields requiring content equality, other structural aggregates, and unions are
 rejected at the source type. Equal keys always share the same hash. Map/Set
 growth and sequence growth failures report catchable `AllocationError` without
 partially changing collection contents. Empty sequence reads return the typed

@@ -14,8 +14,9 @@ native scheduler and are excluded by the browser interpreter. `concurrent`/
 work, not a claim of multi-core execution. `parallel` runs on a separate worker
 pool and *is* real multi-core execution, for the `for`-over-`Array`/`List`
 shape [parallel for](09-parallel-for.md) covers. Typed channels are available
-to cooperative branches; channel operations inside `parallel` regions and
-operating-system `thread` work remain unavailable.
+to cooperative branches; channel operations inside `parallel` regions are
+unavailable. `Thread.run` is a delivered managed OS-thread callback API; the
+general `Thread<T>` handle lifecycle remains specified only.
 
 Start with [Structured Concurrency](04-structured-concurrency.md), then use
 the [`Timer` reference](15-timer.md) for delays, the [`Job<T>` reference](16-job.md)

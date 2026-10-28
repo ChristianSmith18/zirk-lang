@@ -67,7 +67,7 @@ A lazy, finite arithmetic progression; value-like, implements `Iterable<T>`.
 | `a..=b` | `Range<T>` | Inclusive end | delivered |
 | `a..b:step` | `Range<T>` | Explicit non-zero signed step | delivered |
 | `r.contains(value)` | `Boolean` | Bounds test | specified |
-| `r.iterator()` | `Iterator<T>` | Lazy iteration | specified |
+| `r.iterator()` | `Iterator<T>` | Lazy iteration | implemented through `Iterable<T>` |
 | `r.to_string()` | `String` | Definition rendering | specified |
 
 Direction follows the relative bounds (`10..0` descends). `Range` always has a

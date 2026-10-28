@@ -30,9 +30,10 @@ exception crosses frames while resource and `finally` cleanup still runs.
 The contract implemented by every thrown value: deeply immutable reference
 identities with stable `message`, `code`, `cause`, and `stack_trace`.
 
-> **Delivery caveat:** `stack_trace()` exists. `suppressed` (recording a
-> cleanup failure during a pending exception) is normative but not implemented
-> — `Error` has no `suppressed` member yet because it needs `List<T>`.
+> **Delivery caveat:** `Throwable.suppressed()` is implemented as an optional
+> link for nested throws inside a `catch`; it does not yet report a resource
+> close failure that occurs while another exception propagates. `stack_trace()`
+> returns a cached placeholder string; real frame capture is not implemented.
 
 ### Methods
 
@@ -41,8 +42,8 @@ identities with stable `message`, `code`, `cause`, and `stack_trace`.
 | `e.message()` | `String` | Human-readable failure description | implemented |
 | `e.code()` | `String` | Stable machine-readable code | implemented |
 | `e.cause()` | `Throwable?` | Underlying cause, or `null` | implemented |
-| `e.suppressed()` | `List<Throwable>` | Secondary failures recorded during cleanup | implemented — returns `Throwable?` today; the `List<Throwable>` form is specified |
-| `e.stack_trace()` | `String` | Captured trace | implemented |
+| `e.suppressed()` | `Throwable?` | Next exception in the suppressed chain | implemented for nested throws in a `catch` |
+| `e.stack_trace()` | `String` | Diagnostic stack-trace text | implemented as a placeholder; no frames are captured |
 | `e.to_string()` | `String` | Default rendering | implemented |
 
 Built-in safety failures are typed `RuntimeError` subclasses, catchable without

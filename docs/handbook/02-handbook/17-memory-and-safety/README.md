@@ -7,8 +7,9 @@ The guarantees implemented today are scoped to the language and
 compiler boundaries that are available; they do not amount to a general
 data-race guarantee. For example, `parallel` rejects mutable reference captures,
 but the compiler does not prove race freedom for every shared value or global.
-Managed `Thread.run` and language-level mutex, rwlock, semaphore, barrier, and
-once APIs remain unavailable. The compiler provides scalar `Atomic<T>` for
+Managed `Thread.run` and scoped `Mutex<T>.with` are delivered. General
+`Thread<T>` handles and language-level rwlock, semaphore, barrier, and once
+APIs remain unavailable. The compiler provides scalar `Atomic<T>` for
 booleans and signed/unsigned integers through 64 bits when the target supports
 the width. Its payload is inline in the GC-managed object; pointer atomics are
 unsupported, and no lock-free promise is made. Atomic operations do not amount

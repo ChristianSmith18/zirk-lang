@@ -20,7 +20,11 @@ packages. `Map`/`Set` remain deterministic without separate public hash/ordered
 families. Hashing uses a per-process defensive seed while iteration preserves
 insertion order.
 
-> **Implementation status:** accepted Zirk 1.x collection contract.
+> **Implementation status:** the sequence and keyed collection types below
+> are compiler-known language surfaces; this chapter is not an importable
+> `std.collections` package. The package is a proposed distribution surface,
+> not part of the current delivery. The Zirk feature catalog records the
+> stage and target evidence for each family.
 > `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end:step`,
 > inferred descending direction, slicing, expansion, and `Iterable<T>` for
 > integer `T` and `Duration`)
@@ -31,11 +35,21 @@ insertion order.
 > `Map.entries()` and Set iteration snapshots. Nullable layouts with a defined
 > runtime representation (including text), heterogeneous tuples of
 > byte-canonical fields, and payload enums with recursively eligible fields
-> are also covered. Tuples with content-based text fields, nullable Decimal,
-> record derivation, and union key/element support remain incomplete.
-> `Deque<T>`, `PriorityQueue<T>`,
-> `Queue<T>` and `Stack<T>` are part of the target contract but are not
-> implemented yet.
+> are also covered. `Deque<T>`, `PriorityQueue<T>`, `Queue<T>` and `Stack<T>`
+> have constructors, typed operations, interpreter/native parity and focused
+> GC coverage. Remaining Map/Set gaps include aggregate keys/elements requiring
+> content-based `String`/`Char` equality, structural derivation, union-aware
+> equality/hashing and nullable `Decimal`. The 4096-byte inline union payload
+> limit is a defined representation boundary; oversized alternatives must be
+> rejected before backend emission.
+
+> **Sequence availability:** delivered eager methods on `Array<T>` and
+> `List<T>` are `map`, `filter`, `for_each`, `reduce`, `sum`, `count`,
+> `collect`, `contains`, `reverse`, `sort`, `sort_by`, and nullable
+> `first`/`last` (`List<T>` also has `pop`). `Range<T>` supports the sequence
+> pipeline. Iterator adapter chains and collection-family conversions such as
+> `to_array`/`to_set` remain specified, not delivered. The broader examples in
+> this chapter describe the target API.
 
 ## Reference, mutation and copying
 
@@ -122,8 +136,9 @@ layout. Map values preserve their declared byte layouts. Nullable values,
 tuples, and payload enums derive equality when every participating field has a
 canonical stored equality representation. Text keys/elements use normalized
 content, and floating signed zero is normalized before hashing and comparison.
-Tuple text/Char fields, structural records, and unions have no canonical
-aggregate equality descriptor yet, so the type checker rejects them as keys or
+Tuple fields requiring content-based String/Char equality, other structural
+aggregate derivations, and unions have no canonical equality descriptor yet,
+so the type checker rejects them as keys or
 elements before lowering. Set union, intersection,
 difference and symmetric difference preserve deterministic result order
 without mutating their inputs.
@@ -143,10 +158,11 @@ iterators after structural mutation. Growth failure raises catchable
 
 ## Eager and lazy transformation
 
-`List<T>` and `Array<T>` support eager, chainable `map`, `filter`, `flat_map`,
-`reduce`, `take`, `skip`, and `reverse` directly. The last transform in the
-chain returns the same collection family, and a terminal conversion such as
-`to_array()`, `to_list()` or `to_set()` selects the result family:
+The target API specifies eager, chainable `map`, `filter`, `flat_map`, `reduce`,
+`take`, `skip`, and `reverse` directly on `List<T>` and `Array<T>`. Current
+delivery is the subset listed in the availability note above; `flat_map`,
+`take`, `skip`, and cross-family conversions are not yet available. The broader
+example below documents the target API:
 
 ```zirk
 inmut names: List<String> = users
@@ -163,9 +179,9 @@ This is the default idiom for in-memory collections: it is readable, the
 intermediate collections are explicit, and the type of the final expression is
 clear from the last method.
 
-Iterator transformations are lazy and allocate only at an explicit terminal.
-Use them when you want single-pass streaming or to avoid intermediate
-allocations:
+The target API also specifies lazy iterator transformations. Adapter chains
+are not part of the current delivery; the example below is a target-contract
+example, not an executable current-toolchain example:
 
 ```zirk
 inmut names: List<String> = users

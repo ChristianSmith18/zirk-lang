@@ -1,5 +1,9 @@
 # `std.system`
 
+> **Availability:** this is a specified API surface, not an importable package
+> in the current toolchain. Consult the [standard-library
+> index](19-standard-library-indexes.md) for delivered package availability.
+
 `std.system` exposes the small, portable part of the current process and target
 platform that applications commonly need. It deliberately avoids exposing
 runtime internals or fingerprinting data as ambient authority. Environment

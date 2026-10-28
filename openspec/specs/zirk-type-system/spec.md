@@ -1068,13 +1068,12 @@ The implementation SHALL represent `view` with a compiler-internal,
 scope-indexed borrowed type rather than the ordinary by-value type `T`. The
 borrowed type SHALL be rejected from assignments, returns, escaping captures,
 pointer conversions, and calls whose effect or ownership summary is incomplete.
-The checker SHALL derive the callback's suspension effect transitively before
-the API is enabled. Until this scoped-view model exists in both sema and IR,
-`Mutex<T>` SHALL remain behind the Phase 5 type gate. Once the scoped type
-model exists but executable payload projection, runtime ABI, or all-exit unlock
-lowering is incomplete, type checking SHALL still enforce the rules above while
-construction and `mutex.with` report `NOT_LOWERED`; code generation SHALL NOT
-emit an executable no-op lock or treat the handle as its payload.
+The checker SHALL derive the callback's suspension effect transitively. The
+scoped-view model, executable payload projection, runtime ABI, and all-exit
+unlock lowering are delivered for `Mutex<T>.with`; unsupported targets or
+operations SHALL still fail closed rather than emit a no-op lock or treat the
+handle as its payload. Other synchronization types in this requirement remain
+specified-only as recorded in the feature-status catalog.
 
 #### Scenario: guard cannot escape
 - **WHEN** a `mutex.with` closure assigns its view to an outer `mut` binding

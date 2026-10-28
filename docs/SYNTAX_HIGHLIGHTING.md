@@ -23,7 +23,7 @@ the website maps the same scopes through Shiki in
 
 | Language element                                   | Scope(s)                                                  | Color     | Style   |
 |----------------------------------------------------|-----------------------------------------------------------|-----------|---------|
-| Declaration keywords (`class`, `trait`, `interface`, `record`, `enum`, `import`, `use`, `fn`, `construct`, `extends`, `implements`, `type`, `gen`) | `keyword.declaration`, `keyword.control.import`, `storage.type.function` | `#8E6CFF` | normal  |
+| Declaration keywords and reserved legacy keywords (`class`, `trait`, `interface`, `record`, `enum`, `import`, `use`, `fn`, `construct`, `extends`, `implements`, `type`, `gen`) | `keyword.declaration`, `keyword.control.import`, `storage.type.function` | `#8E6CFF` | normal  |
 | Control flow (`if`, `else`, `match`, `for`, `while`, `loop`, `try`, `catch`, `task`, `await`, `select`, `parallel`, …) | `keyword.control`                                         | `#EC4899` | normal  |
 | Exit keywords (`return`, `throw`, `break`, `continue`, `yield`) | `keyword.control.exit`                                    | `#F7C65C` | normal  |
 | Mutability modifiers (`mut`, `inmut`, `inmut::strict`, `share`, `sync`, `strict`) | `storage.modifier.mutability`                             | `#F7C65C` | normal  |

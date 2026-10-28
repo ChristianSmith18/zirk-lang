@@ -4,6 +4,12 @@
 are static views over the same value; they do not copy it or add a runtime
 header. `&` binds more tightly than `|`, and parentheses can change grouping.
 
+> **Runtime boundary:** structural checking and flow facts do not imply that
+> every intersection/union composition has a native representation. Runtime
+> support is tracked by alternative family, container, and target in the
+> [feature-status matrix](../../11-reference/12-feature-status.md); unsupported
+> executable combinations must fail before backend emission.
+
 ```zirk
 contract Named { name: String; }
 contract Identified { id: Int32; }

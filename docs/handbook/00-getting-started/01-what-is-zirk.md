@@ -75,10 +75,10 @@ An expression-valued `match` must cover every possible case. Zirk also has excep
 ## Concurrency is part of the language model
 
 The implemented source surface includes structured `concurrent { ... }` scopes,
-`spawn` with `Job<T>`, `Timer`, CPU-oriented `parallel`, and typed
-`Channel<T>`. The former `task`, `await`, and `select` syntax was removed.
-Managed OS threads, synchronization primitives, and language-level atomics are
-specified or under development, but are not currently available as Zirk APIs.
+`spawn` with `Job<T>`, `Timer`, CPU-oriented `parallel`, typed `Channel<T>`,
+managed `Thread.run`, scalar `Atomic<T>`, and scoped `Mutex<T>.with`. The former
+`task`, `await`, and `select` syntax was removed. General `Thread<T>` handles
+and other synchronization primitives remain specified only.
 
 The cooperative executor and the CPU worker pool are distinct runtime
 components. Synchronous I/O can block the executor; this release does not

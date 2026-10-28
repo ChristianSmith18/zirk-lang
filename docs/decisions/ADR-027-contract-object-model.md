@@ -9,7 +9,7 @@
 
 Zirk had two parallel abstractions for named data shape: immutable inline `record` values and method-only `interface` declarations. That split duplicated structural modeling, made JSON objects a separate representation, and forced object-like data into value-copy semantics. The language needs one structural contract that describes both properties and operations, while preserving traits for reusable behavior and classes for nominal identity and state.
 
-The accepted design and full implementation requirements are tracked in OpenSpec change `unify-objects-and-contracts`. This ADR records the durable language and representation decisions; it does not claim every implementation layer has shipped.
+The accepted design and implementation requirements were tracked in the archived OpenSpec change [`unify-objects-and-contracts`](../../openspec/changes/archive/2026-10-23-unify-objects-and-contracts/). Its scoped tasks are complete; the feature-status catalog records current delivery evidence and remaining boundaries. This ADR remains the durable language and representation decision.
 
 ## Decision
 
@@ -53,4 +53,4 @@ JSON object nodes materialize as ordinary `Object` values, arrays as `List<Dynam
 
 ## Implementation evidence
 
-Implementation is tracked by `openspec/changes/unify-objects-and-contracts/tasks.md`. Completion and public feature status require the full interpreter/native, JSON, GC, editor, migration, and cross-target evidence listed there.
+Implementation evidence is recorded in the archived change's tasks and verification artifacts. The feature-status catalog is the current source for implementation status.

@@ -5,8 +5,11 @@ periods and clock sources. Every value is immutable; transformations return new
 values. The detailed arithmetic contract belongs to the temporal-type chapters.
 
 > **Implementation status:** `Duration` literals, arithmetic, comparison,
-> `Timer`, `Timer.sleep`, `Timer.after`, and `Timer.every` are delivered. Civil
-> and zone-aware types, IANA data, virtual clocks, and `Ticker` remain planned.
+> `Timer`, `Timer.sleep`, `Timer.after`, `Timer.every`, and the civil `Date`,
+> `Time`, and `DateTime` types are delivered. `Instant`, `ZonedDateTime`,
+> `TimeZone`, `Period`, `TimeShift`, locale support, IANA data, virtual clocks,
+> and `Ticker` remain specified but unavailable. The examples below describe
+> the target contract; APIs named above as unavailable are not executable yet.
 
 ## Getting the current time
 
@@ -19,10 +22,9 @@ inmut time = Time.now(zone:);
 inmut current = ZonedDateTime.now(zone:);
 ```
 
-`Time` is only a time-of-day value, so it does not silently guess a zone.
-`Time.now_local()` and corresponding local helpers return `Result` because
-system-zone discovery can fail. Tests pass `clock: virtual_clock` without
-changing global or system time.
+`Time` is only a time-of-day value, so it does not silently guess a zone. The
+zone-aware and virtual-clock examples describe the target API and should not be
+read as current availability claims.
 
 `Clock.monotonic` produces monotonic instants for elapsed measurement, timeout
 and benchmarks; wall-clock corrections cannot make it run backward.

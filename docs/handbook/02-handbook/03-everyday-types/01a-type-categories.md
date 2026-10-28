@@ -27,9 +27,10 @@ second = 8; // first stays 7
 
 ## Native value types
 
-`Date`, `Time`, `DateTime`, `Instant`, `ZonedDateTime`, `TimeZone`, `Period`,
-and supporting temporal enums are immutable semantic values. Transformations
-return new values.
+`Date`, `Time`, `DateTime`, and `Duration` are delivered immutable temporal
+values. `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift`, and
+supporting zone-aware APIs are specified but not delivered. Transformations
+return new values where those APIs exist.
 
 Tuples and enums are also value aggregates. Their value equality and cloning
 follow their declared component capabilities.

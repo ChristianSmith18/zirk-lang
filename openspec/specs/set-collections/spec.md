@@ -80,7 +80,7 @@ All integer widths, `Boolean`, `Char`, `String`, `Decimal`, `Float16`, `Float32`
 - **THEN** they compare equal, produce the same hash, and only one element is stored
 
 #### Scenario: Derived aggregate element uses all active fields
-- **WHEN** a tuple, closed record, payload enum, nullable, or union element derives Hash and Equal
+- **WHEN** a tuple, structural aggregate, payload enum, nullable, or union element derives Hash and Equal
 - **THEN** equality and hashing use the same fields and active alternative, and equal values are treated as one set member
 
 #### Scenario: Nullable text elements use content equality and preserve null
@@ -104,7 +104,7 @@ Every accepted `Set<T>` SHALL store, compare, hash, retrieve, and trace elements
 - **THEN** membership and duplicate detection distinguish values according to nullable and tagged-union equality semantics
 
 #### Scenario: Derived hash and equality are coherent
-- **WHEN** a closed record or payload enum requests derived `Hash` and `Equal` and all participating fields implement both
+- **WHEN** a structural aggregate or payload enum requests derived `Hash` and `Equal` and all participating fields implement both
 - **THEN** derivation uses the same participating fields and equal values produce equal hashes
 
 

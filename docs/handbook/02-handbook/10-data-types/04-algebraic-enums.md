@@ -57,7 +57,9 @@ satisfies the corresponding contract. Payload extraction is legal only inside
 
 Variants carrying zero, one, or several typed payloads; exactly one variant at
 a time. Generic algebraic enums are allowed (generic enum lowering delivered by
-`fase-3-generic-enums` for flat single/multi-parameter cases).
+`fase-3-generic-enums` for flat single/multi-parameter cases); broader generic
+enum dispatch and its full target matrix remain incomplete, as recorded in the
+[feature-status matrix](../../11-reference/12-feature-status.md).
 
 ### Properties
 
@@ -71,7 +73,7 @@ a time. Generic algebraic enums are allowed (generic enum lowering delivered by
 | --- | --- | --- | --- |
 | `LoadState.Ready(doc)` | `LoadState` | Variants are ordinary typed constructors | implemented |
 | `value.to_string()` | `String` | Universal member | implemented |
-| `value.clone()` | `LoadState` | Derived `Clone` when every payload is `Clone` | specified |
+| `value.clone()` | `LoadState` | Derived `Clone` when every payload is `Clone` | implemented |
 
 > Payload extraction is legal only inside `match`; direct enum destructuring is
 > deliberately rejected. There is no `variant_name()` or `is_<variant>()`

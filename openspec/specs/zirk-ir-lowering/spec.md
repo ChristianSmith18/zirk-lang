@@ -642,7 +642,7 @@ Every structural union or intersection accepted by semantic analysis SHALL have 
 - **THEN** lowering reports a source-located implementation diagnostic instead of emitting partial IR
 
 ### Requirement: Collection operations retain complete generic layouts in portable IR
-Portable IR SHALL preserve the canonical concrete type and storage layout for every accepted `Map<K, V>` and `Set<T>` operation. Insert, lookup, membership, removal, iteration, algebra, copy, and managed-reference metadata SHALL retain multiword scalar, nullable, tuple/record, payload enum, union, and collection-reference layouts. Generic specialization SHALL preserve key, value, and element type arguments. The verifier SHALL reject mismatched layout metadata, and source combinations without a defined path SHALL be diagnosed before backend emission.
+Portable IR SHALL preserve the canonical concrete type and storage layout for every accepted `Map<K, V>` and `Set<T>` operation. Insert, lookup, membership, removal, iteration, algebra, copy, and managed-reference metadata SHALL retain multiword scalar, nullable, tuple and structural aggregate, payload enum, union, and collection-reference layouts. Generic specialization SHALL preserve key, value, and element type arguments. The verifier SHALL reject mismatched layout metadata, and source combinations without a defined path SHALL be diagnosed before backend emission.
 
 #### Scenario: Map stores a multiword value
 - **WHEN** a `Map<K, V>` stores a `V` represented by multiple machine words and a later lookup retrieves it

@@ -32,15 +32,16 @@ first == copy; // true
 first is copy; // false
 ```
 
-Records have no observable identity, so `is` is invalid for them. Classes and
-`String` are references. Enum equality compares the case and, for algebraic
-enums, equal associated values.
+Tuples and enums have value semantics, so `is` is invalid for them. Classes,
+`Object`, and `String` have reference identity. Enum equality compares the
+case and, for algebraic enums, equal associated values.
 
 ## Nominal and structural questions
 
-Classes, records, and enums are nominal: two declarations do not become the same
-type merely because their fields match. “Structural equality” describes how two
-values of one compatible type compare; it does not erase the type's name.
+Classes and enums are nominal: two declarations do not become the same type
+merely because their members match. Tuple types are structural value shapes.
+“Structural equality” describes how two values of one compatible type compare;
+it does not erase a nominal type's name.
 
 ## Cloning
 

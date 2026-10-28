@@ -1,6 +1,6 @@
 # Data Types
 
-Zirk offers several ways to model domain data. Records emphasize named structure, classes model identity and lifecycle, enums define closed alternatives, aliases name an existing type, and unions admit explicitly listed types.
+Zirk offers several ways to model domain data. Contracts describe structural requirements, `Object` values hold open data, tuples model positional aggregates, classes model identity and lifecycle, enums define closed alternatives, aliases name an existing type, and unions admit explicitly listed types. The former `record` declaration form was removed.
 
 Choosing among them determines construction, equality, identity, exhaustiveness, and API compatibility—not merely spelling.
 

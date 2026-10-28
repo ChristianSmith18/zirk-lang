@@ -1,11 +1,10 @@
 # Resource Transfer
 
-> **Implementation status:** normative target only — nothing on this page is
-> implemented yet. `TransferableResource`, `transfer()`, and the
-> escape/use-after-transfer analysis described below do not exist in the
-> current compiler; a resource can escape its `match with` scope today without
-> the compiler detecting it. `take(index)` for non-cloneable resources also
-> needs collections (roadmap Phase 7), which do not exist yet.
+> **Implementation status:** `TransferableResource`, `transfer()`, and
+> use-after-transfer rejection are delivered for supported resource types.
+> Moving extraction such as `take(index)` for non-cloneable collection
+> elements remains specified work; see the [feature-status
+> catalog](../../../init/ZIRK_FEATURE_STATUS.md).
 
 A resource cannot escape a `match with` scope directly or indirectly through a collection, object, closure, or task.
 

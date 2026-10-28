@@ -28,7 +28,7 @@ inmut more: List<Int32> = List(-1, 3 .. 6, 6);
 ## Growth, insertion, and removal
 
 ```zirk
-inmut numbers = List(10, 20);
+inmut numbers: List<Int32> = List(10, 20);
 
 numbers.add(30); // [10, 20, 30]
 numbers.insert(0, 5); // [5, 10, 20, 30]
@@ -53,7 +53,7 @@ numbers[10]; // error: index out of bounds
 ## Sharing and cloning
 
 ```zirk
-inmut first = List(1, 2, 3);
+inmut first: List<Int32> = List(1, 2, 3);
 inmut second = first;
 
 second.add(4);
@@ -79,15 +79,15 @@ be rebound but still permits permitted referent mutation. `inmut::strict`
 forbids even that:
 
 ```zirk
-mut a = List(1, 2, 3); // this example demonstrates rebinding
+mut a: List<Int32> = List(1, 2, 3); // this example demonstrates rebinding
 a.add(4); // valid
 a = List(); // valid
 
-inmut b = List(1, 2, 3);
+inmut b: List<Int32> = List(1, 2, 3);
 b.add(4); // valid: the referent may change
 b = List(); // error: binding cannot be reassigned
 
-inmut::strict c = List(1, 2, 3);
+inmut::strict c: List<Int32> = List(1, 2, 3);
 c.add(4); // error: no mutable alias is allowed
 ```
 
@@ -114,8 +114,8 @@ for value in numbers {
 `List` equality is element-wise when `T` is `Equatable`:
 
 ```zirk
-inmut a = List(1, 2, 3);
-inmut b = List(1, 2, 3);
+inmut a: List<Int32> = List(1, 2, 3);
+inmut b: List<Int32> = List(1, 2, 3);
 
 a == b; // true
 a is b; // false: two different list instances
@@ -124,29 +124,27 @@ a is b; // false: two different list instances
 ## Transformations
 
 `List<T>` supports eager, chainable transformations directly on the collection.
-The last transform returns a new `List`; a terminal conversion changes the family:
+The last transform returns a new `List`:
 
 ```zirk
-inmut numbers = List(1, 2, 3, 4, 5);
+inmut numbers: List<Int32> = List(1, 2, 3, 4, 5);
 
 inmut doubled = numbers.map((n) => n * 2);           // [2, 4, 6, 8, 10]
 inmut evens = numbers.filter((n) => n.is_even());  // [2, 4]
-inmut sum = numbers.reduce((acc, n) => acc + n, 0);  // 15
+inmut sum = numbers.reduce(0, (acc: Int32, n: Int32): Int32 => acc + n);  // 15
 
 inmut names = users
     .filter((user) => user.active)
     .map((user) => user.name);
 ```
 
-For lazy, single-pass pipelines, use `.iterator()` and a terminal such as
-`.collect()`:
+For custom lazy, single-pass sources that implement `Iterable<T>`, use
+`for ... in`. A range can materialize its sequence pipeline with `collect()`:
 
 ```zirk
-inmut lazy_names = users
-    .iterator()
-    .filter((user) => user.active)
-    .map((user) => user.name)
-    .collect();
+inmut squares: List<Int32> =(1 ..= 3)
+.map((n: Int32): Int32 => n * n)
+.collect();
 ```
 
 ## When to choose a list
@@ -180,18 +178,23 @@ Dynamically sized ordered sequence; keeps insertion order and supports eager cha
 | `l.splice(start, delete_count, replacement)` | `Void` | General splice | specified |
 | `l.clear()` | `Void` | Logical emptying; no capacity promise | specified |
 | `l.get(i)` | `Result<T, IndexOutOfBoundsError>` (or `T?` in nullable value context) | Safe lookup; preserve or project absence | implemented |
-| `l.contains(v)` / `l.find(pred)` | `Boolean` / `T?` | Search | specified |
-| `l.map(fn)` | `List<U>` | Eager transform; `U` from `fn` return | specified |
-| `l.filter(fn)` | `List<T>` | Eager selection | specified |
+| `l.contains(v)` | `Boolean` | Membership | implemented |
+| `l.find(pred)` | `T?` | First matching element | specified |
+| `l.map(fn)` | `List<U>` | Eager transform; `U` from `fn` return | implemented |
+| `l.filter(fn)` | `List<T>` | Eager selection | implemented |
+| `l.for_each(fn)` | `Void` | Eager side-effecting traversal | implemented |
 | `l.flat_map(fn)` | `List<U>` | Map then flatten one level | specified |
-| `l.reduce(fn, initial)` | `U` | Left fold over elements | specified |
+| `l.reduce(initial, fn)` | `U` | Left fold over elements | implemented |
+| `l.sum()` / `l.count()` | numeric `T` / `Int32` | Numeric sum / element count | implemented |
 | `l.take(n)` | `List<T>` | First `n` elements, or fewer | specified |
 | `l.skip(n)` | `List<T>` | Elements after the first `n` | specified |
-| `l.reverse()` | `List<T>` | Reversed copy | specified |
+| `l.reverse()` | `Void` | Reverse this list in place | implemented |
+| `l.first()` / `l.last()` / `l.pop()` | `T?` | Read endpoints or remove the last item | implemented |
 | `l.to_array()` | `Array<T>` | Materializes as a fixed array | specified |
 | `l.to_set()` | `Set<T>` | Materializes as a set (`T` must satisfy `Hash` + `Equal`) | specified |
-| `l.sort()` / `l.sort_by(fn)` / `l.sort_with(cmp)` / `l.sort_unstable()` | `Void` | Stable sort in place | specified |
-| `l.iterator()` | `Iterator<T>` | Lazy single-pass iterator; use `collect()`/`to_list()` to terminate | specified |
+| `l.sort()` / `l.sort_by(cmp)` | `Void` | Stable natural or comparator sort in place | implemented |
+| `l.collect()` | `List<T>` | Materialize a sequence pipeline as a list | implemented |
+| `l.iterator()` | `Iterator<T>` | Lazy single-pass iterator | implemented |
 | `l.clone()` | `List<T>` | Independent logical copy | implemented |
 | `l.to_string()` | `String` | Rendering | implemented |
 
@@ -201,7 +204,7 @@ errors.
 ### Examples
 
 ```zirk
-mut numbers = List(10, 20);
+mut numbers: List<Int32> = List(10, 20);
 numbers.add(30);                // [10, 20, 30]
 numbers.insert(0, 5);           // [5, 10, 20, 30]
 numbers.remove(1);              // [5, 20, 30]
@@ -222,24 +225,14 @@ inmut eager_from_lazy: List<String> = users
 ## Implementation status
 
 > `List<T>` is delivered as a resizable native reference collection with
-indexed read/write (including negative-from-end indices), `add`, `insert`,
->`remove(index)`, `remove(value)`, `clone()`, `to_string()`, `length`, `is_empty`,
->and `for ... in`. Pre-populated `List(e0, …)` literals are also implemented.
->Eager chainable `map`, `filter`, `flat_map`, `reduce`, `take`, `skip`, `reverse`,
->and family conversions (`to_array`, `to_set`) are specified but remain ahead of
->the current compiler. Use `iterator()` and `collect()` for the delivered lazy
->pipeline today.
+> indexed read/write (including negative-from-end indices), `add`, `insert`,
+> `remove(index)`, `remove(value)`, `clone()`, `to_string()`, `length`,
+> `is_empty`, and `for ... in`. Pre-populated `List(e0, …)` literals are also
+> implemented. Eager `map`, `filter`, `for_each`, `reduce`, `sum`, `count`,
+> in-place `reverse`/`sort`, `first`, `last`, `pop`, and sequence `collect()`
+> are delivered. `flat_map`, `take`, `skip`, and family conversions
+> (`to_array`, `to_set`) remain specified.
 
 ---
 
 **Previous:** [← Fixed Arrays](02-fixed-arrays.md) · **Next:** [ Maps](04-maps.md)
-## Sequence operations
-
-`List<T>` supports eager sequence operations. `map` and `filter` return a new
-list, while `for_each` executes a callback for its side effects. `reduce`
-folds left-to-right, `sum` handles numeric elements, `count` returns the
-length, and `collect` copies the sequence into a list.
-
-`contains` queries membership. `reverse`, `sort`, and `sort_by` mutate the
-list in place. `first`, `last`, and `pop` return `T?`; `pop` also removes the
-last element, so empty lists produce `null`.
