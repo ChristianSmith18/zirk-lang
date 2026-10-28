@@ -23122,7 +23122,7 @@ impl<'a> Checker<'a> {
             let mut bindings = Vec::new();
             self.check_pattern(
                 &arm.pattern,
-                if arm_scrutinee.base == Base::Never {
+                if arm_scrutinee.base == Base::Never || matches!(arm.pattern, Pattern::Float(_)) {
                     scrutinee
                 } else {
                     arm_scrutinee
@@ -23372,10 +23372,22 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Float(literal) => {
-                let ty = self.resolve_pattern_singleton_literal(
-                    &TypeValue::Float(literal.clone()),
-                    literal.span,
-                );
+                let mut contextual = literal.clone();
+                if contextual.width.is_none()
+                    && let Base::Float(width) = remaining.without_null().base
+                {
+                    contextual.width = Some(
+                        match width {
+                            FloatWidth::F16 => "f16",
+                            FloatWidth::F32 => "f32",
+                            FloatWidth::F64 => "f64",
+                            FloatWidth::F128 => "f128",
+                        }
+                        .into(),
+                    );
+                }
+                let ty = self
+                    .resolve_pattern_singleton_literal(&TypeValue::Float(contextual), literal.span);
                 if matches!(remaining.base, Base::Union(_)) {
                     return self.match_union_members(remaining, ty, literal.span);
                 }
@@ -23421,7 +23433,7 @@ impl<'a> Checker<'a> {
                 if matches!(remaining.base, Base::Union(_)) {
                     return self.match_union_members(remaining, ty, literal.span);
                 }
-                if self.assignable_relation(ty, remaining).unwrap_or(false) {
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
                     ty
                 } else {
                     Type::of(Base::Never)
@@ -23432,7 +23444,7 @@ impl<'a> Checker<'a> {
                 if matches!(remaining.base, Base::Union(_)) {
                     return self.match_union_members(remaining, ty, expression.span());
                 }
-                if self.assignable_relation(ty, remaining).unwrap_or(false) {
+                if self.assignable_relation(remaining, ty).unwrap_or(false) {
                     ty
                 } else {
                     Type::of(Base::Never)

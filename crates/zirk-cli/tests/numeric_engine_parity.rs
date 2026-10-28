@@ -170,15 +170,30 @@ fn float_singleton_match_patterns_match_native_observations() {
 fn classify(value: Float64): String {
     return match value { 1.5 => "fraction"; 0.0 => "zero"; _ => "other"; };
 }
+fn classify16(value: Float16): String {
+    return match value { 1.5 => "half"; _ => "other"; };
+}
+fn classify32(value: Float32): String {
+    return match value { 1.5 => "single"; _ => "other"; };
+}
+fn classify128(value: Float128): String {
+    return match value { 1.5 => "quad"; _ => "other"; };
+}
 fn main(): Void {
     stdout.println(classify(1.5));
     stdout.println(classify(-0.0));
     stdout.println(classify(2.5));
+    stdout.println(classify16(1.5f16));
+    stdout.println(classify32(1.5f32));
+    stdout.println(classify128(1.5f128));
 }
 stdout.println(classify(1.5));
 stdout.println(classify(-0.0));
-stdout.println(classify(2.5));"#,
-        "fraction\nzero\nother\n",
+stdout.println(classify(2.5));
+stdout.println(classify16(1.5f16));
+stdout.println(classify32(1.5f32));
+stdout.println(classify128(1.5f128));"#,
+        "fraction\nzero\nother\nhalf\nsingle\nquad\n",
     );
 }
 
