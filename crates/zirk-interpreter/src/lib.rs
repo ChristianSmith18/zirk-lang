@@ -10483,7 +10483,11 @@ mod tests {
                 enum_id: 0,
                 response_class_id: 0,
             }),
-            BrowserSupport::BoundedHost
+            if cfg!(feature = "http") {
+                BrowserSupport::BoundedHost
+            } else {
+                BrowserSupport::Excluded
+            }
         );
         for instruction in [
             InstKind::HttpHead {
@@ -10525,7 +10529,11 @@ mod tests {
         ] {
             assert_eq!(
                 instruction_support(&instruction),
-                BrowserSupport::BoundedHost
+                if cfg!(feature = "http") {
+                    BrowserSupport::BoundedHost
+                } else {
+                    BrowserSupport::Excluded
+                }
             );
         }
         assert_eq!(

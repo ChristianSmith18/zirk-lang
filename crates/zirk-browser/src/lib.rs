@@ -1573,6 +1573,17 @@ mod tests {
             virtual_name: "browser-http-url.zrk".into(),
             limits: None,
         });
+        if !cfg!(feature = "http-fetch") {
+            assert!(matches!(
+                response.failure,
+                Some(crate::contract::Failure {
+                    kind: crate::contract::FailureKind::Capability,
+                    ref code,
+                    ..
+                }) if code == "ZB002"
+            ));
+            return;
+        }
         assert!(
             response.failure.is_none(),
             "URL operations are portable: {response:?}"
@@ -1622,6 +1633,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http-fetch")]
     #[test]
     fn interpreter_suspends_and_resumes_http_get_without_restarting_main() {
         let source = "import { stdout } from std.io;\nimport { HTTP, URL } from std.http;\nfn main(): Void { stdout.println(\"before\"); match URL.parse(\"https://example.com/path\") { Ok(url) => { match HTTP.get(url) { Ok(response) => stdout.println(response.status_code()); Error(_) => stdout.println(\"http-error\"); } } Error(_) => stdout.println(\"url-error\"); } }";
@@ -1758,6 +1770,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "http-fetch")]
     #[test]
     fn interpreter_suspends_and_resumes_http_request_with_body_and_headers() {
         let source = "import { stdout } from std.io;\nimport { HTTP, HTTPHeaders, HTTPMethod, URL } from std.http;\nfn main(): Void { mut payload: Array<Byte> = [112 as Byte, 97 as Byte, 121 as Byte, 108 as Byte, 111 as Byte, 97 as Byte, 100 as Byte]; mut headers = HTTPHeaders.create(); _ = headers.add(\"x-test\", \"yes\"); match URL.parse(\"https://example.com/submit\") { Ok(url) => { match HTTP.request(HTTPMethod.Post, url, payload, headers) { Ok(response) => { stdout.println(response.status_code()); match response.text() { Ok(text) => stdout.println(text); Error(_) => stdout.println(\"text-error\"); } } Error(_) => stdout.println(\"request-error\"); } } Error(_) => stdout.println(\"url-error\"); } }";
@@ -1806,6 +1819,7 @@ mod tests {
         assert_eq!(host.http_requests(), &[request]);
     }
 
+    #[cfg(feature = "http-fetch")]
     #[test]
     fn interpreter_maps_http_convenience_calls_to_bounded_host_requests() {
         let source = r#"

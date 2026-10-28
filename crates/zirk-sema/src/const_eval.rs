@@ -3715,6 +3715,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "timezone")]
     fn zone_aware_temporal_constants_pin_and_validate_rule_data() {
         let zone = evaluate(
             &call("TimeZone", vec![string("America/Santiago")]),
