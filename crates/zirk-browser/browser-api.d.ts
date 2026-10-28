@@ -71,19 +71,5 @@ export interface BrowserApi {
   initialize(): void;
   check(request: string): string;
   run(request: string): string;
-  /**
-   * Runs bounded browser HTTP requests through an explicitly supplied Fetch
-   * function. `allowedOrigins` is a JSON array of origin strings. The byte
-   * limits apply to request and streamed response bodies. The fetch authority
-   * is scoped to this invocation; `run` remains synchronous and hermetic.
-   */
-  runWithFetch(
-    request: string,
-    fetchFunction: Function,
-    allowedOrigins: string,
-    maxRequestBytes: number,
-    maxResponseBytes: number,
-    abortSignal: AbortSignal | null,
-  ): Promise<string>;
   format(request: string): string;
 }

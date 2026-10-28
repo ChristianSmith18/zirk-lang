@@ -92,7 +92,7 @@ impl BrowserApi {
     /// Runs bounded HTTP requests through one explicitly injected browser
     /// fetch function. The origin list, body ceilings, and abort signal live
     /// for this invocation only; `run` remains hermetic and synchronous.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
     #[wasm_bindgen(js_name = runWithFetch)]
     pub async fn run_with_fetch_json(
         &self,
@@ -680,14 +680,14 @@ pub fn run(request: contract::Request) -> contract::Response {
     response
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 struct FetchHost {
     events: Vec<zirk_interpreter::OutputEvent>,
     allowed_origins: std::collections::HashSet<String>,
     abort_signal: wasm_bindgen::JsValue,
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 impl zirk_interpreter::InterpreterHost for FetchHost {
     fn emit(
         &mut self,
@@ -721,7 +721,7 @@ impl zirk_interpreter::InterpreterHost for FetchHost {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn canonical_origin(value: &str) -> Option<String> {
     let url = zirk_runtime_core::http_values::Url::parse(value).ok()?;
     let normalized = url.as_str();
@@ -735,14 +735,14 @@ fn canonical_origin(value: &str) -> Option<String> {
     Some(url.origin())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn request_origin(value: &str) -> Option<String> {
     zirk_runtime_core::http_values::Url::parse(value)
         .ok()
         .map(|url| url.origin())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn parse_origin_allowlist(
     origins: Vec<String>,
 ) -> Result<std::collections::HashSet<String>, contract::Response> {
@@ -765,7 +765,7 @@ fn parse_origin_allowlist(
     Ok(normalized)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 async fn run_with_fetch_async(
     request: contract::Request,
     fetch_function: js_sys::Function,
@@ -949,7 +949,7 @@ async fn run_with_fetch_async(
     response
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 async fn fetch_http_request(
     fetch_function: &js_sys::Function,
     request: &zirk_interpreter::HttpHostRequest,
@@ -1151,7 +1151,7 @@ async fn fetch_http_request(
     })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn valid_http_method_token(method: &str) -> bool {
     !method.is_empty()
         && method.bytes().all(|byte| {
@@ -1176,7 +1176,7 @@ fn valid_http_method_token(method: &str) -> bool {
         })
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn set_js_property(
     target: &js_sys::Object,
     name: &str,
@@ -1185,7 +1185,7 @@ fn set_js_property(
     js_sys::Reflect::set(target, &name.into(), value).map(|_| ())
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "http-fetch"))]
 fn abort_signal_aborted(signal: &wasm_bindgen::JsValue) -> bool {
     !signal.is_null()
         && !signal.is_undefined()
@@ -1280,6 +1280,7 @@ fn execution_failure(
             message: "synchronous browser run cannot resume a suspended interpreter".into(),
             limit: None,
         }),
+        #[cfg(feature = "http-fetch")]
         zirk_interpreter::ExecutionResult::HttpSuspended { .. } => Some(Failure {
             kind: FailureKind::Capability,
             code: "ZB006".into(),

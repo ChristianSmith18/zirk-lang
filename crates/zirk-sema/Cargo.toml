@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["timezone"]
+timezone = ["dep:chrono-tz"]
+
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
-zirk-runtime-core.workspace = true
+zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 chrono.workspace = true
-chrono-tz.workspace = true
+chrono-tz = { workspace = true, optional = true }
 unicode-segmentation.workspace = true
 regex.workspace = true
 

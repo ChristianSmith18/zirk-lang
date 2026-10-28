@@ -49,6 +49,7 @@ const manifest = {
   compilerVersion: process.env.npm_package_version ?? "0.0.0",
   sourceRevision,
   operations: ["check", "run", "format"],
+  buildProfile: { timezone: false, httpFetch: false },
   limits: {
     sourceBytes: 262144,
     diagnostics: 128,

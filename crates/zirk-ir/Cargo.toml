@@ -5,11 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["timezone"]
+timezone = ["zirk-sema/timezone"]
+
 [dependencies]
 zirk-diagnostics.workspace = true
-zirk-sema.workspace = true
+zirk-sema = { path = "../zirk-sema", default-features = false }
 zirk-ast.workspace = true
-zirk-runtime-core.workspace = true
+zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 sha2.workspace = true
 
 [dev-dependencies]

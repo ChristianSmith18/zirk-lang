@@ -368,6 +368,7 @@ pub enum HeapEntry {
     },
 }
 
+#[cfg(feature = "http")]
 fn decode_interpreter_http_headers(encoded: &[u8]) -> Result<Vec<(String, Vec<u8>)>, i32> {
     use zirk_runtime_core::http_values::{Headers, MAX_HTTP_HEADER_BYTES, MAX_HTTP_HEADER_COUNT};
 
@@ -678,6 +679,7 @@ pub enum OutputDestination {
 
 /// One bounded HTTP request handed from interpreted Zirk to an explicit
 /// embedding host. The interpreter never performs ambient browser I/O.
+#[cfg(feature = "http")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpHostRequest {
     pub id: u64,
@@ -691,6 +693,7 @@ pub struct HttpHostRequest {
 
 /// Buffered response returned by an embedding HTTP host when it resumes a
 /// suspended interpreter request.
+#[cfg(feature = "http")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpHostResponse {
     pub status: u16,
@@ -711,6 +714,7 @@ pub trait InterpreterHost {
     /// Hosts without an explicitly scoped HTTP capability keep the default
     /// denial. Returning `true` suspends execution and exposes the request in
     /// `ExecutionResult::HttpSuspended`.
+    #[cfg(feature = "http")]
     fn begin_http_request(&mut self, _request: &HttpHostRequest) -> bool {
         false
     }
@@ -754,7 +758,9 @@ impl std::io::Read for HostReader<'_> {
 pub struct CapturedHost {
     events: Vec<OutputEvent>,
     cancelled: bool,
+    #[cfg(feature = "http")]
     http_enabled: bool,
+    #[cfg(feature = "http")]
     http_requests: Vec<HttpHostRequest>,
     /// A fixed byte sequence `read_stdin` serves from, for deterministic
     /// `stdin.read_*` interpreter unit tests
@@ -774,6 +780,7 @@ impl CapturedHost {
 
     /// Enables deterministic capture of browser-compatible HTTP requests for
     /// interpreter tests. It performs no network I/O.
+    #[cfg(feature = "http")]
     pub fn with_http_capability() -> Self {
         Self {
             http_enabled: true,
@@ -781,6 +788,7 @@ impl CapturedHost {
         }
     }
 
+    #[cfg(feature = "http")]
     pub fn http_requests(&self) -> &[HttpHostRequest] {
         &self.http_requests
     }
@@ -817,6 +825,7 @@ impl InterpreterHost for CapturedHost {
         self.cancelled
     }
 
+    #[cfg(feature = "http")]
     fn begin_http_request(&mut self, request: &HttpHostRequest) -> bool {
         if !self.http_enabled {
             return false;
@@ -861,6 +870,7 @@ pub enum ExecutionResult {
     /// Execution is paused on an accepted asynchronous HTTP host effect.
     /// Resume it with the matching request id; stale and duplicate responses
     /// are rejected without changing the retained interpreter state.
+    #[cfg(feature = "http")]
     HttpSuspended {
         request: HttpHostRequest,
     },
@@ -1196,6 +1206,7 @@ struct ThrowableInfo {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(feature = "http")]
 struct PendingHttpContinuation {
     request_id: u64,
     frame_index: usize,
@@ -1234,7 +1245,9 @@ pub struct Interpreter<'module> {
     throwables: HashMap<HeapId, ThrowableInfo>,
     trace: Option<TraceState>,
     bundled_standard_sources: HashSet<FileId>,
+    #[cfg(feature = "http")]
     next_http_request_id: u64,
+    #[cfg(feature = "http")]
     pending_http: Option<PendingHttpContinuation>,
 }
 
@@ -1287,7 +1300,9 @@ impl<'module> Interpreter<'module> {
             throwables: HashMap::new(),
             trace: None,
             bundled_standard_sources: HashSet::new(),
+            #[cfg(feature = "http")]
             next_http_request_id: 1,
+            #[cfg(feature = "http")]
             pending_http: None,
         })
     }
@@ -1849,9 +1864,13 @@ impl<'module> Interpreter<'module> {
                 span: None,
             });
         }
+        #[cfg(feature = "http")]
         if self.pending_http.is_some() {
             if host.is_cancelled() {
-                self.pending_http = None;
+                #[cfg(feature = "http")]
+                {
+                    self.pending_http = None;
+                }
                 self.main_paused = false;
                 return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
             }
@@ -1877,7 +1896,10 @@ impl<'module> Interpreter<'module> {
                 });
             };
             if host.is_cancelled() {
-                self.pending_http = None;
+                #[cfg(feature = "http")]
+                {
+                    self.pending_http = None;
+                }
                 return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
             }
             if let Err(failure) = self.push_frame(function, Vec::new(), None) {
@@ -1892,7 +1914,10 @@ impl<'module> Interpreter<'module> {
                 return ExecutionResult::LimitFailure(LimitFailure::Instructions);
             }
             if host.is_cancelled() {
-                self.pending_http = None;
+                #[cfg(feature = "http")]
+                {
+                    self.pending_http = None;
+                }
                 self.main_paused = false;
                 return ExecutionResult::LimitFailure(LimitFailure::Cancelled);
             }
@@ -1918,6 +1943,7 @@ impl<'module> Interpreter<'module> {
 
             if let Some(instruction) = instruction {
                 self.frames[frame_index].instruction += 1;
+                #[cfg(feature = "http")]
                 match self.browser_http_convenience_request(frame_index, &instruction.kind) {
                     Ok(Some((request, enum_id, response_class_id))) => {
                         return self.suspend_http_request(
@@ -1945,6 +1971,18 @@ impl<'module> Interpreter<'module> {
                         });
                     }
                 }
+                #[cfg(not(feature = "http"))]
+                if matches!(
+                    &instruction.kind,
+                    InstKind::HttpGet { .. } | InstKind::HttpRequest { .. }
+                ) {
+                    return ExecutionResult::CapabilityFailure(CapabilityFailure {
+                        code: "ZB006".into(),
+                        message: "HTTP is excluded from this interpreter profile".into(),
+                        span: Some(instruction.span),
+                    });
+                }
+                #[cfg(feature = "http")]
                 if let InstKind::HttpGet {
                     url,
                     cached,
@@ -2010,6 +2048,7 @@ impl<'module> Interpreter<'module> {
                     self.main_paused = true;
                     return ExecutionResult::HttpSuspended { request };
                 }
+                #[cfg(feature = "http")]
                 if let InstKind::HttpRequest {
                     method,
                     url,
@@ -2254,6 +2293,7 @@ impl<'module> Interpreter<'module> {
     /// Completes the one outstanding buffered HTTP request. The request id is
     /// single-use; this keeps late or duplicate browser `fetch` completions
     /// from writing into a different interpreter continuation.
+    #[cfg(feature = "http")]
     pub fn resume_http_response(
         &mut self,
         request_id: u64,
@@ -2309,6 +2349,7 @@ impl<'module> Interpreter<'module> {
     /// Completes the pending request with one of the stable `HTTPError`
     /// discriminants declared in `std.http`. Invalid discriminants are
     /// rejected before changing the continuation.
+    #[cfg(feature = "http")]
     pub fn resume_http_error(
         &mut self,
         request_id: u64,
@@ -2349,6 +2390,7 @@ impl<'module> Interpreter<'module> {
         Ok(())
     }
 
+    #[cfg(feature = "http")]
     fn build_http_response_result(
         &mut self,
         pending: PendingHttpContinuation,
@@ -2452,6 +2494,7 @@ impl<'module> Interpreter<'module> {
         self.build_tagged_outcome(pending.enum_id, 0, 0, Some(response_object), 0, 1)
     }
 
+    #[cfg(feature = "http")]
     fn zero_integer(width: IntWidth) -> Result<Value, ExecutionFault> {
         IntegerValue::from_literal(0, width)
             .map(Value::Int)
@@ -2750,6 +2793,7 @@ impl<'module> Interpreter<'module> {
                     })?;
                 self.allocate_string(text).map(|id| Some(Value::Heap(id)))
             }
+            #[cfg(feature = "http")]
             InstKind::HttpUrlNormalize { value, enum_id } => {
                 let value = self.string_operand(frame_index, *value)?;
                 match zirk_runtime_core::http_values::Url::parse(&value) {
@@ -2796,6 +2840,7 @@ impl<'module> Interpreter<'module> {
                         .map(Some),
                 }
             }
+            #[cfg(feature = "http")]
             InstKind::HttpUrlResolve {
                 base,
                 reference,
@@ -5364,6 +5409,7 @@ impl<'module> Interpreter<'module> {
             .collect()
     }
 
+    #[cfg(feature = "http")]
     fn browser_http_convenience_request(
         &self,
         frame_index: usize,
@@ -5470,6 +5516,7 @@ impl<'module> Interpreter<'module> {
         Ok(Some((request, enum_id, response_class_id)))
     }
 
+    #[cfg(feature = "http")]
     fn suspend_http_request(
         &mut self,
         frame_index: usize,

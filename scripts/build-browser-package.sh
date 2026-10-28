@@ -18,7 +18,7 @@ readonly revision="$(git rev-parse HEAD)"
 ./scripts/ensure-wasm-bindgen.sh
 ./scripts/ensure-wasm-opt.sh
 rustup target add "$target"
-cargo build --locked --release -p zirk-browser --target "$target"
+CARGO_PROFILE_RELEASE_OPT_LEVEL=z cargo build --locked --release -p zirk-browser --no-default-features --target "$target"
 
 if [[ -e "$output" ]]; then
     printf 'refusing to overwrite existing output directory: %s\n' "$output" >&2

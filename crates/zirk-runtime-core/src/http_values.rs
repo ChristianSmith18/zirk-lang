@@ -268,9 +268,11 @@ impl HttpRequestValues {
 }
 
 /// An immutable absolute HTTP or HTTPS URL normalized by the URI parser.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Url(url::Url);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Url {
     pub fn parse(input: &str) -> Result<Self, HttpValueError> {
         let parsed = url::Url::parse(input).map_err(|_| HttpValueError::InvalidUrl)?;
@@ -359,6 +361,166 @@ impl Url {
 
     pub fn fragment(&self) -> Option<&str> {
         self.0.fragment()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Url {
+    serialized: String,
+    origin: String,
+    scheme: String,
+    host: String,
+    port: u16,
+    path: String,
+    query: Option<String>,
+    fragment: Option<String>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Url {
+    fn construct(input: &str, base: Option<&str>) -> Result<wasm_bindgen::JsValue, HttpValueError> {
+        use wasm_bindgen::{JsCast, JsValue};
+        let global = js_sys::global();
+        let constructor = js_sys::Reflect::get(&global, &JsValue::from_str("URL"))
+            .map_err(|_| HttpValueError::InvalidUrl)?
+            .dyn_into::<js_sys::Function>()
+            .map_err(|_| HttpValueError::InvalidUrl)?;
+        let args = js_sys::Array::new();
+        args.push(&JsValue::from_str(input));
+        if let Some(base) = base {
+            args.push(&JsValue::from_str(base));
+        }
+        js_sys::Reflect::construct(&constructor, &args).map_err(|_| HttpValueError::InvalidUrl)
+    }
+
+    fn property(value: &wasm_bindgen::JsValue, name: &str) -> Result<String, HttpValueError> {
+        use wasm_bindgen::JsValue;
+        js_sys::Reflect::get(value, &JsValue::from_str(name))
+            .map_err(|_| HttpValueError::InvalidUrl)?
+            .as_string()
+            .ok_or(HttpValueError::InvalidUrl)
+    }
+
+    fn from_js(value: &wasm_bindgen::JsValue) -> Result<Self, HttpValueError> {
+        let serialized = Self::property(value, "href")?;
+        let origin = Self::property(value, "origin")?;
+        let scheme = Self::property(value, "protocol")?
+            .strip_suffix(':')
+            .ok_or(HttpValueError::InvalidUrl)?
+            .to_owned();
+        if !matches!(scheme.as_str(), "http" | "https") {
+            return Err(HttpValueError::UnsupportedScheme);
+        }
+        let username = Self::property(value, "username")?;
+        let password = Self::property(value, "password")?;
+        if !username.is_empty() || !password.is_empty() {
+            return Err(HttpValueError::UrlCredentialsForbidden);
+        }
+        let host = Self::property(value, "hostname")?;
+        if host.is_empty() {
+            return Err(HttpValueError::InvalidUrl);
+        }
+        let explicit_port = Self::property(value, "port")?;
+        let port = if explicit_port.is_empty() {
+            if scheme == "https" { 443 } else { 80 }
+        } else {
+            explicit_port
+                .parse()
+                .map_err(|_| HttpValueError::InvalidUrl)?
+        };
+        let path = Self::property(value, "pathname")?;
+        let query = Self::property(value, "search")?
+            .strip_prefix('?')
+            .filter(|query| !query.is_empty())
+            .map(str::to_owned);
+        let fragment = Self::property(value, "hash")?
+            .strip_prefix('#')
+            .filter(|fragment| !fragment.is_empty())
+            .map(str::to_owned);
+        Ok(Self {
+            serialized,
+            origin,
+            scheme,
+            host,
+            port,
+            path,
+            query,
+            fragment,
+        })
+    }
+
+    pub fn parse(input: &str) -> Result<Self, HttpValueError> {
+        Self::from_js(&Self::construct(input, None)?)
+    }
+
+    pub fn resolve(&self, reference: &str) -> Result<Self, HttpValueError> {
+        Self::from_js(&Self::construct(reference, Some(&self.serialized))?)
+    }
+
+    pub fn with_query(&self, name: &str, value: &str) -> Self {
+        use wasm_bindgen::JsCast;
+        let Ok(url) = Self::construct(&self.serialized, None) else {
+            return self.clone();
+        };
+        let Ok(params) = js_sys::Reflect::get(&url, &"searchParams".into()) else {
+            return self.clone();
+        };
+        let Ok(append) = js_sys::Reflect::get(&params, &"append".into()) else {
+            return self.clone();
+        };
+        let Ok(append) = append.dyn_into::<js_sys::Function>() else {
+            return self.clone();
+        };
+        if append.call2(&params, &name.into(), &value.into()).is_err() {
+            return self.clone();
+        }
+        Self::from_js(&url).unwrap_or_else(|_| self.clone())
+    }
+
+    pub fn without_query(&self) -> Self {
+        self.with_browser_property("search", "")
+    }
+
+    pub fn with_path(&self, path: &str) -> Self {
+        self.with_browser_property("pathname", path)
+    }
+
+    fn with_browser_property(&self, name: &str, value: &str) -> Self {
+        use wasm_bindgen::JsValue;
+        let Ok(url) = Self::construct(&self.serialized, None) else {
+            return self.clone();
+        };
+        if js_sys::Reflect::set(&url, &JsValue::from_str(name), &JsValue::from_str(value)).is_err()
+        {
+            return self.clone();
+        }
+        Self::from_js(&url).unwrap_or_else(|_| self.clone())
+    }
+
+    pub fn origin(&self) -> String {
+        self.origin.clone()
+    }
+    pub fn as_str(&self) -> &str {
+        &self.serialized
+    }
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+    pub fn fragment(&self) -> Option<&str> {
+        self.fragment.as_deref()
     }
 }
 

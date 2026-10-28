@@ -2727,6 +2727,7 @@ dependencies = [
  "hmac",
  "http",
  "httpdate",
+ "js-sys",
  "mime",
  "num-bigint",
  "num-traits",
@@ -2740,6 +2741,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "url",
+ "wasm-bindgen",
  "zeroize",
 ]
 

@@ -95,8 +95,18 @@ fn validate_const_expression(
             }
             Ok(())
         }
+        #[cfg(feature = "timezone")]
         Expr::Field(field) if !field.safe && expression_name(expression) == "TimeZone.UTC" => {
             Ok(())
+        }
+        #[cfg(not(feature = "timezone"))]
+        Expr::Field(field) if !field.safe && expression_name(expression) == "TimeZone.UTC" => {
+            return Err(ConstEvalError::at(
+                field.span,
+                ConstEvalErrorKind::DisallowedEffect(
+                    "time-zone evaluation is excluded from the browser interpreter",
+                ),
+            ));
         }
         Expr::Call(call) => {
             let callee = expression_name(&call.callee);
@@ -376,7 +386,7 @@ fn evaluate_inner_body(
                 "TimeZone",
                 ConstValue::TimeZone {
                     identifier,
-                    rule_data: chrono_tz::IANA_TZDB_VERSION.into(),
+                    rule_data: iana_tzdb_version().into(),
                 },
             )
         }
@@ -504,6 +514,26 @@ fn evaluate_constructor(
             ));
         }
     };
+    #[cfg(not(feature = "timezone"))]
+    if matches!(
+        constructor.as_str(),
+        "Instant.in_zone"
+            | "TimeZone"
+            | "TimeZone.parse"
+            | "TimeZone.database_version"
+            | "TimeZone.offset_at"
+            | "TimeZone.is_dst_at"
+            | "TimeZone.abbreviation_at"
+            | "ZonedDateTime.parse"
+            | "ZonedDateTime.from_instant"
+    ) {
+        return Err(ConstEvalError::at(
+            call.span,
+            ConstEvalErrorKind::DisallowedEffect(
+                "time-zone evaluation is excluded from the browser interpreter",
+            ),
+        ));
+    }
     if constructor == "Period" {
         let mut components = [0_i32; 4];
         let mut seen = [false; 4];
@@ -684,7 +714,7 @@ fn evaluate_constructor(
                         "TimeZone",
                         ConstValue::TimeZone {
                             identifier,
-                            rule_data: chrono_tz::IANA_TZDB_VERSION.to_string(),
+                            rule_data: iana_tzdb_version().to_string(),
                         },
                     )
                 })
@@ -696,7 +726,7 @@ fn evaluate_constructor(
         },
         ("TimeZone.database_version", []) => Ok(make(
             "String",
-            ConstValue::String(chrono_tz::IANA_TZDB_VERSION.to_string()),
+            ConstValue::String(iana_tzdb_version().to_string()),
         )),
         ("Period.years" | "Period.months" | "Period.weeks" | "Period.days", [value]) => {
             let Some(value) = integer_arg(value).and_then(|v| i32::try_from(v).ok()) else {
@@ -902,28 +932,55 @@ fn expression_name(expression: &Expr) -> String {
 }
 
 fn parse_iana_zone(value: &str) -> Option<String> {
-    use std::str::FromStr;
-    let mut canonical = chrono_tz::Tz::from_str(value).ok()?.name().to_string();
-    let links = include_str!("../data/iana-tzdb-links.txt");
-    let (version_line, mappings) = links.split_once('\n')?;
-    if !version_line.contains(chrono_tz::IANA_TZDB_VERSION) {
-        return None;
+    #[cfg(feature = "timezone")]
+    {
+        use std::str::FromStr;
+        let mut canonical = chrono_tz::Tz::from_str(value).ok()?.name().to_string();
+        let links = include_str!("../data/iana-tzdb-links.txt");
+        let (version_line, mappings) = links.split_once('\n')?;
+        if !version_line.contains(iana_tzdb_version().as_str()) {
+            return None;
+        }
+        for _ in 0..=mappings.lines().count() {
+            let next = mappings.lines().find_map(|line| {
+                let (alias, target) = line.split_once('=')?;
+                (alias == canonical).then_some(target)
+            });
+            let Some(next) = next else {
+                return Some(canonical);
+            };
+            canonical = next.to_string();
+        }
+        None
     }
-    for _ in 0..=mappings.lines().count() {
-        let next = mappings.lines().find_map(|line| {
-            let (alias, target) = line.split_once('=')?;
-            (alias == canonical).then_some(target)
-        });
-        let Some(next) = next else {
-            return Some(canonical);
-        };
-        canonical = next.to_string();
+    #[cfg(not(feature = "timezone"))]
+    {
+        let _ = value;
+        None
     }
-    None
 }
 
 fn rule_data_matches_current(value: &str) -> bool {
-    value == chrono_tz::IANA_TZDB_VERSION
+    #[cfg(feature = "timezone")]
+    {
+        value == iana_tzdb_version()
+    }
+    #[cfg(not(feature = "timezone"))]
+    {
+        let _ = value;
+        false
+    }
+}
+
+fn iana_tzdb_version() -> String {
+    #[cfg(feature = "timezone")]
+    {
+        chrono_tz::IANA_TZDB_VERSION.to_string()
+    }
+    #[cfg(not(feature = "timezone"))]
+    {
+        "unavailable-in-browser".to_string()
+    }
 }
 
 fn parse_period(value: &str) -> Option<ConstValue> {
@@ -963,66 +1020,83 @@ fn parse_period(value: &str) -> Option<ConstValue> {
 }
 
 fn parse_zoned_datetime(value: &str) -> Option<ConstValue> {
-    use chrono::{Offset, TimeZone};
-    use std::str::FromStr;
+    #[cfg(feature = "timezone")]
+    {
+        use chrono::{Offset, TimeZone};
+        use std::str::FromStr;
 
-    let (timestamp, zone) = value.strip_suffix(']')?.rsplit_once('[')?;
-    let identifier = parse_iana_zone(zone)?;
-    let zone = chrono_tz::Tz::from_str(zone).ok()?;
-    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
-    let zone_offset = zone
-        .offset_from_utc_datetime(&parsed.naive_utc())
-        .fix()
-        .local_minus_utc();
-    if zone_offset != parsed.offset().local_minus_utc() {
-        return None;
+        let (timestamp, zone) = value.strip_suffix(']')?.rsplit_once('[')?;
+        let identifier = parse_iana_zone(zone)?;
+        let zone = chrono_tz::Tz::from_str(zone).ok()?;
+        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+        let zone_offset = zone
+            .offset_from_utc_datetime(&parsed.naive_utc())
+            .fix()
+            .local_minus_utc();
+        if zone_offset != parsed.offset().local_minus_utc() {
+            return None;
+        }
+        let instant_nanos = i128::from(parsed.timestamp())
+            .checked_mul(1_000_000_000)?
+            .checked_add(i128::from(parsed.timestamp_subsec_nanos()))?;
+        Some(ConstValue::ZonedDateTime {
+            instant_nanos,
+            identifier,
+            rule_data: iana_tzdb_version().to_string(),
+        })
     }
-    let instant_nanos = i128::from(parsed.timestamp())
-        .checked_mul(1_000_000_000)?
-        .checked_add(i128::from(parsed.timestamp_subsec_nanos()))?;
-    Some(ConstValue::ZonedDateTime {
-        instant_nanos,
-        identifier,
-        rule_data: chrono_tz::IANA_TZDB_VERSION.to_string(),
-    })
+    #[cfg(not(feature = "timezone"))]
+    {
+        let _ = value;
+        None
+    }
 }
 
 fn zone_instant_info(
     zone: &CanonicalConst,
     instant: &CanonicalConst,
 ) -> Option<(i32, bool, String)> {
-    use chrono::{Offset, TimeZone, Utc};
-    use chrono_tz::{OffsetComponents, OffsetName};
-    use std::str::FromStr;
+    #[cfg(feature = "timezone")]
+    {
+        use chrono::{Offset, TimeZone, Utc};
+        use chrono_tz::{OffsetComponents, OffsetName};
+        use std::str::FromStr;
 
-    let ConstValue::TimeZone {
-        identifier,
-        rule_data,
-    } = &zone.value
-    else {
-        return None;
-    };
-    let ConstValue::Instant(instant_nanos) = &instant.value else {
-        return None;
-    };
-    if !rule_data_matches_current(rule_data) {
-        return None;
+        let ConstValue::TimeZone {
+            identifier,
+            rule_data,
+        } = &zone.value
+        else {
+            return None;
+        };
+        let ConstValue::Instant(instant_nanos) = &instant.value else {
+            return None;
+        };
+        if !rule_data_matches_current(rule_data) {
+            return None;
+        }
+        let tz = chrono_tz::Tz::from_str(identifier).ok()?;
+        let seconds = i64::try_from(instant_nanos.div_euclid(1_000_000_000)).ok()?;
+        let nanos = u32::try_from(instant_nanos.rem_euclid(1_000_000_000)).ok()?;
+        let instant = chrono::DateTime::<Utc>::from_timestamp(seconds, nanos)?;
+        let offset = tz.offset_from_utc_datetime(&instant.naive_utc());
+        Some((
+            offset.fix().local_minus_utc(),
+            offset.dst_offset().num_seconds() != 0,
+            offset
+                .abbreviation()
+                .map(str::to_string)
+                .unwrap_or_else(|| format_utc_offset(offset.fix().local_minus_utc())),
+        ))
     }
-    let tz = chrono_tz::Tz::from_str(identifier).ok()?;
-    let seconds = i64::try_from(instant_nanos.div_euclid(1_000_000_000)).ok()?;
-    let nanos = u32::try_from(instant_nanos.rem_euclid(1_000_000_000)).ok()?;
-    let instant = chrono::DateTime::<Utc>::from_timestamp(seconds, nanos)?;
-    let offset = tz.offset_from_utc_datetime(&instant.naive_utc());
-    Some((
-        offset.fix().local_minus_utc(),
-        offset.dst_offset().num_seconds() != 0,
-        offset
-            .abbreviation()
-            .map(str::to_string)
-            .unwrap_or_else(|| format_utc_offset(offset.fix().local_minus_utc())),
-    ))
+    #[cfg(not(feature = "timezone"))]
+    {
+        let _ = (zone, instant);
+        None
+    }
 }
 
+#[cfg(feature = "timezone")]
 fn format_utc_offset(seconds: i32) -> String {
     let sign = if seconds < 0 { '-' } else { '+' };
     let total = seconds.unsigned_abs();

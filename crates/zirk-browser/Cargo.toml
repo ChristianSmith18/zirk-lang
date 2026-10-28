@@ -5,24 +5,29 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["timezone", "http-fetch"]
+timezone = ["zirk-interpreter/timezone", "zirk-ir/timezone", "zirk-sema/timezone"]
+http-fetch = ["zirk-interpreter/http", "dep:wasm-bindgen-futures", "dep:js-sys"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen.workspace = true
-wasm-bindgen-futures.workspace = true
-js-sys.workspace = true
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
-zirk-interpreter.workspace = true
-zirk-ir.workspace = true
+zirk-interpreter = { path = "../zirk-interpreter", default-features = false }
+zirk-ir = { path = "../zirk-ir", default-features = false }
 zirk-lexer.workspace = true
 zirk-parser.workspace = true
-zirk-sema.workspace = true
+zirk-sema = { path = "../zirk-sema", default-features = false }
 zirk-format.workspace = true
-zirk-runtime-core.workspace = true
+zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 
 [dev-dependencies]
 zirk-cli = { workspace = true, features = ["backend"] }

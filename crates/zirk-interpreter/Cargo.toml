@@ -5,8 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["timezone", "http"]
+timezone = ["zirk-ir/timezone"]
+http = ["zirk-runtime-core/http-values"]
+
 [dependencies]
 zirk-diagnostics.workspace = true
-zirk-ir.workspace = true
-zirk-runtime-core.workspace = true
+zirk-ir = { path = "../zirk-ir", default-features = false }
+zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 serde_json.workspace = true
