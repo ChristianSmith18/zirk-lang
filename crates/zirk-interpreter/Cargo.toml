@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["timezone", "http"]
+default = ["timezone", "http", "regex-perf"]
 timezone = ["zirk-ir/timezone"]
 http = ["zirk-runtime-core/http-values"]
+regex-perf = ["zirk-runtime-core/regex-perf"]
 
 [dependencies]
 zirk-diagnostics.workspace = true

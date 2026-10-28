@@ -1,8 +1,8 @@
 {
   "name": "regex",
-  "source": "import { stdout } from std.io;\nfn main(): Void { inmut pattern = re'a+'; stdout.println(pattern.matches(\"baac\")); stdout.println(pattern.replace(\"baac\", \"x\")); }",
+  "source": "import { stdout } from std.io;\nfn main(): Void { inmut pattern = re'a+'; stdout.println(pattern.matches(\"baac\")); stdout.println(pattern.replace(\"baac\", \"x\")); stdout.println(re'\\p{Letter}'.matches(\"λ\")); stdout.println(re'\\p{Greek}'.matches(\"λ\")); stdout.println(re'\\p{Emoji}'.matches(\"🧠\")); stdout.println(re'(?i)k'.matches(\"K\")); }",
   "virtualName": "fixtures/regex.zrk",
-  "expectedOutput": ["true\n", "bxc\n"],
+  "expectedOutput": ["true\n", "bxc\n", "true\n", "true\n", "true\n", "true\n"],
   "completion": "completed",
   "exclusions": []
 }

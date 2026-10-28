@@ -6,9 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [features]
-default = ["native-http", "http-values"]
+default = ["native-http", "http-values", "regex-perf"]
 native-http = ["http-values", "dep:httpdate", "dep:psl2"]
 http-values = ["dep:http", "dep:mime", "dep:sfv", "dep:percent-encoding", "dep:url", "dep:js-sys", "dep:wasm-bindgen"]
+regex-perf = ["regex/perf"]
 
 [dependencies]
 unicode-normalization.workspace = true
