@@ -8622,6 +8622,22 @@ pub const fn terminator_support(terminator: &Terminator) -> BrowserSupport {
 }
 
 pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
+    #[cfg(not(feature = "http"))]
+    if matches!(
+        instruction,
+        InstKind::HttpGet { .. }
+            | InstKind::HttpRequest { .. }
+            | InstKind::HttpHead { .. }
+            | InstKind::HttpQuery { .. }
+            | InstKind::HttpQueryWithContentType { .. }
+            | InstKind::HttpPost { .. }
+            | InstKind::HttpPostJson { .. }
+            | InstKind::HttpPostBytes { .. }
+            | InstKind::HttpUrlNormalize { .. }
+            | InstKind::HttpUrlResolve { .. }
+    ) {
+        return BrowserSupport::Excluded;
+    }
     match instruction {
         InstKind::ConstInt(_)
         | InstKind::ConstBool(_)
