@@ -406,7 +406,7 @@ jobs:
           # mensaje, y sin esto no hay forma de ubicar el punto exacto (#2).
           ZIRK_TRACE: "1"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
         with:
           python-version: "3.14"
