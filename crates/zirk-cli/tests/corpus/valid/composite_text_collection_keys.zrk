@@ -12,18 +12,18 @@ fn main(): Void {
     returned_text[0] = "r";
     stdout.println(map.contains_key(("key", 7)).to_string());
 
-    mut set: Set<Tuple<Char, Int32>> = Set();
+    mut set: Set<Tuple<Char, Int32 >> = Set();
     set.add(('a', 3));
     stdout.println(set.contains(('a', 3)).to_string());
     stdout.println(set.add(('a', 3)).to_string());
     stdout.println(set.length.to_string());
-    mut other: Set<Tuple<Char, Int32>> = Set();
+    mut other: Set<Tuple<Char, Int32 >> = Set();
     other.add(('b', 3));
-    mut combined: Set<Tuple<Char, Int32>> = set.union(other);
+    mut combined: Set<Tuple<Char, Int32 >> = set.union(other);
     stdout.println(combined.length.to_string());
     stdout.println(combined.contains(('b', 3)).to_string());
 
-    mut optional: Set<Tuple<String?, Int32>> = Set();
+    mut optional: Set<Tuple<String?, Int32 >> = Set();
     inmut absent: String? = null;
     inmut present: String? = "nullable";
     inmut equivalent: String? = "nullable" + "";

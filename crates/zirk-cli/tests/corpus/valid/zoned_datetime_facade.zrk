@@ -30,14 +30,18 @@ fn main(): Void {
         Error(_) => stdout.println("IANA zone parse failed");
     };
 
-    stdout.println(match ZonedDateTime.parse("2024-03-10T03:30:00-04:00[America/New_York]") {
+    stdout.println(
+        match ZonedDateTime.parse("2024-03-10T03:30:00-04:00[America/New_York]") {
         Ok(parsed) => parsed.local_datetime.to_iso_string();
         Error(_) => "zoned parse failed";
-    });
-    stdout.println(match ZonedDateTime.parse("2024-03-10T03:30:00-05:00[America/New_York]") {
+    },
+    );
+    stdout.println(
+        match ZonedDateTime.parse("2024-03-10T03:30:00-05:00[America/New_York]") {
         Ok(_) => "accepted offset mismatch";
         Error(_) => "rejected offset mismatch";
-    });
+    },
+    );
 
     match TimeZone.parse("America/New_York") {
         Ok(new_york) => match Instant.parse("2024-03-10T07:30:00Z") {

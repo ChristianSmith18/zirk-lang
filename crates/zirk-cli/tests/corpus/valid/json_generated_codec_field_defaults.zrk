@@ -16,7 +16,10 @@ fn main(): Void {
         inmut missing: Person = JSON.decode<Person>("\{\"name\":\"Ada\"\}", codec);
         stdout.println(missing.nickname);
         stdout.println(JSON.encode(missing, codec));
-        inmut supplied: Person = JSON.decode<Person>("\{\"name\":\"Grace\",\"nickname\":\"Hopper\"\}", codec);
+        inmut supplied: Person = JSON.decode<Person>(
+            "\{\"name\":\"Grace\",\"nickname\":\"Hopper\"\}",
+            codec,
+        );
         stdout.println(supplied.nickname);
         stdout.println(JSON.encode(supplied, codec));
         inmut direct: Person = Person.decode_json(JSON.parse("\{\"name\":\"Lin\",\"nickname\":\"Murray\"}"));

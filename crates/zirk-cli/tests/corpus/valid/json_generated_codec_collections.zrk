@@ -18,7 +18,16 @@ class Batch implements JSONCodec<Batch> {
     note: String?;
     labels: List<String?>;
     status: Status;
-    construct(values: List<Int32>, fixed: Array<Int32>, addresses: List<Address>, tags: Set<Int32>, counts: Map<String, Int32>, note: String?, labels: List<String?>, status: Status) {
+    construct(
+        values: List<Int32>,
+        fixed: Array<Int32>,
+        addresses: List<Address>,
+        tags: Set<Int32>,
+        counts: Map<String, Int32>,
+        note: String?,
+        labels: List<String?>,
+        status: Status,
+    ) {
         this.values = values;
         this.fixed = fixed;
         this.addresses = addresses;
@@ -37,7 +46,16 @@ fn main(): Void {
     mut empty_tags: Set<Int32> = Set();
     mut empty_counts: Map<String, Int32> = Map();
     mut empty_labels: List<String?> = List();
-    inmut codec: Batch = Batch(empty, empty_fixed, empty_addresses, empty_tags, empty_counts, null, empty_labels, Status.Ready);
+    inmut codec: Batch = Batch(
+        empty,
+        empty_fixed,
+        empty_addresses,
+        empty_tags,
+        empty_counts,
+        null,
+        empty_labels,
+        Status.Ready,
+    );
     try {
         inmut document: String = "\{\"values\":[4,9,16],\"fixed\":[2,3],\"addresses\":[\{\"city\":\"Santiago\",\"number\":37\}],\"tags\":[5,8],\"counts\":[[\"apples\",3],[\"pears\",7]],\"note\":null,\"labels\":[\"blue\",null],\"status\":\"Ready\"\}";
         inmut batch: Batch = JSON.decode<Batch>(document, codec);

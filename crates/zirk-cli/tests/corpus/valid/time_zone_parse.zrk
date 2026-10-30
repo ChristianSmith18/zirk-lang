@@ -2,14 +2,18 @@ import { stdout } from std.io;
 
 fn main() {
     stdout.println(TimeZone.database_version());
-    stdout.println((match TimeZone.parse("US/Eastern") {
+    stdout.println(
+        (match TimeZone.parse("US/Eastern") {
         Ok(zone) => zone.canonical_identifier;
         Error(_) => "<error>";
-    }) == "America/New_York");
-    stdout.println((match TimeZone.parse("America/New_York") {
+    }) == "America/New_York",
+    );
+    stdout.println(
+        (match TimeZone.parse("America/New_York") {
         Ok(zone) => zone.canonical_identifier;
         Error(_) => "<error>";
-    }) == "America/New_York");
+    }) == "America/New_York",
+    );
     match TimeZone.parse("America/New_York") {
         Ok(zone) => {
             match Instant.parse("2024-01-15T12:00:00Z") {
@@ -31,19 +35,25 @@ fn main() {
         }
         Error(_) => stdout.println("zone parse failed");
     };
-    stdout.println((match TimeZone.parse("+05:30") {
+    stdout.println(
+        (match TimeZone.parse("+05:30") {
         Ok(zone) => zone.canonical_identifier;
         Error(_) => "<error>";
-    }) == "+05:30");
-    stdout.println(match TimeZone.parse("+24:00") {
+    }) == "+05:30",
+    );
+    stdout.println(
+        match TimeZone.parse("+24:00") {
         Ok(_) => "accepted invalid offset";
         Error(_) => "rejected invalid offset";
-    });
+    },
+    );
 
-    stdout.println(match TimeZone.parse("Mars/Olympus") {
+    stdout.println(
+        match TimeZone.parse("Mars/Olympus") {
         Ok(_) => "accepted unknown zone";
         Error(_) => "rejected unknown zone";
-    });
+    },
+    );
 }
 
 main();

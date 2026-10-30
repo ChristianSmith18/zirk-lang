@@ -48,14 +48,18 @@ fn main(): Void {
         Error(_) => stdout.println("invalid policy rejected");
     };
 
-    stdout.println(match Period.parse("P0D") {
+    stdout.println(
+        match Period.parse("P0D") {
         Ok(zero) => zero.to_iso_string();
         Error(_) => "zero period rejected";
-    });
-    stdout.println(match Period.parse("P0D0D") {
+    },
+    );
+    stdout.println(
+        match Period.parse("P0D0D") {
         Ok(_) => "duplicate period accepted";
         Error(_) => "duplicate period rejected";
-    });
+    },
+    );
 
     match TimeShift.calendar(Period.months(1), 0ns, "reject", "reject") {
         Ok(month_shift) => match ZonedDateTime.parse("2024-01-31T12:00:00-05:00[America/New_York]") {

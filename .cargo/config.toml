@@ -1,0 +1,5 @@
+# The browser-hosted compiler performs recursive parsing and lowering inside
+# WebAssembly. Reserve a larger static stack so valid standard-library programs
+# cannot exhaust wasm's default stack and trap with an out-of-bounds memory error.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=8388608"]

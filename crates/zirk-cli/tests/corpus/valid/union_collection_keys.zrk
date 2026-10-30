@@ -60,9 +60,9 @@ fn main(): Void {
     stdout.println((enum_keys.get(Boxed.Value(boxed_decimal)) ?? 0).to_string());
     stdout.println((enum_keys.get(Boxed.Value(boxed_boolean)) ?? 0).to_string());
 
-    mut nested_values: Map<Int32, Tuple<Numeric, Int32>> = Map();
-    nested_values.set(1, (boxed_boolean, 5));
-    inmut nested_result: Tuple<Numeric, Int32> = nested_values.get(1) ?? (boxed_decimal, 0);
+    mut nested_values: Map<Int32, Tuple<Numeric, Int32 >> = Map();
+    nested_values.set(1,(boxed_boolean, 5));
+    inmut nested_result: Tuple<Numeric, Int32> = nested_values.get(1) ??(boxed_decimal, 0);
     stdout.println(match nested_result[0] { true => "boolean"; _ => "decimal"; });
     stdout.println(nested_result[1].to_string());
 

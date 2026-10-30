@@ -131,7 +131,10 @@ fn main(): Void {
 
     inmut one_item_limit: JSONLimits = JSONLimits(1024, 8, 16, 1, 32);
     try {
-        inmut rejected_output: String = JSON.stringify_with_limits(JSON.parse("[1,2]"), one_item_limit);
+        inmut rejected_output: String = JSON.stringify_with_limits(
+            JSON.parse("[1,2]"),
+            one_item_limit,
+        );
         stdout.println(rejected_output);
     } catch JsonConversionError(_) {
         stdout.println("serialization collection limit caught");
@@ -139,7 +142,10 @@ fn main(): Void {
 
     inmut short_output_limit: JSONLimits = JSONLimits(4, 8, 16, 2, 32);
     try {
-        inmut rejected_document: String = JSON.stringify_with_limits(JSON.parse("[1,2]"), short_output_limit);
+        inmut rejected_document: String = JSON.stringify_with_limits(
+            JSON.parse("[1,2]"),
+            short_output_limit,
+        );
         stdout.println(rejected_document);
     } catch JsonConversionError(_) {
         stdout.println("serialization document limit caught");
@@ -147,7 +153,10 @@ fn main(): Void {
 
     inmut short_string_limit: JSONLimits = JSONLimits(1024, 8, 2, 2, 32);
     try {
-        inmut rejected_string: String = JSON.stringify_with_limits(JSON.parse("\"snow\""), short_string_limit);
+        inmut rejected_string: String = JSON.stringify_with_limits(
+            JSON.parse("\"snow\""),
+            short_string_limit,
+        );
         stdout.println(rejected_string);
     } catch JsonConversionError(_) {
         stdout.println("serialization string limit caught");
@@ -155,7 +164,10 @@ fn main(): Void {
 
     inmut short_number_limit: JSONLimits = JSONLimits(1024, 8, 16, 2, 2);
     try {
-        inmut rejected_number: String = JSON.stringify_with_limits(JSON.parse("123"), short_number_limit);
+        inmut rejected_number: String = JSON.stringify_with_limits(
+            JSON.parse("123"),
+            short_number_limit,
+        );
         stdout.println(rejected_number);
     } catch JsonConversionError(_) {
         stdout.println("serialization number limit caught");
@@ -169,7 +181,10 @@ fn main(): Void {
         stdout.println("hard JSON limit caught");
     }
     try {
-        inmut rejected_output: String = JSON.stringify_with_limits(JSON.parse("null"), excessive_limits);
+        inmut rejected_output: String = JSON.stringify_with_limits(
+            JSON.parse("null"),
+            excessive_limits,
+        );
         stdout.println(rejected_output);
     } catch JsonConversionError(_) {
         stdout.println("hard JSON serialization limit caught");

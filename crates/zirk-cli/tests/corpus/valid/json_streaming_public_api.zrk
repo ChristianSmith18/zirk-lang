@@ -21,11 +21,11 @@ fn main(): Void {
         123 as Byte, 34 as Byte, 120 as Byte, 34 as Byte,
         58 as Byte, 34 as Byte, 195 as Byte
     ]) {
-        Ok(_) => {}
+        Ok(_) => { }
         Error(_) => { stdout.println("byte reader push failed"); return; }
     };
     match byte_reader.push_bytes([169 as Byte, 34 as Byte, 125 as Byte]) {
-        Ok(_) => {}
+        Ok(_) => { }
         Error(_) => { stdout.println("byte reader push failed"); return; }
     };
     match byte_reader.finish() {
@@ -65,7 +65,7 @@ fn main(): Void {
                 JSONStreamChunk.Error(error) => {
                     match error {
                         JSONStreamError.OutputTooLarge =>
-                            stdout.println("writer output limit enforced");
+                        stdout.println("writer output limit enforced");
                         _ => stdout.println("writer output limit failed");
                     }
                 }
@@ -87,7 +87,7 @@ fn main(): Void {
 
     inmut cancelled_reader = JSONStreamReader.create(JSONLimits.defaults());
     match cancelled_reader.push_chunk("[1]") {
-        Ok(_) => {}
+        Ok(_) => { }
         Error(_) => stdout.println("cancelled reader setup failed");
     };
     cancelled_reader.cancel();

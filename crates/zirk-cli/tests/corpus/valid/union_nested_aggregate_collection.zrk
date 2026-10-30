@@ -17,20 +17,22 @@ fn main(): Void {
     mut keys: Set<Composite> = Set();
     inmut payload: Payload = Payload.Text("nested union payload");
     inmut union_value: Item = payload;
-    inmut key: Composite = (union_value, 7);
+    inmut key: Composite =(union_value, 7);
     values.set(key, Envelope.Item(union_value));
     keys.add(key);
 
     inmut fallback: Envelope = Envelope.Empty;
     mut stored: Envelope = values.get(key) ?? fallback;
-    stdout.println(match stored {
+    stdout.println(
+        match stored {
         Envelope.Item(item) => match item {
             Payload.Text(text) => text;
             Payload.Number(number) => number.to_string();
             _ => "integer alternative";
         };
         Envelope.Empty => "missing";
-    });
+    },
+    );
     stdout.println(keys.contains(key).to_string());
 }
 

@@ -15,9 +15,17 @@ fn main(): Void {
 
         inmut reference_schema: String = "\{\"$ref\":\"https://schemas.example.test/name.json\"\}";
         inmut resources: Dynamic = JSON.parse("\{\"https://schemas.example.test/name.json\":\{\"type\":\"string\"\}\}");
-        inmut resolved_valid: List<Dynamic> = JSON.validate_with_resolver(JSON.parse("\"Ada\""), reference_schema, resources);
+        inmut resolved_valid: List<Dynamic> = JSON.validate_with_resolver(
+            JSON.parse("\"Ada\""),
+            reference_schema,
+            resources,
+        );
         stdout.println(resolved_valid.length);
-        inmut resolved_invalid: List<Dynamic> = JSON.validate_with_resolver(JSON.parse("7"), reference_schema, resources);
+        inmut resolved_invalid: List<Dynamic> = JSON.validate_with_resolver(
+            JSON.parse("7"),
+            reference_schema,
+            resources,
+        );
         stdout.println(resolved_invalid.length);
         stdout.println(JSON.stringify(resolved_invalid[0]));
     } catch JsonConversionError(error) {

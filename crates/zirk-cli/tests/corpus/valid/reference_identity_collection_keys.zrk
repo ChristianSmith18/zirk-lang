@@ -45,7 +45,7 @@ fn main(): Void {
     mut generic_first: Box<Int32> = Box(5);
     mut generic_alias: Box<Int32> = generic_first;
     mut generic_distinct: Box<Int32> = Box(5);
-    mut generic_keys: Set<Box<Int32>> = Set();
+    mut generic_keys: Set<Box<Int32 >> = Set();
     stdout.println(generic_keys.add(generic_first).to_string());
     stdout.println(generic_keys.add(generic_alias).to_string());
     stdout.println(generic_keys.add(generic_distinct).to_string());
@@ -58,7 +58,7 @@ fn main(): Void {
     stdout.println((generic_values.get(generic_alias) ?? 0).to_string());
     stdout.println(generic_values.contains_key(generic_distinct).to_string());
 
-    mut enum_keys: Set<GenericKey<Int32>> = Set();
+    mut enum_keys: Set<GenericKey<Int32 >> = Set();
     stdout.println(enum_keys.add(GenericKey.Value(7)).to_string());
     stdout.println(enum_keys.add(GenericKey.Value(7)).to_string());
     stdout.println(enum_keys.add(GenericKey.Value(8)).to_string());
