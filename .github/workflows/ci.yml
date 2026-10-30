@@ -425,7 +425,8 @@ jobs:
         if: inputs.native_advanced_matrix == true
         shell: bash
         run: |
-          cargo build -p zirk-cli -p zirk-runtime -p zirk-browser --example interp_repro
+          cargo build --workspace
+          cargo build -p zirk-browser --example interp_repro
           cargo test -p zirk-cli --test advanced_type_target_emission -- --test-threads=1
           cargo test -p zirk-codegen-llvm --test emission advanced_type_corpus_emits_for_all_nine_targets -- --exact --test-threads=1
           cargo test -p zirk-codegen-llvm --test emission float128_runtime_helper_calls_emit_for_all_nine_targets -- --exact --test-threads=1
