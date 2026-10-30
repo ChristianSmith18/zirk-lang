@@ -101,13 +101,13 @@ jobs:
             || (inputs.platform_filter == 'auto'
               && inputs.test_filter == ''
               && inputs.runtime_test_filter == ''))
-          && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-x86_64","runner":"macos-15-intel"},{"name":"macos-aarch64","runner":"macos-14"}]}'
+          && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-x86_64","runner":"macos-15-intel"},{"name":"macos-aarch64","runner":"macos-15"}]}'
           || (inputs.platform_filter == 'linux-x86_64'
             && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"}]}')
           || (inputs.platform_filter == 'linux-aarch64'
             && '{"include":[{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"}]}')
           || (inputs.platform_filter == 'macos-aarch64'
-            && '{"include":[{"name":"macos-aarch64","runner":"macos-14"}]}')
+            && '{"include":[{"name":"macos-aarch64","runner":"macos-15"}]}')
           || (inputs.platform_filter == 'macos-x86_64'
             && '{"include":[{"name":"macos-x86_64","runner":"macos-15-intel"}]}')
           || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}'
