@@ -1,0 +1,160 @@
+name: Advanced data native matrix
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  LLVM_VERSION: "20"
+  LLVM_FULL_VERSION: "20.1.8"
+
+jobs:
+  advanced-data:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - name: windows-x86_64
+            runner: windows-latest
+          - name: macos-x86_64
+            runner: macos-15-intel
+          - name: macos-aarch64
+            runner: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: Install LLVM (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "${LLVM_VERSION}"
+          sudo apt-get install -y "llvm-${LLVM_VERSION}-dev" "libpolly-${LLVM_VERSION}-dev" "lld-${LLVM_VERSION}"
+          echo "LLVM_SYS_201_PREFIX=/usr/lib/llvm-${LLVM_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install "llvm@${LLVM_VERSION}" "lld@${LLVM_VERSION}"
+          echo "LLVM_SYS_201_PREFIX=$(brew --prefix llvm@${LLVM_VERSION})" >> "$GITHUB_ENV"
+
+      - name: Cache LLVM (Windows)
+        if: runner.os == 'Windows'
+        id: cache-llvm-windows
+        uses: actions/cache@v4
+        with:
+          path: C:\LLVM
+          key: llvm-${{ env.LLVM_FULL_VERSION }}-windows-x86_64-inkwell
+
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows' && steps.cache-llvm-windows.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "LLVM-$env:LLVM_FULL_VERSION-win64.7z"
+          $url = "https://github.com/TyrsDev/llvm-package-windows/releases/download/v$env:LLVM_FULL_VERSION/$archive"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          7z x $archive -oC:\extracted -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+          if (Test-Path C:\extracted\bin\llvm-config.exe) {
+            $source = 'C:\extracted'
+          } else {
+            $directory = Get-ChildItem -Path C:\extracted -Directory | Select-Object -First 1
+            if (-not $directory) { throw 'LLVM archive has an unexpected layout' }
+            $source = $directory.FullName
+          }
+          New-Item -ItemType Directory -Force -Path C:\LLVM | Out-Null
+          Move-Item -Path "$source\*" -Destination C:\LLVM -Force
+          if (-not (Test-Path C:\LLVM\bin\llvm-config.exe)) { throw 'LLVM installation is incomplete' }
+
+      - name: Set LLVM prefix (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"LLVM_SYS_201_PREFIX=C:/LLVM" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
+
+      - name: Verify LLVM
+        shell: bash
+        run: |
+          "$LLVM_SYS_201_PREFIX/bin/llvm-config" --version
+          test -d "$LLVM_SYS_201_PREFIX/lib"
+
+      - name: Prepare MSVC linker environment (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstall) { throw 'No Visual Studio installation with x64 C++ tools was found.' }
+          $vcvars = Join-Path $vsInstall 'VC/Auxiliary/Build/vcvars64.bat'
+          $toolchain = & cmd.exe /d /s /c "call `"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw 'vcvars64.bat failed' }
+          $required = @('INCLUDE','LIB','LIBPATH','VSINSTALLDIR','VCINSTALLDIR','VCIDEInstallDir','VCToolsInstallDir','VCToolsVersion','WindowsSdkDir','UniversalCRTSdkDir','UCRTVersion','VisualStudioVersion','VSCMD_VER','VSCMD_ARG_HOST_ARCH','VSCMD_ARG_TGT_ARCH','VSCMD_ARG_app_plat','DevEnvDir')
+          foreach ($line in $toolchain) {
+            $separator = $line.IndexOf('=')
+            if ($separator -le 0) { continue }
+            $name = $line.Substring(0, $separator)
+            if ($required -contains $name) {
+              $value = $line.Substring($separator + 1)
+              "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Set-Item -Path "Env:$name" -Value $value
+            }
+          }
+          $msvcBin = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64'
+          $msvcLinker = Join-Path $msvcBin 'link.exe'
+          if (-not (Test-Path $msvcLinker)) { throw 'MSVC linker was not found' }
+          "$msvcBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$msvcLinker" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: advanced-${{ matrix.name }}
+
+      - name: Build native compiler and runtime
+        run: cargo build --workspace
+
+      - name: Build browser interpreter harness
+        run: cargo build -p zirk-browser --example interp_repro
+
+      - name: Run advanced data evidence
+        shell: bash
+        run: |
+          cargo test -p zirk-cli --test advanced_type_target_emission -- --test-threads=1
+          cargo test -p zirk-codegen-llvm --test emission advanced_type_corpus_emits_for_all_nine_targets -- --exact --test-threads=1
+          cargo test -p zirk-codegen-llvm --test emission float128_runtime_helper_calls_emit_for_all_nine_targets -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity generic -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end generic_function -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity collection -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity structural_intersection_view_keeps_identity_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity class_contract_intersection_view_keeps_identity_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity float128 -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity union -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end heterogeneous_union_ -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end clone_ -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end map_stored_union_payload_survives_forced_gc -- --exact --test-threads=1
+          cargo test -p zirk-cli --test end_to_end nested_union_enum_tuple_collection_keys_survive_forced_gc -- --exact --test-threads=1
+          cargo test -p zirk-cli --test end_to_end managed_union_elements_survive_forced_gc_in_ordered_sequences -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity instant_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity time_zone_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity zoned_datetime_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity local_zone_resolution_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity localized_temporal -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity localized_zoned_temporal -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity tagged_time_shifts -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity period_construction_parsing_and_formatting_match_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-runtime-core --lib locale::tests -- --test-threads=1
+          cargo test -p zirk-runtime-core --lib zoned_temporal::tests -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity contract_sealing_missing_reads_and_class_properties_match_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test end_to_end dynamic_object_properties_read_write_and_raise_catchable_missing_errors -- --exact --test-threads=1
