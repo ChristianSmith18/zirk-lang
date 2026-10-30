@@ -28,8 +28,8 @@ on:
       native_advanced_matrix:
         description: Run the focused advanced-data native matrix without unrelated workspace gates
         required: false
-        default: false
-        type: boolean
+        default: 'false'
+        type: string
       platform_filter:
         description: Native runner selection for focused diagnostics
         required: false
@@ -49,7 +49,7 @@ on:
 concurrency:
   # Keep focused workflow_dispatch diagnostics independent from the full push
   # matrix so native platform failures can be isolated without waiting for it.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.test_filter || inputs.runtime_test_filter || (inputs.native_advanced_matrix && 'advanced') || 'full' }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.test_filter || inputs.runtime_test_filter || (inputs.native_advanced_matrix == 'true' && 'advanced') || 'full' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -64,7 +64,7 @@ jobs:
   browser-wasm-fetch:
     name: browser-wasm-fetch
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true')
+    if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true')
     steps:
       - uses: actions/checkout@v4
 
@@ -103,7 +103,7 @@ jobs:
         ${{ fromJSON(
           (github.event_name != 'workflow_dispatch'
             || inputs.platform_filter == 'all'
-            || format('{0}', inputs.native_advanced_matrix) == 'true'
+            || inputs.native_advanced_matrix == 'true'
             || (inputs.platform_filter == 'auto'
               && inputs.test_filter == ''
               && inputs.runtime_test_filter == ''))
@@ -233,7 +233,7 @@ jobs:
           key: ${{ matrix.name }}
 
       - name: Check dependency licenses
-        if: matrix.name == 'linux-x86_64' && inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: matrix.name == 'linux-x86_64' && inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: |
           cargo install --locked --version 0.20.2 cargo-deny
           cargo-deny check licenses
@@ -243,7 +243,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Build
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: cargo build --workspace
 
       # A permission-isolation E2E clears the child process environment. Restore
@@ -284,7 +284,7 @@ jobs:
           if ($resolvedLinker -ne $msvcLinker) { throw "Expected MSVC linker '$msvcLinker', resolved '$resolvedLinker'" }
 
       - name: Native filesystem conformance
-        if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true')
+        if: github.event_name != 'workflow_dispatch' || (inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true')
         shell: bash
         run: |
           cargo test -p zirk-runtime --lib filesystem::tests -- --test-threads=1 --nocapture
@@ -294,7 +294,7 @@ jobs:
       # The full workspace suite below also runs them, but this focused step
       # makes failures attributable and visible before the broader test run.
       - name: GC y managed threads (Windows)
-        if: runner.os == 'Windows' && inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: runner.os == 'Windows' && inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         shell: bash
         run: |
           cargo test -p zirk-runtime --test gc_registered_participant_lifecycle -- --test-threads=1 --nocapture
@@ -309,7 +309,7 @@ jobs:
           cargo test -p zirk-runtime --test optimization_bench mixed_task_and_registered_worker_waiters_keep_fifo_order -- --test-threads=1 --nocapture
 
       - name: Formato canónico
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         shell: bash
         run: ./scripts/check-format.sh
 
@@ -333,7 +333,7 @@ jobs:
       # Run this after native conformance so unrelated workspace lint failures
       # cannot suppress the filesystem security/API evidence on a platform.
       - name: Clippy
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --test-threads=1 no es solo diagnostico: LLVM mantiene estado global de
@@ -382,7 +382,7 @@ jobs:
       # the ordinary workspace suite does not compile or exercise them. Keep
       # their target-specific runtime behavior visible on every native runner.
       - name: Networking and HTTP/3 runtime conformance
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         shell: bash
         run: |
           cargo test -p zirk-runtime --features http3 --lib udp -- --test-threads=1
@@ -396,7 +396,7 @@ jobs:
       # every native ABI runner, including Windows. The full workspace suite
       # below remains authoritative for broader regressions.
       - name: Union ABI and interpreter parity
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         shell: bash
         run: |
           cargo test -p zirk-codegen-llvm --test emission union -- --test-threads=1
@@ -408,7 +408,7 @@ jobs:
       # generic dispatch, collections, intersections, Float128, and enum Clone
       # failures attributable to a family on every native runner.
       - name: Advanced data types native and interpreter parity
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         shell: bash
         run: |
           cargo test -p zirk-cli --test object_engine_parity generic -- --test-threads=1
@@ -422,7 +422,7 @@ jobs:
       # A focused, dispatchable evidence run makes the advanced-type host
       # matrix independently executable when unrelated workspace gates fail.
       - name: Focused advanced data native matrix
-        if: format('{0}', inputs.native_advanced_matrix) == 'true'
+        if: inputs.native_advanced_matrix == 'true'
         shell: bash
         run: |
           cargo build --workspace
@@ -456,7 +456,7 @@ jobs:
           cargo test -p zirk-cli --test end_to_end dynamic_object_properties_read_write_and_raise_catchable_missing_errors -- --exact --test-threads=1
 
       - name: Tests
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: cargo test --workspace -- --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: "1"
@@ -465,16 +465,16 @@ jobs:
           ZIRK_TRACE: "1"
 
       - uses: actions/setup-python@v5
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         with:
           python-version: "3.14"
 
       - name: Install pinned independent HTTP/3 peer
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: python -m pip install --disable-pip-version-check -r scripts/requirements-http3-interop.txt
 
       - name: Public HTTP/3 WebSocket interoperability
-        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && format('{0}', inputs.native_advanced_matrix) != 'true'
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != 'true'
         run: python scripts/test-http3-websocket-public-api.py
 
       - name: Upload focused native crash dumps (Windows)
