@@ -440,11 +440,16 @@ jobs:
           cargo test -p zirk-cli --test end_to_end map_stored_union_payload_survives_forced_gc -- --exact --test-threads=1
           cargo test -p zirk-cli --test end_to_end nested_union_enum_tuple_collection_keys_survive_forced_gc -- --exact --test-threads=1
           cargo test -p zirk-cli --test end_to_end managed_union_elements_survive_forced_gc_in_ordered_sequences -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity instant_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity time_zone_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity zoned_datetime_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity local_zone_resolution_ -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity localized_temporal -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity localized_zoned_temporal -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity tagged_time_shifts -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity period_construction_parsing_and_formatting_match_across_engines -- --exact --test-threads=1
-          cargo test -p zirk-cli --test object_engine_parity generated_json_codec -- --test-threads=1
-          cargo test -p zirk-cli --test end_to_end generated_json_codec -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity contract_sealing_missing_reads_and_class_properties_match_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test end_to_end dynamic_object_properties_read_write_and_raise_catchable_missing_errors -- --exact --test-threads=1
 
       - name: Tests
         if: inputs.test_filter == '' && inputs.runtime_test_filter == '' && inputs.native_advanced_matrix != true
