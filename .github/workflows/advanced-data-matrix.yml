@@ -1,6 +1,8 @@
 name: Advanced data native matrix
 
 on:
+  push:
+    branches: ['codex/**']
   workflow_dispatch:
 
 env:
