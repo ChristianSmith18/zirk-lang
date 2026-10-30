@@ -449,6 +449,8 @@ jobs:
           cargo test -p zirk-cli --test object_engine_parity localized_zoned_temporal -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity tagged_time_shifts -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity period_construction_parsing_and_formatting_match_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-runtime-core --lib locale::tests -- --test-threads=1
+          cargo test -p zirk-runtime-core --lib zoned_temporal::tests -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity contract_sealing_missing_reads_and_class_properties_match_across_engines -- --exact --test-threads=1
           cargo test -p zirk-cli --test end_to_end dynamic_object_properties_read_write_and_raise_catchable_missing_errors -- --exact --test-threads=1
 
