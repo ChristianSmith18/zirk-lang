@@ -5,6 +5,8 @@ current checker/runtime behavior after recursive Map/Set union-root tracing. It 
 not a claim that every admitted row is already lawful; rows marked incomplete
 are gaps to close before they can be part of the final supported matrix.
 
+> **Final evidence update (2026-10-30):** The hosted five-host run [41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962) passed the selected recursive Map/Set Hash/Equal, text snapshots, Decimal?, union keys/elements, and managed-payload GC fixtures on all five native hosts. The nine-triple evidence in `target-evidence-matrix.md` is object emission only. The row-level “open” notes below remain scoped to untested compositions and generated/exhaustive coverage; they do not mean the named cross-host gate is pending.
+
 ## Current checker admission
 
 | Family | `Map` key / `Set` element | `Map` value | Current representation and behavior | Current gap |
@@ -116,4 +118,4 @@ The following focused commands passed on the current macOS arm64 worktree:
 These checks establish Decimal scale and boundary equivalence, nullable Decimal
 Map/Set parity, and semantic rejection of unsupported collection families.
 Task 1.2 also records the generated Decimal arithmetic parity and 512-case
-equality-implies-equal-hash commands. Cross-target evidence remains in section 8.
+equality-implies-equal-hash commands. The named five-host evidence is recorded in section 8 and `target-evidence-matrix.md`; broader recursive combinations remain untested.

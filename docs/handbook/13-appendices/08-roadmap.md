@@ -18,8 +18,9 @@ removed; use `Object`/tuples and `contract`. The active
 implementation and interpreter/native cases for generic enum dispatch,
 user-defined generic bodies and defaults, trait defaults under generic
 substitution, and nested contract arguments (`Container<Box<T>>`). The
-cross-host execution matrix for those cases remains open; see the active
-change's task and evidence matrices before treating this work as complete.
+the named generic, Clone, collection, union/intersection, Float128, temporal, and
+JSON cases passed on all five hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). The evidence matrix
+records target-emission separately from host execution.
 
 The native type-algebra slice adds recursive n-ary unions/intersections,
 canonical singleton and constant types, generic aliases and erased type

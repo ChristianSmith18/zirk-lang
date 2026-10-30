@@ -593,8 +593,8 @@ distinction changes who implements them:
   ICU4X 2.4.0 / CLDR 49. Partial `TimeZone`/`ZonedDateTime` language APIs now
   cover parsing, instant projection/reprojection, local projection, instant
   comparison, and explicit local-time resolution. `Period` construction/ISO parsing and tagged `TimeShift` clock/calendar
-  application now have local native/interpreter evidence. Localized parsing
-  and cross-host evidence remain pending. `std.time`
+  application now have local native/interpreter evidence. Localized parsing is delivered, and named cross-host temporal evidence passed
+  on all five native hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). `std.time`
   re-exports all nine compiler-owned temporal type aliases.
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>`,
   `Deque<T>`, `Queue<T>`, `Stack<T>`, and `PriorityQueue<T>` — are native

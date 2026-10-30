@@ -167,16 +167,17 @@ Current high-impact delivery limits include:
   enum payloads. Generic enum dispatch, user-defined generic bodies/defaults,
   substituted trait defaults, and nested generic contract applications now
   have local semantic/lowering/interpreter/native cases; their complete
-  cross-host evidence remains open. Unsupported lowering combinations must
+  the named five-host cases passed in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). Unsupported lowering combinations must
   diagnose at the documented source or pre-backend stage. See the feature
-  catalog for host, target, and verification scope; a focused host test does
-  not establish the full target matrix.
+  catalog for host, target, and verification scope; those named fixtures do not
+  establish every theoretical type combination.
 - The core tuple, Array/List/Range, String/Char/Regex, and sequence collection
   families are delivered for their scoped contracts. `Deque`, `Queue`, `Stack`,
   and `PriorityQueue` are implemented with native/interpreter parity. Map/Set
   still reject aggregate key/element combinations without canonical
-  `Hash`/`Equal` derivation, and the cross-target equality/lowering/GC matrix is
-  still incomplete. The `std.collections` source facade is importable; its
+  `Hash`/`Equal` derivation. Named equality/lowering/GC cases passed on all five
+  hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962); the exhaustive recursive capability matrix remains
+  incomplete. The `std.collections` source facade is importable; its
   current exports and the distinction between facade APIs and compiler/runtime
   implementations are documented in the collection chapter. See the feature
   catalog for exact supported combinations and host evidence.
@@ -188,7 +189,7 @@ Current high-impact delivery limits include:
   components and ISO operations, plus the unified clock/calendar `TimeShift`,
   are implemented locally; direct `Date`/`DateTime ± Period`, localized
   parsing, and the complete
-  cross-host/time-zone matrix remain in progress. See the temporal chapters and
+  named cross-host temporal cases passed in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). See the temporal chapters and
   feature catalog for the tested surface.
 - Exact `Decimal` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full

@@ -32,7 +32,7 @@ second = 8; // first stays 7
 locale family is still partial: its implemented IANA/fixed-offset operations,
 localized formatting and parsing, and DST policies are listed in the
 [temporal status reference](../../11-reference/12-feature-status.md); the
-cross-host execution matrix remains open. Transformations return new values
+the named cross-host cases passed in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). Transformations return new values
 where those APIs exist.
 
 Tuples and enums are also value aggregates. Their value equality and cloning

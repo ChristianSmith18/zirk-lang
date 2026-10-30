@@ -53,7 +53,7 @@ main();
 The runtime and browser interpreter share the pinned rules. Local native and
 interpreter parity covers aliases, invalid identifiers, fixed offsets,
 seasonal transitions, abbreviations, and local projection. The full supported
-native-host matrix remains open; local evidence does not establish host parity.
+the named native-host parity cases passed on all five hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962); untested zone and locale combinations remain outside that corpus.
 
 ---
 

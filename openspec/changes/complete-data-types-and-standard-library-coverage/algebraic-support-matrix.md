@@ -5,6 +5,8 @@ This is the current-stage matrix for task 1.3, not the final delivery matrix.
 portable layout alone is not runtime evidence. Rows classified as pending
 remain admitted by the current checker but must not be advertised as complete.
 
+> **Final evidence update (2026-10-30):** The five-host execution and nine-triple object-emission gate was completed by hosted workflow [41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962), on tested revision `0b6284e29041f515c1f7030310084dbfac1a292a`. The advanced corpus covers the supported union/intersection, narrowing, collection, error/cleanup, GC, and unsupported-diagnostic fixtures selected for this change. Rows below that say “pending” or “not verified” are the frozen composition-level audit: they remain limitations only where the named composition is outside the tested corpus or explicitly rejected. The hosted matrix does not claim exhaustive coverage of every theoretical aggregate or GC interleaving. See `target-evidence-matrix.md`.
+
 ## Union alternatives and positions
 
 | Composition or position | Semantic analysis | Portable IR/lowering | Interpreter/native evidence | Current disposition |
@@ -80,10 +82,10 @@ known gap to close in tasks 3.2–3.6; it is not a claim of working parity.
 - Native ABI and branch dispatch: `crates/zirk-codegen-llvm/src/emit.rs` (`UnionInject`, `UnionProject`, `UnionDispatch`).
 - Existing native cases: `crates/zirk-cli/tests/end_to_end.rs` (`scalar_singleton_unions_match_and_execute_on_native_backend`, `structural_union_discriminants_narrow_before_field_reads`, `structural_union_three_alternatives_narrow_across_else_if`, `structural_union_mixed_with_scalar_preserves_tag_and_managed_payload`, `structural_intersection_object_literal_keeps_one_object_identity`, `captured_structural_union_payload_survives_forced_gc`).
 
-The final delivery matrix must replace every “pending” row with executable
-interpreter/native/target/GC evidence or change it to a verified semantic
-diagnostic. An admitted row with missing active-reference tracing is a defect,
-not support.
+The final delivery evidence update above supersedes the old target-pending
+statements for the selected corpus. Any row still marked pending/not verified
+remains a composition-level gap or a required early diagnostic; an admitted row
+with missing active-reference tracing is a defect, not support.
 
 ### Additional local Linux aarch64 execution evidence
 
@@ -95,4 +97,4 @@ suite (68 passed), plus the focused
 `managed_union_elements_survive_forced_gc_in_ordered_sequences` end-to-end
 tests (one passed each). This confirms the named Map/Set and ordered-sequence
 GC regressions on a second operating system. It is local container evidence,
-not a hosted runner result; the five-host CI requirement remains in task 8.1.
+the run is the hosted five-host CI evidence recorded in `target-evidence-matrix.md`; local container results are supplementary.

@@ -27,8 +27,7 @@ is checked against the parameter's `from` constraint. Defaults on the type
 parameters of a user-defined generic function support trailing defaults and
 are checked at declaration and call sites. Generic function bodies, defaults,
 enum dispatch, trait-default substitution, and nested contract applications
-have local interpreter/native cases; their complete multi-host execution
-matrix remains open. Evidence: [generic native/interpreter parity](../../../../crates/zirk-cli/tests/object_engine_parity.rs), [generic function/Clone end-to-end tests](../../../../crates/zirk-cli/tests/end_to_end.rs), and [generic semantic checks](../../../../crates/zirk-sema/tests/typing.rs). Constructors reuse the type's parameters rather than
+have local interpreter/native cases; their named five-host cases passed in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). Evidence: [generic native/interpreter parity](../../../../crates/zirk-cli/tests/object_engine_parity.rs), [generic function/Clone end-to-end tests](../../../../crates/zirk-cli/tests/end_to_end.rs), and [generic semantic checks](../../../../crates/zirk-sema/tests/typing.rs). Constructors reuse the type's parameters rather than
 declaring an independent generic list; use a generic factory when construction
 needs new type variables.
 

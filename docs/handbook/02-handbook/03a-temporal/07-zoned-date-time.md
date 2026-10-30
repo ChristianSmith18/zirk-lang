@@ -74,7 +74,7 @@ instant. Applying the clock form produced by `Time ± Duration` returns
 zoned formatting remain pending.
 Native/interpreter local parity covers parsing, offset validation, projection,
 zone changes, overlap selection, gap shifting, and rejection behavior. The
-supported native-host matrix remains open.
+named temporal host cases passed on all five native hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962).
 
 ---
 

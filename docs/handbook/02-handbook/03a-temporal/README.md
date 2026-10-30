@@ -37,8 +37,9 @@ composition, operators, parsing, DST and errors across the family.
 > parsing, projection, instant-preserving conversion, and explicit local-time
 > resolution. `Period` exposes construction, components, ISO parsing, and
 > formatting; unified `TimeShift` exposes clock and calendar forms. Localized
-> civil parsing is implemented; cross-host evidence and direct `Date`/`DateTime`
-> `Period` operators remain open. The chapters below mark delivered and
+> civil parsing is implemented; the named zone/locale/Period/TimeShift cases
+> passed on all five native hosts in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962). Direct `Date`/`DateTime` `Period`
+> operators remain open. The chapters below mark delivered and
 > remaining operations individually.
 
 1. [Choosing a Temporal Type](./01-choosing-a-temporal-type.md)

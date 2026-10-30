@@ -37,7 +37,7 @@ offsets, winter/summer offsets, DST, abbreviations, instant-preserving
 reprojection, RFC 3339 offset validation, overlap selection, gap shifting, and
 default rejection. Typed subtypes include `AmbiguousLocalTimeError`,
 `NonexistentLocalTimeError`, and `InvalidDstPolicyError`; local parity does not
-close the supported native-host matrix.
+cover the named native-host cases in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962).
 
 ## Repeated local time
 

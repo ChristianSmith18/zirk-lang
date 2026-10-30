@@ -1,8 +1,12 @@
 # Generic Dispatch and Target Evidence Matrix
 
-This is the frozen current-stage matrix for task 1.4. A source fixture or a
-passing native host test does not imply evidence for another compiler stage,
-another target, or another generic composition.
+This is the frozen implementation-stage matrix for task 1.4. Its “not yet
+recorded” entries describe the baseline at freeze time. A source fixture or a
+passing host test does not imply evidence for another stage, target, or generic
+composition. The final hosted evidence update below supersedes only the named
+host and object-emission status; it does not assert untested compositions.
+
+> **Final evidence update (2026-10-30):** The historical rows below describe evidence as it stood when the matrix was frozen. The advanced fixtures subsequently ran in hosted workflow [41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962) on Linux x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64. The hosted block passed generic enum dispatch, generic functions/defaults, trait and contract substitution, nested contracts, and enum Clone cases on every host. The same run passed advanced-corpus object emission on all nine configured triples. See `target-evidence-matrix.md` for the revision, stage boundaries, and exact target list. This closes the named host/target gate, not every possible generic composition.
 
 ## Feature-stage matrix
 
@@ -36,8 +40,8 @@ The existing `generic_enum_*` fixtures establish selected native source
 behavior, not interpreter parity or nine-target object support. The focused
 generic-contract workflow cited in `docs/init/ZIRK_FEATURE_STATUS.md` covers
 four CI hosts and a specific constrained method case, not all generic enum,
-trait-default, or nested-contract cases. Task 8.1/8.2 must add the advanced
-corpus to the target pipelines and report every stage independently. No
+trait-default, or nested-contract cases. The advanced corpus has since run in the hosted target workflow documented in
+`target-evidence-matrix.md`; that evidence closes the named host/target gate. No
 unverified generic composition is promoted to complete by this matrix.
 
 ## Focused verification recorded during implementation
@@ -62,8 +66,8 @@ Generic trait-default focused verification on macOS arm64:
 
 The parity fixture covers generic receiver properties, constrained `clone`,
 direct and contract-typed dispatch, and nested `List<T>` parameters/results for
-both `Int32` and `String`. This is focused host evidence only; target coverage
-remains open under tasks 4.6, 8.1, and 8.2.
+both `Int32` and `String`. This is focused local evidence; hosted cross-target evidence for the named
+composition is recorded under run 41114248962 and in `target-evidence-matrix.md`.
 
 Nested generic-contract focused verification on macOS arm64:
 

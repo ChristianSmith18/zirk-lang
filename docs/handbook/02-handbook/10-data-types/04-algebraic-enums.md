@@ -79,7 +79,7 @@ satisfies the corresponding contract. Payload extraction is legal only inside
 Variants carrying zero, one, or several typed payloads; exactly one variant at
 a time. Generic algebraic enums support construction and dispatch across
 distinct and nested instantiations in local interpreter/native cases. The
-complete multi-host execution matrix remains open; see the
+named multi-host execution cases passed in [run 41114248962](https://github.com/ChristianSmith18/zirk-lang/actions/runs/41114248962); see the
 [feature-status matrix](../../11-reference/12-feature-status.md).
 
 ### Properties
