@@ -21,7 +21,7 @@ The standard library SHALL publish `std.collections` as a stable logical import 
 
 ### Requirement: Extended JSON APIs preserve one bounded ordinary-value model
 
-The bundled `std.json` package SHALL expose generated codecs, configurable bounded parsing and serialization limits, JSON Pointer, RFC 9535 JSONPath, streaming reader and writer operations, pretty output, RFC 8785-compatible canonical output for its supported I-JSON domain, JSON Schema 2020-12 validation, and a separate JSON5 parser. These APIs SHALL materialize ordinary Zirk values and use typed errors; they SHALL NOT introduce an incompatible second public JSON object model. Network retrieval of schemas SHALL NOT occur implicitly. Limits SHALL have safe defaults and hard ceilings, and streaming SHALL report errors without publishing partial success.
+The bundled `std.json` package SHALL expose generated codecs, configurable bounded parsing and serialization limits, JSON Pointer, RFC 9535 JSONPath, synchronous incremental streaming reader and writer operations, pretty output, RFC 8785-compatible canonical output for its supported I-JSON domain, JSON Schema 2020-12 validation, and a separate JSON5 parser. Public streaming calls SHALL NOT require language-level task suspension or `task`/`await`; asynchronous stream adapters are deferred. These APIs SHALL materialize ordinary Zirk values and use typed errors; they SHALL NOT introduce an incompatible second public JSON object model. Network retrieval of schemas SHALL NOT occur implicitly. Limits SHALL have safe defaults and hard ceilings, and streaming SHALL report errors without publishing partial success.
 
 #### Scenario: Generated codec validates a declared type
 
@@ -57,6 +57,11 @@ The bundled `std.json` package SHALL expose generated codecs, configurable bound
 
 - **WHEN** a streaming parse reaches a configured byte, depth, token, or collection limit
 - **THEN** it stops at a documented boundary, returns a typed error, and does not expose a partial document as success
+
+#### Scenario: Public JSON streaming is synchronous
+
+- **WHEN** a caller pushes reader chunks and finishes the document or pulls writer chunks
+- **THEN** each operation completes as a synchronous call without language-level task suspension or `task`/`await`; asynchronous stream adapters remain deferred
 
 #### Scenario: Canonical output rejects out-of-domain numbers
 

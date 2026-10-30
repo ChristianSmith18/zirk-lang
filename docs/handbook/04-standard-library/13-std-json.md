@@ -197,12 +197,14 @@ feeds a bounded one-chunk channel into the parser and retains no second full
 source-document buffer. The public pull `JSONStreamWriter` serializes on a
 worker into a bounded one-chunk channel instead of materializing the serialized
 document. Its output can be consumed by any caller-managed sink; the tested
-filesystem path awaits each async write before pulling the next chunk. Limits,
-cancellation, terminal state, and serialization failures have explicit
-outcomes. The parser still materializes the final JSON value tree, as required
-by the ordinary `Dynamic` API.
+filesystem integration demonstrates that a caller may combine synchronous
+chunk pulls with its own I/O strategy. The JSON reader and writer methods are
+synchronous Zirk calls and do not require `task`/`await`; asynchronous JSON
+stream adapters are deferred. Limits, cancellation, terminal state, and
+serialization failures have explicit outcomes. The parser still materializes
+the final JSON value tree, as required by the ordinary `Dynamic` API.
 
-Executable evidence: [native/interpreter JSON parity](../../../crates/zirk-cli/tests/object_engine_parity.rs), [JSON corpus fixture](../../../crates/zirk-cli/tests/corpus/valid/json_stringify_dynamic.zrk), [public streaming fixture](../../../crates/zirk-cli/tests/corpus/valid/json_streaming_public_api.zrk), [asynchronous filesystem backpressure test](../../../crates/zirk-cli/tests/end_to_end.rs), and [runtime-core JSON conformance and stream tests](../../../crates/zirk-runtime-core/src/json.rs).
+Executable evidence: [native/interpreter JSON parity](../../../crates/zirk-cli/tests/object_engine_parity.rs), [JSON corpus fixture](../../../crates/zirk-cli/tests/corpus/valid/json_stringify_dynamic.zrk), [public synchronous streaming fixture](../../../crates/zirk-cli/tests/corpus/valid/json_streaming_public_api.zrk), and [runtime-core JSON conformance and stream tests](../../../crates/zirk-runtime-core/src/json.rs).
 
 ---
 
