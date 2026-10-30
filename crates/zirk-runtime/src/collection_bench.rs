@@ -103,6 +103,10 @@ fn collection_operation_costs() {
                 WORD,
                 std::ptr::null(),
                 0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
                 false,
                 WORD,
             )

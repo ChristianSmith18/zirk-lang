@@ -27,10 +27,13 @@ second = 8; // first stays 7
 
 ## Native value types
 
-`Date`, `Time`, `DateTime`, and `Duration` are delivered immutable temporal
-values. `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift`, and
-supporting zone-aware APIs are specified but not delivered. Transformations
-return new values where those APIs exist.
+`Date`, `Time`, `DateTime`, `Duration`, `Instant`, `ZonedDateTime`, `TimeZone`,
+`Period`, and `TimeShift` are delivered immutable temporal values. The zone and
+locale family is still partial: its implemented IANA/fixed-offset operations,
+localized formatting and parsing, and DST policies are listed in the
+[temporal status reference](../../11-reference/12-feature-status.md); the
+cross-host execution matrix remains open. Transformations return new values
+where those APIs exist.
 
 Tuples and enums are also value aggregates. Their value equality and cloning
 follow their declared component capabilities.

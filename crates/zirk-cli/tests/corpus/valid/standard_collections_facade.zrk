@@ -1,0 +1,73 @@
+import { Array, Deque, List, Map, PriorityQueue, Queue, Range, Set, Stack } from std.collections;
+import { stdout } from std.io;
+
+type FacadeList<T = Int32> = List<T>;
+type FacadeArray<T> = Array<T>;
+type FacadeDeque<T> = Deque<T>;
+type FacadeMap<K, V> = Map<K, V>;
+type FacadePriorityQueue<T> = PriorityQueue<T>;
+type FacadeQueue<T> = Queue<T>;
+type FacadeRange<T> = Range<T>;
+type FacadeSet<T> = Set<T>;
+type FacadeStack<T> = Stack<T>;
+
+fn array_to_builtin(value: FacadeArray<Int32>): Array<Int32> { return value; }
+fn array_to_facade(value: Array<Int32>): FacadeArray<Int32> { return value; }
+fn deque_to_builtin(value: FacadeDeque<Int32>): Deque<Int32> { return value; }
+fn deque_to_facade(value: Deque<Int32>): FacadeDeque<Int32> { return value; }
+fn list_to_builtin(value: FacadeList<Int32>): List<Int32> { return value; }
+fn list_to_facade(value: List<Int32>): FacadeList<Int32> { return value; }
+fn map_to_builtin(value: FacadeMap<String, Int32>): Map<String, Int32> { return value; }
+fn map_to_facade(value: Map<String, Int32>): FacadeMap<String, Int32> { return value; }
+fn priority_queue_to_builtin(value: FacadePriorityQueue<Int32>): PriorityQueue<Int32> { return value; }
+fn priority_queue_to_facade(value: PriorityQueue<Int32>): FacadePriorityQueue<Int32> { return value; }
+fn queue_to_builtin(value: FacadeQueue<Int32>): Queue<Int32> { return value; }
+fn queue_to_facade(value: Queue<Int32>): FacadeQueue<Int32> { return value; }
+fn range_to_builtin(value: FacadeRange<Int32>): Range<Int32> { return value; }
+fn range_to_facade(value: Range<Int32>): FacadeRange<Int32> { return value; }
+fn set_to_builtin(value: FacadeSet<Int32>): Set<Int32> { return value; }
+fn set_to_facade(value: Set<Int32>): FacadeSet<Int32> { return value; }
+fn stack_to_builtin(value: FacadeStack<Int32>): Stack<Int32> { return value; }
+fn stack_to_facade(value: Stack<Int32>): FacadeStack<Int32> { return value; }
+
+fn main(): Void {
+    mut array: Array<Int32> = Array(3, 7);
+    stdout.println(array[1]);
+
+    mut values: FacadeList = List();
+    values.add(7);
+    stdout.println(values[0]);
+
+    mut map: Map<String, Int32> = Map();
+    map.set("answer", 42);
+    stdout.println(map.contains_key("answer").to_string());
+
+    mut set: Set<Int32> = Set();
+    set.add(9);
+    stdout.println(set.contains(9).to_string());
+
+    mut deque: Deque<Int32> = Deque();
+    deque.push_back(1);
+    _ = deque.pop_front();
+    stdout.println(deque.length);
+
+    mut queue: Queue<Int32> = Queue();
+    queue.enqueue(2);
+    _ = queue.dequeue();
+    stdout.println(queue.length);
+
+    mut stack: Stack<Int32> = Stack();
+    stack.push(3);
+    _ = stack.pop();
+    stdout.println(stack.length);
+
+    mut priority: PriorityQueue<Int32> = PriorityQueue();
+    priority.enqueue(4);
+    _ = priority.dequeue();
+    stdout.println(priority.length);
+
+    inmut range: Range<Int32> = 0 .. 3;
+    mut total: Int32 = 0;
+    for value in range { total += value; }
+    stdout.println(total);
+}

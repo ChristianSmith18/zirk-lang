@@ -1,0 +1,7 @@
+type TupleUnion = Tuple<Int32, Int32> | Int32;
+type PriorityQueueUnion = PriorityQueue<Int32> | Int32;
+
+fn consume_tuple_union(value: TupleUnion): Void {}
+fn consume_priority_queue_union(value: PriorityQueueUnion): Void {}
+
+fn main(): Void {}

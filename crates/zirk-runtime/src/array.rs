@@ -1,12 +1,30 @@
 //! Runtime helpers for `Array<T>`.
 
 use std::alloc::{Layout, alloc};
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{Mutex, OnceLock};
 
 const WORD: usize = std::mem::size_of::<usize>();
 const HEADER_BYTES: usize = crate::collector::HEADER_BYTES;
 const LENGTH_OFFSET: usize = HEADER_BYTES;
 const DATA_OFFSET: usize = HEADER_BYTES + WORD;
+
+static ARRAY_UNION_LAYOUTS: OnceLock<Mutex<HashMap<usize, Box<[usize]>>>> = OnceLock::new();
+
+fn array_union_layouts() -> &'static Mutex<HashMap<usize, Box<[usize]>>> {
+    ARRAY_UNION_LAYOUTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn release_union_layout(descriptor: *mut c_void) {
+    if descriptor.is_null() {
+        return;
+    }
+    array_union_layouts()
+        .lock()
+        .expect("array union-layout registry poisoned")
+        .remove(&(descriptor as usize));
+}
 
 /// Descriptor for non-reference arrays: no GC fields to trace.
 #[unsafe(no_mangle)]
@@ -114,18 +132,63 @@ pub unsafe extern "C" fn zirk_rt_array_new_with_layout(
     unsafe { array_new_with_offsets(capacity, elem_size, elem_align, offsets) }
 }
 
+/// Allocates an array with tag-aware roots for inline union values.
+///
+/// # Safety
+/// Both metadata tables must remain valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_array_new_with_union_layout(
+    capacity: usize,
+    elem_size: usize,
+    elem_align: usize,
+    offsets: *const usize,
+    offset_count: usize,
+    union_words: *const usize,
+    union_word_count: usize,
+) -> *mut c_void {
+    if offset_count > 0 && offsets.is_null() {
+        crate::failure::fatal("array reference offsets are null");
+    }
+    if union_word_count > 0 && union_words.is_null() {
+        crate::failure::fatal("array union-root metadata is null");
+    }
+    let offsets = if offset_count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(offsets, offset_count) }
+    };
+    let union_words = if union_word_count == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(union_words, union_word_count) }
+    };
+    unsafe {
+        array_new_with_offsets_and_unions(capacity, elem_size, elem_align, offsets, union_words)
+    }
+}
+
 unsafe fn array_new_with_offsets(
     capacity: usize,
     elem_size: usize,
     elem_align: usize,
     offsets: &[usize],
 ) -> *mut c_void {
+    unsafe { array_new_with_offsets_and_unions(capacity, elem_size, elem_align, offsets, &[]) }
+}
+
+unsafe fn array_new_with_offsets_and_unions(
+    capacity: usize,
+    elem_size: usize,
+    elem_align: usize,
+    offsets: &[usize],
+    union_words: &[usize],
+) -> *mut c_void {
     let size = DATA_OFFSET.saturating_add(capacity.saturating_mul(elem_size));
     let align = crate::collector::allocation_align(elem_align);
     let object = unsafe { crate::memory::zirk_rt_alloc(size, align) };
 
-    let descriptor = if !offsets.is_empty() {
-        if capacity == 0 {
+    let descriptor = if !offsets.is_empty() || !union_words.is_empty() {
+        if capacity == 0 && union_words.is_empty() {
             &raw const zirk_rt_array_descriptor as *mut c_void
         } else {
             unsafe { make_descriptor(DATA_OFFSET, elem_size, capacity, offsets) }
@@ -134,8 +197,118 @@ unsafe fn array_new_with_offsets(
         &raw const zirk_rt_array_descriptor as *mut c_void
     };
     unsafe { set_descriptor(object, descriptor) };
+    if !union_words.is_empty() {
+        let mut metadata = Vec::with_capacity(union_words.len() + 1);
+        metadata.push(elem_size);
+        metadata.extend_from_slice(union_words);
+        array_union_layouts()
+            .lock()
+            .expect("array union-layout registry poisoned")
+            .insert(descriptor as usize, metadata.into_boxed_slice());
+    }
     unsafe { write_usize(object, LENGTH_OFFSET, capacity) };
     object
+}
+
+/// Traces tag-aware union payloads in an array's inline element storage.
+pub(crate) unsafe fn mark_union_entries(
+    array: *mut c_void,
+    descriptor: *mut c_void,
+    mark: &mut dyn FnMut(*mut c_void),
+) {
+    let layouts = array_union_layouts()
+        .lock()
+        .expect("array union-layout registry poisoned");
+    let Some(words) = layouts.get(&(descriptor as usize)) else {
+        return;
+    };
+    let length = unsafe { zirk_rt_array_length(array) };
+    // Array element size is encoded in the generated reference-offset table
+    // only when it has ordinary refs, so each record's relative offsets are
+    // based on the compiler-provided stride retained alongside the roots.
+    let roots = parse_union_roots(words);
+    let stride = roots.0;
+    let roots = roots.1;
+    let data = unsafe { (array as *const u8).add(DATA_OFFSET) };
+    for index in 0..length {
+        let element = unsafe { std::slice::from_raw_parts(data.add(index * stride), stride) };
+        for root in &roots {
+            if !root.enum_guards.iter().all(|(offset, expected)| {
+                let actual =
+                    unsafe { element.as_ptr().add(*offset).cast::<u32>().read_unaligned() };
+                actual == *expected
+            }) {
+                continue;
+            }
+            let union_root = crate::collector::UnionRoot {
+                base: unsafe { element.as_ptr().add(root.offset) },
+                descriptor: root.descriptor,
+                present: root
+                    .present_offset
+                    .map_or(std::ptr::null(), |offset| unsafe {
+                        element.as_ptr().add(offset)
+                    }),
+            };
+            crate::collector::mark_union_root(&union_root, mark);
+        }
+    }
+}
+
+fn union_words_for(array: *mut c_void) -> Option<Vec<usize>> {
+    let descriptor = unsafe { *(array as *mut *mut c_void) };
+    array_union_layouts()
+        .lock()
+        .expect("array union-layout registry poisoned")
+        .get(&(descriptor as usize))
+        .map(|words| words[1..].to_vec())
+}
+
+struct CollectionUnionRoot {
+    offset: usize,
+    descriptor: *const usize,
+    present_offset: Option<usize>,
+    enum_guards: Box<[(usize, u32)]>,
+}
+
+fn parse_union_roots(words: &[usize]) -> (usize, Vec<CollectionUnionRoot>) {
+    // The first two words are the element stride and the remaining metadata
+    // uses the shared compiler encoding consumed by Map/Set.
+    assert!(words.len() >= 2, "truncated array union-layout metadata");
+    let stride = words[0];
+    let roots_words = &words[1..];
+    let mut cursor = 0;
+    let mut roots = Vec::new();
+    while cursor < roots_words.len() {
+        assert!(
+            roots_words.len() - cursor >= 4,
+            "truncated array union-root metadata"
+        );
+        let offset = roots_words[cursor];
+        let descriptor = roots_words[cursor + 1] as *const usize;
+        let present = roots_words[cursor + 2];
+        let guard_count = roots_words[cursor + 3];
+        cursor += 4;
+        assert!(!descriptor.is_null(), "array union-root descriptor is null");
+        assert!(
+            guard_count <= 64 && guard_count * 2 <= roots_words.len() - cursor,
+            "invalid array union-root guards"
+        );
+        let mut guards = Vec::with_capacity(guard_count);
+        for _ in 0..guard_count {
+            guards.push((
+                roots_words[cursor],
+                u32::try_from(roots_words[cursor + 1]).expect("array enum guard exceeds u32"),
+            ));
+            cursor += 2;
+        }
+        roots.push(CollectionUnionRoot {
+            offset,
+            descriptor,
+            present_offset: (present != usize::MAX).then_some(present),
+            enum_guards: guards.into_boxed_slice(),
+        });
+    }
+    (stride, roots)
 }
 
 /// Returns the length of an `Array<T>`.
@@ -164,7 +337,15 @@ pub unsafe extern "C" fn zirk_rt_array_clone(
 ) -> *mut c_void {
     let length = unsafe { zirk_rt_array_length(array) };
     let offsets = if is_ref { &[0usize][..] } else { &[] };
-    let clone = unsafe { array_new_with_offsets(length, elem_size, elem_align, offsets) };
+    let union_words = union_words_for(array);
+    let clone = unsafe {
+        union_words.as_ref().map_or_else(
+            || array_new_with_offsets(length, elem_size, elem_align, offsets),
+            |words| {
+                array_new_with_offsets_and_unions(length, elem_size, elem_align, offsets, words)
+            },
+        )
+    };
     if length > 0 {
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -189,8 +370,23 @@ pub unsafe extern "C" fn zirk_rt_array_clone_with_layout(
     offset_count: usize,
 ) -> *mut c_void {
     let length = unsafe { zirk_rt_array_length(array) };
-    let clone = unsafe {
-        zirk_rt_array_new_with_layout(length, elem_size, elem_align, offsets, offset_count)
+    let union_words = union_words_for(array);
+    let clone = if let Some(union_words) = union_words {
+        unsafe {
+            zirk_rt_array_new_with_union_layout(
+                length,
+                elem_size,
+                elem_align,
+                offsets,
+                offset_count,
+                union_words.as_ptr(),
+                union_words.len(),
+            )
+        }
+    } else {
+        unsafe {
+            zirk_rt_array_new_with_layout(length, elem_size, elem_align, offsets, offset_count)
+        }
     };
     if length > 0 {
         unsafe {
@@ -334,7 +530,15 @@ unsafe fn array_slice_with_offsets(
     };
 
     let length = indices.len();
-    let slice = unsafe { array_new_with_offsets(length, elem_size, elem_align, offsets) };
+    let union_words = union_words_for(array);
+    let slice = unsafe {
+        union_words.as_ref().map_or_else(
+            || array_new_with_offsets(length, elem_size, elem_align, offsets),
+            |words| {
+                array_new_with_offsets_and_unions(length, elem_size, elem_align, offsets, words)
+            },
+        )
+    };
     let source = unsafe { (array as *const u8).add(DATA_OFFSET) };
     let target = unsafe { (slice as *mut u8).add(DATA_OFFSET) };
     for (slot, index) in indices.into_iter().enumerate() {

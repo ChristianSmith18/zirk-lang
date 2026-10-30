@@ -1,0 +1,1171 @@
+//! The query evaluator: walks a compiled [`Query`] over a
+//! [`serde_json::Value`] and produces a [`NodeList`].
+//!
+//! Evaluation is infallible — a compiled query always yields a (possibly empty)
+//! nodelist. Results borrow from the input document. The comparison semantics
+//! (RFC 9535 §2.3.5.2.2), the slice algorithm (§2.3.4.2.2), descendant pre-order
+//! traversal (§2.5.2.2), and the function extensions (§2.4) are all implemented here.
+
+use crate::ast;
+use crate::compiled::FilterQuery;
+use crate::compiled::{
+    Comparable, Comparison, ExistenceTest, Function, LogicalExpr, Query, Segment, Selector,
+    ValueArg,
+};
+use crate::node::{LocatedNode, NodeList};
+use crate::normalized_path::NormalizedPath;
+use core::cmp::Ordering;
+use serde_json::{Number, Value};
+use std::borrow::Cow;
+use std::cell::Cell;
+
+#[derive(Clone, Copy)]
+struct StepBudget {
+    remaining: usize,
+    exceeded: bool,
+    max_results: usize,
+    result_exceeded: bool,
+}
+
+thread_local! {
+    static STEP_BUDGET: Cell<Option<StepBudget>> = const { Cell::new(None) };
+}
+
+fn charge_step() -> bool {
+    STEP_BUDGET.with(|budget| match budget.get() {
+        None => true,
+        Some(mut state) if state.remaining > 0 => {
+            state.remaining -= 1;
+            budget.set(Some(state));
+            true
+        }
+        Some(mut state) => {
+            state.exceeded = true;
+            budget.set(Some(state));
+            false
+        }
+    })
+}
+
+fn budget_exceeded() -> bool {
+    STEP_BUDGET.with(|budget| budget.get().is_some_and(|state| state.exceeded))
+}
+
+fn result_limit_exceeded() -> bool {
+    STEP_BUDGET.with(|budget| budget.get().is_some_and(|state| state.result_exceeded))
+}
+
+fn reserve_output<P>(out: &mut Vec<P>, requested: usize) {
+    let bounded = STEP_BUDGET.with(|budget| {
+        budget
+            .get()
+            .map_or(requested, |state| {
+                requested
+                    .min(state.remaining)
+                    .min(state.max_results.saturating_sub(out.len()))
+            })
+    });
+    out.reserve(bounded);
+}
+
+fn push_result<'a, P>(out: &mut Vec<(P, &'a Value)>, item: (P, &'a Value)) {
+    if !charge_step() {
+        return;
+    }
+    let within_result_limit = STEP_BUDGET.with(|budget| {
+        let Some(mut state) = budget.get() else {
+            return true;
+        };
+        if out.len() >= state.max_results {
+            state.result_exceeded = true;
+            budget.set(Some(state));
+            false
+        } else {
+            true
+        }
+    });
+    if within_result_limit {
+        out.push(item);
+    }
+}
+
+/// How a node's location is tracked during traversal.
+///
+/// [`NormalizedPath`] builds the real path (for [`evaluate`], which fills a
+/// [`NodeList`]). The no-op [`NoPath`] implementation is zero-sized, so value-only
+/// queries ([`evaluate_values`]) and every filter sub-query skip path construction
+/// entirely — the per-node `Rc` allocation that dominates wildcard/descendant traversal.
+trait Position<'a>: Clone {
+    /// The position of object member `name` (a key borrowed from the document) reached
+    /// from here.
+    fn descend_name(&self, name: &'a str) -> Self;
+    /// The position of array element `index` reached from here.
+    fn descend_index(&self, index: usize) -> Self;
+}
+
+impl<'a> Position<'a> for NormalizedPath<'a> {
+    #[inline]
+    fn descend_name(&self, name: &'a str) -> Self {
+        self.child_name(name)
+    }
+    #[inline]
+    fn descend_index(&self, index: usize) -> Self {
+        self.child_index(index)
+    }
+}
+
+/// The no-op position for value-only evaluation: a zero-sized type whose `descend_*`
+/// methods do nothing, so `query_values` and filter sub-queries compile away all path work.
+#[derive(Clone, Copy)]
+struct NoPath;
+
+impl<'a> Position<'a> for NoPath {
+    #[inline]
+    fn descend_name(&self, _name: &'a str) -> Self {
+        Self
+    }
+    #[inline]
+    fn descend_index(&self, _index: usize) -> Self {
+        Self
+    }
+}
+
+/// Evaluates `query` against `root`, returning the selected nodelist with normalized
+/// paths.
+pub fn evaluate<'a>(query: &Query, root: &'a Value) -> NodeList<'a> {
+    NodeList::new(
+        walk(&query.segments, NormalizedPath::root(), root, root)
+            .into_iter()
+            .map(|(path, value)| LocatedNode::new(path, value))
+            .collect(),
+    )
+}
+
+/// Evaluates `query` against `root`, returning just the selected values in order.
+/// Tracks no paths (`P = NoPath`), so traversal performs no path allocation. With
+/// the `rayon` feature, work over large arrays/frontiers is parallelised (see
+/// `PAR_THRESHOLD`); results stay in document order via chunk-ordered concatenation.
+pub fn evaluate_values<'a>(query: &Query, root: &'a Value) -> Vec<&'a Value> {
+    #[cfg(feature = "rayon")]
+    {
+        walk_par(&query.segments, root)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        walk(&query.segments, NoPath, root, root)
+            .into_iter()
+            .map(|(_, value)| value)
+            .collect()
+    }
+}
+
+/// Evaluates a query with an explicit selector/filter and output-construction budget.
+pub(crate) fn evaluate_values_bounded<'a>(
+    query: &Query,
+    root: &'a Value,
+    max_steps: usize,
+    max_results: usize,
+) -> Result<Vec<&'a Value>, BoundedEvaluationError> {
+    STEP_BUDGET.with(|budget| {
+        budget.set(Some(StepBudget {
+            remaining: max_steps,
+            exceeded: false,
+            max_results,
+            result_exceeded: false,
+        }));
+    });
+    if max_results == 0 {
+        STEP_BUDGET.with(|budget| {
+            if let Some(mut state) = budget.get() {
+                state.result_exceeded = true;
+                budget.set(Some(state));
+            }
+        });
+        STEP_BUDGET.with(|budget| budget.set(None));
+        return Err(BoundedEvaluationError::Results);
+    }
+    let nodes = walk(&query.segments, NoPath, root, root)
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
+    let exceeded = budget_exceeded();
+    let result_exceeded = result_limit_exceeded();
+    STEP_BUDGET.with(|budget| budget.set(None));
+    if exceeded {
+        Err(BoundedEvaluationError::Steps)
+    } else if result_exceeded {
+        Err(BoundedEvaluationError::Results)
+    } else {
+        Ok(nodes)
+    }
+}
+
+pub(crate) enum BoundedEvaluationError {
+    Steps,
+    Results,
+}
+
+// ---- Parallel value-path evaluation (`rayon` feature) ----
+//
+// Only the value path (`P = NoPath`) parallelises: normalized paths share prefix
+// links via `Rc`, which is not `Send`, and the paths API keeps its serial walk
+// byte-for-byte. Everything here is read-only fan-out over `&Value` with
+// chunk-ordered concatenation, so per-query result order is identical to the serial
+// walk (the CTS harness cross-checks `query_values` against `query` on every case).
+
+/// Arrays and frontiers below this many elements are walked serially: fork/join and
+/// per-chunk buffers cost more than sub-millisecond work. At or above it, chunks go
+/// to the rayon pool.
+#[cfg(feature = "rayon")]
+const PAR_THRESHOLD: usize = 2048;
+
+/// Splits `len` items into roughly four chunks per worker thread — small enough to
+/// balance, large enough that per-chunk buffers stay amortised.
+#[cfg(feature = "rayon")]
+fn par_chunk_size(len: usize) -> usize {
+    (len / (rayon::current_num_threads().max(1) * 4)).max(512)
+}
+
+/// Chunk-ordered parallel fan-out — the one shape every parallel applicator shares:
+/// splits `items` into ~4 chunks per worker (see [`par_chunk_size`]), materialises
+/// each chunk's selections on the rayon pool with `per_chunk`, and appends the chunk
+/// results to `out` in chunk order. Chunks partition `items` in order, so the
+/// concatenation preserves document order exactly as the serial walk would emit it.
+///
+/// Two lifetimes on purpose: the selected values borrow the document (`'a`), while
+/// `items` may be a shorter-lived frontier slice whose *elements* borrow the
+/// document (`apply_segment_par`) or the document's own arrays (`'b = 'a`).
+#[cfg(feature = "rayon")]
+fn par_fanout<'a, 'b, T: Sync>(
+    items: &'b [T],
+    out: &mut Vec<(NoPath, &'a Value)>,
+    per_chunk: impl Fn(&'b [T]) -> Vec<(NoPath, &'a Value)> + Send + Sync,
+) {
+    use rayon::prelude::*;
+    let chunks: Vec<Vec<(NoPath, &'a Value)>> = items
+        .par_chunks(par_chunk_size(items.len()))
+        .map(per_chunk)
+        .collect();
+    for mut chunk in chunks {
+        out.append(&mut chunk);
+    }
+}
+
+/// The value-path counterpart of [`walk`]: same segment-at-a-time frontier model,
+/// with large frontiers and large-array selector fan-outs dispatched to the pool.
+#[cfg(feature = "rayon")]
+fn walk_par<'a>(segments: &[Segment], root: &'a Value) -> Vec<(NoPath, &'a Value)> {
+    let mut nodes: Vec<(NoPath, &'a Value)> = vec![(NoPath, root)];
+    for segment in segments {
+        let mut next = Vec::with_capacity(nodes.len());
+        apply_segment_par(segment, &nodes, root, &mut next);
+        nodes = next;
+    }
+    nodes
+}
+
+#[cfg(feature = "rayon")]
+fn apply_segment_par<'a>(
+    segment: &Segment,
+    input: &[(NoPath, &'a Value)],
+    root: &'a Value,
+    out: &mut Vec<(NoPath, &'a Value)>,
+) {
+    // A large frontier parallelises regardless of segment kind: apply the segment per
+    // chunk with the ordinary serial applicators, then concatenate chunks in order.
+    if input.len() >= PAR_THRESHOLD {
+        par_fanout(input, out, |chunk| {
+            let mut local = Vec::with_capacity(chunk.len());
+            apply_segment(segment, chunk, root, &mut local);
+            local
+        });
+        return;
+    }
+    match segment {
+        Segment::Child(selectors) => {
+            for (path, value) in input {
+                for selector in selectors {
+                    apply_selector_par(selector, *path, value, root, out);
+                }
+            }
+        }
+        Segment::Descendant(selectors) => {
+            for (_path, value) in input {
+                match selectors.as_slice() {
+                    [Selector::Name(name)] => descend_name_par(name, value, out),
+                    _ => descend_par(selectors, value, root, out),
+                }
+            }
+        }
+    }
+}
+
+/// Like [`apply_selector`], but a filter over a large array evaluates its predicate
+/// across the pool. The other selectors either do trivial per-node work (name,
+/// index, wildcard's pushes) or are rare (slice); they stay serial.
+#[cfg(feature = "rayon")]
+fn apply_selector_par<'a>(
+    selector: &Selector,
+    path: NoPath,
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(NoPath, &'a Value)>,
+) {
+    match selector {
+        Selector::Filter(expr) => apply_filter_par(expr, path, value, root, out),
+        Selector::Name(_) | Selector::Wildcard | Selector::Index(_) | Selector::Slice(_) => {
+            apply_selector(selector, &path, value, root, out);
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+fn apply_filter_par<'a>(
+    expr: &LogicalExpr,
+    path: NoPath,
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(NoPath, &'a Value)>,
+) {
+    match value {
+        Value::Array(elements) if elements.len() >= PAR_THRESHOLD => {
+            par_fanout(elements, out, |chunk| {
+                chunk
+                    .iter()
+                    .filter(|element| eval_logical(expr, element, root))
+                    .map(|element| (NoPath, element))
+                    .collect()
+            });
+        }
+        Value::Array(_)
+        | Value::Object(_)
+        | Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_) => apply_filter(expr, &path, value, root, out),
+    }
+}
+
+/// Parallel mirror of [`descend_name`]: identical order and pruning, but a large
+/// array fans its element subtrees out to the pool (each subtree recursing through
+/// the ordinary serial walk).
+#[cfg(feature = "rayon")]
+fn descend_name_par<'a>(name: &str, value: &'a Value, out: &mut Vec<(NoPath, &'a Value)>) {
+    match value {
+        Value::Object(members) => {
+            if let Some((_key, member)) = get_member(members, name) {
+                out.push((NoPath, member));
+            }
+            for (_key, member) in members {
+                if is_container(member) {
+                    descend_name_par(name, member, out);
+                }
+            }
+        }
+        Value::Array(elements) if elements.len() >= PAR_THRESHOLD => {
+            par_fanout(elements, out, |chunk| {
+                let mut local = Vec::new();
+                for element in chunk {
+                    if is_container(element) {
+                        descend_name(name, &NoPath, element, &mut local);
+                    }
+                }
+                local
+            });
+        }
+        Value::Array(elements) => {
+            for element in elements {
+                if is_container(element) {
+                    descend_name_par(name, element, out);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Parallel mirror of [`descend`] for the general selector list, with the same
+/// large-array fan-out as [`descend_name_par`].
+#[cfg(feature = "rayon")]
+fn descend_par<'a>(
+    selectors: &[Selector],
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(NoPath, &'a Value)>,
+) {
+    for selector in selectors {
+        apply_selector_par(selector, NoPath, value, root, out);
+    }
+    match value {
+        Value::Array(elements) if elements.len() >= PAR_THRESHOLD => {
+            par_fanout(elements, out, |chunk| {
+                let mut local = Vec::new();
+                for element in chunk {
+                    if is_container(element) {
+                        descend(selectors, &NoPath, element, root, &mut local);
+                    }
+                }
+                local
+            });
+        }
+        Value::Array(elements) => {
+            for element in elements {
+                if is_container(element) {
+                    descend_par(selectors, element, root, out);
+                }
+            }
+        }
+        Value::Object(members) => {
+            for (_key, member) in members {
+                if is_container(member) {
+                    descend_par(selectors, member, root, out);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Seam for the `scan` hybrid evaluator: threads `segments` from `start` (an extracted
+/// fragment), carrying `root` for absolute filter sub-queries, and returns just the
+/// selected values in order — no path tracking. Kept as a wrapper so [`Position`] and
+/// [`NoPath`] stay private to this module.
+#[cfg(feature = "scan")]
+pub fn walk_values<'a>(segments: &[Segment], start: &'a Value, root: &'a Value) -> Vec<&'a Value> {
+    walk(segments, NoPath, start, root)
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect()
+}
+
+// A query whose every segment is a single child name/index step selects at most one
+// node, so it needs neither a worklist nor any per-segment `Vec`: a single `&Value` is
+// threaded down the document. `JsonPath` precomputes this form (see
+// `compiled::Query::singular`) and dispatches here. Kept as standalone functions —
+// rather than a branch inside [`evaluate_values`] — so the general worklist path's
+// codegen (inlining of [`walk`], in-place `collect`) is left exactly as it was.
+
+/// Singular fast path for [`JsonPath::query`](crate::JsonPath::query): resolves the
+/// at-most-one selected node, building its normalized path as it descends.
+pub fn evaluate_singular<'a>(query: &ast::SingularQuery, root: &'a Value) -> NodeList<'a> {
+    NodeList::new(
+        eval_singular_located(query, root)
+            .map(|(path, value)| LocatedNode::new(path, value))
+            .into_iter()
+            .collect(),
+    )
+}
+
+/// Singular fast path for [`JsonPath::query_values`](crate::JsonPath::query_values):
+/// resolves the at-most-one selected value with no path construction.
+pub fn evaluate_singular_values<'a>(query: &ast::SingularQuery, root: &'a Value) -> Vec<&'a Value> {
+    eval_singular(query, root, root).into_iter().collect()
+}
+
+/// Resolves a top-level singular query (rooted at `$`) to its at-most-one node,
+/// building the normalized path of the result. The value-only counterpart is the
+/// existing [`eval_singular`].
+fn eval_singular_located<'a>(
+    query: &ast::SingularQuery,
+    root: &'a Value,
+) -> Option<(NormalizedPath<'a>, &'a Value)> {
+    let mut value = root;
+    let mut path = NormalizedPath::root();
+    for segment in &query.segments {
+        match segment {
+            ast::SingularSegment::Name(name) => {
+                // Borrow the document's own key for the path (it equals `name`), so the
+                // path step costs no string allocation.
+                let (key, member) = get_member(value.as_object()?, name)?;
+                value = member;
+                path = path.child_name(key);
+            }
+            ast::SingularSegment::Index(index) => {
+                let elements = value.as_array()?;
+                let resolved = normalize(index.get(), elements.len())?;
+                let (resolved, element) = element_at(elements, resolved)?;
+                value = element;
+                path = path.child_index(resolved);
+            }
+        }
+    }
+    Some((path, value))
+}
+
+/// Threads `segments` from `(start, start_value)`, carrying `root` for absolute filter
+/// sub-queries. Generic over how positions are tracked (see [`Position`]).
+fn walk<'a, P: Position<'a>>(
+    segments: &[Segment],
+    start: P,
+    start_value: &'a Value,
+    root: &'a Value,
+) -> Vec<(P, &'a Value)> {
+    if !charge_step() {
+        return Vec::new();
+    }
+    let mut nodes: Vec<(P, &'a Value)> = vec![(start, start_value)];
+    for segment in segments {
+        if !charge_step() {
+            break;
+        }
+        // Most segments select roughly one node per input node (every name/index/filter
+        // match), so pre-size to avoid the small-Vec realloc chain; wildcard/descendant
+        // grow further via their own `reserve`/pushes.
+        let mut next = Vec::with_capacity(nodes.len());
+        apply_segment(segment, &nodes, root, &mut next);
+        nodes = next;
+    }
+    nodes
+}
+
+/// Applies `segment` to every node in `input`, pushing selected nodes into `out`.
+/// Selectors push directly into `out` — no per-node or per-selector intermediate
+/// vector — and the descendant walk is fused with selection (see [`descend`]).
+fn apply_segment<'a, P: Position<'a>>(
+    segment: &Segment,
+    input: &[(P, &'a Value)],
+    root: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    match segment {
+        Segment::Child(selectors) => {
+            for (path, value) in input {
+                if !charge_step() {
+                    return;
+                }
+                for selector in selectors {
+                    if !charge_step() {
+                        return;
+                    }
+                    apply_selector(selector, path, value, root, out);
+                }
+            }
+        }
+        Segment::Descendant(selectors) => {
+            for (path, value) in input {
+                if !charge_step() {
+                    return;
+                }
+                // Specialize the common `$..name` shape to a tight recursion that
+                // skips the per-node selector-slice loop and enum dispatch of `descend`.
+                match selectors.as_slice() {
+                    [Selector::Name(name)] => descend_name(name, path, value, out),
+                    _ => descend(selectors, path, value, root, out),
+                }
+            }
+        }
+    }
+}
+
+/// Specialized `$..name` descendant: pushes every object member named `name`, reachable
+/// at any depth, in pre-order. Mirrors the general `descend` for a single name selector
+/// but without per-node dispatch.
+fn descend_name<'a, P: Position<'a>>(
+    name: &str,
+    path: &P,
+    value: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    if !charge_step() {
+        return;
+    }
+    match value {
+        Value::Object(members) => {
+            if let Some((key, member)) = get_member(members, name) {
+                push_result(out, (path.descend_name(key), member));
+            }
+            // Only descend into members that can actually contain a deeper match — a
+            // scalar has no descendants, so building the path step to recurse into it
+            // (an `Rc<Link>` for the path API) would be pure waste.
+            for (key, member) in members {
+                if !charge_step() {
+                    return;
+                }
+                if is_container(member) {
+                    descend_name(name, &path.descend_name(key), member, out);
+                }
+            }
+        }
+        Value::Array(elements) => {
+            for (index, element) in elements.iter().enumerate() {
+                if !charge_step() {
+                    return;
+                }
+                if is_container(element) {
+                    descend_name(name, &path.descend_index(index), element, out);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Whether `value` has descendants (an object or array) — used to prune descendant
+/// recursion into scalars, which can never contain a deeper match.
+#[inline]
+const fn is_container(value: &Value) -> bool {
+    matches!(value, Value::Object(_) | Value::Array(_))
+}
+
+/// Objects at or below this size are searched by scanning entries instead of by
+/// `Map::get_key_value`. With `serde_json`'s `preserve_order` backend (`IndexMap`) a
+/// map lookup hashes (`SipHash`) the name on every call — the single hottest cost in
+/// wildcard and descendant traversal, since a query re-looks-up the same literal name
+/// per node. A linear scan of a few short keys is cheaper than one hash on either
+/// backend; large objects still take the map's own sublinear lookup.
+const LINEAR_SCAN_MAX: usize = 16;
+
+/// Looks up member `name`, scanning small objects linearly (see [`LINEAR_SCAN_MAX`]).
+#[inline]
+fn get_member<'a>(
+    members: &'a serde_json::Map<String, Value>,
+    name: &str,
+) -> Option<(&'a String, &'a Value)> {
+    if members.len() <= LINEAR_SCAN_MAX {
+        members.iter().find(|&(key, _)| key == name)
+    } else {
+        members.get_key_value(name)
+    }
+}
+
+/// Applies `selectors` to `value` and every descendant in pre-order (a node before its
+/// descendants; array elements in order; object members in map order), pushing matches
+/// into `out`. Fused with the traversal, so the full descendant set is never collected.
+fn descend<'a, P: Position<'a>>(
+    selectors: &[Selector],
+    path: &P,
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    for selector in selectors {
+        if !charge_step() {
+            return;
+        }
+        apply_selector(selector, path, value, root, out);
+    }
+    match value {
+        Value::Array(elements) => {
+            for (index, element) in elements.iter().enumerate() {
+                if !charge_step() {
+                    return;
+                }
+                if is_container(element) {
+                    descend(selectors, &path.descend_index(index), element, root, out);
+                }
+            }
+        }
+        Value::Object(members) => {
+            for (key, member) in members {
+                if !charge_step() {
+                    return;
+                }
+                if is_container(member) {
+                    descend(selectors, &path.descend_name(key), member, root, out);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[inline]
+fn apply_selector<'a, P: Position<'a>>(
+    selector: &Selector,
+    path: &P,
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    if !charge_step() {
+        return;
+    }
+    match selector {
+        Selector::Name(name) => apply_name(name, path, value, out),
+        Selector::Wildcard => apply_wildcard(path, value, out),
+        Selector::Index(index) => apply_index(*index, path, value, out),
+        Selector::Slice(slice) => apply_slice(slice, path, value, out),
+        Selector::Filter(expr) => apply_filter(expr, path, value, root, out),
+    }
+}
+
+#[inline]
+fn apply_name<'a, P: Position<'a>>(
+    name: &str,
+    path: &P,
+    value: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    if let Some((key, member)) = value
+        .as_object()
+        .and_then(|members| get_member(members, name))
+    {
+        push_result(out, (path.descend_name(key), member));
+    }
+}
+
+#[inline]
+fn apply_wildcard<'a, P: Position<'a>>(path: &P, value: &'a Value, out: &mut Vec<(P, &'a Value)>) {
+    match value {
+        Value::Array(elements) => {
+            reserve_output(out, elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                if !charge_step() {
+                    return;
+                }
+                push_result(out, (path.descend_index(index), element));
+            }
+        }
+        Value::Object(members) => {
+            reserve_output(out, members.len());
+            for (key, member) in members {
+                if !charge_step() {
+                    return;
+                }
+                push_result(out, (path.descend_name(key), member));
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+#[inline]
+fn apply_index<'a, P: Position<'a>>(
+    index: ast::JsonInt,
+    path: &P,
+    value: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    if let Some(elements) = value.as_array()
+        && let Some(position) = normalize(index.get(), elements.len())
+        && let Some((resolved, element)) = element_at(elements, position)
+    {
+        push_result(out, (path.descend_index(resolved), element));
+    }
+}
+
+fn apply_slice<'a, P: Position<'a>>(
+    slice: &ast::Slice,
+    path: &P,
+    value: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    let Some(elements) = value.as_array() else {
+        return;
+    };
+    let Ok(len) = i64::try_from(elements.len()) else {
+        return;
+    };
+    let step = slice.step.map_or(1, ast::JsonInt::get);
+    if step == 0 {
+        return;
+    }
+    let (start_default, end_default) = if step >= 0 {
+        (0, len)
+    } else {
+        (len - 1, -len - 1)
+    };
+    let start = slice.start.map_or(start_default, ast::JsonInt::get);
+    let end = slice.end.map_or(end_default, ast::JsonInt::get);
+    let (lower, upper) = bounds(start, end, step, len);
+
+    let mut index = if step > 0 { lower } else { upper };
+    while (step > 0 && index < upper) || (step < 0 && lower < index) {
+        if !charge_step() {
+            break;
+        }
+        if let Some((resolved, element)) = element_at(elements, index) {
+            push_result(out, (path.descend_index(resolved), element));
+        }
+        index = index.saturating_add(step);
+    }
+}
+
+/// Normalizes a possibly-negative index against `len`, returning `None` if the array
+/// length does not fit in `i64` (impossible for real documents).
+fn normalize(index: i64, len: usize) -> Option<i64> {
+    let len = i64::try_from(len).ok()?;
+    Some(if index >= 0 { index } else { len + index })
+}
+
+/// The slice `Bounds` algorithm of RFC 9535 §2.3.4.2.2.
+fn bounds(start: i64, end: i64, step: i64, len: i64) -> (i64, i64) {
+    let normalize_bound = |bound: i64| if bound >= 0 { bound } else { len + bound };
+    let normalized_start = normalize_bound(start);
+    let normalized_end = normalize_bound(end);
+    if step >= 0 {
+        (normalized_start.clamp(0, len), normalized_end.clamp(0, len))
+    } else {
+        (
+            normalized_end.clamp(-1, len - 1),
+            normalized_start.clamp(-1, len - 1),
+        )
+    }
+}
+
+/// Returns the `(index, element)` at signed position `index`, if in bounds.
+fn element_at(elements: &[Value], index: i64) -> Option<(usize, &Value)> {
+    let resolved = usize::try_from(index).ok()?;
+    elements.get(resolved).map(|element| (resolved, element))
+}
+
+#[inline]
+fn apply_filter<'a, P: Position<'a>>(
+    expr: &LogicalExpr,
+    path: &P,
+    value: &'a Value,
+    root: &'a Value,
+    out: &mut Vec<(P, &'a Value)>,
+) {
+    match value {
+        Value::Array(elements) => {
+            for (index, element) in elements.iter().enumerate() {
+                if !charge_step() {
+                    return;
+                }
+                if eval_logical(expr, element, root) {
+                    push_result(out, (path.descend_index(index), element));
+                }
+            }
+        }
+        Value::Object(members) => {
+            for (key, member) in members {
+                if !charge_step() {
+                    return;
+                }
+                if eval_logical(expr, member, root) {
+                    push_result(out, (path.descend_name(key), member));
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Evaluates a relative (`@`) or absolute (`$`) query inside a filter, returning the
+/// values it selects. Filters observe only values and cardinality, so this skips path
+/// construction entirely (`P = NoPath`).
+fn eval_filter_query<'a>(
+    query: &FilterQuery,
+    current: &'a Value,
+    root: &'a Value,
+) -> Vec<(NoPath, &'a Value)> {
+    let start = match query.root {
+        ast::QueryRoot::Current => current,
+        ast::QueryRoot::Root => root,
+    };
+    walk(&query.segments, NoPath, start, root)
+}
+
+/// Evaluates a filter's logical expression against a candidate node. Also serves as the
+/// `scan` hybrid evaluator's per-fragment predicate.
+pub fn eval_logical<'a>(expr: &LogicalExpr, current: &'a Value, root: &'a Value) -> bool {
+    if !charge_step() {
+        return false;
+    }
+    match expr {
+        LogicalExpr::Or(left, right) => {
+            eval_logical(left, current, root) || eval_logical(right, current, root)
+        }
+        LogicalExpr::And(left, right) => {
+            eval_logical(left, current, root) && eval_logical(right, current, root)
+        }
+        LogicalExpr::Not(inner) => !eval_logical(inner, current, root),
+        LogicalExpr::Comparison(comparison) => eval_comparison(comparison, current, root),
+        // An absent node is "Nothing": it equals nothing and orders against nothing,
+        // so only `!=` holds (RFC 9535 §2.3.5.2.2).
+        LogicalExpr::SingularLiteral { query, op, literal } => eval_singular(query, current, root)
+            .map_or(matches!(op, ast::ComparisonOp::Ne), |value| {
+                compare_values(value, *op, literal)
+            }),
+        LogicalExpr::Existence(test) => match test {
+            ExistenceTest::Singular(query) => eval_singular(query, current, root).is_some(),
+            ExistenceTest::General(query) => !eval_filter_query(query, current, root).is_empty(),
+        },
+        #[cfg(feature = "regex")]
+        LogicalExpr::Test(function) => eval_logical_function(function, current, root),
+    }
+}
+
+fn eval_comparison<'a>(comparison: &Comparison, current: &'a Value, root: &'a Value) -> bool {
+    if !charge_step() {
+        return false;
+    }
+    let left = eval_comparable(&comparison.left, current, root);
+    let right = eval_comparable(&comparison.right, current, root);
+    compare(&left, comparison.op, &right)
+}
+
+/// Compares two present values directly — the [`LogicalExpr::SingularLiteral`] fast
+/// path, which never builds a [`Comparand`]. Semantics match [`compare`] for two
+/// `Value` operands.
+fn compare_values(left: &Value, op: ast::ComparisonOp, right: &Value) -> bool {
+    match op {
+        ast::ComparisonOp::Eq => value_eq(left, right),
+        ast::ComparisonOp::Ne => !value_eq(left, right),
+        ast::ComparisonOp::Lt => value_less(left, right),
+        ast::ComparisonOp::Le => value_less(left, right) || value_eq(left, right),
+        ast::ComparisonOp::Gt => value_less(right, left),
+        ast::ComparisonOp::Ge => value_less(right, left) || value_eq(left, right),
+    }
+}
+
+/// A comparison operand: a JSON value (borrowed from the document or owned for a
+/// literal/computed result) or the special "Nothing".
+enum Comparand<'a> {
+    Nothing,
+    Value(Cow<'a, Value>),
+}
+
+fn eval_comparable<'a>(
+    comparable: &'a Comparable,
+    current: &'a Value,
+    root: &'a Value,
+) -> Comparand<'a> {
+    match comparable {
+        Comparable::Literal(value) => Comparand::Value(Cow::Borrowed(value.as_ref())),
+        Comparable::Singular(query) => eval_singular(query, current, root)
+            .map_or(Comparand::Nothing, |value| {
+                Comparand::Value(Cow::Borrowed(value))
+            }),
+        Comparable::Function(function) => eval_value_function(function, current, root),
+    }
+}
+
+/// Resolves a singular query to the at-most-one node it selects.
+fn eval_singular<'a>(
+    query: &ast::SingularQuery,
+    current: &'a Value,
+    root: &'a Value,
+) -> Option<&'a Value> {
+    let mut value = match query.root {
+        ast::QueryRoot::Current => current,
+        ast::QueryRoot::Root => root,
+    };
+    for segment in &query.segments {
+        if !charge_step() {
+            return None;
+        }
+        value = match segment {
+            ast::SingularSegment::Name(name) => get_member(value.as_object()?, name)?.1,
+            ast::SingularSegment::Index(index) => index_into(value, index.get())?,
+        };
+    }
+    Some(value)
+}
+
+fn index_into(value: &Value, index: i64) -> Option<&Value> {
+    let elements = value.as_array()?;
+    let resolved = normalize(index, elements.len())?;
+    element_at(elements, resolved).map(|(_, element)| element)
+}
+
+fn eval_value_function<'a>(
+    function: &'a Function,
+    current: &'a Value,
+    root: &'a Value,
+) -> Comparand<'a> {
+    if !charge_step() {
+        return Comparand::Nothing;
+    }
+    match function {
+        Function::Length(arg) => length(&eval_value_arg(arg, current, root)),
+        Function::Count(query) => Comparand::Value(Cow::Owned(json_number(
+            eval_filter_query(query, current, root).len(),
+        ))),
+        Function::Value(query) => match eval_filter_query(query, current, root).as_slice() {
+            [(_, value)] => Comparand::Value(Cow::Borrowed(value)),
+            _ => Comparand::Nothing,
+        },
+        #[cfg(feature = "regex")]
+        Function::Match(..) | Function::Search(..) => Comparand::Nothing,
+    }
+}
+
+fn eval_value_arg<'a>(arg: &'a ValueArg, current: &'a Value, root: &'a Value) -> Comparand<'a> {
+    match arg {
+        ValueArg::Literal(value) => Comparand::Value(Cow::Borrowed(value.as_ref())),
+        ValueArg::Singular(query) => eval_singular(query, current, root)
+            .map_or(Comparand::Nothing, |value| {
+                Comparand::Value(Cow::Borrowed(value))
+            }),
+        ValueArg::Function(function) => eval_value_function(function, current, root),
+    }
+}
+
+/// `length()`: Unicode scalar count of a string, element count of an array, member
+/// count of an object; otherwise Nothing.
+fn length<'a>(arg: &Comparand<'_>) -> Comparand<'a> {
+    let Comparand::Value(value) = arg else {
+        return Comparand::Nothing;
+    };
+    match value.as_ref() {
+        Value::String(string) => Comparand::Value(Cow::Owned(json_number(string.chars().count()))),
+        Value::Array(elements) => Comparand::Value(Cow::Owned(json_number(elements.len()))),
+        Value::Object(members) => Comparand::Value(Cow::Owned(json_number(members.len()))),
+        Value::Null | Value::Bool(_) | Value::Number(_) => Comparand::Nothing,
+    }
+}
+
+fn json_number(count: usize) -> Value {
+    Value::Number(Number::from(count))
+}
+
+#[cfg(feature = "regex")]
+fn eval_logical_function(function: &Function, current: &Value, root: &Value) -> bool {
+    match function {
+        Function::Length(..) | Function::Count(..) | Function::Value(..) => false,
+        Function::Match(target, pattern) => regex_test(target, pattern, true, current, root),
+        Function::Search(target, pattern) => regex_test(target, pattern, false, current, root),
+    }
+}
+
+#[cfg(feature = "regex")]
+fn regex_test(
+    target: &ValueArg,
+    pattern: &crate::compiled::Pattern,
+    anchored: bool,
+    current: &Value,
+    root: &Value,
+) -> bool {
+    let target_value = eval_value_arg(target, current, root);
+    let Some(text) = comparand_str(&target_value) else {
+        return false;
+    };
+    match pattern {
+        // A metacharacter-free `match()` pattern is string equality — no engine.
+        crate::compiled::Pattern::Plain(plain) => plain_match(text, plain, anchored),
+        // A metacharacter-free `search()` pattern is a SIMD substring search whose
+        // tables were built once at compile time.
+        crate::compiled::Pattern::Substring(finder) => finder.find(text.as_bytes()).is_some(),
+        // The literal pattern was compiled once at `JsonPath::parse` time (with the
+        // right anchoring); evaluation only matches.
+        crate::compiled::Pattern::Literal(regex) => {
+            regex.as_ref().is_some_and(|regex| regex.is_match(text))
+        }
+        // A document-derived pattern must be handled now: string-compare when the
+        // computed value is metacharacter-free (unlike the literal case, this pays for
+        // `search()` too — the alternative here is a full regex *compile* per call,
+        // which dwarfs a scalar substring scan), else compile per call.
+        crate::compiled::Pattern::Dynamic(arg) => {
+            let pattern_value = eval_value_arg(arg, current, root);
+            comparand_str(&pattern_value).is_some_and(|expression| {
+                if crate::iregexp::is_plain(expression) {
+                    plain_match(text, expression, anchored)
+                } else {
+                    crate::iregexp::build(expression, anchored)
+                        .is_some_and(|regex| regex.is_match(text))
+                }
+            })
+        }
+    }
+}
+
+/// Matches a metacharacter-free pattern: `match()` (anchored) is string equality,
+/// `search()` is substring containment. Exactly the I-Regexp semantics of a pattern
+/// with no metacharacters, without the regex engine. The one-shot `memmem::find` is
+/// the unprepared form of the [`Pattern::Substring`](crate::compiled::Pattern)
+/// searcher, for dynamic patterns known only at evaluation time; byte-level search
+/// is exact for UTF-8 (a valid needle can never match starting inside a multi-byte
+/// character).
+#[cfg(feature = "regex")]
+fn plain_match(text: &str, pattern: &str, anchored: bool) -> bool {
+    if anchored {
+        text == pattern
+    } else {
+        memchr::memmem::find(text.as_bytes(), pattern.as_bytes()).is_some()
+    }
+}
+
+#[cfg(feature = "regex")]
+fn comparand_str<'a>(comparand: &'a Comparand<'_>) -> Option<&'a str> {
+    match comparand {
+        Comparand::Value(value) => value.as_str(),
+        Comparand::Nothing => None,
+    }
+}
+
+/// Compares two operands under the RFC 9535 §2.3.5.2.2 rules.
+fn compare(left: &Comparand, op: ast::ComparisonOp, right: &Comparand) -> bool {
+    match op {
+        ast::ComparisonOp::Eq => equal(left, right),
+        ast::ComparisonOp::Ne => !equal(left, right),
+        ast::ComparisonOp::Lt => less(left, right),
+        ast::ComparisonOp::Le => less(left, right) || equal(left, right),
+        ast::ComparisonOp::Gt => less(right, left),
+        ast::ComparisonOp::Ge => less(right, left) || equal(left, right),
+    }
+}
+
+fn equal(left: &Comparand, right: &Comparand) -> bool {
+    match (left, right) {
+        (Comparand::Nothing, Comparand::Nothing) => true,
+        (Comparand::Value(left), Comparand::Value(right)) => value_eq(left, right),
+        (Comparand::Nothing, Comparand::Value(_)) | (Comparand::Value(_), Comparand::Nothing) => {
+            false
+        }
+    }
+}
+
+fn less(left: &Comparand, right: &Comparand) -> bool {
+    match (left, right) {
+        (Comparand::Value(left), Comparand::Value(right)) => value_less(left, right),
+        (Comparand::Nothing, _) | (_, Comparand::Nothing) => false,
+    }
+}
+
+fn value_eq(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::Bool(left), Value::Bool(right)) => left == right,
+        (Value::Number(left), Value::Number(right)) => number_eq(left, right),
+        (Value::String(left), Value::String(right)) => left == right,
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(l, r)| value_eq(l, r))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .all(|(key, value)| right.get(key).is_some_and(|other| value_eq(value, other)))
+        }
+        _ => false,
+    }
+}
+
+fn value_less(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => number_less(left, right),
+        (Value::String(left), Value::String(right)) => left < right,
+        _ => false,
+    }
+}
+
+fn number_eq(left: &Number, right: &Number) -> bool {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left == right;
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return left == right;
+    }
+    matches!(
+        (left.as_f64(), right.as_f64()),
+        (Some(left), Some(right)) if left.partial_cmp(&right) == Some(Ordering::Equal)
+    )
+}
+
+fn number_less(left: &Number, right: &Number) -> bool {
+    if let (Some(left), Some(right)) = (left.as_i64(), right.as_i64()) {
+        return left < right;
+    }
+    if let (Some(left), Some(right)) = (left.as_u64(), right.as_u64()) {
+        return left < right;
+    }
+    matches!(
+        (left.as_f64(), right.as_f64()),
+        (Some(left), Some(right)) if left.partial_cmp(&right) == Some(Ordering::Less)
+    )
+}

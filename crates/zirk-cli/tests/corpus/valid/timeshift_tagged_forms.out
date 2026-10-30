@@ -1,0 +1,26 @@
+clock
+2h
+01:30:00
+1
+true
+true
+-1ns
+23:59:59.999999999
+-1
+calendar
+1h
+true
+true
+P1D
+later
+forward
+2024-03-10T04:30:00
+clock shift rejected
+invalid policy rejected
+P0D
+duplicate period rejected
+2024-02-29T12:00:00
+-14400
+-18000
+ambiguous shift rejected
+out-of-range shift rejected

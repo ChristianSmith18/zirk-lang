@@ -635,6 +635,7 @@ fn verify_module_layouts(module: &Module, errors: &mut Vec<IrError>) {
             | IrType::Nullable(
                 Nullable::Int(_)
                 | Nullable::Float(_)
+                | Nullable::Decimal
                 | Nullable::Boolean
                 | Nullable::String
                 | Nullable::Char,
@@ -1218,9 +1219,9 @@ fn verify_function(
                 match declared.get(&operand.0) {
                     None => report(format!("{position}: uses undefined value {:?}", operand.0)),
                     Some(origin) if *origin != block.id => report(format!(
-                        "{position}: uses value {:?} defined in another block ({origin:?}); \
+                        "{position}: instruction {:?} uses value {:?} defined in another block ({origin:?}); \
                          values do not cross blocks in this IR",
-                        operand.0
+                        inst.kind, operand.0,
                     )),
                     Some(_) => report(format!(
                         "{position}: uses value {:?} before it is defined",
@@ -2895,7 +2896,7 @@ fn verify_instruction(
                 (key, IrType::String, "key"),
                 (value, IrType::Dynamic, "value"),
             ] {
-                if let Some(actual) = type_of(operand)
+                if let Some(actual) = type_of(&operand)
                     && actual != expected
                 {
                     report(format!(
@@ -2919,7 +2920,7 @@ fn verify_instruction(
                 (object, IrType::ObjectAny, "receiver"),
                 (key, IrType::String, "key"),
             ] {
-                if let Some(actual) = type_of(operand)
+                if let Some(actual) = type_of(&operand)
                     && actual != expected
                 {
                     report(format!(
@@ -2990,6 +2991,89 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::JsonStringifyDynamicPretty { value } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(crate::Nullable::String),
+                position,
+                "JsonStringifyDynamicPretty",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonStringifyDynamicPretty value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonCanonicalizeDynamic { value } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(crate::Nullable::String),
+                position,
+                "JsonCanonicalizeDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonCanonicalizeDynamic value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonStringifyDynamicWithLimits {
+            value,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(crate::Nullable::String),
+                position,
+                "JsonStringifyDynamicWithLimits",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonStringifyDynamicWithLimits value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            for (name, operand) in [
+                ("max_document_bytes", *max_document_bytes),
+                ("max_nesting_depth", *max_nesting_depth),
+                ("max_string_bytes", *max_string_bytes),
+                ("max_container_items", *max_container_items),
+                ("max_number_bytes", *max_number_bytes),
+            ] {
+                if let Some(actual) = type_of(&operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: JsonStringifyDynamicWithLimits {name} is {}, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::JsonNullDynamic => {
+            expect(
+                inst.ty,
+                IrType::Dynamic,
+                position,
+                "JsonNullDynamic",
+                report,
+            );
+        }
         InstKind::JsonParseDynamic {
             document,
             list_dynamic_id,
@@ -3012,6 +3096,446 @@ fn verify_instruction(
             if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
                 report(format!(
                     "{position}: JsonParseDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::Json5ParseDynamic {
+            document,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "Json5ParseDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(document)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: Json5ParseDynamic document is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: Json5ParseDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonParseDynamicWithLimits {
+            document,
+            list_dynamic_id,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "JsonParseDynamicWithLimits",
+                report,
+            );
+            if let Some(actual) = type_of(document)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonParseDynamicWithLimits document is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            for (name, operand) in [
+                ("max_document_bytes", max_document_bytes),
+                ("max_nesting_depth", max_nesting_depth),
+                ("max_string_bytes", max_string_bytes),
+                ("max_container_items", max_container_items),
+                ("max_number_bytes", max_number_bytes),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: JsonParseDynamicWithLimits {name} is {}, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonParseDynamicWithLimits references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonStreamReaderCreate {
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "JsonStreamReaderCreate",
+                report,
+            );
+            for (name, operand) in [
+                ("max_document_bytes", max_document_bytes),
+                ("max_nesting_depth", max_nesting_depth),
+                ("max_string_bytes", max_string_bytes),
+                ("max_container_items", max_container_items),
+                ("max_number_bytes", max_number_bytes),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: JsonStreamReaderCreate {name} is {}, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::JsonStreamReaderPush { handle, chunk } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "JsonStreamReaderPush",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderPush handle is {}, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(chunk)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderPush chunk is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonStreamReaderPushBytes { handle, chunk } => {
+            expect(
+                inst.ty,
+                IrType::Boolean,
+                position,
+                "JsonStreamReaderPushBytes",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderPushBytes handle is {}, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if !matches!(type_of(chunk), Some(IrType::Array(id)) if module.array_types.get(id as usize) == Some(&IrType::Int(IntWidth::U8)))
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderPushBytes chunk must be Array<UInt8>"
+                ));
+            }
+        }
+        InstKind::JsonStreamReaderFinish {
+            handle,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "JsonStreamReaderFinish",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderFinish handle is {}, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonStreamReaderFinish references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonStreamReaderCancel { handle } => {
+            expect(
+                inst.ty,
+                IrType::Void,
+                position,
+                "JsonStreamReaderCancel",
+                report,
+            );
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: JsonStreamReaderCancel handle is {}, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonStreamWriterCreate {
+            value,
+            max_chunk_bytes,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U64),
+                position,
+                "JsonStreamWriterCreate",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonStreamWriterCreate value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            for (name, operand) in [
+                ("max_chunk_bytes", max_chunk_bytes),
+                ("max_document_bytes", max_document_bytes),
+                ("max_nesting_depth", max_nesting_depth),
+                ("max_string_bytes", max_string_bytes),
+                ("max_container_items", max_container_items),
+                ("max_number_bytes", max_number_bytes),
+            ] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: JsonStreamWriterCreate {name} is {}, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonStreamWriterCreate references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonStreamWriterNextStatus {
+            handle,
+            max_chunk_bytes,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::U32),
+                position,
+                "JsonStreamWriterNextStatus",
+                report,
+            );
+            for (name, operand) in [("handle", handle), ("max_chunk_bytes", max_chunk_bytes)] {
+                if let Some(actual) = type_of(operand)
+                    && actual != IrType::Int(IntWidth::U64)
+                {
+                    report(format!(
+                        "{position}: JsonStreamWriterNextStatus {name} is {}, expected UInt64",
+                        actual.as_str()
+                    ));
+                }
+            }
+        }
+        InstKind::JsonStreamWriterTake { handle } | InstKind::JsonStreamWriterCancel { handle } => {
+            let expected = if matches!(inst.kind, InstKind::JsonStreamWriterTake { .. }) {
+                IrType::String
+            } else {
+                IrType::Void
+            };
+            expect(inst.ty, expected, position, "JsonStreamWriter", report);
+            if let Some(actual) = type_of(handle)
+                && actual != IrType::Int(IntWidth::U64)
+            {
+                report(format!(
+                    "{position}: JsonStreamWriter handle is {}, expected UInt64",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonPointerDynamic {
+            value,
+            pointer,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::Dynamic),
+                position,
+                "JsonPointerDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonPointerDynamic value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(pointer)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonPointerDynamic pointer is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonPointerDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonPointerErrorKind { value, pointer } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "JsonPointerErrorKind",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonPointerErrorKind value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(pointer)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonPointerErrorKind pointer is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonPathDynamic {
+            value,
+            query,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::List(*list_dynamic_id)),
+                position,
+                "JsonPathDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonPathDynamic value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(query)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonPathDynamic query is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonPathDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
+                ));
+            }
+        }
+        InstKind::JsonPathErrorKind { value, query } => {
+            expect(
+                inst.ty,
+                IrType::Int(IntWidth::I32),
+                position,
+                "JsonPathErrorKind",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonPathErrorKind value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(query)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonPathErrorKind query is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+        }
+        InstKind::JsonSchemaValidateDynamic {
+            value,
+            schema,
+            resolver,
+            list_dynamic_id,
+        } => {
+            expect(
+                inst.ty,
+                IrType::Nullable(Nullable::List(*list_dynamic_id)),
+                position,
+                "JsonSchemaValidateDynamic",
+                report,
+            );
+            if let Some(actual) = type_of(value)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonSchemaValidateDynamic value is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if let Some(actual) = type_of(schema)
+                && actual != IrType::String
+            {
+                report(format!(
+                    "{position}: JsonSchemaValidateDynamic schema is {}, expected String",
+                    actual.as_str()
+                ));
+            }
+            if let Some(resolver) = resolver
+                && let Some(actual) = type_of(resolver)
+                && actual != IrType::Dynamic
+            {
+                report(format!(
+                    "{position}: JsonSchemaValidateDynamic resolver is {}, expected Dynamic",
+                    actual.as_str()
+                ));
+            }
+            if module.list_types.get(*list_dynamic_id as usize) != Some(&IrType::Dynamic) {
+                report(format!(
+                    "{position}: JsonSchemaValidateDynamic references invalid List<Dynamic> layout {list_dynamic_id}"
                 ));
             }
         }
@@ -9028,7 +9552,7 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
         InstKind::Discriminant(operand) => vec![*operand],
         InstKind::CheckedCast { object, .. } => vec![*object],
         InstKind::IsInstance { object, .. } => vec![*object],
-        InstKind::Undefined => vec![],
+        InstKind::Undefined | InstKind::JsonNullDynamic => vec![],
         InstKind::Retype(operand) => vec![*operand],
         InstKind::IntCast(operand) => vec![*operand],
         InstKind::ConstFloat(_, _) | InstKind::ConstDecimal(_) => Vec::new(),
@@ -9077,7 +9601,97 @@ fn operands_of(kind: &InstKind) -> Vec<Operand> {
             .chain(excluded_keys.iter().copied())
             .collect(),
         InstKind::JsonStringifyDynamic { value } => vec![*value],
+        InstKind::JsonStringifyDynamicPretty { value } => vec![*value],
+        InstKind::JsonCanonicalizeDynamic { value } => vec![*value],
+        InstKind::JsonStringifyDynamicWithLimits {
+            value,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+        } => vec![
+            *value,
+            *max_document_bytes,
+            *max_nesting_depth,
+            *max_string_bytes,
+            *max_container_items,
+            *max_number_bytes,
+        ],
         InstKind::JsonParseDynamic { document, .. } => vec![*document],
+        InstKind::Json5ParseDynamic { document, .. } => vec![*document],
+        InstKind::JsonParseDynamicWithLimits {
+            document,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+            ..
+        } => vec![
+            *document,
+            *max_document_bytes,
+            *max_nesting_depth,
+            *max_string_bytes,
+            *max_container_items,
+            *max_number_bytes,
+        ],
+        InstKind::JsonStreamReaderCreate {
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+        } => vec![
+            *max_document_bytes,
+            *max_nesting_depth,
+            *max_string_bytes,
+            *max_container_items,
+            *max_number_bytes,
+        ],
+        InstKind::JsonStreamReaderPush { handle, chunk } => vec![*handle, *chunk],
+        InstKind::JsonStreamReaderPushBytes { handle, chunk } => vec![*handle, *chunk],
+        InstKind::JsonStreamReaderFinish { handle, .. }
+        | InstKind::JsonStreamReaderCancel { handle } => vec![*handle],
+        InstKind::JsonStreamWriterCreate {
+            value,
+            max_chunk_bytes,
+            max_document_bytes,
+            max_nesting_depth,
+            max_string_bytes,
+            max_container_items,
+            max_number_bytes,
+            ..
+        } => vec![
+            *value,
+            *max_chunk_bytes,
+            *max_document_bytes,
+            *max_nesting_depth,
+            *max_string_bytes,
+            *max_container_items,
+            *max_number_bytes,
+        ],
+        InstKind::JsonStreamWriterNextStatus {
+            handle,
+            max_chunk_bytes,
+        } => vec![*handle, *max_chunk_bytes],
+        InstKind::JsonStreamWriterTake { handle } | InstKind::JsonStreamWriterCancel { handle } => {
+            vec![*handle]
+        }
+        InstKind::JsonPointerDynamic { value, pointer, .. } => vec![*value, *pointer],
+        InstKind::JsonPointerErrorKind { value, pointer } => vec![*value, *pointer],
+        InstKind::JsonPathDynamic { value, query, .. } => vec![*value, *query],
+        InstKind::JsonPathErrorKind { value, query } => vec![*value, *query],
+        InstKind::JsonSchemaValidateDynamic {
+            value,
+            schema,
+            resolver,
+            ..
+        } => {
+            let mut operands = vec![*value, *schema];
+            operands.extend(resolver.iter().copied());
+            operands
+        }
         InstKind::Unary { operand, .. } => vec![*operand],
         InstKind::Binary { left, right, .. } => vec![*left, *right],
         InstKind::CheckedArithmetic { left, right, .. } => vec![*left, *right],

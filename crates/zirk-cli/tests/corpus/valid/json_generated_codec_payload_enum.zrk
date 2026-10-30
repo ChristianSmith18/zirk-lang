@@ -1,0 +1,111 @@
+import { JSONCodec } from std.json;
+import { stdout } from std.io;
+
+class Address implements JSONCodec<Address> {
+    city: String;
+    number: Int32;
+    construct(city: String, number: Int32) {
+        this.city = city;
+        this.number = number;
+    }
+}
+
+enum Event {
+    Login(user: Address),
+    Tick(count: Int32),
+    Idle,
+}
+
+enum Box<T> {
+    Full(value: T),
+    Empty,
+}
+
+class Envelope implements JSONCodec<Envelope> {
+    event: Event;
+    events: List<Event>;
+    box: Box<Int32>;
+    box_text: Box<String>;
+    construct(event: Event, events: List<Event>, box: Box<Int32>, box_text: Box<String>) {
+        this.event = event;
+        this.events = events;
+        this.box = box;
+        this.box_text = box_text;
+    }
+}
+
+fn main(): Void {
+    mut empty_events: List<Event> = List();
+    inmut codec: Envelope = Envelope(Event.Idle, empty_events, Box.Empty, Box.Empty);
+    try {
+        inmut login: Envelope = JSON.decode<Envelope>(
+            "\{\"event\":\{\"$variant\":\"Login\",\"$payload\":\{\"user\":\{\"city\":\"Santiago\",\"number\":37\}\}\},\"events\":[\{\"$variant\":\"Idle\"\},\{\"$variant\":\"Tick\",\"$payload\":\{\"count\":2\}\}],\"box\":\{\"$variant\":\"Full\",\"$payload\":\{\"value\":7\}\},\"box_text\":\{\"$variant\":\"Full\",\"$payload\":\{\"value\":\"generic\"\}\}\}",
+            codec
+        );
+        match login.event {
+            Event.Login(user) => stdout.println(user.city + ":" + user.number.to_string());
+            Event.Tick(count) => stdout.println(count.to_string());
+            Event.Idle => stdout.println("idle");
+        }
+        stdout.println(login.events.length.to_string());
+        match login.events[1] {
+            Event.Login(_) => stdout.println("list-login");
+            Event.Tick(count) => stdout.println("list-tick:" + count.to_string());
+            Event.Idle => stdout.println("list-idle");
+        }
+        match login.box {
+            Box.Full(value) => stdout.println("box:" + value.to_string());
+            Box.Empty => stdout.println("box-empty");
+        }
+        match login.box_text {
+            Box.Full(value) => stdout.println("box-text:" + value);
+            Box.Empty => stdout.println("box-text-empty");
+        }
+        stdout.println(JSON.encode(login, codec));
+
+        inmut idle: Envelope = JSON.decode<Envelope>(
+            "\{\"event\":\{\"$variant\":\"Idle\"\},\"events\":[],\"box\":\{\"$variant\":\"Empty\"\},\"box_text\":\{\"$variant\":\"Empty\"\}\}",
+            codec
+        );
+        match idle.event {
+            Event.Login(_) => stdout.println("login");
+            Event.Tick(_) => stdout.println("tick");
+            Event.Idle => stdout.println("idle");
+        }
+        stdout.println(JSON.encode(idle, codec));
+
+        inmut tick: Envelope = JSON.decode<Envelope>(
+            "\{\"event\":\{\"$variant\":\"Tick\",\"$payload\":\{\"count\":5\}\},\"events\":[],\"box\":\{\"$variant\":\"Empty\"\},\"box_text\":\{\"$variant\":\"Empty\"\}\}",
+            codec
+        );
+        match tick.event {
+            Event.Login(_) => stdout.println("login");
+            Event.Tick(count) => stdout.println("tick:" + count.to_string());
+            Event.Idle => stdout.println("idle");
+        }
+        stdout.println(JSON.encode(tick, codec));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut invalid: Envelope = JSON.decode<Envelope>(
+            "\{\"event\":\{\"$variant\":\"Login\",\"$payload\":\{\}\},\"events\":[],\"box\":\{\"$variant\":\"Empty\"\},\"box_text\":\{\"$variant\":\"Empty\"\}\}",
+            codec
+        );
+        stdout.println(invalid.event.to_string());
+    } catch JsonConversionError(_) {
+        stdout.println("missing enum payload field rejected");
+    }
+
+    try {
+        inmut invalid: Envelope = JSON.decode<Envelope>(
+            "\{\"event\":\{\"$variant\":\"Missing\"\},\"events\":[],\"box\":\{\"$variant\":\"Empty\"\},\"box_text\":\{\"$variant\":\"Empty\"\}\}",
+            codec
+        );
+        stdout.println(invalid.event.to_string());
+    } catch JsonConversionError(_) {
+        stdout.println("unknown enum variant rejected");
+    }
+}
+main();

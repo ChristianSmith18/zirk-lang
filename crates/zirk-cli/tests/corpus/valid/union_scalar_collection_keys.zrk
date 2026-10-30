@@ -1,0 +1,42 @@
+import { stdout } from std.io;
+
+type Scalar = Int128 | Float128 | Decimal | Boolean | String | Char;
+
+fn main(): Void {
+    inmut integer: Int128 = 123456789012345678901234567890;
+    inmut binary: Float128 = 1.25;
+    inmut decimal: Decimal = 1.250;
+    inmut flag: Boolean = true;
+    inmut text: String = "same";
+    inmut character: Char = 's';
+
+    mut values: Map<Scalar, Int32> = Map();
+    values.set(integer, 1);
+    values.set(binary, 2);
+    values.set(decimal, 3);
+    values.set(flag, 4);
+    values.set(text, 5);
+    values.set(character, 6);
+    values.set(decimal, 7);
+    stdout.println(values.length.to_string());
+    stdout.println((values.get(integer) ?? 0).to_string());
+    stdout.println((values.get(binary) ?? 0).to_string());
+    stdout.println((values.get(decimal) ?? 0).to_string());
+    stdout.println((values.get(flag) ?? 0).to_string());
+    stdout.println((values.get(text) ?? 0).to_string());
+    stdout.println((values.get(character) ?? 0).to_string());
+
+    mut elements: Set<Scalar> = Set();
+    elements.add(integer);
+    elements.add(binary);
+    elements.add(decimal);
+    elements.add(flag);
+    elements.add(text);
+    elements.add(character);
+    elements.add(character);
+    stdout.println(elements.length.to_string());
+    stdout.println(elements.contains(character).to_string());
+    stdout.println(elements.contains(text).to_string());
+}
+
+main();

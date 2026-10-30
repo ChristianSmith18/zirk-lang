@@ -378,8 +378,9 @@ native types, task handles, pointers, weak references, and views without an
 audited contract fail conservatively. This is not a blanket data-race or
 ownership guarantee. Managed `Thread.run` is available on supported native
 64-bit targets with Transfer/Share, effect, rooting, and join checks; blocking
-FFI without a verified native transition remains rejected. Mutex, rwlock,
-semaphore, barrier, and once remain runtime-private and unavailable to Zirk.
+FFI without a verified native transition remains rejected. `Mutex<T>.with`
+is available as a compiler-known scoped API. Read/write locks, semaphores,
+barriers, and once remain unavailable to Zirk.
 
 The language exposes a managed `Atomic<T>` for `Boolean` and signed/unsigned
 integers through 64 bits where the target advertises the matching atomic width.
@@ -388,8 +389,9 @@ aggregate atomics are unsupported. Operations default to sequential
 consistency; weaker orders require `unsafe`. Invalid dynamic order combinations
 raise `InvalidArgumentError` before access. No lock-free promise is made.
 Atomic operations protect only the individual scalar access and do not prove
-general data-race freedom. Mutex, rwlock, semaphore, barrier, and once remain
-unavailable language features.
+general data-race freedom. `Mutex<T>.with` provides scoped access to protected
+state. Read/write locks, semaphores, barriers, and once remain unavailable
+language features.
 
 When the root executor task completes, it closes background-job admission,
 requests cancellation for tracked detached jobs, and waits for a fixed

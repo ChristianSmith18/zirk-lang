@@ -1,0 +1,48 @@
+import { JSON } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        inmut document: Dynamic = JSON.parse("\{\"people\":[\{\"name\":\"Ada\",\"age\":37\},\{\"name\":\"Grace\",\"age\":85\}]\}");
+        inmut names: List<Dynamic> = JSON.query(document, "$.people[*].name");
+        for name in names {
+            stdout.println(JSON.stringify(name));
+        }
+        inmut older: List<Dynamic> = JSON.query(document, "$.people[?@.age > 40].name");
+        for name in older {
+            stdout.println(JSON.stringify(name));
+        }
+        inmut empty: List<Dynamic> = JSON.query(document, "$.missing[*]");
+        stdout.println(empty.length);
+    } catch JsonPathSyntaxError(_) {
+        stdout.println("unexpected JSONPath syntax error");
+    } catch JsonPathFunctionError(_) {
+        stdout.println("unexpected JSONPath function error");
+    } catch JsonLimitError(_) {
+        stdout.println("unexpected JSONPath limit error");
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut document: Dynamic = JSON.parse("\{\"people\":[\{\"name\":\"Ada\",\"age\":37\},\{\"name\":\"Grace\",\"age\":85\}]\}");
+        inmut invalid: List<Dynamic> = JSON.query(document, "$[?");
+        stdout.println(invalid.length);
+    } catch JsonPathSyntaxError(_) {
+        stdout.println("JSONPath syntax error caught");
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut document: Dynamic = JSON.parse("\{\"people\":[\{\"name\":\"Ada\",\"age\":37\},\{\"name\":\"Grace\",\"age\":85\}]\}");
+        inmut invalid_function: List<Dynamic> = JSON.query(document, "$[?mystery(@)]");
+        stdout.println(invalid_function.length);
+    } catch JsonPathFunctionError(_) {
+        stdout.println("JSONPath function error caught");
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+}
+
+main();

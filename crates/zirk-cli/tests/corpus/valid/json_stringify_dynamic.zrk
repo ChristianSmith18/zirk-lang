@@ -1,4 +1,4 @@
-import { JSON } from std.json;
+import { JSON, JSONLimits } from std.json;
 import { stdout } from std.io;
 
 fn main(): Void {
@@ -22,8 +22,52 @@ fn main(): Void {
     try {
         inmut parsed: Dynamic = JSON.parse("\{\"name\":\"Ada\",\"scores\":[7,8]\}");
         stdout.println(JSON.stringify(parsed));
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "")));
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "/scores/1")));
     } catch JsonConversionError(error) {
         stdout.println(error.message());
+    }
+
+    try {
+        inmut escaped: Dynamic = JSON.parse("\{\"a/b\":7,\"~1\":8\}");
+        stdout.println(JSON.stringify(JSON.pointer(escaped, "/a~1b")));
+        stdout.println(JSON.stringify(JSON.pointer(escaped, "/~01")));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut parsed: Dynamic = JSON.parse("\{\"name\":\"Ada\"\}");
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "/missing")));
+    } catch JsonPointerNotFoundError(_) {
+        stdout.println("missing pointer caught");
+    } catch RuntimeError(_) {
+        stdout.println("unexpected pointer error");
+    }
+
+    try {
+        inmut parsed: Dynamic = JSON.parse("[1]");
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "not-a-pointer")));
+    } catch JsonPointerSyntaxError(_) {
+        stdout.println("pointer syntax error caught");
+    } catch RuntimeError(_) {
+        stdout.println("unexpected pointer syntax classification");
+    }
+    try {
+        inmut parsed: Dynamic = JSON.parse("[1]");
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "/01")));
+    } catch JsonPointerIndexError(_) {
+        stdout.println("pointer index error caught");
+    } catch RuntimeError(_) {
+        stdout.println("unexpected pointer index classification");
+    }
+    try {
+        inmut parsed: Dynamic = JSON.parse("[1]");
+        stdout.println(JSON.stringify(JSON.pointer(parsed, "/0/name")));
+    } catch JsonPointerContainerError(_) {
+        stdout.println("pointer container error caught");
+    } catch RuntimeError(_) {
+        stdout.println("unexpected pointer container classification");
     }
 
     try {
@@ -53,6 +97,82 @@ fn main(): Void {
         stdout.println(JSON.stringify(duplicate));
     } catch JsonConversionError(_) {
         stdout.println("duplicate key caught");
+    }
+
+    inmut limits: JSONLimits = JSONLimits(1024, 8, 16, 2, 32);
+    try {
+        inmut limited: Dynamic = JSON.parse_with_limits("[1,2]", limits);
+        stdout.println(JSON.stringify(limited));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut over_limit: Dynamic = JSON.parse_with_limits("[1,2,3]", limits);
+        stdout.println(JSON.stringify(over_limit));
+    } catch JsonConversionError(_) {
+        stdout.println("custom collection limit caught");
+    }
+
+    inmut default_limits: JSONLimits = JSONLimits.defaults();
+    try {
+        inmut defaulted: Dynamic = JSON.parse_with_limits("[1]", default_limits);
+        stdout.println(JSON.stringify(defaulted));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut limited_output: String = JSON.stringify_with_limits(JSON.parse("[1,2]"), limits);
+        stdout.println(limited_output);
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    inmut one_item_limit: JSONLimits = JSONLimits(1024, 8, 16, 1, 32);
+    try {
+        inmut rejected_output: String = JSON.stringify_with_limits(JSON.parse("[1,2]"), one_item_limit);
+        stdout.println(rejected_output);
+    } catch JsonConversionError(_) {
+        stdout.println("serialization collection limit caught");
+    }
+
+    inmut short_output_limit: JSONLimits = JSONLimits(4, 8, 16, 2, 32);
+    try {
+        inmut rejected_document: String = JSON.stringify_with_limits(JSON.parse("[1,2]"), short_output_limit);
+        stdout.println(rejected_document);
+    } catch JsonConversionError(_) {
+        stdout.println("serialization document limit caught");
+    }
+
+    inmut short_string_limit: JSONLimits = JSONLimits(1024, 8, 2, 2, 32);
+    try {
+        inmut rejected_string: String = JSON.stringify_with_limits(JSON.parse("\"snow\""), short_string_limit);
+        stdout.println(rejected_string);
+    } catch JsonConversionError(_) {
+        stdout.println("serialization string limit caught");
+    }
+
+    inmut short_number_limit: JSONLimits = JSONLimits(1024, 8, 16, 2, 2);
+    try {
+        inmut rejected_number: String = JSON.stringify_with_limits(JSON.parse("123"), short_number_limit);
+        stdout.println(rejected_number);
+    } catch JsonConversionError(_) {
+        stdout.println("serialization number limit caught");
+    }
+
+    inmut excessive_limits: JSONLimits = JSONLimits(67108865, 128, 16777216, 1000000, 4096);
+    try {
+        inmut rejected: Dynamic = JSON.parse_with_limits("null", excessive_limits);
+        stdout.println(JSON.stringify(rejected));
+    } catch JsonConversionError(_) {
+        stdout.println("hard JSON limit caught");
+    }
+    try {
+        inmut rejected_output: String = JSON.stringify_with_limits(JSON.parse("null"), excessive_limits);
+        stdout.println(rejected_output);
+    } catch JsonConversionError(_) {
+        stdout.println("hard JSON serialization limit caught");
     }
 }
 main();

@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use crate::ordered::{OrderedMap, TryKeyClone};
+use crate::ordered::{CollectionTextField, CompositeKey, OrderedMap, TryKeyClone};
 
 const WORD: usize = std::mem::size_of::<usize>();
 const BODY_OFFSET: usize = crate::collector::HEADER_BYTES;
@@ -11,12 +11,22 @@ const BODY_OFFSET: usize = crate::collector::HEADER_BYTES;
 struct SetBody {
     elements: SetElements,
     reference_offsets: Box<[usize]>,
+    union_roots: Box<[CollectionUnionRoot]>,
+    text_fields: Box<[CollectionTextField]>,
     element_size: usize,
+}
+
+struct CollectionUnionRoot {
+    offset: usize,
+    descriptor: *const usize,
+    present_offset: Option<usize>,
+    enum_guards: Box<[(usize, u32)]>,
 }
 
 enum SetElements {
     Words(OrderedMap<Vec<u8>, ()>),
     Text(OrderedMap<Option<Box<str>>, ()>),
+    Composite(OrderedMap<CompositeKey, ()>),
 }
 
 impl SetElements {
@@ -24,6 +34,7 @@ impl SetElements {
         match self {
             Self::Words(elements) => elements.len(),
             Self::Text(elements) => elements.len(),
+            Self::Composite(elements) => elements.len(),
         }
     }
 
@@ -31,6 +42,7 @@ impl SetElements {
         match self {
             Self::Words(elements) => elements.is_empty(),
             Self::Text(elements) => elements.is_empty(),
+            Self::Composite(elements) => elements.is_empty(),
         }
     }
 }
@@ -142,10 +154,153 @@ pub unsafe extern "C" fn zirk_rt_set_new_with_layout(
                 SetElements::Words(OrderedMap::default())
             },
             reference_offsets,
+            union_roots: Box::new([]),
+            text_fields: Box::new([]),
             element_size,
         });
     }
     object
+}
+
+/// Creates a typed Set whose elements may contain tagged unions. The root
+/// records use the same layout descriptor format as typed Map entries.
+///
+/// # Safety
+/// The reference-offset and union-root metadata must be readable for their
+/// declared lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_new_with_union_roots(
+    offsets: *const usize,
+    offset_count: usize,
+    element_size: usize,
+    string_content: bool,
+    union_roots: *const usize,
+    union_root_word_count: usize,
+) -> *mut c_void {
+    let set =
+        unsafe { zirk_rt_set_new_with_layout(offsets, offset_count, element_size, string_content) };
+    unsafe { &mut *body(set) }.union_roots =
+        unsafe { collection_union_roots(union_roots, union_root_word_count, element_size) };
+    set
+}
+
+/// Creates a typed set whose element layout contains nested String/Char
+/// fields. Each record is `[pointer offset, guard count, guard offsets...]`.
+///
+/// # Safety
+/// Both metadata arrays must be readable for their declared lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_new_with_text_fields(
+    offsets: *const usize,
+    offset_count: usize,
+    element_size: usize,
+    text_fields: *const usize,
+    text_field_word_count: usize,
+) -> *mut c_void {
+    let set = unsafe { zirk_rt_set_new_with_layout(offsets, offset_count, element_size, false) };
+    let set_body = unsafe { &mut *body(set) };
+    set_body.elements = SetElements::Composite(OrderedMap::default());
+    set_body.text_fields = unsafe {
+        crate::ordered::collection_text_fields(text_fields, text_field_word_count, element_size)
+    };
+    set
+}
+
+/// Creates a typed Set with nested text snapshots and tagged-union GC roots.
+///
+/// # Safety
+/// All non-empty metadata arrays must be readable for their declared lengths.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_set_new_with_text_fields_and_union_roots(
+    offsets: *const usize,
+    offset_count: usize,
+    element_size: usize,
+    text_fields: *const usize,
+    text_field_word_count: usize,
+    union_roots: *const usize,
+    union_root_word_count: usize,
+) -> *mut c_void {
+    let set = unsafe {
+        zirk_rt_set_new_with_union_roots(
+            offsets,
+            offset_count,
+            element_size,
+            false,
+            union_roots,
+            union_root_word_count,
+        )
+    };
+    let set_body = unsafe { &mut *body(set) };
+    set_body.elements = SetElements::Composite(OrderedMap::default());
+    set_body.text_fields = unsafe {
+        crate::ordered::collection_text_fields(text_fields, text_field_word_count, element_size)
+    };
+    set
+}
+
+unsafe fn collection_union_roots(
+    pointer: *const usize,
+    word_count: usize,
+    element_size: usize,
+) -> Box<[CollectionUnionRoot]> {
+    if word_count == 0 {
+        return Box::new([]);
+    }
+    assert!(!pointer.is_null(), "set union-root metadata is null");
+    let words = unsafe { std::slice::from_raw_parts(pointer, word_count) };
+    let mut roots = Vec::new();
+    let mut cursor = 0;
+    while cursor < words.len() {
+        assert!(
+            words.len() - cursor >= 4,
+            "truncated set union-root metadata"
+        );
+        let offset = words[cursor];
+        let descriptor = words[cursor + 1] as *const usize;
+        let present = words[cursor + 2];
+        let guard_count = words[cursor + 3];
+        cursor += 4;
+        assert!(!descriptor.is_null(), "set union-root descriptor is null");
+        assert!(
+            offset.checked_add(4).is_some_and(|end| end <= element_size),
+            "set union tag is outside its element"
+        );
+        let present_offset = (present != usize::MAX).then_some(present);
+        if let Some(present_offset) = present_offset {
+            assert!(
+                present_offset < element_size,
+                "set union presence is outside its element"
+            );
+        }
+        assert!(guard_count <= 64, "set union-root has too many enum guards");
+        assert!(
+            guard_count
+                .checked_mul(2)
+                .is_some_and(|count| count <= words.len() - cursor),
+            "truncated set union-root enum guards"
+        );
+        let mut enum_guards = Vec::with_capacity(guard_count);
+        for _ in 0..guard_count {
+            let tag_offset = words[cursor];
+            let expected_tag =
+                u32::try_from(words[cursor + 1]).expect("set enum guard tag exceeds u32");
+            cursor += 2;
+            assert!(
+                tag_offset
+                    .checked_add(4)
+                    .is_some_and(|end| end <= element_size),
+                "set enum guard is outside its element"
+            );
+            enum_guards.push((tag_offset, expected_tag));
+        }
+        roots.push(CollectionUnionRoot {
+            offset,
+            descriptor,
+            present_offset,
+            enum_guards: enum_guards.into_boxed_slice(),
+        });
+    }
+    roots.into_boxed_slice()
 }
 
 pub(crate) unsafe fn mark_entries(
@@ -167,10 +322,35 @@ pub(crate) unsafe fn mark_entries(
                 mark(candidate);
             }
         }
+        for root in &body.union_roots {
+            let active = root.enum_guards.iter().all(|(offset, expected)| {
+                let actual =
+                    unsafe { element.as_ptr().add(*offset).cast::<u32>().read_unaligned() };
+                actual == *expected
+            });
+            if !active {
+                continue;
+            }
+            crate::collector::mark_union_root(
+                &crate::collector::UnionRoot {
+                    base: unsafe { element.as_ptr().add(root.offset) },
+                    descriptor: root.descriptor,
+                    present: root
+                        .present_offset
+                        .map_or(std::ptr::null(), |offset| unsafe {
+                            element.as_ptr().add(offset)
+                        }),
+                },
+                mark,
+            );
+        }
     };
     match &body.elements {
         SetElements::Words(elements) => elements.iter().for_each(|(value, _)| visit(value)),
         SetElements::Text(_) => {}
+        SetElements::Composite(elements) => {
+            elements.iter().for_each(|(value, _)| visit(&value.raw))
+        }
     }
 }
 
@@ -247,6 +427,14 @@ pub unsafe extern "C" fn zirk_rt_set_values(
                 }
             }
         }
+        SetElements::Composite(elements) => {
+            for (index, (value, _)) in elements.iter().enumerate() {
+                let (bytes, _roots) = value
+                    .materialize(&set_body.text_fields)
+                    .expect("materialize composite set element");
+                unsafe { crate::array::write_bytes(result, index, element_size, &bytes) };
+            }
+        }
     }
     result
 }
@@ -286,6 +474,18 @@ pub unsafe extern "C" fn zirk_rt_set_add_typed(
                 Ok(previous) => previous.is_none() as i32,
                 Err(()) => 2,
             },
+            SetElements::Composite(elements) => {
+                let Ok(mut composite) = CompositeKey::from_bytes(&value, &body.text_fields) else {
+                    return 2;
+                };
+                let Ok(_roots) = composite.snapshot_handles(&body.text_fields) else {
+                    return 2;
+                };
+                match elements.insert(composite, ()) {
+                    Ok(previous) => previous.is_none() as i32,
+                    Err(()) => 2,
+                }
+            }
         };
     }
     0
@@ -315,6 +515,11 @@ pub unsafe extern "C" fn zirk_rt_set_contains_typed(
     match &unsafe { &*body(set) }.elements {
         SetElements::Words(elements) => elements.get(&value.to_vec()).is_some() as i32,
         SetElements::Text(elements) => elements.get(&text_element(value)).is_some() as i32,
+        SetElements::Composite(elements) => {
+            CompositeKey::from_bytes(value, &unsafe { &*body(set) }.text_fields)
+                .ok()
+                .is_some_and(|value| elements.get(&value).is_some()) as i32
+        }
     }
 }
 #[unsafe(no_mangle)]
@@ -342,6 +547,11 @@ pub unsafe extern "C" fn zirk_rt_set_remove_typed(
     match &mut unsafe { &mut *body(set) }.elements {
         SetElements::Words(elements) => elements.remove(&value.to_vec()).is_some() as i32,
         SetElements::Text(elements) => elements.remove(&text_element(value)).is_some() as i32,
+        SetElements::Composite(elements) => {
+            CompositeKey::from_bytes(value, &unsafe { &*body(set) }.text_fields)
+                .ok()
+                .is_some_and(|value| elements.remove(&value).is_some()) as i32
+        }
     }
 }
 
@@ -351,6 +561,7 @@ pub extern "C" fn zirk_rt_set_clear(set: *mut c_void) {
         match &mut unsafe { &mut *body(set) }.elements {
             SetElements::Words(elements) => elements.clear(),
             SetElements::Text(elements) => elements.clear(),
+            SetElements::Composite(elements) => elements.clear(),
         }
     }
 }
@@ -359,19 +570,33 @@ fn new_like(set: *mut c_void) -> *mut c_void {
     if set.is_null() {
         return zirk_rt_set_new();
     }
-    let body = unsafe { &*body(set) };
-    match &body.elements {
+    let source_body = unsafe { &*body(set) };
+    match &source_body.elements {
         SetElements::Words(_) => unsafe {
             zirk_rt_set_new_with_layout(
-                body.reference_offsets.as_ptr(),
-                body.reference_offsets.len(),
-                body.element_size,
+                source_body.reference_offsets.as_ptr(),
+                source_body.reference_offsets.len(),
+                source_body.element_size,
                 false,
             )
         },
         SetElements::Text(_) => unsafe {
             zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, true)
         },
+        SetElements::Composite(_) => {
+            let result = unsafe {
+                zirk_rt_set_new_with_layout(
+                    source_body.reference_offsets.as_ptr(),
+                    source_body.reference_offsets.len(),
+                    source_body.element_size,
+                    false,
+                )
+            };
+            let result_body = unsafe { &mut *body(result) };
+            result_body.elements = SetElements::Composite(OrderedMap::default());
+            result_body.text_fields = source_body.text_fields.clone();
+            result
+        }
     }
 }
 
@@ -459,6 +684,43 @@ pub extern "C" fn zirk_rt_set_algebra(
                 }
             }
         }
+        (
+            SetElements::Composite(left),
+            SetElements::Composite(right),
+            SetElements::Composite(result),
+        ) => {
+            for (value, _) in left.iter() {
+                let in_right = right.get(value).is_some();
+                if operation == 0
+                    || (operation == 1 && in_right)
+                    || (operation == 2 && !in_right)
+                    || (operation == 3 && !in_right)
+                {
+                    result
+                        .insert(
+                            value
+                                .try_clone_key()
+                                .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed()),
+                            (),
+                        )
+                        .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                }
+            }
+            if matches!(operation, 0 | 3) {
+                for (value, _) in right.iter() {
+                    if left.get(value).is_none() {
+                        result
+                            .insert(
+                                value.try_clone_key().unwrap_or_else(|()| {
+                                    crate::failure::zirk_rt_allocation_failed()
+                                }),
+                                (),
+                            )
+                            .unwrap_or_else(|()| crate::failure::zirk_rt_allocation_failed());
+                    }
+                }
+            }
+        }
         _ => crate::failure::fatal("set algebra received incompatible layouts"),
     }
     result
@@ -484,6 +746,12 @@ pub extern "C" fn zirk_rt_set_relation(
             _ => 0,
         },
         (SetElements::Text(left), SetElements::Text(right)) => match relation {
+            0 => left.iter().all(|(value, _)| right.get(value).is_some()) as i32,
+            1 => right.iter().all(|(value, _)| left.get(value).is_some()) as i32,
+            2 => left.iter().all(|(value, _)| right.get(value).is_none()) as i32,
+            _ => 0,
+        },
+        (SetElements::Composite(left), SetElements::Composite(right)) => match relation {
             0 => left.iter().all(|(value, _)| right.get(value).is_some()) as i32,
             1 => right.iter().all(|(value, _)| left.get(value).is_some()) as i32,
             2 => left.iter().all(|(value, _)| right.get(value).is_none()) as i32,
@@ -526,6 +794,7 @@ unsafe fn set_elements_snapshot(
                     .map(|(element, _)| element.clone())
                     .collect(),
                 SetElements::Words(elements) => elements.iter().map(|_| None).collect(),
+                SetElements::Composite(elements) => elements.iter().map(|_| None).collect(),
             }
         };
         if sorted {
@@ -533,6 +802,7 @@ unsafe fn set_elements_snapshot(
         }
         return crate::map::snapshots_array(&elements);
     }
+    let mut snapshot_roots = Vec::new();
     let (element_size, reference_offsets, mut elements): (usize, Vec<usize>, Vec<Vec<u8>>) =
         if set.is_null() {
             (WORD, Vec::new(), Vec::new())
@@ -545,6 +815,16 @@ unsafe fn set_elements_snapshot(
                 SetElements::Text(elements) => elements
                     .iter()
                     .map(|_| vec![0; set_body.element_size])
+                    .collect(),
+                SetElements::Composite(elements) => elements
+                    .iter()
+                    .map(|(value, _)| {
+                        let (bytes, roots) = value
+                            .materialize(&set_body.text_fields)
+                            .expect("materialize composite set snapshot element");
+                        snapshot_roots.push(roots);
+                        bytes
+                    })
                     .collect(),
             };
             (
@@ -600,6 +880,45 @@ mod tests {
         assert_eq!(zirk_rt_set_contains(set, 7), 1);
         assert_eq!(zirk_rt_set_contains(set, 9), 0);
         assert_eq!(zirk_rt_set_add(set, 7), 0);
+    }
+
+    #[test]
+    fn composite_text_elements_compare_by_content() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let offsets = [0usize];
+        let text_fields = [0usize, 0usize, 0usize];
+        let set = unsafe {
+            zirk_rt_set_new_with_text_fields(
+                offsets.as_ptr(),
+                offsets.len(),
+                WORD * 2,
+                text_fields.as_ptr(),
+                text_fields.len(),
+            )
+        };
+        let first = crate::string::alloc_owned("e\u{301}");
+        let equivalent = crate::string::alloc_owned("é");
+        let first_value = [first as usize, 11usize];
+        let equal_value = [equivalent as usize, 11usize];
+        let first_bytes =
+            unsafe { std::slice::from_raw_parts(first_value.as_ptr().cast::<u8>(), WORD * 2) };
+        let equal_bytes =
+            unsafe { std::slice::from_raw_parts(equal_value.as_ptr().cast::<u8>(), WORD * 2) };
+        assert_eq!(
+            unsafe { zirk_rt_set_add_typed(set, first_bytes.as_ptr(), first_bytes.len()) },
+            1
+        );
+        assert_eq!(
+            unsafe { zirk_rt_set_contains_typed(set, equal_bytes.as_ptr(), equal_bytes.len()) },
+            1
+        );
+        assert_eq!(
+            unsafe { zirk_rt_set_add_typed(set, equal_bytes.as_ptr(), equal_bytes.len()) },
+            0
+        );
+        assert_eq!(zirk_rt_set_length(set), 1);
+        crate::collector::reset_state_for_tests();
     }
 
     #[test]
@@ -679,6 +998,21 @@ mod tests {
         assert_eq!(zirk_rt_set_length(set), 1);
         assert_eq!(zirk_rt_set_contains(set, second as i64), 1);
         assert_eq!(zirk_rt_set_remove(set, first as i64), 1);
+        crate::collector::reset_state_for_tests();
+    }
+
+    #[test]
+    fn canonically_equivalent_text_elements_share_one_hash_entry() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let set = unsafe { zirk_rt_set_new_with_layout(std::ptr::null(), 0, WORD, true) };
+        let composed = crate::string::alloc_owned("é");
+        let decomposed = crate::string::alloc_owned("e\u{301}");
+        assert_ne!(composed, decomposed);
+        zirk_rt_set_add(set, composed as i64);
+        assert_eq!(zirk_rt_set_contains(set, decomposed as i64), 1);
+        assert_eq!(zirk_rt_set_add(set, decomposed as i64), 0);
+        assert_eq!(zirk_rt_set_length(set), 1);
         crate::collector::reset_state_for_tests();
     }
 

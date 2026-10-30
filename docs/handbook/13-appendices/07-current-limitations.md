@@ -10,15 +10,16 @@ the `String` mutation/search surface, `Char` classification/normalization, and
 nominal reference types. Their existence in documentation does not imply every pipeline
 stage implements them.
 
-The delivered `Map`/`Set` runtime remains intentionally narrower than the
-generic API contract: admitted keys, elements, and Map values use typed declared
-layouts; supported managed references are traced; mutable text keys/elements
-use content equality; and aggregate key/element layouts without a supported
-`Hash`/`Equal` derivation are rejected by semantic analysis. Nullable layouts,
-byte-canonical tuples, and payload enums with recursively eligible fields are
-supported. Tuple fields requiring content-based String/Char equality,
-other structural aggregate keys, union keys/elements, and nullable Decimal
-remain unsupported. Map and Set traversal is insertion-ordered; Map exposes typed
+The delivered `Map`/`Set` runtime remains narrower than the generic API
+contract: admitted keys, elements, and Map values use typed declared layouts;
+supported managed references are traced; and aggregate key/element layouts
+without a supported recursive `Hash`/`Equal` capability are rejected by
+semantic analysis. Supported combinations include nullable layouts, nested
+String/Char tuple snapshots, nullable Decimal, recursive enum payloads, direct
+union keys/elements (including nullable and tuple-contained cases), active
+enum-variant text snapshots, and mutable reference identity. Some compositions,
+including intersections, remain unsupported; the full cross-target equality/lowering/GC
+matrix is not closed. Map and Set traversal is insertion-ordered; Map exposes typed
 key/value/entry snapshots, Set exposes ordered algebra and `for … in`,
 `Map.set` returns `Void`, and `Set.add` returns whether it inserted a new item.
 Deque, FIFO Queue, LIFO Stack, and stable minimum-first PriorityQueue have
@@ -162,19 +163,33 @@ Current high-impact delivery limits include:
   `record`/`interface` model and are historical. Those declarations were
   removed; current language and pipeline status is in the feature catalog.
   Current type-system gaps include broader union/intersection alternative and
-  container combinations, full narrowing/match/error/cleanup paths, nested
-  generic contract arguments, generic function bodies/defaults, trait defaults
-  under generic substitution, and construction of recursively self-referential
-  enum payloads. Unsupported lowering combinations must diagnose before
-  backend emission. See the feature catalog for host, target, and verification
-  scope; a focused host test does not establish the full target matrix.
+  container combinations and construction of recursively self-referential
+  enum payloads. Generic enum dispatch, user-defined generic bodies/defaults,
+  substituted trait defaults, and nested generic contract applications now
+  have local semantic/lowering/interpreter/native cases; their complete
+  cross-host evidence remains open. Unsupported lowering combinations must
+  diagnose at the documented source or pre-backend stage. See the feature
+  catalog for host, target, and verification scope; a focused host test does
+  not establish the full target matrix.
 - The core tuple, Array/List/Range, String/Char/Regex, and sequence collection
   families are delivered for their scoped contracts. `Deque`, `Queue`, `Stack`,
   and `PriorityQueue` are implemented with native/interpreter parity. Map/Set
   still reject aggregate key/element combinations without canonical
-  `Hash`/`Equal` derivation. These compiler-known collection types do not imply
-  an importable `std.collections` package. See the collection chapter and
-  feature catalog for exact supported combinations.
+  `Hash`/`Equal` derivation, and the cross-target equality/lowering/GC matrix is
+  still incomplete. The `std.collections` source facade is importable; its
+  current exports and the distinction between facade APIs and compiler/runtime
+  implementations are documented in the collection chapter. See the feature
+  catalog for exact supported combinations and host evidence.
+- Locale-aware formatting is implemented for civil `Date`, `Time`, and
+  `DateTime` values. `Instant` has checked factories, parsing, formatting,
+  ordering and exact-duration arithmetic. `TimeZone` and `ZonedDateTime` have
+  partial language APIs for pinned rule parsing, projection, instant-preserving
+  conversion, and explicit local-time resolution. `Period` construction,
+  components and ISO operations, plus the unified clock/calendar `TimeShift`,
+  are implemented locally; direct `Date`/`DateTime ± Period`, localized
+  parsing, and the complete
+  cross-host/time-zone matrix remain in progress. See the temporal chapters and
+  feature catalog for the tested surface.
 - Exact `Decimal` irrational operations (`sqrt`, a fractional `pow`) carry only
   `f64`-grade precision (~15 significant digits), not the full
   28-digit budget the rational operations use. `Decimal.format(spec)` and an

@@ -1,0 +1,70 @@
+import { JSON, JSONCodec } from std.json;
+import { stdout } from std.io;
+
+class Address implements JSONCodec<Address> {
+    city: String;
+    number: Int32;
+    construct(city: String, number: Int32) { this.city = city; this.number = number; }
+}
+
+class Person implements JSONCodec<Person> {
+    name: String;
+    address: Address;
+    construct(name: String, address: Address) {
+        this.name = name;
+        this.address = address;
+    }
+}
+
+class PersonManualCodec implements JSONCodec<Person> {
+    decode(value: Dynamic): Person throws JsonConversionError {
+        inmut object: Object = value as Object;
+        return Person(object.name as String, Address.decode_json(object.address));
+    }
+
+    encode(value: Person): Dynamic {
+        inmut object: Object = { name: value.name, address: Address.encode_json(value.address) };
+        return object;
+    }
+}
+
+fn main(): Void {
+    inmut codec: Person = Person("", Address("", 0));
+    inmut manual_codec: PersonManualCodec = PersonManualCodec();
+    try {
+        inmut person: Person = JSON.decode<Person>(JSON.stringify({ name: "Ada", address: { city: "Santiago", number: 37 } }), codec);
+        stdout.println(person.name);
+        stdout.println(person.address.city);
+        stdout.println(person.address.number);
+        stdout.println(JSON.encode(person, codec));
+        inmut manual_person: Person = JSON.decode<Person>(JSON.stringify({ name: "Ada", address: { city: "Santiago", number: 37 } }), manual_codec);
+        stdout.println(JSON.encode(manual_person, manual_codec) == JSON.encode(person, codec));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+    try {
+        inmut ignored: Person = JSON.decode<Person>(JSON.stringify({ name: "Ada", address: { city: "Santiago", number: "bad" } }), codec);
+        stdout.println(ignored.name);
+    } catch JsonConversionError(_) {
+        stdout.println("invalid numeric field rejected");
+    }
+    try {
+        inmut ignored: Person = JSON.decode<Person>(JSON.stringify({ address: { city: "Santiago", number: 1 } }), codec);
+        stdout.println(ignored.address.city);
+    } catch JsonConversionError(_) {
+        stdout.println("missing root property rejected");
+    }
+    try {
+        inmut ignored: Person = JSON.decode<Person>(JSON.stringify({ name: "Ada", address: { city: "Santiago" } }), codec);
+        stdout.println(ignored.name);
+    } catch JsonConversionError(_) {
+        stdout.println("missing nested property rejected");
+    }
+    try {
+        inmut ignored: Person = JSON.decode<Person>(JSON.stringify({ name: 37, address: { city: "Santiago", number: 1 } }), codec);
+        stdout.println(ignored.name);
+    } catch JsonConversionError(_) {
+        stdout.println("incompatible field rejected");
+    }
+}
+main();

@@ -24,8 +24,8 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use zirk_ast::{ImportSource, Program};
-use zirk_diagnostics::{Diagnostic, DiagnosticSink, FileId, SourceFile, SourceMap};
+use zirk_ast::{Ident, ImportDecl, ImportName, ImportSource, Program};
+use zirk_diagnostics::{Diagnostic, DiagnosticSink, FileId, SourceFile, SourceMap, Span};
 
 /// The parsed files of one crate.
 pub struct Crate {
@@ -341,19 +341,29 @@ fn package_directories(entries: &HashMap<String, PathBuf>) -> HashMap<String, Pa
 /// logical identity is fixed and their trusted host bindings remain governed
 /// by `zirk_sema::stdlib` rather than source syntax.
 fn standard_package_roots() -> HashMap<String, PathBuf> {
-    ["io", "environment", "http", "json", "net", "path", "fs"]
-        .into_iter()
-        .map(|package| {
-            let entry = absolute_normalize(
-                &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join(format!("../../stdlib/std/{package}/package.zrk")),
-            );
-            (
-                format!("std.{package}"),
-                std::fs::canonicalize(&entry).unwrap_or(entry),
-            )
-        })
-        .collect()
+    [
+        "io",
+        "environment",
+        "http",
+        "json",
+        "net",
+        "path",
+        "fs",
+        "collections",
+        "time",
+    ]
+    .into_iter()
+    .map(|package| {
+        let entry = absolute_normalize(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../stdlib/std/{package}/package.zrk")),
+        );
+        (
+            format!("std.{package}"),
+            std::fs::canonicalize(&entry).unwrap_or(entry),
+        )
+    })
+    .collect()
 }
 
 /// Bundled source stays available to the browser/WASM frontend without a
@@ -394,6 +404,10 @@ fn standard_source(path: &Path) -> Option<&'static str> {
         "path/path.zrk" => Some(include_str!("../../../stdlib/std/path/path.zrk")),
         "fs/package.zrk" => Some(include_str!("../../../stdlib/std/fs/package.zrk")),
         "fs/fs.zrk" => Some(include_str!("../../../stdlib/std/fs/fs.zrk")),
+        "collections/package.zrk" => {
+            Some(include_str!("../../../stdlib/std/collections/package.zrk"))
+        }
+        "time/package.zrk" => Some(include_str!("../../../stdlib/std/time/package.zrk")),
         _ => None,
     }
 }
@@ -524,6 +538,37 @@ impl Loader<'_> {
 
         let tokens = zirk_lexer::tokenize(self.sources.file(file), self.sink);
         let mut program = zirk_parser::parse(self.sources.file(file), &tokens, self.sink);
+        let derives_json_codec = program.classes.iter().any(|class| {
+            class.implements.iter().any(|implemented| {
+                implemented.name == "JSONCodec"
+                    && program.imports.iter().any(|import| {
+                        matches!(&import.source, ImportSource::Package { path, .. } if path == "std.json")
+                            && import.names.iter().any(|name| name.name.name == "JSONCodec")
+                    })
+            })
+        });
+        let has_json_binding = program.imports.iter().any(|import| {
+            import
+                .names
+                .iter()
+                .any(|name| name.bound_name().name == "JSON")
+        });
+        if derives_json_codec && !has_json_binding {
+            let end = program.span.end;
+            let span = Span::in_file(file, end, end);
+            program.imports.push(ImportDecl {
+                names: vec![ImportName {
+                    name: Ident::new("JSON", span),
+                    alias: None,
+                    span,
+                }],
+                source: ImportSource::Package {
+                    path: "std.json".into(),
+                    span,
+                },
+                span,
+            });
+        }
         self.loading_stack.push(LoadingEntry {
             path: identity_path.clone(),
             has_executable_body: !program.body.is_empty(),
@@ -765,9 +810,11 @@ mod tests {
             .expect("bundled std.fs source");
         assert!(path_source.contains("share class Path"));
         assert!(fs_source.contains("share class File implements Resource<FileResourceError>"));
-        assert_eq!(standard_package_roots().len(), 7);
+        assert_eq!(standard_package_roots().len(), 9);
+        assert!(zirk_sema::stdlib::standard_module("std.collections").is_some());
         assert!(zirk_sema::stdlib::standard_module("std.path::path").is_some());
         assert!(zirk_sema::stdlib::standard_module("std.fs::fs").is_some());
+        assert!(zirk_sema::stdlib::standard_module("std.time").is_some());
 
         let dir = scratch("bundled-filesystem-import");
         let entry = write(
@@ -804,6 +851,49 @@ mod tests {
             "{}",
             check_sink.render(zirk_diagnostics::RenderStyle::Human)
         );
+    }
+
+    #[test]
+    fn collections_package_is_bundled_and_exports_the_canonical_builtin_aliases() {
+        let std_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std");
+        let source = standard_source(&absolute_normalize(
+            &std_root.join("collections/package.zrk"),
+        ))
+        .expect("bundled std.collections source");
+
+        for declaration in [
+            "share type Array<T> = Array<T>;",
+            "share type List<T> = List<T>;",
+            "share type Map<K, V> = Map<K, V>;",
+            "share type Set<T> = Set<T>;",
+            "share type Range<T> = Range<T>;",
+            "share type Deque<T> = Deque<T>;",
+            "share type Queue<T> = Queue<T>;",
+            "share type Stack<T> = Stack<T>;",
+            "share type PriorityQueue<T> = PriorityQueue<T>;",
+        ] {
+            assert!(source.contains(declaration), "missing `{declaration}`");
+        }
+
+        let dir = scratch("bundled-collections-import");
+        let entry = write(
+            &dir,
+            "main.zrk",
+            "import { List } from std.collections;\nmut values: List<Int32> = List();\n",
+        );
+        let mut sink = DiagnosticSink::new();
+        let krate = load(&entry, &mut sink).expect("std.collections resolves");
+        assert!(
+            !sink.has_errors(),
+            "{}",
+            sink.render(zirk_diagnostics::RenderStyle::Human)
+        );
+        assert!(krate.sources.files().any(|(_, source)| {
+            source
+                .name()
+                .replace('\\', "/")
+                .ends_with("/stdlib/std/collections/package.zrk")
+        }));
     }
 
     #[test]

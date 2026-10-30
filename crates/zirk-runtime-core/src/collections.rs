@@ -6,6 +6,39 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Recursive semantic capability required for a value to be used as a
+/// `Map` key or `Set` element. The compiler builds this from the concrete
+/// instantiated type; runtimes use the same shape to select lawful hashing
+/// and equality behavior instead of inferring semantics from byte size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionHashEq {
+    Integer {
+        bits: u16,
+        signed: bool,
+    },
+    BinaryFloat {
+        bits: u16,
+    },
+    Decimal,
+    Boolean,
+    /// NFC-normalized content, snapshotted when inserted into a collection.
+    Text(CollectionTextKind),
+    /// Stable managed-object identity. Mutable fields do not participate.
+    Identity,
+    Nullable(Box<CollectionHashEq>),
+    Tuple(Vec<CollectionHashEq>),
+    /// One field-capability list per canonical variant discriminant.
+    Enum(Vec<Vec<CollectionHashEq>>),
+    /// One payload capability per canonical tagged-union alternative.
+    Union(Vec<CollectionHashEq>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionTextKind {
+    String,
+    Char,
+}
+
 /// Resolves an element index, with negative indexes measured from the end.
 pub fn element_index(length: usize, index: i64) -> Option<usize> {
     let length = i64::try_from(length).ok()?;

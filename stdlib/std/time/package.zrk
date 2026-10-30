@@ -1,0 +1,12 @@
+package std.time;
+
+// Stable import names for the compiler-owned temporal value types.
+share type Date = Date;
+share type Time = Time;
+share type DateTime = DateTime;
+share type Instant = Instant;
+share type Duration = Duration;
+share type Period = Period;
+share type TimeShift = TimeShift;
+share type TimeZone = TimeZone;
+share type ZonedDateTime = ZonedDateTime;

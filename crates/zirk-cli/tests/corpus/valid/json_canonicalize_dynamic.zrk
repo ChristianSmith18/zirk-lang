@@ -1,0 +1,33 @@
+import { JSON } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        inmut value: Dynamic = JSON.parse("\{\"z\":2,\"a\":1\}");
+        stdout.println(JSON.canonicalize(value));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+
+    try {
+        inmut rounded: Dynamic = JSON.parse("9007199254740993");
+        stdout.println(JSON.canonicalize(rounded));
+    } catch JsonConversionError(_) {
+        stdout.println("rejected out-of-domain number");
+    }
+
+    try {
+        inmut precise: Dynamic = JSON.parse("0.10000000000000001");
+        stdout.println(JSON.canonicalize(precise));
+    } catch JsonConversionError(_) {
+        stdout.println("rejected inexact decimal");
+    }
+
+    try {
+        inmut overflow: Dynamic = JSON.parse("1e400");
+        stdout.println(JSON.canonicalize(overflow));
+    } catch JsonConversionError(_) {
+        stdout.println("rejected non-finite conversion");
+    }
+}
+main();

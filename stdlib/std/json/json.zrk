@@ -7,17 +7,349 @@ package std.json;
 // Implementations validate the JSON shape with Object/contract semantics and
 // construct values through their normal constructors.
 share contract JSONCodec<T> {
-    decode(value: Dynamic): T;
+    decode(value: Dynamic): T throws JsonConversionError;
     encode(value: T): Dynamic;
 }
 
+share class JSONLimits {
+    inmut maxDocumentBytes: UInt64;
+    inmut maxNestingDepth: UInt64;
+    inmut maxStringBytes: UInt64;
+    inmut maxContainerItems: UInt64;
+    inmut maxNumberBytes: UInt64;
+
+    construct(
+        maxDocumentBytes: UInt64,
+        maxNestingDepth: UInt64,
+        maxStringBytes: UInt64,
+        maxContainerItems: UInt64,
+        maxNumberBytes: UInt64
+    ) {
+        this.maxDocumentBytes = maxDocumentBytes;
+        this.maxNestingDepth = maxNestingDepth;
+        this.maxStringBytes = maxStringBytes;
+        this.maxContainerItems = maxContainerItems;
+        this.maxNumberBytes = maxNumberBytes;
+    }
+
+    static defaults(): JSONLimits {
+        return JSONLimits(16777216, 128, 16777216, 1000000, 4096);
+    }
+}
+
+share enum JSONStreamError {
+    Cancelled,
+    ChunkTooLarge,
+    DocumentTooLarge,
+    InvalidDocument,
+    InvalidState,
+    InvalidLimits,
+    InvalidChunkSize,
+    Io,
+    OutputTooLarge,
+}
+
+share enum JSONStreamChunk {
+    Data(text: String),
+    End,
+    Error(error: JSONStreamError),
+}
+
+// The reader accepts bounded text chunks and publishes a Dynamic value only
+// after the complete document passes the same parser and limits as JSON.parse.
+share class JSONStreamReader {
+    private inmut limits: JSONLimits;
+    private inmut handle: UInt64;
+    private mut bufferedBytes: UInt64;
+    private mut cancelled: Boolean;
+    private mut finished: Boolean;
+
+    private construct(limits: JSONLimits, handle: UInt64) {
+        this.limits = limits;
+        this.handle = handle;
+        this.bufferedBytes = 0;
+        this.cancelled = false;
+        this.finished = false;
+    }
+
+    static create(limits: JSONLimits): JSONStreamReader {
+        inmut handle = JSONStreamReader.stream_reader_create_native(
+            limits.maxDocumentBytes,
+            limits.maxNestingDepth,
+            limits.maxStringBytes,
+            limits.maxContainerItems,
+            limits.maxNumberBytes
+        );
+        if handle == 0 { return JSONStreamReader(limits, 0); }
+        return JSONStreamReader(limits, handle);
+    }
+
+    push_chunk(chunk: String): Result<Void, JSONStreamError> {
+        if this.cancelled { return Error(JSONStreamError.Cancelled); }
+        if this.finished { return Error(JSONStreamError.InvalidState); }
+
+        inmut chunk_bytes = chunk.bytes().length as UInt64;
+        if chunk_bytes > 65536 { return Error(JSONStreamError.ChunkTooLarge); }
+        if chunk_bytes > this.limits.maxDocumentBytes
+            || this.bufferedBytes > this.limits.maxDocumentBytes - chunk_bytes {
+            return Error(JSONStreamError.DocumentTooLarge);
+        }
+
+        if !JSONStreamReader.stream_reader_push_native(this.handle, chunk) {
+            return Error(JSONStreamError.InvalidState);
+        }
+        this.bufferedBytes += chunk_bytes;
+        return Ok(JSONStreamReader.unit());
+    }
+
+    push_bytes(chunk: Array<Byte>): Result<Void, JSONStreamError> {
+        if this.cancelled { return Error(JSONStreamError.Cancelled); }
+        if this.finished { return Error(JSONStreamError.InvalidState); }
+
+        inmut chunk_bytes = chunk.length as UInt64;
+        if chunk_bytes > 65536 { return Error(JSONStreamError.ChunkTooLarge); }
+        if chunk_bytes > this.limits.maxDocumentBytes
+            || this.bufferedBytes > this.limits.maxDocumentBytes - chunk_bytes {
+            return Error(JSONStreamError.DocumentTooLarge);
+        }
+
+        if !JSONStreamReader.stream_reader_push_bytes_native(this.handle, chunk) {
+            return Error(JSONStreamError.InvalidState);
+        }
+        this.bufferedBytes += chunk_bytes;
+        return Ok(JSONStreamReader.unit());
+    }
+
+    cancel(): Void {
+        if !this.finished {
+            JSONStreamReader.stream_reader_cancel_native(this.handle);
+            this.bufferedBytes = 0;
+            this.cancelled = true;
+        }
+    }
+
+    finish(): Result<Dynamic, JSONStreamError> {
+        if this.cancelled { return Error(JSONStreamError.Cancelled); }
+        if this.finished { return Error(JSONStreamError.InvalidState); }
+        this.finished = true;
+        if this.handle == 0 { return Error(JSONStreamError.InvalidLimits); }
+
+        try {
+            return Ok(JSONStreamReader.stream_reader_finish_native(this.handle));
+        } catch JsonConversionError(_) {
+            return Error(JSONStreamError.InvalidDocument);
+        }
+    }
+
+    private static unit(): Void { return; }
+
+    private static stream_reader_create_native(
+        maxDocumentBytes: UInt64,
+        maxNestingDepth: UInt64,
+        maxStringBytes: UInt64,
+        maxContainerItems: UInt64,
+        maxNumberBytes: UInt64
+    ): UInt64 {
+        return 0;
+    }
+
+    private static stream_reader_push_native(handle: UInt64, chunk: String): Boolean {
+        return false;
+    }
+
+    private static stream_reader_push_bytes_native(handle: UInt64, chunk: Array<Byte>): Boolean {
+        return false;
+    }
+
+    private static stream_reader_finish_native(handle: UInt64): Dynamic throws JsonConversionError {
+        return "";
+    }
+
+    private static stream_reader_cancel_native(handle: UInt64): Void {
+        return;
+    }
+}
+
+// The writer serializes into a bounded producer channel and releases text
+// chunks on demand so a caller controls output backpressure.
+share class JSONStreamWriter {
+    private inmut handle: UInt64;
+    private inmut maxChunkBytes: UInt64;
+    private mut finished: Boolean;
+
+    private construct(handle: UInt64, maxChunkBytes: UInt64) {
+        this.handle = handle;
+        this.maxChunkBytes = maxChunkBytes;
+        this.finished = false;
+    }
+
+    static create(
+        value: Dynamic,
+        max_chunk_bytes: UInt64,
+        limits: JSONLimits
+    ): Result<JSONStreamWriter, JSONStreamError> {
+        if max_chunk_bytes == 0 || max_chunk_bytes > 65536 {
+            return Error(JSONStreamError.InvalidChunkSize);
+        }
+        inmut handle = JSONStreamWriter.stream_writer_create_native(
+            value,
+            max_chunk_bytes,
+            limits.maxDocumentBytes,
+            limits.maxNestingDepth,
+            limits.maxStringBytes,
+            limits.maxContainerItems,
+            limits.maxNumberBytes
+        );
+        if handle == 0 {
+            return Error(JSONStreamError.InvalidLimits);
+        }
+        if handle == 18446744073709551615 {
+            return Error(JSONStreamError.OutputTooLarge);
+        }
+        if handle == 18446744073709551614 {
+            return Error(JSONStreamError.Io);
+        }
+        return Ok(JSONStreamWriter(handle, max_chunk_bytes));
+    }
+
+    next_chunk(): JSONStreamChunk {
+        if this.finished { return JSONStreamChunk.End; }
+        inmut status = JSONStreamWriter.stream_writer_next_status_native(
+            this.handle,
+            this.maxChunkBytes
+        );
+        if status == 1 {
+            this.finished = true;
+            return JSONStreamChunk.End;
+        }
+        if status == 2 {
+            this.finished = true;
+            return JSONStreamChunk.Error(JSONStreamError.OutputTooLarge);
+        }
+        if status == 3 {
+            this.finished = true;
+            return JSONStreamChunk.Error(JSONStreamError.Cancelled);
+        }
+        if status == 5 {
+            this.finished = true;
+            return JSONStreamChunk.Error(JSONStreamError.Io);
+        }
+        if status == 6 {
+            this.finished = true;
+            return JSONStreamChunk.Error(JSONStreamError.ChunkTooLarge);
+        }
+        if status != 0 {
+            this.finished = true;
+            return JSONStreamChunk.Error(JSONStreamError.InvalidState);
+        }
+        return JSONStreamChunk.Data(JSONStreamWriter.stream_writer_take_native(this.handle));
+    }
+
+    cancel(): Void {
+        if !this.finished {
+            JSONStreamWriter.stream_writer_cancel_native(this.handle);
+            this.finished = true;
+        }
+    }
+
+    private static stream_writer_create_native(
+        value: Dynamic,
+        maxChunkBytes: UInt64,
+        maxDocumentBytes: UInt64,
+        maxNestingDepth: UInt64,
+        maxStringBytes: UInt64,
+        maxContainerItems: UInt64,
+        maxNumberBytes: UInt64
+    ): UInt64 {
+        return 0;
+    }
+
+    private static stream_writer_next_status_native(handle: UInt64, maxChunkBytes: UInt64): UInt32 {
+        return 1;
+    }
+
+    private static stream_writer_take_native(handle: UInt64): String {
+        return "";
+    }
+
+    private static stream_writer_cancel_native(handle: UInt64): Void {
+        return;
+    }
+}
+
 share class JSON {
+    static null_value(): Dynamic {
+        return JSON.null_dynamic_native();
+    }
+
+    static unwrap_nullable<T>(value: T?): T {
+        return value ?? fatalError("nullable JSON codec guard failed");
+    }
+
     static parse(document: String): Dynamic throws JsonConversionError {
         return JSON.parse_dynamic_native(document);
     }
 
+    static parse5(document: String): Dynamic throws JsonConversionError {
+        return JSON.parse5_dynamic_native(document);
+    }
+
+    static parse_with_limits(document: String, limits: JSONLimits): Dynamic throws JsonConversionError {
+        return JSON.parse_dynamic_with_limits_native(
+            document,
+            limits.maxDocumentBytes,
+            limits.maxNestingDepth,
+            limits.maxStringBytes,
+            limits.maxContainerItems,
+            limits.maxNumberBytes
+        );
+    }
+
     static stringify(value: Dynamic): String throws JsonConversionError {
         return JSON.stringify_dynamic_native(value);
+    }
+
+    static stringify_pretty(value: Dynamic): String throws JsonConversionError {
+        return JSON.stringify_pretty_dynamic_native(value);
+    }
+
+    static canonicalize(value: Dynamic): String throws JsonConversionError {
+        return JSON.canonicalize_dynamic_native(value);
+    }
+
+    static stringify_with_limits(value: Dynamic, limits: JSONLimits): String throws JsonConversionError {
+        return JSON.stringify_dynamic_with_limits_native(
+            value,
+            limits.maxDocumentBytes,
+            limits.maxNestingDepth,
+            limits.maxStringBytes,
+            limits.maxContainerItems,
+            limits.maxNumberBytes
+        );
+    }
+
+    static pointer(value: Dynamic, pointer: String): Dynamic throws JsonConversionError {
+        return JSON.pointer_dynamic_native(value, pointer);
+    }
+
+    static has_pointer(value: Dynamic, pointer: String): Boolean {
+        return JSON.pointer_error_kind_dynamic_native(value, pointer) == 0;
+    }
+
+    static query(value: Dynamic, expression: String): List<Dynamic> throws JsonConversionError {
+        return JSON.jsonpath_dynamic_native(value, expression);
+    }
+
+    static validate(value: Dynamic, schema: String): List<Dynamic> throws JsonConversionError {
+        return JSON.schema_validate_dynamic_native(value, schema);
+    }
+
+    static validate_with_resolver(
+        value: Dynamic,
+        schema: String,
+        resources: Dynamic
+    ): List<Dynamic> throws JsonConversionError {
+        return JSON.schema_validate_with_resolver_dynamic_native(value, schema, resources);
     }
 
     static decode<T>(document: String, codec: JSONCodec<T>): T throws JsonConversionError {
@@ -32,7 +364,70 @@ share class JSON {
         return document;
     }
 
+    private static null_dynamic_native(): Dynamic {
+        return "";
+    }
+
+
+    private static parse5_dynamic_native(document: String): Dynamic throws JsonConversionError {
+        return document;
+    }
+
+    private static parse_dynamic_with_limits_native(
+        document: String,
+        maxDocumentBytes: UInt64,
+        maxNestingDepth: UInt64,
+        maxStringBytes: UInt64,
+        maxContainerItems: UInt64,
+        maxNumberBytes: UInt64
+    ): Dynamic throws JsonConversionError {
+        return document;
+    }
+
     private static stringify_dynamic_native(value: Dynamic): String throws JsonConversionError {
         return "";
+    }
+
+    private static stringify_pretty_dynamic_native(value: Dynamic): String throws JsonConversionError {
+        return "";
+    }
+
+    private static canonicalize_dynamic_native(value: Dynamic): String throws JsonConversionError {
+        return "";
+    }
+
+    private static stringify_dynamic_with_limits_native(
+        value: Dynamic,
+        maxDocumentBytes: UInt64,
+        maxNestingDepth: UInt64,
+        maxStringBytes: UInt64,
+        maxContainerItems: UInt64,
+        maxNumberBytes: UInt64
+    ): String throws JsonConversionError {
+        return "";
+    }
+
+    private static pointer_dynamic_native(value: Dynamic, pointer: String): Dynamic throws JsonConversionError {
+        return value;
+    }
+
+    private static pointer_error_kind_dynamic_native(value: Dynamic, pointer: String): Int32 {
+        return 0;
+    }
+
+    private static jsonpath_dynamic_native(value: Dynamic, expression: String): List<Dynamic> throws JsonConversionError {
+        return [];
+    }
+
+    private static schema_validate_dynamic_native(value: Dynamic, schema: String): List<Dynamic> throws JsonConversionError {
+        return [];
+    }
+
+    private static schema_validate_with_resolver_dynamic_native(
+        value: Dynamic,
+        schema: String,
+        resources: Dynamic
+    ): List<Dynamic> throws JsonConversionError {
+        return [];
     }
 }

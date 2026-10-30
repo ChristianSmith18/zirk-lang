@@ -1,0 +1,13 @@
+package std.collections;
+
+// Stable import names for the compiler-owned collection types. Each alias
+// resolves to the existing built-in identity and does not wrap its values.
+share type Array<T> = Array<T>;
+share type List<T> = List<T>;
+share type Map<K, V> = Map<K, V>;
+share type Set<T> = Set<T>;
+share type Range<T> = Range<T>;
+share type Deque<T> = Deque<T>;
+share type Queue<T> = Queue<T>;
+share type Stack<T> = Stack<T>;
+share type PriorityQueue<T> = PriorityQueue<T>;

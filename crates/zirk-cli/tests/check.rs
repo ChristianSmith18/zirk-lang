@@ -44,7 +44,12 @@ fn host_target() -> &'static str {
 
 /// A private working directory per test.
 fn workspace(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    // Keep temporary projects outside the repository tree. A root `.zkinit`
+    // would otherwise be discovered by commands that intentionally test the
+    // absence of a project manifest in their own working directory.
+    let dir = std::env::temp_dir()
+        .join(format!("zirk-cli-check-{}", std::process::id()))
+        .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("working directory");
     dir
@@ -139,6 +144,179 @@ fn structural_mixed_union_is_accepted_by_frontend() {
 }
 
 #[test]
+fn unsupported_collection_rows_fail_in_check_with_the_nested_type_path() {
+    for (case, source, expected_path) in [
+        (
+            "nested_unsupported_tuple_key",
+            "fn main(): Void { mut values: Map<Tuple<Int32, Tuple<Decimal?, Range<Int32>>>, Boolean> = Map(); }",
+            "Tuple<Int32, Tuple<Decimal?, Range<Int32>>>",
+        ),
+        (
+            "range_map_value",
+            "fn main(): Void { mut values: Map<String, Range<Int32>> = Map(); }",
+            "Range<Int32>",
+        ),
+        (
+            "dynamic_set_element",
+            "fn main(): Void { mut values: Set<Dynamic> = Set(); }",
+            "Dynamic",
+        ),
+        (
+            "unsupported_union_alternative",
+            "type Key = Int32 | List<Int32>; fn main(): Void { mut values: Map<Key, Boolean> = Map(); }",
+            "List<Int32>",
+        ),
+        (
+            "mutable_object_key",
+            "fn main(): Void { mut values: Map<Object, Boolean> = Map(); }",
+            "Object",
+        ),
+        (
+            "array_set_element",
+            "fn main(): Void { mut values: Set<Array<Int32>> = Set(); }",
+            "Array<Int32>",
+        ),
+        (
+            "atomic_map_key",
+            "fn main(): Void { mut values: Map<Atomic<Int32>, Boolean> = Map(); }",
+            "Atomic<Int32>",
+        ),
+        (
+            "regex_set_element",
+            "fn main(): Void { mut values: Set<Regex> = Set(); }",
+            "Regex",
+        ),
+        (
+            "mutex_map_value",
+            "fn main(): Void { mut values: Map<String, Mutex<Int32>> = Map(); }",
+            "Mutex<Int32>",
+        ),
+    ] {
+        let dir = workspace(&format!("unsupported_collection_{case}"));
+        let source_path = dir.join("main.zrk");
+        std::fs::write(&source_path, source).expect("write unsupported collection fixture");
+
+        let (success, stdout, stderr) = zirk_check(
+            &source_path,
+            &format!("unsupported_collection_check_{case}"),
+        );
+        assert!(!success, "{case} must be rejected during checking");
+        assert!(stdout.is_empty(), "zirk check must not write to stdout");
+        assert!(
+            stderr.contains("unhashable") || stderr.contains("runtime value layout"),
+            "{case} must produce a semantic collection diagnostic:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(expected_path),
+            "{case} diagnostic must name {expected_path}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("compiler produced invalid IR")
+                && !stderr.contains("internal compiler error"),
+            "{case} must fail before lowering/backend generation:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn admitted_collection_capability_rows_pass_semantic_check() {
+    let key_types = [
+        "Int8",
+        "UInt8",
+        "Int16",
+        "UInt16",
+        "Int32",
+        "UInt32",
+        "Int64",
+        "UInt64",
+        "Int128",
+        "UInt128",
+        "Float16",
+        "Float32",
+        "Float64",
+        "Float128",
+        "Decimal",
+        "Boolean",
+        "Char",
+        "String",
+        "Duration",
+        "Date",
+        "Time",
+        "DateTime",
+        "Instant",
+        "Decimal?",
+        "Int32?",
+        "Tuple<Int32, Decimal?>",
+        "Tuple<String, Int32>",
+        "Tuple<Char, Int32>",
+        "Payload",
+        "Choice",
+        "WrappedChoice",
+        "Identity",
+        "Identity?",
+    ];
+    let value_types = [
+        "Int32",
+        "Float64",
+        "Decimal",
+        "Boolean",
+        "Char",
+        "String",
+        "Duration",
+        "Date",
+        "Time",
+        "DateTime",
+        "Instant",
+        "Decimal?",
+        "Int32?",
+        "Array<Int32>",
+        "List<Int32>",
+        "Map<String, Int32>",
+        "Set<Int32>",
+        "Atomic<Int32>",
+        "Object",
+        "Dynamic",
+        "Tuple<String, Int32>",
+        "Payload",
+        "Choice",
+        "Identity",
+        "Identity?",
+        "Point",
+    ];
+    let mut source = String::from(
+        "type Choice = Int32 | String;\n\
+         type NumericChoice = Boolean | Decimal;\n\
+         type Point = { x: Int32; };\n\
+         enum Payload { Number(value: Int32), Empty }\n\
+         enum WrappedChoice { Value(value: NumericChoice), Empty }\n\
+         class Identity { construct() { } }\n\
+         fn main(): Void {\n",
+    );
+    for (index, ty) in key_types.iter().enumerate() {
+        source.push_str(&format!(
+            "  mut key_map_{index}: Map<{ty}, Int32> = Map();\n  mut key_set_{index}: Set<{ty}> = Set();\n"
+        ));
+    }
+    for (index, ty) in value_types.iter().enumerate() {
+        source.push_str(&format!(
+            "  mut value_map_{index}: Map<String, {ty}> = Map();\n"
+        ));
+    }
+    source.push_str("}\n");
+
+    let dir = workspace("admitted_collection_capability_matrix");
+    let source_path = dir.join("main.zrk");
+    std::fs::write(&source_path, source).expect("write admitted collection matrix");
+    let (success, stdout, stderr) = zirk_check(&source_path, "admitted_collection_matrix_check");
+    assert!(
+        success,
+        "admitted key, element, and Map value rows must type-check:\n{stderr}"
+    );
+    assert!(stdout.is_empty(), "zirk check must not write to stdout");
+    assert!(stderr.is_empty(), "zirk check must not produce diagnostics");
+}
+
+#[test]
 fn unsupported_structural_match_patterns_are_rejected_before_lowering() {
     let dir = workspace("unsupported_structural_match_pattern_input");
     let source = dir.join("main.zrk");
@@ -183,6 +361,51 @@ fn an_invalid_program_is_rejected_with_diagnostics() {
     assert!(
         stderr.contains("E0411") || stderr.contains("error"),
         "`zirk check` must report an error, got: {stderr}"
+    );
+}
+
+#[test]
+fn generated_json_codec_partial_implementation_has_a_focused_diagnostic() {
+    let path = corpus("invalid").join("json_generated_codec_partial.zrk");
+    let (success, stdout, stderr) = zirk_check(&path, "json_codec_partial");
+
+    assert!(!success, "partial generated codecs must be rejected");
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("provides only part of its generated JSON codec"),
+        "the diagnostic should identify the partial codec request:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("does not implement `decode`")
+            && !stderr.contains("does not implement `encode`"),
+        "partial generation should not cascade into contract-conformance errors:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("compiler produced invalid IR")
+            && !stderr.contains("internal compiler error"),
+        "the partial form must fail before lowering:\n{stderr}"
+    );
+}
+
+#[test]
+fn unsupported_generated_json_codec_field_fails_before_lowering() {
+    let path = corpus("invalid").join("json_generated_codec_nullable_field.zrk");
+    let (success, stdout, stderr) = zirk_check(&path, "json_codec_nullable_field");
+
+    assert!(
+        !success,
+        "unsupported nullable codec fields must be rejected"
+    );
+    assert!(stdout.is_empty());
+    assert!(
+        stderr.contains("cannot generate JSON codec for field `nickname`")
+            && stderr.contains("no generated JSON validation and conversion yet"),
+        "the diagnostic should name the unsupported field and conversion gap:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("compiler produced invalid IR")
+            && !stderr.contains("internal compiler error"),
+        "the unsupported field must fail before lowering:\n{stderr}"
     );
 }
 
@@ -1421,7 +1644,7 @@ fn result_projection_rejects_payloads_without_nullable_runtime_layouts() {
     let dir = workspace("unsupported_result_projection");
     std::fs::write(
         dir.join("main.zrk"),
-        "fn main(): Void { mut value: Decimal = Decimal.parse(\"1.5\"); }",
+        "fn project(value: Result<Range<Int32>, String>): Range<Int32>? { return value; }\nfn main(): Void {}",
     )
     .unwrap();
     let output = Command::new(compiler())

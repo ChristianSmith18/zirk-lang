@@ -1,0 +1,11 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut now = Instant.now();
+    stdout.println(match Instant.parse(now.to_iso_string()) {
+        Ok(parsed) => parsed == now;
+        Error(_) => false;
+    });
+}
+
+main();

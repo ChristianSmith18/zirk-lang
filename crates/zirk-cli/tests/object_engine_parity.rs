@@ -109,6 +109,7 @@ class PersonWatcher implements Watched<Person> {
         stdout.println("called");
     }
 }
+
 fn attach(person: Watched<Person>): Void {
     person.on("ageChanged", (age): Void => { });
     person.on("nameChanged", (name): Void => { });
@@ -119,6 +120,119 @@ fn main(): Void {
 }
 main();"#,
         "called\ncalled\n",
+    );
+}
+
+#[test]
+fn generic_trait_defaults_substitute_contract_types_for_each_adopter() {
+    assert_parity(
+        "generic_trait_default_substitution",
+        r#"import { stdout } from std.io;
+trait DefaultContainer<T from Clone> {
+    value: T;
+    echo(input: T): T { return input; }
+    echo_many(input: List<T>): List<T> { return input; }
+    get(): T { return this.value; }
+    duplicate(): T { return this.value.clone(); }
+}
+class IntBox implements DefaultContainer<Int32> {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+class StringBox implements DefaultContainer<String> {
+    value: String;
+    construct(value: String) { this.value = value; }
+}
+fn main(): Void {
+    mut i: IntBox = IntBox(7);
+    mut s: StringBox = StringBox("ok");
+    mut ci: DefaultContainer<Int32> = i;
+    mut cs: DefaultContainer<String> = s;
+    inmut numbers: List<Int32> = [9, 10];
+    inmut words: List<String> = ["uno", "dos"];
+    stdout.println(i.echo(42));
+    stdout.println(i.get());
+    stdout.println(s.echo("text"));
+    stdout.println(s.get());
+    stdout.println(i.duplicate());
+    stdout.println(s.duplicate());
+    stdout.println(i.echo_many(numbers)[0]);
+    stdout.println(s.echo_many(words)[1]);
+    stdout.println(ci.echo(84));
+    stdout.println(cs.get());
+}
+main();"#,
+        "42\n7\ntext\nok\n7\nok\n9\ndos\n84\nok\n",
+    );
+}
+
+#[test]
+fn nested_generic_contract_arguments_substitute_and_dispatch_recursively() {
+    assert_parity(
+        "nested_generic_contract_arguments",
+        r#"import { stdout } from std.io;
+enum Box<T> { Full(value: T) }
+contract Container<T> {
+    item: T;
+    get(): T;
+}
+contract NestedContainer<T> implements Container<Box<T>> {}
+class IntContainer implements NestedContainer<Int32> {
+    item: Box<Int32>;
+    construct(item: Box<Int32>) { this.item = item; }
+    get(): Box<Int32> { return this.item; }
+}
+fn main(): Void {
+    mut value: IntContainer = IntContainer(Box.Full(42));
+    mut container: Container<Box<Int32>> = value;
+    stdout.println(match container.get() {
+        Box.Full(number) => number;
+    });
+}
+main();"#,
+        "42\n",
+    );
+}
+
+#[test]
+fn generic_enum_match_dispatches_after_recursive_substitution() {
+    assert_parity(
+        "generic_enum_match_recursive_substitution",
+        r#"import { stdout } from std.io;
+enum Box<T> { Full(value: T), Empty }
+fn rebox<T>(box: Box<T>): Box<T> {
+    return match box {
+        Box.Full(value) => Box.Full(value);
+        Box.Empty => Box.Empty;
+    };
+}
+fn describe_int(box: Box<Int32>): String {
+    return match box {
+        Box.Full(value) => "full:" + value.to_string();
+        Box.Empty => "empty";
+    };
+}
+fn describe_string(box: Box<String>): String {
+    return match box {
+        Box.Full(value) => "full:" + value;
+        Box.Empty => "empty";
+    };
+}
+fn main(): Void {
+    inmut number: Box<Int32> = Box.Full(42);
+    inmut text: Box<String> = Box.Full("hola");
+    inmut nested: Box<Box<String>> = Box.Full(Box.Full("nested"));
+    inmut empty: Box<String> = Box.Empty;
+    stdout.println(describe_int(rebox(number)));
+    stdout.println(describe_string(rebox(text)));
+    stdout.println(match rebox(nested) {
+        Box.Full(inner) => describe_string(inner);
+        Box.Empty => "empty";
+    });
+    stdout.println(describe_string(rebox(empty)));
+}
+main();"#,
+        "full:42\nfull:hola\nfull:nested\nempty\n",
     );
 }
 
@@ -165,6 +279,144 @@ main();"#,
 }
 
 #[test]
+fn decimal_collection_keys_match_at_coefficient_and_scale_boundaries() {
+    assert_parity(
+        "decimal_collection_boundaries",
+        r#"import { stdout } from std.io;
+fn main(): Void {
+    inmut upper = match Decimal.parse("99999999999999999999999999999999999999") {
+        Ok(value) => value;
+        Error(_) => Decimal(0);
+    };
+    inmut upper_scaled = match Decimal.parse("99999999999999999999999999999999999999") {
+        Ok(value) => value;
+        Error(_) => Decimal(0);
+    };
+    inmut tiny = match Decimal.parse("0.0000000000000000000000000000000000001") {
+        Ok(value) => value;
+        Error(_) => Decimal(0);
+    };
+    inmut tiny_scaled = match Decimal.parse("0.00000000000000000000000000000000000010") {
+        Ok(value) => value;
+        Error(_) => Decimal(0);
+    };
+    mut values: Set<Decimal> = Set();
+    stdout.println(values.add(upper).to_string());
+    stdout.println(values.add(upper_scaled).to_string());
+    stdout.println(values.add(tiny).to_string());
+    stdout.println(values.add(tiny_scaled).to_string());
+    stdout.println(values.length.to_string());
+    mut map: Map<Decimal, String> = Map();
+    map.set(tiny, "smallest-scale-boundary");
+    stdout.println((map.get(tiny_scaled) ?? "missing"));
+    mut decimal_values: Map<Decimal, Decimal> = Map();
+    decimal_values.set(upper, tiny);
+    stdout.println((decimal_values.get(upper_scaled) ?? Decimal(0)).to_string());
+}
+main();"#,
+        "true\nfalse\ntrue\nfalse\n2\nsmallest-scale-boundary\n0.0000000000000000000000000000000000001\n",
+    );
+}
+
+#[test]
+fn nullable_decimal_collection_keys_match_native_and_interpreter() {
+    assert_parity(
+        "nullable_decimal_collection_keys",
+        r#"import { stdout } from std.io;
+fn main(): Void {
+    inmut absent: Decimal? = null;
+    inmut first: Decimal? = 1.0;
+    inmut equivalent: Decimal? = 1.00;
+    mut values: Set<Decimal?> = Set();
+    stdout.println(values.add(absent).to_string());
+    stdout.println(values.add(absent).to_string());
+    stdout.println(values.add(first).to_string());
+    stdout.println(values.add(equivalent).to_string());
+    stdout.println(values.length.to_string());
+    mut map: Map<Decimal?, String> = Map();
+    map.set(absent, "none");
+    map.set(first, "some");
+    stdout.println((map.get(absent) ?? "missing"));
+    stdout.println((map.get(equivalent) ?? "missing"));
+    stdout.println(map.length.to_string());
+    mut tuple_values: Set<Tuple<Decimal?, Boolean>> = Set();
+    stdout.println(tuple_values.add((absent, false)).to_string());
+    stdout.println(tuple_values.add((absent, false)).to_string());
+    stdout.println(tuple_values.add((first, false)).to_string());
+    stdout.println(tuple_values.add((equivalent, false)).to_string());
+    stdout.println(tuple_values.length.to_string());
+    mut tuple_map: Map<Tuple<Decimal?, Boolean>, Int32> = Map();
+    tuple_map.set((first, true), 42);
+    stdout.println((tuple_map.get((equivalent, true)) ?? 0).to_string());
+}
+main();"#,
+        "true\nfalse\ntrue\nfalse\n2\nnone\nsome\n2\ntrue\nfalse\ntrue\nfalse\n2\n42\n",
+    );
+}
+
+#[test]
+fn generated_decimal_arithmetic_values_preserve_collection_hash_coherence() {
+    let mut program = String::from(
+        "import { stdout } from std.io;\nfn main(): Void {\n\
+         mut values: Set<Decimal> = Set();\n\
+         mut entries: Map<Decimal, Int32> = Map();\n\
+         inmut quarter: Decimal = Decimal.parse(\"0.25\") ?? Decimal(0);\n",
+    );
+    let mut expected = String::new();
+    for value in 0..8_i32 {
+        let whole = value * 7919 + 1;
+        program.push_str(&format!(
+            "inmut first_{value}: Decimal = Decimal.parse(\"{whole}.00\") ?? Decimal(0);\n\
+             inmut equal_{value}: Decimal = Decimal.parse(\"{whole}.0\") ?? Decimal(0);\n\
+             inmut arithmetic_{value}: Decimal = first_{value} + quarter;\n\
+             inmut arithmetic_equal_{value}: Decimal = Decimal.parse(\"{whole}.25\") ?? Decimal(0);\n\
+             stdout.println(values.add(first_{value}).to_string());\n\
+             stdout.println(values.add(equal_{value}).to_string());\n\
+             stdout.println(values.add(arithmetic_{value}).to_string());\n\
+             stdout.println(values.add(arithmetic_equal_{value}).to_string());\n\
+             entries.set(arithmetic_{value}, {value});\n\
+             stdout.println((entries.get(arithmetic_equal_{value}) ?? -1).to_string());\n"
+        ));
+        expected.push_str(&format!("true\nfalse\ntrue\nfalse\n{value}\n"));
+    }
+    program.push_str("}\nmain();\n");
+    assert_parity(
+        "generated_decimal_collection_hash_coherence",
+        &program,
+        &expected,
+    );
+}
+
+#[test]
+fn canonically_equivalent_text_collection_keys_match_native_and_interpreter() {
+    assert_parity(
+        "canonical_text_collection_keys",
+        r#"import { stdout } from std.io;
+fn main(): Void {
+    mut map: Map<String, Int32> = Map();
+    map.set("é", 17);
+    stdout.println(map.contains_key("é").to_string());
+    stdout.println((map.get("é") ?? 0).to_string());
+    mut set: Set<String> = Set();
+    stdout.println(set.add("é").to_string());
+    stdout.println(set.add("é").to_string());
+    stdout.println(set.length.to_string());
+    stdout.println(set.remove("é").to_string());
+    stdout.println(set.add("é").to_string());
+    stdout.println(set.length.to_string());
+    mut chars: Set<Char> = Set();
+    stdout.println(chars.add('é').to_string());
+    stdout.println(chars.add('é').to_string());
+    stdout.println(chars.remove('é').to_string());
+    stdout.println(chars.add('é').to_string());
+    stdout.println(chars.length.to_string());
+}
+main();"#,
+        "true\n17\ntrue\nfalse\n1\ntrue\ntrue\n1\ntrue\nfalse\ntrue\ntrue\n1\n",
+    );
+}
+
+#[test]
 fn nullable_and_heterogeneous_tuple_collection_keys_match_native_and_interpreter() {
     assert_parity(
         "nullable_and_heterogeneous_tuple_collection_keys",
@@ -201,6 +453,10 @@ fn main(): Void {
     stdout.println(nullable_text.add("key").to_string());
     stdout.println(nullable_text.add("key").to_string());
     for value in nullable_text { stdout.println((value ?? "nil")); }
+    stdout.println(nullable_text.remove(null).to_string());
+    stdout.println(nullable_text.remove(null).to_string());
+    stdout.println(nullable_text.remove("key").to_string());
+    stdout.println(nullable_text.length.to_string());
     mut nullable_text_map: Map<String?, Int32> = Map();
     nullable_text_map.set(null, 5);
     nullable_text_map.set("key", 6);
@@ -220,8 +476,96 @@ fn main(): Void {
     enum_map.set(ScalarKey.Ratio(0.0 as Float64), 23);
     stdout.println((enum_map.get(ScalarKey.Ratio(-0.0 as Float64)) ?? 0).to_string());
 }
+
 main();"#,
-        "true\nfalse\ntrue\n2\ntrue\n42\ntrue\nfalse\n1\ntrue\nfalse\n1\ntrue\nfalse\ntrue\n2\ntrue\nfalse\ntrue\nfalse\nnil\nkey\ntrue\n6\nnil\nkey\n(<Null>, 5)\n(key, 6)\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n3\n23\n",
+        "true\nfalse\ntrue\n2\ntrue\n42\ntrue\nfalse\n1\ntrue\nfalse\n1\ntrue\nfalse\ntrue\n2\ntrue\nfalse\ntrue\nfalse\nnil\nkey\ntrue\nfalse\ntrue\n0\ntrue\n6\nnil\nkey\n(<Null>, 5)\n(key, 6)\ntrue\nfalse\ntrue\nfalse\ntrue\nfalse\n3\n23\n",
+    );
+}
+
+#[test]
+fn enum_text_collection_keys_use_variant_aware_content_snapshots() {
+    assert_parity(
+        "enum_text_collection_keys",
+        r#"import { stdout } from std.io;
+enum TextKey { Name(value: String), Character(value: Char), Empty }
+fn main(): Void {
+    mut source: String = "é";
+    mut names: Set<TextKey> = Set();
+    stdout.println(names.add(TextKey.Name(source)).to_string());
+    source[0] = "x";
+    stdout.println(names.contains(TextKey.Name("é")).to_string());
+    stdout.println(names.contains(TextKey.Name("x")).to_string());
+    stdout.println(names.add(TextKey.Name("é")).to_string());
+    stdout.println(names.add(TextKey.Character('é')).to_string());
+    stdout.println(names.add(TextKey.Character('é')).to_string());
+    stdout.println(names.add(TextKey.Empty).to_string());
+    stdout.println(names.add(TextKey.Empty).to_string());
+    mut values: Map<TextKey, Int32> = Map();
+    values.set(TextKey.Name("é"), 17);
+    values.set(TextKey.Character('é'), 23);
+    stdout.println((values.get(TextKey.Name("é")) ?? 0).to_string());
+    stdout.println((values.get(TextKey.Character('é')) ?? 0).to_string());
+    stdout.println(values.length.to_string());
+}
+main();"#,
+        "true\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\nfalse\n17\n23\n2\n",
+    );
+}
+
+#[test]
+fn aggregate_set_removal_uses_declared_equality_and_preserves_order() {
+    assert_parity(
+        "aggregate_set_removal_order",
+        r#"import { stdout } from std.io;
+enum Key { Count(value: Int128), Empty }
+enum NestedKey { Value(value: Tuple<Decimal?, Boolean>), Empty }
+fn main(): Void {
+    mut tuples: Set<Tuple<Int32, Boolean>> = Set();
+    tuples.add((1, true));
+    tuples.add((2, false));
+    stdout.println(tuples.remove((1, true)).to_string());
+    stdout.println(tuples.remove((1, true)).to_string());
+    tuples.add((1, true));
+    for key in tuples { stdout.println(key[0].to_string()); }
+    mut nullable: Set<Tuple<Int32?, Boolean>> = Set();
+    inmut absent: Int32? = null;
+    inmut present: Int32? = 7;
+    nullable.add((absent, false));
+    nullable.add((present, false));
+    stdout.println(nullable.remove((absent, false)).to_string());
+    for key in nullable { stdout.println((key[0] ?? 0).to_string()); }
+    mut enums: Set<Key> = Set();
+    enums.add(Key.Count(10));
+    enums.add(Key.Empty);
+    stdout.println(enums.remove(Key.Count(10)).to_string());
+    enums.add(Key.Count(10));
+    for key in enums {
+        match key {
+            Key.Count(value) => stdout.println(value.to_string());
+            Key.Empty => stdout.println("empty");
+        }
+    }
+    inmut decimal_absent: Decimal? = null;
+    inmut other_absent: Decimal? = null;
+    inmut decimal_present: Decimal? = 1.00;
+    inmut decimal_equivalent: Decimal? = 1.0;
+    mut nested: Set<NestedKey> = Set();
+    nested.add(NestedKey.Value((decimal_absent, false)));
+    nested.add(NestedKey.Empty);
+    stdout.println(nested.remove(NestedKey.Value((other_absent, false))).to_string());
+    stdout.println(nested.remove(NestedKey.Value((decimal_absent, false))).to_string());
+    nested.add(NestedKey.Value((decimal_present, true)));
+    nested.add(NestedKey.Value((decimal_equivalent, true)));
+    stdout.println(nested.length.to_string());
+    for key in nested {
+        match key {
+            NestedKey.Value(_) => stdout.println("value");
+            NestedKey.Empty => stdout.println("empty");
+        }
+    }
+}
+main();"#,
+        "true\nfalse\n2\n1\ntrue\n7\ntrue\nempty\n10\ntrue\nfalse\n2\nempty\nvalue\n",
     );
 }
 
@@ -336,6 +680,37 @@ fn map_key_and_value_snapshots_preserve_insertion_order_in_both_engines() {
         "map_typed_snapshots",
         include_str!("corpus/valid/map_typed_snapshots.zrk"),
         include_str!("corpus/valid/map_typed_snapshots.out"),
+    );
+}
+
+#[test]
+fn mutable_text_collection_keys_and_elements_use_insertion_snapshots() {
+    let program = r#"import { stdout } from std.io;
+fn main(): Void {
+    mut key: String = "one";
+    mut map: Map<String, Int32> = Map();
+    mut set: Set<String> = Set();
+    map.set(key, 7);
+    set.add(key);
+
+    key[0] = 'd';
+    stdout.println(map.contains_key("one").to_string());
+    stdout.println((map.get("one") ?? 0).to_string());
+    stdout.println(map.contains_key(key).to_string());
+    stdout.println(set.contains("one").to_string());
+    stdout.println(set.contains(key).to_string());
+
+    mut map_keys: Array<String> = map.keys();
+    mut exposed_map_key: String = map_keys[0];
+    exposed_map_key[0] = 'x';
+    stdout.println(map.contains_key("one").to_string());
+    stdout.println(set.contains("one").to_string());
+}
+main();"#;
+    assert_parity(
+        "mutable_text_collection_snapshots",
+        program,
+        "true\n7\nfalse\ntrue\nfalse\ntrue\ntrue\n",
     );
 }
 
@@ -590,6 +965,48 @@ fn mutable_reference_collection_keys_use_identity_in_both_engines() {
 }
 
 #[test]
+fn contract_reference_set_keys_keep_underlying_object_identity() {
+    assert_parity(
+        "contract_reference_set_identity",
+        r#"import { stdout } from std.io;
+contract HasValue { value: Int32; }
+class MutableValue implements HasValue {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut concrete: MutableValue = MutableValue(7);
+    mut first_view: HasValue = concrete;
+    mut second_view: HasValue = concrete;
+    mut distinct: HasValue = MutableValue(7);
+    mut values: Set<HasValue> = Set();
+    stdout.println(values.add(first_view).to_string());
+    stdout.println(values.add(second_view).to_string());
+    stdout.println(values.add(distinct).to_string());
+    concrete.value = 9;
+    stdout.println(values.contains(second_view).to_string());
+    stdout.println(values.remove(second_view).to_string());
+    stdout.println(values.remove(first_view).to_string());
+    stdout.println(values.length.to_string());
+    for value in values { stdout.println(value.value.to_string()); }
+    inmut absent: HasValue? = null;
+    inmut present: HasValue? = first_view;
+    mut nullable: Set<HasValue?> = Set();
+    stdout.println(nullable.add(absent).to_string());
+    stdout.println(nullable.add(absent).to_string());
+    stdout.println(nullable.add(present).to_string());
+    stdout.println(nullable.contains(present).to_string());
+    stdout.println(nullable.remove(absent).to_string());
+    stdout.println(nullable.remove(absent).to_string());
+    stdout.println(nullable.remove(present).to_string());
+    stdout.println(nullable.length.to_string());
+}
+main();"#,
+        "true\nfalse\ntrue\ntrue\ntrue\nfalse\n1\n7\ntrue\nfalse\ntrue\ntrue\ntrue\nfalse\ntrue\n0\n",
+    );
+}
+
+#[test]
 fn float128_arithmetic_comparison_and_format_match_native_and_interpreter() {
     let program = r#"import { stdout } from std.io;
 fn main(): Void {
@@ -668,6 +1085,7 @@ fn main(): Void {
     float_values.set(positive_zero, negative_zero);
     stdout.println((float_values.get(positive_zero) ?? 1.0).to_string());
 
+
     mut positive_quad: Float128 = 0.0 as Float128;
     mut negative_quad: Float128 = -0.0 as Float128;
     mut quad_values: Set<Float128> = Set();
@@ -695,6 +1113,70 @@ main();"#;
         "floating_collection_keys_signed_zero",
         program,
         "true\nfalse\n1\n-0\ntrue\nfalse\n1\n-0\ntrue\nfalse\n1\ntrue\n17\ntrue\n-0\ntrue\nfalse\n1\n123456789012345678901234567890\ntrue\ntrue\nfalse\n2\nwide-key\n",
+    );
+}
+
+#[test]
+fn floating_collection_keys_distinguish_infinities_and_preserve_equal_lookups() {
+    let program = r#"import { stdout } from std.io;
+fn main(): Void {
+    inmut positive16: Float16 = Float16.parse("inf") ?? 0.0;
+    inmut negative16: Float16 = Float16.parse("-inf") ?? 0.0;
+    inmut positive64: Float64 = Float64.parse("inf") ?? 0.0;
+    inmut negative64: Float64 = Float64.parse("-inf") ?? 0.0;
+    inmut positive32: Float32 = Float32.parse("inf") ?? 0.0;
+    inmut negative32: Float32 = Float32.parse("-inf") ?? 0.0;
+    inmut positive128: Float128 = Float128.parse("inf") ?? 0.0;
+    inmut negative128: Float128 = Float128.parse("-inf") ?? 0.0;
+
+    mut values16: Set<Float16> = Set();
+    stdout.println(values16.add(positive16).to_string());
+    stdout.println(values16.add(negative16).to_string());
+    stdout.println(values16.length.to_string());
+    mut entries16: Map<Float16, Int32> = Map();
+    entries16.set(positive16, 161);
+    entries16.set(negative16, 162);
+    stdout.println((entries16.get(positive16) ?? 0).to_string());
+    stdout.println((entries16.get(negative16) ?? 0).to_string());
+
+    mut values64: Set<Float64> = Set();
+    stdout.println(values64.add(positive64).to_string());
+    stdout.println(values64.add(positive64).to_string());
+    stdout.println(values64.add(negative64).to_string());
+    stdout.println(values64.length.to_string());
+    stdout.println(values64.contains(positive64).to_string());
+    stdout.println(values64.contains(negative64).to_string());
+    mut entries64: Map<Float64, Int32> = Map();
+    entries64.set(positive64, 41);
+    entries64.set(negative64, 42);
+    stdout.println((entries64.get(positive64) ?? 0).to_string());
+    stdout.println((entries64.get(negative64) ?? 0).to_string());
+
+    mut values32: Set<Float32> = Set();
+    stdout.println(values32.add(positive32).to_string());
+    stdout.println(values32.add(negative32).to_string());
+    stdout.println(values32.length.to_string());
+    mut entries32: Map<Float32, Int32> = Map();
+    entries32.set(positive32, 31);
+    entries32.set(negative32, 32);
+    stdout.println((entries32.get(positive32) ?? 0).to_string());
+    stdout.println((entries32.get(negative32) ?? 0).to_string());
+
+    mut values128: Set<Float128> = Set();
+    stdout.println(values128.add(positive128).to_string());
+    stdout.println(values128.add(negative128).to_string());
+    stdout.println(values128.length.to_string());
+    mut entries128: Map<Float128, Int32> = Map();
+    entries128.set(positive128, 1281);
+    entries128.set(negative128, 1282);
+    stdout.println((entries128.get(positive128) ?? 0).to_string());
+    stdout.println((entries128.get(negative128) ?? 0).to_string());
+}
+main();"#;
+    assert_parity(
+        "floating_collection_keys_infinities",
+        program,
+        "true\ntrue\n2\n161\n162\ntrue\nfalse\ntrue\n2\ntrue\ntrue\n41\n42\ntrue\ntrue\n2\n31\n32\ntrue\ntrue\n2\n1281\n1282\n",
     );
 }
 
@@ -821,12 +1303,170 @@ main();
 }
 
 #[test]
+fn payload_enum_union_narrowing_has_native_interpreter_parity() {
+    let program = r#"import { stdout } from std.io;
+enum Message { Success(value: String), Failure(code: Int32), Empty }
+type Value = Message | Int32;
+fn describe(value: Value): String {
+    return match value {
+        7 => "number";
+        Message.Success(text) => "success " + text;
+        Message.Failure(code) => "failure " + code.to_string();
+        Message.Empty => "empty";
+        _ => "other";
+    };
+}
+fn category(value: Value): String {
+    if value is Message { return "message"; }
+    return "integer";
+}
+fn main(): Void {
+    stdout.println(describe(7));
+    stdout.println(describe(Message.Success("ready")));
+    stdout.println(describe(Message.Failure(23)));
+    stdout.println(describe(Message.Empty));
+    stdout.println(category(Message.Success("tagged")));
+    stdout.println(category(7));
+}
+main();
+"#;
+    assert_parity(
+        "payload_enum_union",
+        program,
+        "number\nsuccess ready\nfailure 23\nempty\nmessage\ninteger\n",
+    );
+}
+
+#[test]
+fn generic_list_union_payload_dispatch_has_native_interpreter_parity() {
+    let program = r#"import { stdout } from std.io;
+enum Message { Text(value: String), Count(value: Int32) }
+type Value = Message | Boolean;
+fn describe(value: Value): String {
+    return match value {
+        Message.Text(text) => "text " + text;
+        Message.Count(count) => "count " + count.to_string();
+        true => "true";
+        false => "false";
+        _ => "other";
+    };
+}
+fn render_all(values: List<Value>): Void {
+    for value in values { stdout.println(describe(value)); }
+}
+fn main(): Void {
+    mut values: List<Value> = List();
+    values.add(Message.Text("nested"));
+    values.add(true);
+    values.add(Message.Count(42));
+    render_all(values);
+    mut current: Value = Message.Count(1);
+    current = true;
+    current = Message.Text("assigned");
+    stdout.println(describe(current));
+}
+main();
+"#;
+    assert_parity(
+        "generic_list_union_payload",
+        program,
+        "text nested\ntrue\ncount 42\ntext assigned\n",
+    );
+}
+
+#[test]
+fn map_union_values_round_trip_and_match_across_engines() {
+    let program = r#"import { stdout } from std.io;
+enum StoredMessage { Text(value: String), Empty }
+type Value = StoredMessage | Int32;
+fn describe(value: Value?): String {
+    return match value {
+        null => "missing";
+        7 => "number";
+        StoredMessage.Text(text) => "text " + text;
+        StoredMessage.Empty => "empty";
+        _ => "other";
+    };
+}
+fn main(): Void {
+    mut values: Map<String, Value> = Map();
+    values.set("text", StoredMessage.Text("stored"));
+    values.set("number", 7);
+    values.set("empty", StoredMessage.Empty);
+    stdout.println(describe(values.get("text")));
+    stdout.println(describe(values.get("number")));
+    stdout.println(describe(values.get("empty")));
+    stdout.println(describe(values.get("missing")));
+}
+main();
+"#;
+    assert_parity(
+        "map_union_values",
+        program,
+        "text stored\nnumber\nempty\nmissing\n",
+    );
+}
+
+#[test]
+fn union_narrowing_survives_return_error_nested_match_and_finally() {
+    let program = r#"import { stdout } from std.io;
+type Payload = { kind: "text"; text: String };
+type Value = Payload | Int32;
+fn describe(value: Value): String {
+    if value is Payload {
+        return match value.kind {
+            "text" => value.text;
+        };
+    }
+    return "number";
+}
+fn fail(value: Value): String throws InvalidArgumentError {
+    if value is Payload { throw InvalidArgumentError(value.text); }
+    return "number";
+}
+fn main(): Void {
+    inmut value: Value = { kind: "text", text: "payload stays live" };
+    stdout.println(describe(value));
+    try {
+        stdout.println(fail(value));
+    } catch InvalidArgumentError(error) {
+        stdout.println(error.message());
+    } finally {
+        stdout.println(describe(value));
+        stdout.println("cleanup");
+    }
+}
+main();
+"#;
+    assert_parity(
+        "union_narrowing_control_flow",
+        program,
+        "payload stays live\npayload stays live\npayload stays live\ncleanup\n",
+    );
+}
+
+#[test]
 fn collection_reference_union_has_native_interpreter_parity() {
     let program = r#"import { stdout } from std.io;
-type Value = Int32 | Array<Int32> | List<Int32> | Map<String, Int32> | Set<Int32>;
+type Value = Int32 | Array<Int32> | List<Int32> | Map<String, Int32> | Set<Int32> | Deque<Int32> | Queue<Int32> | Stack<Int32>;
+type IntArray = Array<Int32>;
+type IntList = List<Int32>;
+type IntMap = Map<String, Int32>;
+type IntSet = Set<Int32>;
+type IntDeque = Deque<Int32>;
+type IntQueue = Queue<Int32>;
+type IntStack = Stack<Int32>;
 fn describe(value: Value): String {
-    return match value { 7 => "number"; _ => "collection"; };
+    if value is IntArray { return "array " + value.length.to_string(); }
+    if value is IntList { return "list " + value.length.to_string(); }
+    if value is IntMap { return "map " + (value.get("answer") ?? 0).to_string(); }
+    if value is IntSet { return "set " + value.contains(10).to_string(); }
+    if value is IntDeque { return "deque " + value.length.to_string(); }
+    if value is IntQueue { return "queue " + value.length.to_string(); }
+    if value is IntStack { return "stack " + value.length.to_string(); }
+    return "number " + value.to_string();
 }
+
 fn make_value(kind: Int32): Value {
     if kind == 1 {
         mut values: List<Int32> = List();
@@ -849,6 +1489,21 @@ fn make_value(kind: Int32): Value {
         values[0] = 30;
         return values;
     }
+    if kind == 5 {
+        mut values: Deque<Int32> = Deque();
+        values.push_back(50);
+        return values;
+    }
+    if kind == 6 {
+        mut values: Queue<Int32> = Queue();
+        values.enqueue(60);
+        return values;
+    }
+    if kind == 7 {
+        mut values: Stack<Int32> = Stack();
+        values.push(70);
+        return values;
+    }
     return 7;
 }
 fn main(): Void {
@@ -857,13 +1512,107 @@ fn main(): Void {
     stdout.println(describe(make_value(2)));
     stdout.println(describe(make_value(3)));
     stdout.println(describe(make_value(4)));
+    stdout.println(describe(make_value(5)));
+    stdout.println(describe(make_value(6)));
+    stdout.println(describe(make_value(7)));
 }
 main();
 "#;
     assert_parity(
         "collection_reference_union",
         program,
-        "number\ncollection\ncollection\ncollection\ncollection\n",
+        "number 7\nlist 2\nmap 42\nset true\narray 1\ndeque 1\nqueue 1\nstack 1\n",
+    );
+}
+
+#[test]
+fn union_elements_round_trip_through_ordered_sequences_in_both_engines() {
+    assert_parity(
+        "union_ordered_sequence_elements",
+        r#"import { stdout } from std.io;
+type Item = Int32 | String;
+fn main(): Void {
+    mut deque: Deque<Item> = Deque();
+    deque.push_back(3);
+    deque.push_back("d");
+    for item in deque {
+        match item {
+            3 => stdout.println("3");
+            "d" => stdout.println("d");
+            _ => stdout.println("other");
+        }
+    }
+    mut queue: Queue<Item> = Queue();
+    queue.enqueue(4);
+    queue.enqueue("q");
+    match queue.dequeue() {
+        Result.Ok(item) => {
+            match item {
+                4 => stdout.println("4");
+                "q" => stdout.println("q");
+                _ => stdout.println("other");
+            }
+        }
+        Result.Error(_) => stdout.println("empty");
+    }
+    mut stack: Stack<Item> = Stack();
+    stack.push(5);
+    stack.push("s");
+    match stack.pop() {
+        Result.Ok(item) => {
+            match item {
+                5 => stdout.println("5");
+                "s" => stdout.println("s");
+                _ => stdout.println("other");
+            }
+        }
+        Result.Error(_) => stdout.println("empty");
+    }
+}
+main();"#,
+        "3\nd\n4\ns\n",
+    );
+}
+
+#[test]
+fn managed_union_elements_in_all_sequence_families_match_across_engines() {
+    assert_parity(
+        "managed_union_sequence_families",
+        r#"import { stdout } from std.io;
+class Payload {
+    text: String;
+    construct(text: String) { this.text = text; }
+}
+type Item = Payload | Int32;
+fn show(item: Item): Void {
+    if item is Payload { stdout.println(item.text); }
+    else { stdout.println(item.to_string()); }
+}
+fn main(): Void {
+    mut array: Array<Item> = Array(1);
+    array[0] = Payload("array");
+    mut list: List<Item> = List();
+    list.add(Payload("list"));
+    mut deque: Deque<Item> = Deque();
+    deque.push_back(Payload("deque"));
+    mut queue: Queue<Item> = Queue();
+    queue.enqueue(Payload("queue"));
+    mut stack: Stack<Item> = Stack();
+    stack.push(Payload("stack"));
+    show(array[0]);
+    for value in list { show(value); }
+    for value in deque { show(value); }
+    match queue.dequeue() {
+        Result.Ok(value) => show(value);
+        Result.Error(_) => stdout.println("queue-empty");
+    }
+    match stack.pop() {
+        Result.Ok(value) => show(value);
+        Result.Error(_) => stdout.println("stack-empty");
+    }
+}
+main();"#,
+        "array\nlist\ndeque\nqueue\nstack\n",
     );
 }
 
@@ -953,6 +1702,7 @@ fn main(): Void {
     stdout.println(money(2.5));
     stdout.println(letter('b'));
 }
+
 main();
 "#;
     assert_parity(
@@ -1080,6 +1830,33 @@ main();
 }
 
 #[test]
+fn class_contract_intersection_view_keeps_identity_across_engines() {
+    let program = r#"import { stdout } from std.io;
+contract Named { name: String; }
+contract Identified { id: Int32; }
+class Entity {
+    id: Int32;
+    construct(id: Int32) { this.id = id; }
+}
+class Person extends Entity implements Named, Identified {
+    name: String;
+    construct(name: String, id: Int32) { super(id); this.name = name; }
+}
+type NamedPerson = Person & Entity & Named & Identified;
+fn describe(value: NamedPerson): String { return value.name + ":" + value.id.to_string(); }
+fn main(): Void {
+    mut person: NamedPerson = Person("Ada", 7);
+    mut same: NamedPerson = person;
+    same.name = "Grace";
+    same.id = 8;
+    stdout.println(describe(person));
+}
+main();
+"#;
+    assert_parity("class_contract_intersection_view", program, "Grace:8\n");
+}
+
+#[test]
 fn open_template_indexed_callback_matches_native_and_interpreter() {
     let program = r#"import { stdout } from std.io;
 fn on<T, K from String & keyof T>(value: T, event: "{K}Changed", new_value: T[K], callback: Fn(T[K]) => Void): Void {
@@ -1106,6 +1883,56 @@ fn contract_sealing_missing_reads_and_class_properties_match_across_engines() {
             "json_stringify_dynamic",
             include_str!("corpus/valid/json_stringify_dynamic.zrk"),
             include_str!("corpus/valid/json_stringify_dynamic.out"),
+        ),
+        (
+            "json_generated_codec",
+            include_str!("corpus/valid/json_generated_codec.zrk"),
+            include_str!("corpus/valid/json_generated_codec.out"),
+        ),
+        (
+            "json_generated_codec_implicit_json",
+            include_str!("corpus/valid/json_generated_codec_implicit_json.zrk"),
+            include_str!("corpus/valid/json_generated_codec_implicit_json.out"),
+        ),
+        (
+            "json_generated_codec_collections",
+            include_str!("corpus/valid/json_generated_codec_collections.zrk"),
+            include_str!("corpus/valid/json_generated_codec_collections.out"),
+        ),
+        (
+            "json_generated_codec_field_defaults",
+            include_str!("corpus/valid/json_generated_codec_field_defaults.zrk"),
+            include_str!("corpus/valid/json_generated_codec_field_defaults.out"),
+        ),
+        (
+            "json_generated_codec_payload_enum",
+            include_str!("corpus/valid/json_generated_codec_payload_enum.zrk"),
+            include_str!("corpus/valid/json_generated_codec_payload_enum.out"),
+        ),
+        (
+            "json_stringify_pretty_dynamic",
+            include_str!("corpus/valid/json_stringify_pretty_dynamic.zrk"),
+            include_str!("corpus/valid/json_stringify_pretty_dynamic.out"),
+        ),
+        (
+            "json_canonicalize_dynamic",
+            include_str!("corpus/valid/json_canonicalize_dynamic.zrk"),
+            include_str!("corpus/valid/json_canonicalize_dynamic.out"),
+        ),
+        (
+            "json_streaming_public_api",
+            include_str!("corpus/valid/json_streaming_public_api.zrk"),
+            include_str!("corpus/valid/json_streaming_public_api.out"),
+        ),
+        (
+            "jsonpath_dynamic",
+            include_str!("corpus/valid/jsonpath_dynamic.zrk"),
+            include_str!("corpus/valid/jsonpath_dynamic.out"),
+        ),
+        (
+            "jsonschema_dynamic",
+            include_str!("corpus/valid/jsonschema_dynamic.zrk"),
+            include_str!("corpus/valid/jsonschema_dynamic.out"),
         ),
         (
             "contract_conformance",
@@ -1145,4 +1972,226 @@ fn contract_sealing_missing_reads_and_class_properties_match_across_engines() {
     ] {
         assert_parity(name, source, expected);
     }
+}
+
+#[test]
+fn json5_relaxed_values_and_errors_match_native_and_interpreter() {
+    assert_parity(
+        "json5_relaxed_values",
+        r#"import { JSON } from std.json;
+import { stdout } from std.io;
+fn main(): Void {
+    try {
+        inmut value: Dynamic = JSON.parse5("\{ // relaxed syntax\n unquoted: 'text', hex: +0x10, fraction: .5, list: [1, 2,], duplicate: 1, duplicate: 2 \}");
+        stdout.println(JSON.stringify(value));
+    } catch JsonConversionError(_) { stdout.println("parse failed"); }
+    try {
+        inmut invalid: Dynamic = JSON.parse5("\{ value: '\\u12' \}");
+        stdout.println(JSON.stringify(invalid));
+    } catch JsonConversionError(_) { stdout.println("syntax caught"); }
+}
+
+main();"#,
+        "{\"duplicate\":2.0,\"fraction\":0.5,\"hex\":16.0,\"list\":[1.0,2.0],\"unquoted\":\"text\"}\nsyntax caught\n",
+    );
+}
+
+#[test]
+fn instant_parse_arithmetic_and_format_match_across_engines() {
+    assert_parity(
+        "instant_temporal",
+        include_str!("corpus/valid/instant_temporal.zrk"),
+        "2024-03-10T07:30:00+00:00\n1710055800\n1710055800000\n1710055800000000000\n2024-03-10T07:30:00+00:00\ntrue\n2s\n-1\n-1\n-1\ntrue\n",
+    );
+}
+
+#[test]
+fn instant_unix_factories_and_range_errors_match_across_engines() {
+    let source = r#"import { stdout } from std.io;
+fn main(): Void {
+    match Instant.from_unix_seconds(0) {
+        Ok(value) => stdout.println(value);
+        Error(_) => stdout.println("seconds error");
+    };
+    match Instant.from_unix_milliseconds(1000) {
+        Ok(value) => stdout.println(value);
+        Error(_) => stdout.println("milliseconds error");
+    };
+    match Instant.from_unix_nanoseconds(1500000000) {
+        Ok(value) => stdout.println(value);
+        Error(_) => stdout.println("nanoseconds error");
+    };
+    match Instant.from_unix_nanoseconds(-1) {
+        Ok(value) => stdout.println(value);
+        Error(_) => stdout.println("negative nanoseconds error");
+    };
+    stdout.println(match Instant.from_unix_seconds(1) {
+        Ok(seconds) => match Instant.from_unix_milliseconds(1000) {
+            Ok(milliseconds) => seconds == milliseconds;
+            Error(_) => false;
+        };
+        Error(_) => false;
+    });
+    stdout.println(match Instant.from_unix_seconds(Int64.MAX) {
+        Error(_) => true;
+        Ok(_) => false;
+    });
+    stdout.println(match Instant.from_unix_nanoseconds(Int128.MAX) {
+        Error(_) => true;
+        Ok(_) => false;
+    });
+}
+main();"#;
+    assert_parity(
+        "instant_unix_factories",
+        source,
+        "1970-01-01T00:00:00+00:00\n1970-01-01T00:00:01+00:00\n1970-01-01T00:00:01.500+00:00\n1969-12-31T23:59:59.999999999+00:00\ntrue\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn time_zone_parsing_and_queries_match_native_and_interpreter() {
+    assert_parity(
+        "time_zone_parse",
+        include_str!("corpus/valid/time_zone_parse.zrk"),
+        include_str!("corpus/valid/time_zone_parse.out"),
+    );
+}
+
+#[test]
+fn zoned_datetime_conversion_preserves_the_instant_across_engines() {
+    assert_parity(
+        "zoned_datetime_facade",
+        include_str!("corpus/valid/zoned_datetime_facade.zrk"),
+        include_str!("corpus/valid/zoned_datetime_facade.out"),
+    );
+}
+
+#[test]
+fn local_zone_resolution_preserves_typed_dst_error_subclasses() {
+    assert_parity(
+        "typed_zone_resolution_errors",
+        r#"import { stdout } from std.io;
+import { Date, DateTime, Time, TimeZone } from std.time;
+fn label(error: LocaleError): String {
+    if error is AmbiguousLocalTimeError { return "ambiguous"; }
+    if error is NonexistentLocalTimeError { return "nonexistent"; }
+    if error is InvalidDstPolicyError { return "invalid-policy"; }
+    if error is UnknownTimeZoneError { return "unknown-zone"; }
+    if error is InvalidTimeZoneError { return "invalid-zone"; }
+    if error is TemporalRangeError { return "out-of-range"; }
+    return "generic";
+}
+fn main(): Void {
+    match TimeZone.parse("Mars/Base") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+    match TimeZone.parse("+25:00") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+    match TimeZone.parse("America/New_York") {
+        Ok(zone) => {
+            match DateTime(Date(2024, 11, 3), Time(1, 30)).in_zone(zone, "reject", "reject") {
+                Ok(_) => stdout.println("unexpected");
+                Error(error) => stdout.println(label(error));
+            };
+            match DateTime(Date(2024, 3, 10), Time(2, 30)).in_zone(zone, "reject", "reject") {
+                Ok(_) => stdout.println("unexpected");
+                Error(error) => stdout.println(label(error));
+            };
+            match DateTime(Date(2024, 5, 1), Time(12, 0)).in_zone(zone, "bad", "reject") {
+                Ok(_) => stdout.println("unexpected");
+                Error(error) => stdout.println(label(error));
+            };
+        }
+        Error(_) => stdout.println("zone-unavailable");
+    };
+}
+main();"#,
+        "unknown-zone\ninvalid-zone\nambiguous\nnonexistent\ninvalid-policy\n",
+    );
+}
+
+#[test]
+fn localized_temporal_formatting_matches_native_and_interpreter() {
+    assert_parity(
+        "temporal_locale",
+        include_str!("corpus/valid/temporal_locale.zrk"),
+        include_str!("corpus/valid/temporal_locale.out"),
+    );
+}
+
+#[test]
+fn localized_temporal_parsing_matches_native_and_interpreter() {
+    assert_parity(
+        "temporal_locale_parse",
+        include_str!("corpus/valid/temporal_locale_parse.zrk"),
+        include_str!("corpus/valid/temporal_locale_parse.out"),
+    );
+}
+
+#[test]
+fn localized_zoned_temporal_formatting_matches_native_and_interpreter() {
+    assert_parity(
+        "temporal_locale_zones",
+        include_str!("corpus/valid/temporal_locale_zones.zrk"),
+        "November 3, 2024 at 1:30:00\u{202f}AM Eastern Daylight Time\nNovember 3, 2024 at 1:30:00\u{202f}AM Eastern Standard Time\nambiguous time rejected\nMarch 10, 2024 at 3:30:00\u{202f}AM Eastern Daylight Time\n2024年3月10日 2:30:00 GMT+09:00\ninvalid DST policy rejected\n",
+    );
+}
+
+#[test]
+fn tagged_time_shifts_preserve_clock_carry_and_calendar_dst_order() {
+    assert_parity(
+        "timeshift_tagged_forms",
+        include_str!("corpus/valid/timeshift_tagged_forms.zrk"),
+        include_str!("corpus/valid/timeshift_tagged_forms.out"),
+    );
+}
+
+#[test]
+fn period_construction_parsing_and_formatting_match_across_engines() {
+    assert_parity(
+        "period_temporal",
+        include_str!("corpus/valid/period_temporal.zrk"),
+        include_str!("corpus/valid/period_temporal.out"),
+    );
+}
+
+#[test]
+fn composite_text_collection_keys_match_native_and_interpreter() {
+    let program = include_str!("corpus/valid/composite_text_collection_keys.zrk");
+    assert_parity(
+        "composite_text_collection_keys",
+        program,
+        "41\nfalse\ntrue\ntrue\nfalse\n1\n2\ntrue\ntrue\ntrue\ntrue\nfalse\n2\n",
+    );
+}
+
+#[test]
+fn union_collection_keys_match_native_and_interpreter() {
+    assert_parity(
+        "union_collection_keys",
+        include_str!("corpus/valid/union_collection_keys.zrk"),
+        "70\n80\nfalse\n2\n81\n2\ntrue\ntrue\n93\n73\n2\n111\n2\n112\n100\nboolean\n5\n1\n31\n12\n5\n6\n2\n2\n",
+    );
+}
+
+#[test]
+fn union_scalar_collection_keys_match_native_and_interpreter() {
+    assert_parity(
+        "union_scalar_collection_keys",
+        include_str!("corpus/valid/union_scalar_collection_keys.zrk"),
+        "6\n1\n2\n7\n4\n5\n6\n6\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn nested_aggregate_union_collections_match_native_and_interpreter() {
+    assert_parity(
+        "union_nested_aggregate_collection",
+        include_str!("corpus/valid/union_nested_aggregate_collection.zrk"),
+        "nested union payload\ntrue\n",
+    );
 }

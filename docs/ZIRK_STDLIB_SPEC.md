@@ -300,20 +300,30 @@ Elapsed measurements use a monotonic clock. Civil date and duration are distinct
 types; they are not implicitly mixed. There is no general `await` timeout
 operator in the available language surface.
 
-Friendly current-time calls live on temporal types (`Instant.now` and
-`Date`/`Time`/`ZonedDateTime.now(zone:)`) with an optional injectable clock.
-Local-zone discovery is fallible. System, monotonic and virtual test clocks
-never mutate the host clock. Timer/Ticker are cancelable resources;
-fixed-rate/fixed-delay policies are explicit and ticks report missed intervals.
-Cron/calendar scheduling is an official package.
+The target contract includes current-time calls on temporal types with an
+optional injectable clock. The currently delivered language surface provides
+native `Instant.now()`, `Date.today()`, `Time.now_local()`, and
+`DateTime.now_local()`; browser interpretation denies ambient wall-clock
+access. Local-zone discovery and injectable clocks remain future work.
+Timer/Ticker are cancelable resources; fixed-rate/fixed-delay policies are
+explicit and ticks report missed intervals. Cron/calendar scheduling is an
+official package.
 
 - `Date` validates 1-based calendar components, parses/formats explicit and ISO
-  forms, exposes calendar properties, compares chronologically and combines
-  with `Time`/`Period`.
-- `Time` exposes components through nanoseconds; arithmetic returns `TimeShift`
-  when crossing midnight so the day offset is not lost.
+  forms, exposes calendar properties, compares chronologically, combines with
+  `Time`, and supports integer-day arithmetic. Calendar `Period` application
+  is available through the calendar form of `TimeShift`; direct `Date ±
+  Period` and `DateTime ± Period` operators are not implemented.
+- `Time` exposes components through nanoseconds. `Time ± Duration` returns the
+  clock form of `TimeShift`, preserving the wrapped time and signed day offset.
+- `TimeShift` is a tagged immutable value. Its clock form comes from `Time ±
+  Duration`; its calendar form is created by
+  `TimeShift.calendar(period, duration, overlap, gap)` and applies a calendar
+  `Period` before exact elapsed time to a `ZonedDateTime`. The two forms expose
+  a shared `kind`/`duration` and nullable form-specific fields. Applying the
+  clock form to a zoned value is a typed form-mismatch error.
 - `DateTime` has no zone or absolute timeline meaning until `in_zone` resolves
-  it with an explicit ambiguity policy.
+  it with explicit overlap and gap policies.
 - `Instant` supports Unix seconds/milliseconds/nanoseconds, ISO UTC forms and
   exact `Duration` arithmetic.
 - `TimeZone` uses versioned IANA identities/rules; a fixed offset is not a zone.
@@ -358,10 +368,13 @@ orders require `unsafe`. A dynamically invalid order raises
 `Task<T>`, `task`, `await`, and `select` surface was removed. No general
 `task.blocking` bridge or timeout operator is available.
 
-**Planned:** managed `Thread<T>`, `std.sync`, `Mutex<T>`, `RwLock<T>`,
-`Semaphore`, `Barrier`, and `Once<T>` remain gated on their compiler, runtime,
-ownership, and collector contracts. The runtime's Rust/C `AtomicCell` ABI is
-distinct from source `Atomic<T>`.
+**Partially available:** `Mutex<T>.with` provides scoped access to protected
+state, and scalar `Atomic<T>` is available as described above. These are
+compiler-known surfaces; there is not yet an importable `std.sync` package.
+**Planned:** managed `Thread<T>`, `RwLock<T>`, `Semaphore`, `Barrier`, and
+`Once<T>` remain gated on their compiler, runtime, ownership, and collector
+contracts. The runtime's Rust/C `AtomicCell` ABI is distinct from source
+`Atomic<T>`.
 Runtime combinators such as `settled` likewise do not imply a source-level
 standard-library API. `parallel.settled` is not available.
 
@@ -454,9 +467,12 @@ constructors and may validate contract shapes; the runtime does not use
 reflection or bypass invariants.
 
 Configurable limits, typed `JSONPath`/`JSONPointer`, generated codecs, streaming
-reader/writer APIs, pretty/canonical output, schema validation, and JSON5 are not
-part of the implemented surface. The handbook records this boundary; the feature
-status catalog remains the implementation evidence.
+reader/writer APIs, pretty/canonical output, schema validation, and JSON5 are
+implemented with the documented partial boundaries. The reader accepts text or
+byte chunks and incrementally feeds a bounded parser; the pull writer serializes
+through a bounded channel. See the [JSON handbook](handbook/04-standard-library/13-std-json.md)
+and [feature-status catalog](handbook/11-reference/12-feature-status.md) for the
+current per-target evidence and generated-codec support limits.
 
 ## 12. `std.crypto`
 

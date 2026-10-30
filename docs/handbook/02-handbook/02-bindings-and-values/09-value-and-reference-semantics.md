@@ -15,7 +15,9 @@ if first is second { /* same observable instance */ }
 
 String is the simplest visible reference example: assigning it shares one
 mutable instance, while `clone()` creates independent content. Temporal values
-and records are value-semantic and expose no `is` identity.
+and tuples/enums are value-semantic and expose no `is` identity. The former
+`record` declaration form was removed; use a tuple for positional values or an
+algebraic enum for closed alternatives.
 
 ## Whole references, projections, and places
 

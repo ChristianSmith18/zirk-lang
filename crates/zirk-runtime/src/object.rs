@@ -389,10 +389,129 @@ pub unsafe extern "C" fn zirk_rt_json_stringify_dynamic(
     }
     let mut active = HashSet::new();
     let mut budget = 100_000usize;
-    let Ok(value) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget) }) else {
+    let Ok(value) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, None) })
+    else {
         return 1;
     };
     let Ok(document) = serde_json::to_string(&value) else {
+        return 1;
+    };
+    let string = crate::string::alloc_owned(&document);
+    if string.is_null() {
+        return -1;
+    }
+    unsafe { output.write(string) };
+    0
+}
+
+/// Pretty-serializes a tagged Dynamic JSON tree using the shared bounded JSON
+/// defaults. Unsupported values and cycles fail without publishing a partial
+/// result.
+///
+/// # Safety
+/// `value` must be a live Zirk Dynamic and `output` a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stringify_dynamic_pretty(
+    value: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || output.is_null() {
+        return -1;
+    }
+    let limits = zirk_runtime_core::json::JsonLimits::default();
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(value) =
+        (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, Some(limits)) })
+    else {
+        return 1;
+    };
+    let Ok(document) = zirk_runtime_core::json::serialize_pretty_value_with_limits(&value, limits)
+    else {
+        return 1;
+    };
+    let string = crate::string::alloc_owned(&document);
+    if string.is_null() {
+        return -1;
+    }
+    unsafe { output.write(string) };
+    0
+}
+
+/// Canonicalizes a tagged Dynamic JSON tree using RFC 8785 JCS and the shared
+/// bounded JSON defaults. Values outside the I-JSON number domain fail
+/// without publishing a partial result.
+///
+/// # Safety
+/// `value` must be a live Zirk Dynamic and `output` a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_canonicalize_dynamic(
+    value: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || output.is_null() {
+        return -1;
+    }
+    let limits = zirk_runtime_core::json::JsonLimits::default();
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(value) =
+        (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, Some(limits)) })
+    else {
+        return 1;
+    };
+    let Ok(document) = zirk_runtime_core::json::canonicalize_value_with_limits(&value, limits)
+    else {
+        return 1;
+    };
+    let string = crate::string::alloc_owned(&document);
+    if string.is_null() {
+        return -1;
+    }
+    unsafe { output.write(string) };
+    0
+}
+
+/// Serializes a tagged Dynamic JSON tree under caller-selected hard-bounded
+/// JSON limits.
+///
+/// # Safety
+/// `value` must be a live Zirk Dynamic and `output` a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stringify_dynamic_with_limits(
+    value: *mut c_void,
+    max_document_bytes: u64,
+    max_nesting_depth: u64,
+    max_string_bytes: u64,
+    max_container_items: u64,
+    max_number_bytes: u64,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || output.is_null() {
+        return -1;
+    }
+    let Ok(limits) = (|| {
+        Ok::<_, ()>(zirk_runtime_core::json::JsonLimits {
+            max_document_bytes: usize::try_from(max_document_bytes).map_err(|_| ())?,
+            max_nesting_depth: usize::try_from(max_nesting_depth).map_err(|_| ())?,
+            max_string_bytes: usize::try_from(max_string_bytes).map_err(|_| ())?,
+            max_container_items: usize::try_from(max_container_items).map_err(|_| ())?,
+            max_number_bytes: usize::try_from(max_number_bytes).map_err(|_| ())?,
+        })
+    })() else {
+        return 1;
+    };
+    if zirk_runtime_core::json::validate_limits(limits).is_err() {
+        return 1;
+    }
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(value) =
+        (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, Some(limits)) })
+    else {
+        return 1;
+    };
+    let Ok(document) = zirk_runtime_core::json::serialize_value_with_limits(&value, limits) else {
         return 1;
     };
     let string = crate::string::alloc_owned(&document);
@@ -426,8 +545,15 @@ pub unsafe extern "C" fn zirk_rt_json_parse_dynamic(
         return 1;
     };
     let mut budget = 100_000usize;
-    let Ok(value) = (unsafe { json_value_to_dynamic(value, list_dynamic_id, 0, &mut budget) })
-    else {
+    let Ok(value) = (unsafe {
+        json_value_to_dynamic(
+            value,
+            list_dynamic_id,
+            zirk_runtime_core::json::MAX_NESTING_DEPTH,
+            0,
+            &mut budget,
+        )
+    }) else {
         return 1;
     };
     if value.is_null() {
@@ -437,13 +563,695 @@ pub unsafe extern "C" fn zirk_rt_json_parse_dynamic(
     0
 }
 
-unsafe fn json_value_to_dynamic(
-    value: serde_json::Value,
+/// Parses a JSON5 document into ordinary managed Dynamic/Object/List values.
+/// JSON5 numbers are represented as binary64 Dynamic scalars, including the
+/// permitted infinities and NaN.
+///
+/// # Safety
+/// `document` must be a live Zirk String and `output` a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json5_parse_dynamic(
+    document: *mut c_void,
     list_dynamic_id: u32,
+    output: *mut *mut c_void,
+) -> i32 {
+    if document.is_null() || output.is_null() {
+        return -1;
+    }
+    let text = unsafe { (*crate::string::payload_ptr(document)).as_str() };
+    let Ok(value) = zirk_runtime_core::json::parse_json5(text) else {
+        return 1;
+    };
+    let mut budget = 100_000usize;
+    let Ok(value) = (unsafe {
+        json5_value_to_dynamic(
+            value,
+            list_dynamic_id,
+            zirk_runtime_core::json::MAX_NESTING_DEPTH,
+            0,
+            &mut budget,
+        )
+    }) else {
+        return 1;
+    };
+    if value.is_null() {
+        return -1;
+    }
+    unsafe { output.write(value) };
+    0
+}
+
+unsafe fn json5_value_to_dynamic(
+    value: zirk_runtime_core::json::Json5Value,
+    list_dynamic_id: u32,
+    max_depth: usize,
     depth: usize,
     budget: &mut usize,
 ) -> Result<*mut c_void, ()> {
-    if depth > zirk_runtime_core::json::MAX_NESTING_DEPTH || *budget == 0 {
+    if depth > max_depth || *budget == 0 {
+        return Err(());
+    }
+    *budget -= 1;
+    match value {
+        zirk_runtime_core::json::Json5Value::Null => Ok(unsafe {
+            zirk_rt_dynamic_value_new(0x0f_0000, [0u8].as_ptr(), 1, std::ptr::null(), 0)
+        }),
+        zirk_runtime_core::json::Json5Value::Boolean(value) => {
+            let payload = [u8::from(value)];
+            Ok(unsafe {
+                zirk_rt_dynamic_value_new(0x301, payload.as_ptr(), 1, std::ptr::null(), 0)
+            })
+        }
+        zirk_runtime_core::json::Json5Value::String(value) => {
+            let handle = crate::string::alloc_owned(&value);
+            let offsets = [0usize];
+            Ok(unsafe {
+                zirk_rt_dynamic_value_new(
+                    0x302,
+                    (&handle as *const *mut c_void).cast(),
+                    WORD,
+                    offsets.as_ptr(),
+                    1,
+                )
+            })
+        }
+        zirk_runtime_core::json::Json5Value::Number(value) => {
+            let payload = value.to_bits().to_ne_bytes();
+            Ok(unsafe {
+                zirk_rt_dynamic_value_new(
+                    0x202,
+                    payload.as_ptr(),
+                    payload.len(),
+                    std::ptr::null(),
+                    0,
+                )
+            })
+        }
+        zirk_runtime_core::json::Json5Value::Array(values) => {
+            let offsets = [0usize];
+            let list = unsafe {
+                crate::list::zirk_rt_list_new_with_layout(WORD, WORD, offsets.as_ptr(), 1)
+            };
+            for value in values {
+                let item = unsafe {
+                    json5_value_to_dynamic(value, list_dynamic_id, max_depth, depth + 1, budget)
+                }?;
+                unsafe {
+                    crate::list::zirk_rt_list_add(
+                        list,
+                        (&item as *const *mut c_void).cast(),
+                        WORD,
+                        WORD,
+                        true,
+                    )
+                };
+            }
+            let tag = 0x9_0000u32.checked_add(list_dynamic_id).ok_or(())?;
+            let offsets = [0usize];
+            Ok(unsafe {
+                zirk_rt_dynamic_value_new(
+                    tag,
+                    (&list as *const *mut c_void).cast(),
+                    WORD,
+                    offsets.as_ptr(),
+                    1,
+                )
+            })
+        }
+        zirk_runtime_core::json::Json5Value::Object(values) => {
+            let object = zirk_rt_object_new();
+            for (key_text, value) in values {
+                let key = crate::string::alloc_owned(&key_text);
+                let item = unsafe {
+                    json5_value_to_dynamic(value, list_dynamic_id, max_depth, depth + 1, budget)
+                }?;
+                if zirk_rt_object_set(object, key, item) != 0 {
+                    return Err(());
+                }
+            }
+            let offsets = [0usize];
+            Ok(unsafe {
+                zirk_rt_dynamic_value_new(
+                    0x3_0000,
+                    (&object as *const *mut c_void).cast(),
+                    WORD,
+                    offsets.as_ptr(),
+                    1,
+                )
+            })
+        }
+    }
+}
+
+/// Parses strict JSON using caller-selected limits bounded by runtime-core.
+///
+/// # Safety
+/// `document` must be a live Zirk String and `output` a writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_parse_dynamic_with_limits(
+    document: *mut c_void,
+    list_dynamic_id: u32,
+    max_document_bytes: u64,
+    max_nesting_depth: u64,
+    max_string_bytes: u64,
+    max_container_items: u64,
+    max_number_bytes: u64,
+    output: *mut *mut c_void,
+) -> i32 {
+    if document.is_null() || output.is_null() {
+        return -1;
+    }
+    let Ok(limits) = (|| {
+        Ok::<_, ()>(zirk_runtime_core::json::JsonLimits {
+            max_document_bytes: usize::try_from(max_document_bytes).map_err(|_| ())?,
+            max_nesting_depth: usize::try_from(max_nesting_depth).map_err(|_| ())?,
+            max_string_bytes: usize::try_from(max_string_bytes).map_err(|_| ())?,
+            max_container_items: usize::try_from(max_container_items).map_err(|_| ())?,
+            max_number_bytes: usize::try_from(max_number_bytes).map_err(|_| ())?,
+        })
+    })() else {
+        return 1;
+    };
+    let text = unsafe { (*crate::string::payload_ptr(document)).as_str() };
+    if zirk_runtime_core::json::validate_document_with_limits(text, limits).is_err() {
+        return 1;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return 1;
+    };
+    let mut budget = text.len().saturating_add(1);
+    let Ok(value) = (unsafe {
+        json_value_to_dynamic(
+            value,
+            list_dynamic_id,
+            limits.max_nesting_depth,
+            0,
+            &mut budget,
+        )
+    }) else {
+        return 1;
+    };
+    if value.is_null() {
+        return -1;
+    }
+    unsafe { output.write(value) };
+    0
+}
+
+/// Creates a bounded incremental JSON reader and returns its opaque handle;
+/// zero denotes invalid limits or allocation failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_json_stream_reader_create(
+    max_document_bytes: u64,
+    max_nesting_depth: u64,
+    max_string_bytes: u64,
+    max_container_items: u64,
+    max_number_bytes: u64,
+) -> u64 {
+    let Ok(limits) = (|| {
+        Ok::<_, ()>(zirk_runtime_core::json::JsonLimits {
+            max_document_bytes: usize::try_from(max_document_bytes).map_err(|_| ())?,
+            max_nesting_depth: usize::try_from(max_nesting_depth).map_err(|_| ())?,
+            max_string_bytes: usize::try_from(max_string_bytes).map_err(|_| ())?,
+            max_container_items: usize::try_from(max_container_items).map_err(|_| ())?,
+            max_number_bytes: usize::try_from(max_number_bytes).map_err(|_| ())?,
+        })
+    })() else {
+        return 0;
+    };
+    if zirk_runtime_core::json::validate_limits(limits).is_err() {
+        return 0;
+    }
+    zirk_runtime_core::json::stream_reader_create(limits).unwrap_or(0)
+}
+
+/// Pushes one UTF-8 Zirk string chunk into the reader's bounded parser channel.
+/// Returns zero on success and nonzero for an invalid/failed handle or limit.
+///
+/// # Safety
+/// `chunk` must be a live Zirk String.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stream_reader_push(handle: u64, chunk: *mut c_void) -> i32 {
+    if chunk.is_null() {
+        return 1;
+    }
+    let text = unsafe { (*crate::string::payload_ptr(chunk)).as_str() };
+    zirk_runtime_core::json::stream_reader_push(handle, text.as_bytes()).map_or(1, |_| 0)
+}
+
+/// Pushes one bounded raw `Array<Byte>` chunk into the incremental parser.
+///
+/// # Safety
+/// `chunk` must be a live Zirk `Array<Byte>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stream_reader_push_bytes(
+    handle: u64,
+    chunk: *mut c_void,
+) -> i32 {
+    let Some(bytes) = (unsafe {
+        crate::array::copy_byte_array(chunk, zirk_runtime_core::json::JSON_STREAM_CHUNK_BYTES)
+    }) else {
+        return 1;
+    };
+    zirk_runtime_core::json::stream_reader_push(handle, &bytes).map_or(1, |_| 0)
+}
+
+/// Finishes parsing a stream and converts the complete JSON tree to ordinary
+/// managed Dynamic/Object/List values.
+///
+/// # Safety
+/// `output` must be a writable pointer to a Dynamic slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stream_reader_finish(
+    handle: u64,
+    list_dynamic_id: u32,
+    output: *mut *mut c_void,
+) -> i32 {
+    if output.is_null() {
+        return 1;
+    }
+    let Ok(value) = zirk_runtime_core::json::stream_reader_finish(handle) else {
+        return 1;
+    };
+    let mut budget = 100_000usize;
+    let Ok(value) = (unsafe {
+        json_value_to_dynamic(
+            value,
+            list_dynamic_id,
+            zirk_runtime_core::json::MAX_NESTING_DEPTH,
+            0,
+            &mut budget,
+        )
+    }) else {
+        return 1;
+    };
+    unsafe { output.write(value) };
+    0
+}
+
+/// Cancels and releases a streaming reader handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_json_stream_reader_cancel(handle: u64) {
+    let _ = zirk_runtime_core::json::stream_reader_cancel(handle);
+}
+
+/// Starts a bounded, pull-based serializer for one tagged Dynamic JSON value.
+/// A zero result denotes invalid input/limits or allocation failure.
+///
+/// # Safety
+/// `value` must be a live Zirk Dynamic.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stream_writer_create(
+    value: *mut c_void,
+    max_chunk_bytes: u64,
+    max_document_bytes: u64,
+    max_nesting_depth: u64,
+    max_string_bytes: u64,
+    max_container_items: u64,
+    max_number_bytes: u64,
+    _list_dynamic_id: u32,
+) -> u64 {
+    if value.is_null() {
+        return 0;
+    }
+    let Ok(max_chunk_bytes) = usize::try_from(max_chunk_bytes) else {
+        return 0;
+    };
+    let Ok(limits) = (|| {
+        Ok::<_, ()>(zirk_runtime_core::json::JsonLimits {
+            max_document_bytes: usize::try_from(max_document_bytes).map_err(|_| ())?,
+            max_nesting_depth: usize::try_from(max_nesting_depth).map_err(|_| ())?,
+            max_string_bytes: usize::try_from(max_string_bytes).map_err(|_| ())?,
+            max_container_items: usize::try_from(max_container_items).map_err(|_| ())?,
+            max_number_bytes: usize::try_from(max_number_bytes).map_err(|_| ())?,
+        })
+    })() else {
+        return 0;
+    };
+    if zirk_runtime_core::json::validate_limits(limits).is_err() {
+        return 0;
+    }
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(value) =
+        (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, Some(limits)) })
+    else {
+        return u64::MAX;
+    };
+    if max_chunk_bytes == 0 || max_chunk_bytes > zirk_runtime_core::json::JSON_STREAM_CHUNK_BYTES {
+        return 0;
+    }
+    zirk_runtime_core::json::stream_writer_create(
+        value,
+        limits,
+        zirk_runtime_core::json::JsonStreamFormat::Compact,
+    )
+    .unwrap_or_else(|error| match error {
+        zirk_runtime_core::json::JsonStreamError::Validation(
+            zirk_runtime_core::json::JsonValidationError::InvalidLimits,
+        ) => 0,
+        zirk_runtime_core::json::JsonStreamError::Io
+        | zirk_runtime_core::json::JsonStreamError::Allocation => u64::MAX - 1,
+        _ => u64::MAX,
+    })
+}
+
+/// Produces status 0=data, 1=end, 2=serialization error, 3=invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_json_stream_writer_next_status(handle: u64, max_chunk_bytes: u64) -> u32 {
+    let Ok(max_chunk_bytes) = usize::try_from(max_chunk_bytes) else {
+        return 3;
+    };
+    zirk_runtime_core::json::stream_writer_next_status(handle, max_chunk_bytes)
+}
+
+/// Takes the chunk produced by the immediately preceding status call.
+///
+/// # Safety
+/// `output` must be a writable pointer to a Zirk String slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_stream_writer_take(
+    handle: u64,
+    output: *mut *mut c_void,
+) -> i32 {
+    if output.is_null() {
+        return 1;
+    }
+    let Ok(chunk) = zirk_runtime_core::json::stream_writer_take(handle) else {
+        return 1;
+    };
+    let string = crate::string::alloc_owned(&chunk);
+    if string.is_null() {
+        return 1;
+    }
+    unsafe { output.write(string) };
+    0
+}
+
+/// Cancels and releases a streaming writer handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn zirk_rt_json_stream_writer_cancel(handle: u64) {
+    let _ = zirk_runtime_core::json::stream_writer_cancel(handle);
+}
+
+/// Selects a value from a tagged Dynamic JSON tree using RFC 6901.
+///
+/// # Safety
+/// `value` and `pointer` must be live Zirk managed values and `output` a
+/// writable pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_pointer_dynamic(
+    value: *mut c_void,
+    pointer: *mut c_void,
+    list_dynamic_id: u32,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || pointer.is_null() || output.is_null() {
+        return -1;
+    }
+    let pointer = unsafe { (*crate::string::payload_ptr(pointer)).as_str() };
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(document) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, None) })
+    else {
+        return 1;
+    };
+    let Ok(selected) = zirk_runtime_core::json::lookup_pointer(&document, pointer) else {
+        return 1;
+    };
+    let mut budget = 100_000usize;
+    let Ok(selected) = (unsafe {
+        json_value_to_dynamic(
+            selected.clone(),
+            list_dynamic_id,
+            zirk_runtime_core::json::MAX_NESTING_DEPTH,
+            0,
+            &mut budget,
+        )
+    }) else {
+        return 1;
+    };
+    if selected.is_null() {
+        return -1;
+    }
+    unsafe { output.write(selected) };
+    0
+}
+
+/// Classifies an RFC 6901 lookup failure for the compiler's typed exceptions.
+/// Returns 0 for a successful lookup, then syntax/index/not-found/wrong-container
+/// as 1–4; unrepresentable Dynamic values return 5.
+///
+/// # Safety
+/// `value` and `pointer` must be live Zirk managed values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_pointer_error_kind_dynamic(
+    value: *mut c_void,
+    pointer: *mut c_void,
+) -> i32 {
+    if value.is_null() || pointer.is_null() {
+        return 5;
+    }
+    let pointer = unsafe { (*crate::string::payload_ptr(pointer)).as_str() };
+    let mut active = HashSet::new();
+    let mut budget = 100_000usize;
+    let Ok(document) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, None) })
+    else {
+        return 5;
+    };
+    match zirk_runtime_core::json::lookup_pointer(&document, pointer) {
+        Ok(_) => 0,
+        Err(zirk_runtime_core::json::JsonPointerError::Syntax) => 1,
+        Err(zirk_runtime_core::json::JsonPointerError::Index) => 2,
+        Err(zirk_runtime_core::json::JsonPointerError::NotFound) => 3,
+        Err(zirk_runtime_core::json::JsonPointerError::WrongContainer) => 4,
+    }
+}
+
+/// Evaluates RFC 9535 JSONPath over a Dynamic JSON value and returns a managed
+/// `List<Dynamic>` with the selected nodes in document order.
+///
+/// # Safety
+/// `value` and `query` must be live Zirk values and `output` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_jsonpath_dynamic(
+    value: *mut c_void,
+    query: *mut c_void,
+    list_dynamic_id: u32,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || query.is_null() || output.is_null() {
+        return -1;
+    }
+    let query = unsafe { (*crate::string::payload_ptr(query)).as_str() };
+    let mut active = HashSet::new();
+    let mut budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+    let Ok(document) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, None) })
+    else {
+        return 4;
+    };
+    let selected = match zirk_runtime_core::json::query_jsonpath(&document, query) {
+        Ok(selected) => selected,
+        Err(error) => return jsonpath_error_code(error),
+    };
+    let offsets = [0usize];
+    let list = unsafe {
+        crate::list::zirk_rt_list_new_with_layout(WORD, WORD, offsets.as_ptr(), offsets.len())
+    };
+    if list.is_null() {
+        return -1;
+    }
+    let mut conversion_budget = 100_000usize;
+    for value in selected {
+        let Ok(item) = (unsafe {
+            json_value_to_dynamic(
+                value,
+                list_dynamic_id,
+                zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                0,
+                &mut conversion_budget,
+            )
+        }) else {
+            return 4;
+        };
+        if item.is_null() {
+            return -1;
+        }
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                (&item as *const *mut c_void).cast(),
+                WORD,
+                WORD,
+                true,
+            )
+        };
+    }
+    unsafe { output.write(list) };
+    0
+}
+
+/// Validates a Dynamic JSON value against a Draft 2020-12 schema and returns
+/// all issues in a managed `List<Dynamic>`. Each issue is an ordinary object
+/// with `instance_pointer` and `message` properties.
+///
+/// # Safety
+/// `value` and `schema` must be live Zirk values and `output` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_json_schema_validate_dynamic(
+    value: *mut c_void,
+    schema: *mut c_void,
+    list_dynamic_id: u32,
+    resolver: *mut c_void,
+    output: *mut *mut c_void,
+) -> i32 {
+    if value.is_null() || schema.is_null() || output.is_null() {
+        return -1;
+    }
+    let schema = unsafe { (*crate::string::payload_ptr(schema)).as_str() };
+    let mut active = HashSet::new();
+    let mut budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+    let Ok(instance) = (unsafe {
+        dynamic_json_value(
+            value,
+            &mut active,
+            0,
+            &mut budget,
+            Some(zirk_runtime_core::json::JsonLimits::default()),
+        )
+    }) else {
+        return 1;
+    };
+    let Ok(instance_document) = zirk_runtime_core::json::serialize_value_with_limits(
+        &instance,
+        zirk_runtime_core::json::JsonLimits::default(),
+    ) else {
+        return 1;
+    };
+    let limits = zirk_runtime_core::json::JsonLimits::default();
+    let issues = match if resolver.is_null() {
+        zirk_runtime_core::json::validate_json_schema(schema, &instance_document, limits)
+    } else {
+        let mut resolver_active = HashSet::new();
+        let mut resolver_budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+        let Ok(resolver_value) = (unsafe {
+            dynamic_json_value(
+                resolver,
+                &mut resolver_active,
+                0,
+                &mut resolver_budget,
+                Some(limits),
+            )
+        }) else {
+            return 1;
+        };
+        let serde_json::Value::Object(resources) = resolver_value else {
+            return 1;
+        };
+        let mut documents = Vec::with_capacity(resources.len());
+        for (uri, resource) in resources {
+            let Ok(document) =
+                zirk_runtime_core::json::serialize_value_with_limits(&resource, limits)
+            else {
+                return 1;
+            };
+            documents.push((uri, document));
+        }
+        zirk_runtime_core::json::validate_json_schema_with_resolver(
+            schema,
+            &instance_document,
+            limits,
+            &documents,
+        )
+    } {
+        Ok(issues) => issues,
+        Err(_) => return 1,
+    };
+
+    let offsets = [0usize];
+    let list = unsafe {
+        crate::list::zirk_rt_list_new_with_layout(WORD, WORD, offsets.as_ptr(), offsets.len())
+    };
+    if list.is_null() {
+        return -1;
+    }
+    let mut conversion_budget = 100_000usize;
+    for issue in issues {
+        let value = serde_json::json!({
+            "instance_pointer": issue.instance_pointer,
+            "message": issue.message,
+        });
+        let Ok(item) = (unsafe {
+            json_value_to_dynamic(
+                value,
+                list_dynamic_id,
+                zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                0,
+                &mut conversion_budget,
+            )
+        }) else {
+            return 1;
+        };
+        if item.is_null() {
+            return -1;
+        }
+        unsafe {
+            crate::list::zirk_rt_list_add(
+                list,
+                (&item as *const *mut c_void).cast(),
+                WORD,
+                WORD,
+                true,
+            )
+        };
+    }
+    unsafe { output.write(list) };
+    0
+}
+
+/// Classifies JSONPath failure codes: syntax, function, limit, then an
+/// unrepresentable Dynamic input. Returns zero when evaluation succeeds.
+///
+/// # Safety
+/// `value` and `query` must be live Zirk values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_jsonpath_error_kind_dynamic(
+    value: *mut c_void,
+    query: *mut c_void,
+) -> i32 {
+    if value.is_null() || query.is_null() {
+        return 4;
+    }
+    let query = unsafe { (*crate::string::payload_ptr(query)).as_str() };
+    let mut active = HashSet::new();
+    let mut budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+    let Ok(document) = (unsafe { dynamic_json_value(value, &mut active, 0, &mut budget, None) })
+    else {
+        return 4;
+    };
+    match zirk_runtime_core::json::query_jsonpath(&document, query) {
+        Ok(_) => 0,
+        Err(error) => jsonpath_error_code(error),
+    }
+}
+
+fn jsonpath_error_code(error: zirk_runtime_core::json::JsonPathError) -> i32 {
+    match error {
+        zirk_runtime_core::json::JsonPathError::Syntax => 1,
+        zirk_runtime_core::json::JsonPathError::Function => 2,
+        zirk_runtime_core::json::JsonPathError::Limit => 3,
+        zirk_runtime_core::json::JsonPathError::Input => 4,
+    }
+}
+
+unsafe fn json_value_to_dynamic(
+    value: serde_json::Value,
+    list_dynamic_id: u32,
+    max_depth: usize,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<*mut c_void, ()> {
+    if depth > max_depth || *budget == 0 {
         return Err(());
     }
     *budget -= 1;
@@ -489,8 +1297,9 @@ unsafe fn json_value_to_dynamic(
                 crate::list::zirk_rt_list_new_with_layout(WORD, WORD, offsets.as_ptr(), 1)
             };
             for value in values {
-                let item =
-                    unsafe { json_value_to_dynamic(value, list_dynamic_id, depth + 1, budget) }?;
+                let item = unsafe {
+                    json_value_to_dynamic(value, list_dynamic_id, max_depth, depth + 1, budget)
+                }?;
                 unsafe {
                     crate::list::zirk_rt_list_add(
                         list,
@@ -517,8 +1326,9 @@ unsafe fn json_value_to_dynamic(
             let object = zirk_rt_object_new();
             for (key_text, value) in values {
                 let key = crate::string::alloc_owned(&key_text);
-                let item =
-                    unsafe { json_value_to_dynamic(value, list_dynamic_id, depth + 1, budget) }?;
+                let item = unsafe {
+                    json_value_to_dynamic(value, list_dynamic_id, max_depth, depth + 1, budget)
+                }?;
                 if zirk_rt_object_set(object, key, item) != 0 {
                     return Err(());
                 }
@@ -542,10 +1352,11 @@ unsafe fn dynamic_json_value(
     active: &mut HashSet<usize>,
     depth: usize,
     budget: &mut usize,
+    limits: Option<zirk_runtime_core::json::JsonLimits>,
 ) -> Result<serde_json::Value, ()> {
     if value.is_null()
         || !crate::collector::is_managed_allocation(value)
-        || depth > 256
+        || depth > limits.map_or(256, |limits| limits.max_nesting_depth)
         || *budget == 0
     {
         return Err(());
@@ -580,6 +1391,9 @@ unsafe fn dynamic_json_value(
             } else {
                 u128::from_ne_bytes(raw).to_string()
             };
+            if limits.is_some_and(|limits| text.len() > limits.max_number_bytes) {
+                return Err(());
+            }
             serde_json::from_str(&text).map_err(|_| ())
         }
         0x200..=0x203 => {
@@ -595,9 +1409,11 @@ unsafe fn dynamic_json_value(
                 // model without changing its token, so reject it explicitly.
                 _ => return Err(()),
             };
-            serde_json::Number::from_f64(number)
-                .map(serde_json::Value::Number)
-                .ok_or(())
+            let number = serde_json::Number::from_f64(number).ok_or(())?;
+            if limits.is_some_and(|limits| number.to_string().len() > limits.max_number_bytes) {
+                return Err(());
+            }
+            Ok(serde_json::Value::Number(number))
         }
         0x301 => {
             let Some(&value) = bytes.first() else {
@@ -607,6 +1423,9 @@ unsafe fn dynamic_json_value(
         }
         JSON_NUMBER_TAG => {
             let token = std::str::from_utf8(bytes).map_err(|_| ())?;
+            if limits.is_some_and(|limits| token.len() > limits.max_number_bytes) {
+                return Err(());
+            }
             serde_json::from_str(token).map_err(|_| ())
         }
         0x302 | 0x303 => {
@@ -615,6 +1434,9 @@ unsafe fn dynamic_json_value(
                 return Err(());
             }
             let text = unsafe { (*crate::string::payload_ptr(handle)).as_str() };
+            if limits.is_some_and(|limits| text.len() > limits.max_string_bytes) {
+                return Err(());
+            }
             Ok(serde_json::Value::String(text.to_owned()))
         }
         // Nullable<…> uses the leading presence flag. The all-zero inner tag
@@ -622,7 +1444,7 @@ unsafe fn dynamic_json_value(
         0x0f_0000 if bytes.first().copied() == Some(0) => Ok(serde_json::Value::Null),
         0x1_0000..=0x3_ffff => {
             let object = read_payload_pointer(bytes)?;
-            unsafe { object_json_value(object, active, depth + 1, budget) }
+            unsafe { object_json_value(object, active, depth, budget, limits) }
         }
         // JSON parsing materializes arrays as List<Dynamic>; each element is
         // therefore itself a managed Dynamic box.
@@ -632,7 +1454,8 @@ unsafe fn dynamic_json_value(
                 return Err(());
             }
             let length = unsafe { crate::list::zirk_rt_list_length(list) };
-            if length > *budget {
+            if length > *budget || limits.is_some_and(|limits| length > limits.max_container_items)
+            {
                 active.remove(&(list as usize));
                 return Err(());
             }
@@ -640,7 +1463,8 @@ unsafe fn dynamic_json_value(
             for index in 0..length {
                 let slot = unsafe { crate::list::zirk_rt_list_element(list, index as i64, WORD) };
                 let child = unsafe { (slot as *const *mut c_void).read_unaligned() };
-                items.push(unsafe { dynamic_json_value(child, active, depth + 1, budget) }?);
+                items
+                    .push(unsafe { dynamic_json_value(child, active, depth + 1, budget, limits) }?);
             }
             active.remove(&(list as usize));
             Ok(serde_json::Value::Array(items))
@@ -654,12 +1478,13 @@ unsafe fn object_json_value(
     active: &mut HashSet<usize>,
     depth: usize,
     budget: &mut usize,
+    limits: Option<zirk_runtime_core::json::JsonLimits>,
 ) -> Result<serde_json::Value, ()> {
     if object.is_null() || !active.insert(object as usize) {
         return Err(());
     }
     let length = zirk_rt_object_length(object);
-    if length > *budget {
+    if length > *budget || limits.is_some_and(|limits| length > limits.max_container_items) {
         active.remove(&(object as usize));
         return Err(());
     }
@@ -670,13 +1495,18 @@ unsafe fn object_json_value(
             active.remove(&(object as usize));
             return Err(());
         }
-        let key_text = unsafe { (*crate::string::payload_ptr(key)).as_str() }.to_owned();
+        let key_text = unsafe { (*crate::string::payload_ptr(key)).as_str() };
+        if limits.is_some_and(|limits| key_text.len() > limits.max_string_bytes) {
+            active.remove(&(object as usize));
+            return Err(());
+        }
+        let key_text = key_text.to_owned();
         let mut child = std::ptr::null_mut();
         if unsafe { zirk_rt_object_get(object, key, &mut child) } != 1 {
             active.remove(&(object as usize));
             return Err(());
         }
-        let value = unsafe { dynamic_json_value(child, active, depth + 1, budget) }?;
+        let value = unsafe { dynamic_json_value(child, active, depth + 1, budget, limits) }?;
         map.insert(key_text, value);
     }
     active.remove(&(object as usize));

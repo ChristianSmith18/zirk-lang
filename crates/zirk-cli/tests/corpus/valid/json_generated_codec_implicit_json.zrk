@@ -1,0 +1,18 @@
+import { JSONCodec } from std.json;
+import { stdout } from std.io;
+
+class Label implements JSONCodec<Label> {
+    value: String;
+    construct(value: String) { this.value = value; }
+}
+
+fn main(): Void {
+    try {
+        inmut source: Label = Label("compile-time import");
+        inmut decoded: Label = Label.decode_json(Label.encode_json(source));
+        stdout.println(decoded.value);
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+}
+main();

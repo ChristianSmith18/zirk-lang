@@ -68,6 +68,14 @@ pub fn standard_module(path: &str) -> Option<StandardModule> {
             package: "std.json",
             module: "json",
         }),
+        "std.collections" => Some(StandardModule {
+            package: "std.collections",
+            module: "collections",
+        }),
+        "std.time" => Some(StandardModule {
+            package: "std.time",
+            module: "time",
+        }),
         "std.net" => Some(StandardModule {
             package: "std.net",
             module: "net",
@@ -442,7 +450,29 @@ pub fn compiler_binding_for_http_member(name: &str) -> Option<&'static str> {
 pub fn compiler_binding_for_json_member(name: &str) -> Option<&'static str> {
     match name {
         "stringify_dynamic_native" => Some("std.json.stringify_dynamic"),
+        "stringify_pretty_dynamic_native" => Some("std.json.stringify_pretty_dynamic"),
+        "canonicalize_dynamic_native" => Some("std.json.canonicalize_dynamic"),
+        "stringify_dynamic_with_limits_native" => Some("std.json.stringify_dynamic_with_limits"),
         "parse_dynamic_native" => Some("std.json.parse_dynamic"),
+        "null_dynamic_native" => Some("std.json.null_dynamic"),
+        "parse5_dynamic_native" => Some("std.json.parse5_dynamic"),
+        "parse_dynamic_with_limits_native" => Some("std.json.parse_dynamic_with_limits"),
+        "pointer_dynamic_native" => Some("std.json.pointer_dynamic"),
+        "pointer_error_kind_dynamic_native" => Some("std.json.pointer_error_kind_dynamic"),
+        "jsonpath_dynamic_native" => Some("std.json.jsonpath_dynamic"),
+        "schema_validate_dynamic_native" => Some("std.json.schema_validate_dynamic"),
+        "schema_validate_with_resolver_dynamic_native" => {
+            Some("std.json.schema_validate_with_resolver_dynamic")
+        }
+        "stream_reader_create_native" => Some("std.json.stream_reader_create"),
+        "stream_reader_push_native" => Some("std.json.stream_reader_push"),
+        "stream_reader_push_bytes_native" => Some("std.json.stream_reader_push_bytes"),
+        "stream_reader_finish_native" => Some("std.json.stream_reader_finish"),
+        "stream_reader_cancel_native" => Some("std.json.stream_reader_cancel"),
+        "stream_writer_create_native" => Some("std.json.stream_writer_create"),
+        "stream_writer_next_status_native" => Some("std.json.stream_writer_next_status"),
+        "stream_writer_take_native" => Some("std.json.stream_writer_take"),
+        "stream_writer_cancel_native" => Some("std.json.stream_writer_cancel"),
         _ => None,
     }
 }

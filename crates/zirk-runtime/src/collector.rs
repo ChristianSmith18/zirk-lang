@@ -133,6 +133,7 @@ pub(crate) unsafe fn release_dynamic_descriptor(pointer: *mut c_void) {
     if pointer.is_null() {
         return;
     }
+    crate::array::release_union_layout(pointer);
     let layout = DYNAMIC_DESCRIPTORS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -1427,6 +1428,7 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
             unsafe { mark_object(object) };
 
             let descriptor = unsafe { *(object as *mut *mut c_void) };
+            unsafe { crate::array::mark_union_entries(object, descriptor, &mut enqueue) };
 
             // WeakCell is a live object but its target is deliberately weak.
             if std::ptr::eq(descriptor, weak_cell_descriptor()) {
@@ -1434,6 +1436,10 @@ fn mark(walk_mutator_chains: bool, allocations: &AllocationSet) {
             }
             if std::ptr::eq(descriptor, crate::channel::channel_descriptor()) {
                 unsafe { crate::channel::mark_queued(object, &mut enqueue) };
+                continue;
+            }
+            if std::ptr::eq(descriptor, crate::list::list_descriptor()) {
+                unsafe { crate::list::mark_union_entries(object, allocations, &mut enqueue) };
                 continue;
             }
             if std::ptr::eq(descriptor, gc_mutex::descriptor()) {
@@ -1523,7 +1529,7 @@ fn mark_frame_roots(frame: &Frame, enqueue: &mut dyn FnMut(*mut c_void)) {
     }
 }
 
-fn mark_union_root(root: &UnionRoot, enqueue: &mut dyn FnMut(*mut c_void)) {
+pub(crate) fn mark_union_root(root: &UnionRoot, enqueue: &mut dyn FnMut(*mut c_void)) {
     if root.base.is_null() || root.descriptor.is_null() {
         crate::failure::fatal("internal error: a union GC root has missing metadata");
     }
@@ -2178,6 +2184,10 @@ mod tests {
                 2 * WORD,
                 std::ptr::null(),
                 0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
                 false,
                 WORD,
             )
@@ -2351,8 +2361,12 @@ mod tests {
                 std::ptr::null(),
                 0,
                 word,
+                std::ptr::null(),
+                0,
                 reference_offsets.as_ptr(),
                 reference_offsets.len(),
+                std::ptr::null(),
+                0,
                 false,
                 word,
             )
@@ -2435,6 +2449,135 @@ mod tests {
     }
 
     #[test]
+    fn map_replacement_and_map_set_removal_update_managed_gc_edges() {
+        let _guard = test_support::test_guard();
+        reset_state_for_tests();
+        test_support::set_threshold_for_tests(usize::MAX / 2);
+        let word = std::mem::size_of::<usize>();
+        let reference_offsets = [0usize];
+        let map = unsafe {
+            crate::map::zirk_rt_map_new_with_layout(
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                word,
+                std::ptr::null(),
+                0,
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                std::ptr::null(),
+                0,
+                false,
+                word,
+            )
+        };
+        let set = unsafe {
+            crate::set::zirk_rt_set_new_with_layout(
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                word,
+                false,
+            )
+        };
+        let key = crate::string::alloc_owned("gc-map-key");
+        let old_map_value = crate::string::alloc_owned("gc-map-old-value");
+        let removed_set_element = crate::string::alloc_owned("gc-set-removed-element");
+
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_set_typed(
+                    map,
+                    (&key as *const *mut c_void).cast(),
+                    word,
+                    (&old_map_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                crate::set::zirk_rt_set_add_typed(
+                    set,
+                    (&removed_set_element as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            1
+        );
+        let mut roots = [map, set];
+        let mut root_slots: Vec<*mut c_void> = roots
+            .iter_mut()
+            .map(|root| (root as *mut *mut c_void).cast())
+            .collect();
+        unsafe { zirk_rt_push_frame(root_slots.as_mut_ptr(), root_slots.len() as i64) };
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(key));
+        assert!(test_support::is_live_for_tests(old_map_value));
+        assert!(test_support::is_live_for_tests(removed_set_element));
+
+        let new_map_value = crate::string::alloc_owned("gc-map-new-value");
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_set_typed(
+                    map,
+                    (&key as *const *mut c_void).cast(),
+                    word,
+                    (&new_map_value as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                crate::set::zirk_rt_set_remove_typed(
+                    set,
+                    (&removed_set_element as *const *mut c_void).cast(),
+                    word,
+                )
+            },
+            1
+        );
+        let mut current_map_value = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_get_keyed(
+                    map,
+                    (&key as *const *mut c_void).cast(),
+                    word,
+                    (&mut current_map_value as *mut *mut c_void).cast(),
+                    word,
+                )
+            },
+            1
+        );
+        assert_eq!(current_map_value, new_map_value);
+        test_support::collect_for_tests();
+        assert!(test_support::is_live_for_tests(key));
+        assert!(test_support::is_live_for_tests(new_map_value));
+        assert!(!test_support::is_live_for_tests(old_map_value));
+        assert!(!test_support::is_live_for_tests(removed_set_element));
+
+        assert_eq!(
+            unsafe {
+                crate::map::zirk_rt_map_remove_typed(map, (&key as *const *mut c_void).cast(), word)
+            },
+            1
+        );
+        test_support::collect_for_tests();
+        assert!(!test_support::is_live_for_tests(key));
+        assert!(!test_support::is_live_for_tests(new_map_value));
+        assert_eq!(crate::map::zirk_rt_map_length(map), 0);
+        assert_eq!(crate::set::zirk_rt_set_length(set), 0);
+
+        zirk_rt_pop_frame();
+        test_support::collect_for_tests();
+        assert!(!test_support::is_live_for_tests(map));
+        assert!(!test_support::is_live_for_tests(set));
+        reset_state_for_tests();
+    }
+
+    #[test]
     fn adversarial_mixed_managed_graph_survives_churn_and_sweeps_unreachable_graphs() {
         let _guard = reset_state();
         const WORD: usize = std::mem::size_of::<usize>();
@@ -2467,8 +2610,12 @@ mod tests {
                 key_offsets.as_ptr(),
                 key_offsets.len(),
                 WORD,
+                std::ptr::null(),
+                0,
                 map_value_offsets.as_ptr(),
                 map_value_offsets.len(),
+                std::ptr::null(),
+                0,
                 false,
                 2 * WORD,
             )

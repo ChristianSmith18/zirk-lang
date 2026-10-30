@@ -1,0 +1,41 @@
+import { stdout } from std.io;
+import { Date, DateTime, Time } from std.time;
+
+fn label(error: LocaleError): String {
+    if error is AmbiguousLocalizedInputError { return "ambiguous"; }
+    if error is InvalidLocalizedInputError { return "invalid"; }
+    return "locale";
+}
+
+fn main(): Void {
+    match Date.parse_locale("May 17, 2026", "en-US", "long") {
+        Ok(date) => stdout.println(date.to_iso_string());
+        Error(_) => stdout.println("date-error");
+    };
+    match Time.parse_locale("4:12:20 PM", "en-US", "medium") {
+        Ok(time) => stdout.println(time.to_iso_string());
+        Error(_) => stdout.println("time-error");
+    };
+    match DateTime.parse_locale("May 17, 2026, 4:12:20 PM", "en-US", "medium") {
+        Ok(value) => stdout.println(value.to_iso_string());
+        Error(_) => stdout.println("datetime-error");
+    };
+    match Date.parse_locale("5/17/26", "en-US", "short") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+    match Date.parse_locale("not a date", "en-US", "long") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+    match Date.parse_locale("May 17, 2026", "zz-ZZ", "long") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+    match Date.parse_locale("May 17, 2026", "en-US", "unsupported") {
+        Ok(_) => stdout.println("unexpected");
+        Error(error) => stdout.println(label(error));
+    };
+}
+
+main();

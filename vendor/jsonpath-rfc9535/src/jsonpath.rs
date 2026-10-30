@@ -1,0 +1,228 @@
+//! The compiled, runnable JSONPath query type.
+
+use crate::compiled::{self, Query};
+use crate::{Error, NodeList, SingularSegment};
+use core::str::FromStr;
+use serde_json::Value;
+
+/// A compiled JSONPath query, ready to evaluate against any number of documents.
+///
+/// Compiling with [`JsonPath::parse`] performs both parsing and the RFC 9535 §2.4
+/// function well-typedness check, so a `JsonPath` value is guaranteed to be a valid,
+/// well-typed query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonPath {
+    query: Query,
+}
+
+impl JsonPath {
+    /// Compiles a JSONPath query string.
+    ///
+    /// This parses the query against the RFC 9535 grammar and type-checks any
+    /// function extensions; the resulting `JsonPath` can be evaluated repeatedly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`Error`] if `query` is not syntactically valid JSONPath, contains
+    /// an out-of-range integer, nests brackets or parentheses deeper than the
+    /// supported limit (128 levels — far beyond any real query), or uses a function
+    /// extension that is unregistered, has the wrong arity, or is not well-typed.
+    ///
+    /// # Examples
+    ///
+    /// Because `parse` rejects a malformed or ill-typed query, it doubles as the way to
+    /// validate a query without running it:
+    ///
+    /// ```
+    /// use jsonpath_rfc9535::JsonPath;
+    ///
+    /// assert!(JsonPath::parse("$.store.book[0]").is_ok()); // valid
+    /// assert!(JsonPath::parse("$.store.book[").is_err()); // unclosed bracket
+    /// assert!(JsonPath::parse("$[?length(@.*) < 3]").is_err()); // ill-typed argument
+    /// ```
+    pub fn parse(query: &str) -> Result<Self, Error> {
+        let ast = crate::parser::parse(query)?;
+        Ok(Self {
+            query: compiled::lower(ast)?,
+        })
+    }
+
+    /// Evaluates the query against `root`, returning the selected nodelist — each value
+    /// paired with its [`NormalizedPath`](crate::NormalizedPath). Borrows from `root`
+    /// and never fails. Use [`query_values`](Self::query_values) when you don't need
+    /// the paths.
+    #[must_use]
+    pub fn query<'a>(&self, root: &'a Value) -> NodeList<'a> {
+        self.query.singular.as_ref().map_or_else(
+            || crate::eval::evaluate(self.compiled(), root),
+            |singular| crate::eval::evaluate_singular(singular, root),
+        )
+    }
+
+    /// Evaluates the query against `root`, returning just the selected values in order.
+    ///
+    /// This skips normalized-path construction entirely, so it is substantially faster
+    /// than [`query`](Self::query) for wildcard- and descendant-heavy queries where the
+    /// caller does not need paths.
+    #[must_use]
+    pub fn query_values<'a>(&self, root: &'a Value) -> Vec<&'a Value> {
+        self.query.singular.as_ref().map_or_else(
+            || crate::eval::evaluate_values(self.compiled(), root),
+            |singular| crate::eval::evaluate_singular_values(singular, root),
+        )
+    }
+
+    /// Evaluates the query with caller-supplied selector/filter and result
+    /// ceilings. Partial results are discarded if either limit is exceeded.
+    pub fn query_values_bounded<'a>(
+        &self,
+        root: &'a Value,
+        max_steps: usize,
+        max_results: usize,
+    ) -> Result<Vec<&'a Value>, Error> {
+        crate::eval::evaluate_values_bounded(self.compiled(), root, max_steps, max_results)
+            .map_err(|error| match error {
+                crate::eval::BoundedEvaluationError::Steps => Error::EvaluationLimit,
+                crate::eval::BoundedEvaluationError::Results => Error::ResultLimit,
+            })
+    }
+
+    /// Returns the query's steps when each one selects a single child by member name
+    /// or array index, so the query selects at most one node; `None` when it has a
+    /// wildcard, slice, filter, descendant segment, or more than one selector in a
+    /// segment. Member names are decoded: `$['a\'b']` has the name `a'b`.
+    ///
+    /// ```
+    /// use jsonpath_rfc9535::{JsonPath, SingularSegment};
+    ///
+    /// let path = JsonPath::parse("$.store['book'][-1]")?;
+    /// let steps = path.singular_steps().expect("names and indexes only");
+    /// assert!(matches!(&steps[0], SingularSegment::Name(name) if name == "store"));
+    /// assert!(matches!(&steps[2], SingularSegment::Index(index) if index.get() == -1));
+    ///
+    /// assert!(JsonPath::parse("$.store.*")?.singular_steps().is_none());
+    /// # Ok::<(), jsonpath_rfc9535::Error>(())
+    /// ```
+    #[must_use]
+    pub fn singular_steps(&self) -> Option<&[SingularSegment]> {
+        self.query
+            .singular
+            .as_ref()
+            .map(|singular| singular.segments.as_slice())
+    }
+
+    /// Returns the compiled query IR (consumed by the evaluator, and by the `scan`
+    /// splitter).
+    pub(crate) const fn compiled(&self) -> &Query {
+        &self.query
+    }
+}
+
+impl FromStr for JsonPath {
+    type Err = Error;
+
+    fn from_str(query: &str) -> Result<Self, Self::Err> {
+        Self::parse(query)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JsonPath;
+    use core::str::FromStr;
+
+    #[test]
+    fn compiles_a_valid_query() {
+        assert!(
+            JsonPath::parse("$.store.book[?@.price < 10]").is_ok(),
+            "a valid, well-typed query compiles"
+        );
+    }
+
+    #[test]
+    fn rejects_a_syntax_error() {
+        assert!(
+            JsonPath::parse(" $").is_err(),
+            "leading whitespace is a syntax error"
+        );
+    }
+
+    #[test]
+    fn rejects_an_ill_typed_query() {
+        assert!(
+            JsonPath::parse("$[?length(@.*) < 3]").is_err(),
+            "a non-singular query in a ValueType slot is rejected at compile time"
+        );
+    }
+
+    #[test]
+    fn parses_via_from_str() {
+        assert!(
+            JsonPath::from_str("$..*").is_ok(),
+            "FromStr delegates to parse"
+        );
+    }
+
+    #[test]
+    fn evaluates_index_and_filter() {
+        let doc = serde_json::json!({"a": {"b": [10, 20, 30]}});
+        let by_index = JsonPath::parse("$.a.b[1]").expect("compiles");
+        assert_eq!(
+            by_index.query_values(&doc),
+            vec![&serde_json::json!(20)],
+            "index selector picks the second element"
+        );
+
+        let filtered = JsonPath::parse("$.a.b[?@ > 15]").expect("compiles");
+        assert_eq!(
+            filtered.query_values(&doc),
+            vec![&serde_json::json!(20), &serde_json::json!(30)],
+            "filter keeps elements greater than 15"
+        );
+    }
+
+    #[test]
+    fn singular_fast_path_resolves_value_and_path() {
+        // A pure name/index chain takes the singular fast path; verify it agrees with the
+        // RFC on both the value and the normalized path, including negative-index
+        // normalization (`[-1]` → the resolved positive index in the path).
+        let doc = serde_json::json!({"a": {"b": [10, 20, 30]}});
+        let query = JsonPath::parse("$.a.b[-1]").expect("compiles");
+
+        assert_eq!(
+            query.query_values(&doc),
+            vec![&serde_json::json!(30)],
+            "negative index selects the last element"
+        );
+        let nodes = query.query(&doc);
+        assert_eq!(
+            nodes.values().collect::<Vec<_>>(),
+            vec![&serde_json::json!(30)],
+            "path API selects the same value"
+        );
+        assert_eq!(
+            nodes.paths().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["$['a']['b'][2]".to_owned()],
+            "the path records the resolved (positive) index"
+        );
+
+        // A singular query that matches nothing yields an empty nodelist (no panic).
+        let missing = JsonPath::parse("$.a.b[9]").expect("compiles");
+        assert!(
+            missing.query_values(&doc).is_empty(),
+            "out-of-range index selects nothing"
+        );
+    }
+
+    #[test]
+    fn query_reports_normalized_paths() {
+        let doc = serde_json::json!({"x": [1, 2]});
+        let path = JsonPath::parse("$.x[*]").expect("compiles");
+        let paths: Vec<String> = path.query(&doc).paths().map(ToString::to_string).collect();
+        assert_eq!(
+            paths,
+            vec!["$['x'][0]".to_owned(), "$['x'][1]".to_owned()],
+            "wildcard paths"
+        );
+    }
+}

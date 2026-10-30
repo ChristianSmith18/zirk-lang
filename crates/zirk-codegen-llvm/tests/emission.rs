@@ -508,7 +508,7 @@ fn value_field_nullable_nested_union_emits_recursive_gc_descriptor() {
     let ir = llvm.print_to_string().to_string();
     assert!(ir.contains("@zk.union.gc."), "GC descriptors are emitted");
     assert!(
-        ir.contains("ptrtoint (ptr @zk.union.gc."),
+        ir.contains("ptr @zk.union.gc.0"),
         "outer descriptor points to the recursively emitted inner descriptor"
     );
 }
@@ -1654,6 +1654,117 @@ fn float128_runtime_helper_calls_emit_for_all_nine_targets() {
             .unwrap_or_else(|error| panic!("{}: {}", target.name, error.render()));
         assert!(path.is_file(), "{} object was not emitted", target.name);
         std::fs::remove_file(path).expect("remove emitted Float128 object");
+    }
+}
+
+#[test]
+fn advanced_type_corpus_emits_for_all_nine_targets() {
+    let _llvm = common::llvm_lock();
+    let source = r#"import { stdout } from std.io;
+contract Named { name: String; }
+contract Identified { id: Int32; }
+class Entity {
+    id: Int32;
+    construct(id: Int32) { this.id = id; }
+}
+class Person extends Entity implements Named, Identified {
+    name: String;
+    construct(name: String, id: Int32) { super(id); this.name = name; }
+}
+type PersonView = Person & Entity & Named & Identified;
+enum Box<T> { Full(value: T), Empty }
+type Choice = Int32 | String;
+fn describe(value: PersonView): String { return value.name + value.id.to_string(); }
+fn rebox<T>(value: Box<T>): Box<T> {
+    return match value {
+        Box.Full(item) => Box.Full(item);
+        Box.Empty => Box.Empty;
+    };
+}
+fn render(value: Choice): String {
+    return match value {
+        42 => "number";
+        "payload" => "text";
+        _ => "other";
+    };
+}
+fn main(): Void {
+    inmut person: PersonView = Person("Ada", 7);
+    inmut boxed: Box<String> = rebox(Box.Full("payload"));
+    inmut cloned: Box<String> = boxed.clone();
+    inmut choice: Choice = 42;
+    mut values: Map<Decimal, Int32> = Map();
+    values.set(1.0, 42);
+    mut union_keys: Map<Choice, Int32> = Map();
+    union_keys.set(choice, 42);
+    union_keys.set("payload", 7);
+    mut union_elements: Set<Choice> = Set();
+    union_elements.add(choice);
+    union_elements.add("payload");
+    mut nested_union_keys: Map<Tuple<Choice, Int32>, Int32> = Map();
+    nested_union_keys.set((choice, 1), 8);
+    mut keys: Set<Tuple<Int32, Boolean>> = Set();
+    keys.add((1, true));
+    mut wide: Float128 = 1.25;
+    stdout.println(describe(person) + render(choice));
+    stdout.println(match cloned {
+        Box.Full(text) => text;
+        Box.Empty => "empty";
+    });
+}
+main();"#;
+    let context = Context::create();
+    let ir = checked_ir(source);
+    let llvm = emit(&context, &ir, "advanced_type_target_matrix");
+    verify_llvm_module(&llvm);
+    let llvm_text = llvm.print_to_string().to_string();
+    assert!(llvm_text.contains("zirk_rt_map_new_with_layout"));
+    assert!(llvm_text.contains("zirk_rt_map_new_with_text_fields"));
+    assert!(llvm_text.contains("zirk_rt_set_new_with_layout"));
+    assert!(llvm_text.contains("zirk_rt_set_new_with_text_fields"));
+    assert!(llvm_text.contains("zirk_float128_binary"));
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "zirk-advanced-type-target-matrix-{}-{nonce}",
+        std::process::id()
+    ));
+    for target in zirk_codegen_llvm::TARGETS {
+        let path = root.with_extension(format!("{}.o", target.name));
+        emit_object_for_triple(&llvm, target.triple, &path)
+            .unwrap_or_else(|error| panic!("{}: {}", target.name, error.render()));
+        assert!(path.is_file(), "{} object was not emitted", target.name);
+        let bytes = std::fs::read(&path).expect("read emitted advanced-type object");
+        assert!(!bytes.is_empty(), "{} object is empty", target.name);
+        let expected_container = match target.container {
+            zirk_codegen_llvm::Container::MachO => common::DetectedContainer::MachO,
+            zirk_codegen_llvm::Container::Elf => common::DetectedContainer::Elf,
+            zirk_codegen_llvm::Container::Coff => common::DetectedContainer::Coff,
+        };
+        assert_eq!(
+            common::detect_container(&bytes),
+            expected_container,
+            "{} object has the wrong container",
+            target.name
+        );
+        if target.container == zirk_codegen_llvm::Container::Coff {
+            let expected_machine = match target.name {
+                "x86-windows" => 0x014C,
+                "x86_64-windows" => 0x8664,
+                "aarch64-windows" => 0xAA64,
+                other => panic!("unhandled COFF target: {other}"),
+            };
+            assert_eq!(
+                common::detect_machine(&bytes),
+                Some(expected_machine),
+                "{} object declares the wrong COFF architecture",
+                target.name
+            );
+        }
+        std::fs::remove_file(path).expect("remove emitted advanced-type object");
     }
 }
 

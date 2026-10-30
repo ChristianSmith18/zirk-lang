@@ -32,7 +32,7 @@ pub use checker::{
     OwnershipMarkers, OwnershipProperties, ProjectGlobalCallInfo, ProjectGlobalInfo,
     ProjectGlobalOperation, ProjectGlobalSpec, ProjectGlobalSubscriptionCallInfo,
     ProjectGlobalSubscriptionOperation, ServiceSpawnInfo, SettledPlan, TypeMapEntry, TypeMapKind,
-    check, check_with_globals, check_with_globals_cancellable,
+    check, check_with_globals, check_with_globals_cancellable, substitute_alias_type_ref,
 };
 pub use constant_value::{CanonicalConst, ConstValue};
 pub use ide::{

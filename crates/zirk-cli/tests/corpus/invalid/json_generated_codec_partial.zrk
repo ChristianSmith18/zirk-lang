@@ -1,0 +1,10 @@
+import { JSONCodec } from std.json;
+
+class Person implements JSONCodec<Person> {
+    name: String;
+    construct(name: String) { this.name = name; }
+
+    decode(value: Dynamic): Person {
+        return Person(value as String);
+    }
+}

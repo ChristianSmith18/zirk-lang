@@ -1,0 +1,12 @@
+import { JSON } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        inmut value: Dynamic = JSON.parse("\{\"a\":[1,true],\"b\":\"x\"\}");
+        stdout.println(JSON.stringify_pretty(value));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+}
+main();

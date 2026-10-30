@@ -1,0 +1,116 @@
+import { stdout } from std.io;
+import { Duration, Period, TimeShift } from std.time;
+
+fn main(): Void {
+    inmut clock: TimeShift = Time(23, 30, 0) + 2h;
+    stdout.println(clock.kind);
+    stdout.println(clock.duration);
+    inmut clock_time: Time = clock.time ?? Time(0, 0, 0);
+    stdout.println(clock_time.to_iso_string());
+    stdout.println(clock.day_offset ?? 0);
+    stdout.println(clock.period == null);
+    stdout.println(clock.overlap_policy == null);
+
+    inmut negative_clock: TimeShift = Time(0, 0, 0) - 1ns;
+    stdout.println(negative_clock.duration);
+    stdout.println(negative_clock.time ?? Time(0, 0, 0));
+    stdout.println(negative_clock.day_offset ?? 0);
+
+    match TimeShift.calendar(Period.days(1), 1h, "later", "forward") {
+        Ok(calendar) => {
+            stdout.println(calendar.kind);
+            stdout.println(calendar.duration);
+            stdout.println(calendar.time == null);
+            stdout.println(calendar.day_offset == null);
+            stdout.println((calendar.period ?? Period.days(0)).to_iso_string());
+            stdout.println(calendar.overlap_policy ?? "missing overlap");
+            stdout.println(calendar.gap_policy ?? "missing gap");
+            match ZonedDateTime.parse("2024-03-09T02:30:00-05:00[America/New_York]") {
+                Ok(start) => match calendar.apply_to(start) {
+                    Ok(shifted) => stdout.println(shifted.local_datetime.to_iso_string());
+                    Error(_) => stdout.println("calendar application failed");
+                };
+                Error(_) => stdout.println("zoned start parse failed");
+            };
+            match ZonedDateTime.parse("2024-03-09T02:30:00-05:00[America/New_York]") {
+                Ok(start) => match clock.apply_to(start) {
+                    Ok(_) => stdout.println("clock shift unexpectedly applied");
+                    Error(_) => stdout.println("clock shift rejected");
+                };
+                Error(_) => stdout.println("zoned start parse failed");
+            };
+        }
+        Error(_) => stdout.println("calendar shift construction failed");
+    };
+
+    match TimeShift.calendar(Period.days(1), 0ns, "invalid", "forward") {
+        Ok(_) => stdout.println("invalid policy accepted");
+        Error(_) => stdout.println("invalid policy rejected");
+    };
+
+    stdout.println(match Period.parse("P0D") {
+        Ok(zero) => zero.to_iso_string();
+        Error(_) => "zero period rejected";
+    });
+    stdout.println(match Period.parse("P0D0D") {
+        Ok(_) => "duplicate period accepted";
+        Error(_) => "duplicate period rejected";
+    });
+
+    match TimeShift.calendar(Period.months(1), 0ns, "reject", "reject") {
+        Ok(month_shift) => match ZonedDateTime.parse("2024-01-31T12:00:00-05:00[America/New_York]") {
+            Ok(january_end) => match month_shift.apply_to(january_end) {
+                Ok(february_end) => stdout.println(february_end.local_datetime.to_iso_string());
+                Error(_) => stdout.println("month-end shift failed");
+            };
+            Error(_) => stdout.println("month-end start parse failed");
+        };
+        Error(_) => stdout.println("month-end shift construction failed");
+    };
+
+    match ZonedDateTime.parse("2024-11-02T01:30:00-04:00[America/New_York]") {
+        Ok(overlap_start) => {
+            match TimeShift.calendar(Period.days(1), 0ns, "earlier", "reject") {
+                Ok(earlier_shift) => match earlier_shift.apply_to(overlap_start) {
+                    Ok(value) => stdout.println(value.offset_seconds);
+                    Error(_) => stdout.println("earlier overlap selection failed");
+                };
+                Error(_) => stdout.println("earlier overlap policy failed");
+            };
+            match TimeShift.calendar(Period.days(1), 0ns, "later", "reject") {
+                Ok(later_shift) => match later_shift.apply_to(overlap_start) {
+                    Ok(value) => stdout.println(value.offset_seconds);
+                    Error(_) => stdout.println("later overlap selection failed");
+                };
+                Error(_) => stdout.println("later overlap policy failed");
+            };
+            match TimeShift.calendar(Period.days(1), 0ns, "reject", "reject") {
+                Ok(reject_shift) => match reject_shift.apply_to(overlap_start) {
+                    Ok(_) => stdout.println("ambiguous shift accepted");
+                    Error(_) => stdout.println("ambiguous shift rejected");
+                };
+                Error(_) => stdout.println("reject overlap policy failed");
+            };
+        }
+        Error(_) => stdout.println("overlap start parse failed");
+    };
+
+    match TimeZone.parse("UTC") {
+        Ok(utc) => {
+            inmut far_future = DateTime(Date(262000, 12, 31), Time(23, 0, 0));
+            match far_future.in_zone(utc, "reject", "reject") {
+                Ok(value) => match TimeShift.calendar(Period.years(1000), 0ns, "reject", "reject") {
+                    Ok(overflow_shift) => match overflow_shift.apply_to(value) {
+                        Ok(_) => stdout.println("out-of-range shift accepted");
+                        Error(_) => stdout.println("out-of-range shift rejected");
+                    };
+                    Error(_) => stdout.println("overflow shift construction failed");
+                };
+                Error(_) => stdout.println("far-future zoned value rejected");
+            };
+        }
+        Error(_) => stdout.println("UTC zone parse failed");
+    };
+}
+
+main();

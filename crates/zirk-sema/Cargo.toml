@@ -12,11 +12,14 @@ timezone = ["dep:chrono-tz"]
 [dependencies]
 zirk-diagnostics.workspace = true
 zirk-ast.workspace = true
+zirk-lexer.workspace = true
+zirk-parser.workspace = true
 zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 chrono.workspace = true
 chrono-tz = { workspace = true, optional = true }
 unicode-segmentation.workspace = true
 regex.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 zirk-lexer.workspace = true

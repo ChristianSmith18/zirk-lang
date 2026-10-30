@@ -1,0 +1,17 @@
+3
+4
+16
+2
+3
+Santiago
+37
+true
+7
+none
+2
+blue
+none
+Ready
+{"values":[4,9,16],"fixed":[2,3],"addresses":[{"city":"Santiago","number":37}],"tags":[5,8],"counts":[["apples",3],["pears",7]],"note":null,"labels":["blue",null],"status":"Ready"}
+unknown enum value rejected
+invalid Map pair rejected

@@ -14,9 +14,10 @@ use std::collections::{HashMap, HashSet};
 
 use zirk_diagnostics::{FileId, Span};
 use zirk_ir::{
-    BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Nullable, Terminator,
-    UnaryOp, ValueId, verify,
+    BinaryOp, BlockId, FloatWidth, InstKind, IntWidth, IrType, Module, Nullable, Operand,
+    Terminator, UnaryOp, ValueId, verify,
 };
+use zirk_runtime_core::collections::{CollectionHashEq, CollectionTextKind};
 
 /// Browser compatibility classification used by preflight and maintained as
 /// exhaustive matches so new IR variants cannot silently acquire support.
@@ -1074,8 +1075,8 @@ fn browser_extern_capability_message(name: &str) -> String {
 }
 
 /// Externs that need a host clock the browser boundary deliberately does not
-/// grant: `Date.today`, `Time.now_*` and `DateTime.now_*` are platform
-/// authority, not portable value semantics.
+/// grant: `Date.today`, `Time.now_*`, `DateTime.now_*` and `Instant.now()` are
+/// platform authority, not portable value semantics.
 fn is_host_clock_extern(name: &str) -> bool {
     matches!(
         name,
@@ -1084,6 +1085,7 @@ fn is_host_clock_extern(name: &str) -> bool {
             | "zirk_rt_time_now_local"
             | "zirk_rt_datetime_now_utc"
             | "zirk_rt_datetime_now_local"
+            | "zirk_rt_instant_now"
     )
 }
 
@@ -1103,6 +1105,11 @@ fn is_browser_intrinsic(name: &str) -> bool {
         || name.starts_with("zirk_rt_date_")
         || name.starts_with("zirk_rt_time_")
         || name.starts_with("zirk_rt_datetime_")
+        || name.starts_with("zirk_rt_instant_")
+        || name.starts_with("zirk_rt_period_")
+        || name.starts_with("zirk_rt_timeshift_")
+        || name.starts_with("zirk_rt_timezone_")
+        || name.starts_with("zirk_rt_zoned_datetime_")
     {
         return true;
     }
@@ -3948,6 +3955,7 @@ impl<'module> Interpreter<'module> {
                     .map(Some)
             }
             InstKind::MapSortedKeys(receiver) => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let mut values = match self.heap.get(id) {
                     Some(HeapEntry::Map(entries)) => {
@@ -3959,6 +3967,9 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
+                for value in &mut values {
+                    *value = self.snapshot_collection_value(&capability, value)?;
+                }
                 let text_keys = matches!(instruction.ty, IrType::Array(array)
                     if matches!(self.module.array_types.get(array as usize),
                         Some(IrType::String | IrType::Char)));
@@ -3976,11 +3987,13 @@ impl<'module> Interpreter<'module> {
                     .map_err(ExecutionFault::Limit)
             }
             InstKind::MapKeys(receiver) | InstKind::MapValues(receiver) => {
+                let is_keys = matches!(&instruction.kind, InstKind::MapKeys(_));
+                let capability = is_keys
+                    .then(|| self.collection_key_capability(frame_index, *receiver))
+                    .transpose()?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let values = match self.heap.get(id) {
-                    Some(HeapEntry::Map(entries))
-                        if matches!(&instruction.kind, InstKind::MapKeys(_)) =>
-                    {
+                    Some(HeapEntry::Map(entries)) if is_keys => {
                         entries.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>()
                     }
                     Some(HeapEntry::Map(entries)) => {
@@ -3992,6 +4005,14 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
+                let values = if let Some(capability) = capability {
+                    values
+                        .iter()
+                        .map(|value| self.snapshot_collection_value(&capability, value))
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    values
+                };
                 let bytes = std::mem::size_of::<HeapEntry>()
                     .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
                     .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
@@ -4001,6 +4022,7 @@ impl<'module> Interpreter<'module> {
                     .map_err(ExecutionFault::Limit)
             }
             InstKind::MapEntries(receiver) => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let rows = match self.heap.get(id) {
                     Some(HeapEntry::Map(entries)) => entries.clone(),
@@ -4022,6 +4044,7 @@ impl<'module> Interpreter<'module> {
                 };
                 let mut tuples = Vec::with_capacity(rows.len());
                 for (key, value) in rows {
+                    let key = self.snapshot_collection_value(&capability, &key)?;
                     let fields = vec![key, value];
                     let bytes = std::mem::size_of::<HeapEntry>()
                         .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
@@ -4048,6 +4071,7 @@ impl<'module> Interpreter<'module> {
                     .map_err(ExecutionFault::Limit)
             }
             InstKind::SetValues(receiver) => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let values = match self.heap.get(id) {
                     Some(HeapEntry::Set(values)) => values.clone(),
@@ -4057,6 +4081,10 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
+                let values = values
+                    .iter()
+                    .map(|value| self.snapshot_collection_value(&capability, value))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let bytes = std::mem::size_of::<HeapEntry>()
                     .checked_add(values.len().saturating_mul(std::mem::size_of::<Value>()))
                     .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
@@ -4066,6 +4094,7 @@ impl<'module> Interpreter<'module> {
                     .map_err(ExecutionFault::Limit)
             }
             InstKind::SetSortedElements(receiver) => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let mut values = match self.heap.get(id) {
                     Some(HeapEntry::Set(values)) => values.clone(),
@@ -4075,6 +4104,9 @@ impl<'module> Interpreter<'module> {
                         ));
                     }
                 };
+                for value in &mut values {
+                    *value = self.snapshot_collection_value(&capability, value)?;
+                }
                 let text_elements = matches!(instruction.ty, IrType::Array(array)
                     if matches!(self.module.array_types.get(array as usize),
                         Some(IrType::String | IrType::Char)));
@@ -4132,6 +4164,7 @@ impl<'module> Interpreter<'module> {
                 right,
                 operation,
             } => {
+                let capability = self.collection_key_capability(frame_index, *left)?;
                 let left_id = self.heap_operand(frame_index, *left)?;
                 let right_id = self.heap_operand(frame_index, *right)?;
                 let left_values = match self.heap.get(left_id) {
@@ -4143,7 +4176,9 @@ impl<'module> Interpreter<'module> {
                     _ => return Err(ExecutionFault::Internal("SetOperation right operand is not a set".into())),
                 };
                 let contains = |values: &[Value], value: &Value| {
-                    values.iter().any(|candidate| self.runtime_value_equals(candidate, value))
+                    values.iter().any(|candidate| {
+                        self.collection_value_equals_with_capability(&capability, candidate, value)
+                    })
                 };
                 use zirk_ir::SetOperation as Op;
                 let relation = match operation {
@@ -4179,13 +4214,16 @@ impl<'module> Interpreter<'module> {
                 key,
                 value,
             } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
                 let value = self.value(frame_index, *value)?;
                 let position = match self.heap.get(id) {
                     Some(HeapEntry::Map(entries)) => entries
                         .iter()
-                        .position(|(candidate, _)| self.runtime_value_equals(candidate, &key)),
+                        .position(|(candidate, _)| {
+                            self.collection_value_equals_with_capability(&capability, candidate, &key)
+                        }),
                     _ => {
                         return Err(ExecutionFault::Internal(
                             "MapSet receiver is not a map".into(),
@@ -4211,6 +4249,7 @@ impl<'module> Interpreter<'module> {
                     if !charged {
                         2
                     } else {
+                        let key = self.snapshot_collection_value(&capability, &key)?;
                         let Some(HeapEntry::Map(entries)) = self.heap.get_mut(id) else {
                             unreachable!("checked above");
                         };
@@ -4225,6 +4264,7 @@ impl<'module> Interpreter<'module> {
                 )))
             }
             InstKind::MapContainsKey { receiver, key } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
                 let Some(HeapEntry::Map(entries)) = self.heap.get(id) else {
@@ -4233,10 +4273,13 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 Ok(Some(Value::Boolean(entries.iter().any(
-                    |(candidate, _)| self.runtime_value_equals(candidate, &key),
+                    |(candidate, _)| {
+                        self.collection_value_equals_with_capability(&capability, candidate, &key)
+                    },
                 ))))
             }
             InstKind::MapGet { receiver, key } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
                 let Some(HeapEntry::Map(entries)) = self.heap.get(id) else {
@@ -4246,7 +4289,9 @@ impl<'module> Interpreter<'module> {
                 };
                 entries
                     .iter()
-                    .find(|(candidate, _)| self.runtime_value_equals(candidate, &key))
+                    .find(|(candidate, _)| {
+                        self.collection_value_equals_with_capability(&capability, candidate, &key)
+                    })
                     .map(|(_, value)| Some(value.clone()))
                     .ok_or_else(|| {
                         ExecutionFault::Internal(
@@ -4255,12 +4300,15 @@ impl<'module> Interpreter<'module> {
                     })
             }
             InstKind::MapRemove { receiver, key } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let key = self.value(frame_index, *key)?;
                 let position = match self.heap.get(id) {
                     Some(HeapEntry::Map(entries)) => entries
                         .iter()
-                        .position(|(candidate, _)| self.runtime_value_equals(candidate, &key)),
+                        .position(|(candidate, _)| {
+                            self.collection_value_equals_with_capability(&capability, candidate, &key)
+                        }),
                     _ => {
                         return Err(ExecutionFault::Internal(
                             "MapRemove receiver is not a map".into(),
@@ -4277,12 +4325,15 @@ impl<'module> Interpreter<'module> {
                 Ok(Some(Value::Boolean(position.is_some())))
             }
             InstKind::SetAdd { receiver, value } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
                 let present = match self.heap.get(id) {
                     Some(HeapEntry::Set(values)) => values
                         .iter()
-                        .any(|candidate| self.runtime_value_equals(candidate, &value)),
+                        .any(|candidate| {
+                            self.collection_value_equals_with_capability(&capability, candidate, &value)
+                        }),
                     _ => {
                         return Err(ExecutionFault::Internal(
                             "SetAdd receiver is not a set".into(),
@@ -4301,6 +4352,7 @@ impl<'module> Interpreter<'module> {
                     if !charged {
                         2
                     } else {
+                        let value = self.snapshot_collection_value(&capability, &value)?;
                         let Some(HeapEntry::Set(values)) = self.heap.get_mut(id) else {
                             unreachable!("checked above");
                         };
@@ -4314,6 +4366,7 @@ impl<'module> Interpreter<'module> {
                 )))
             }
             InstKind::SetContains { receiver, value } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
                 let Some(HeapEntry::Set(values)) = self.heap.get(id) else {
@@ -4322,16 +4375,19 @@ impl<'module> Interpreter<'module> {
                     ));
                 };
                 Ok(Some(Value::Boolean(values.iter().any(|candidate| {
-                    self.runtime_value_equals(candidate, &value)
+                    self.collection_value_equals_with_capability(&capability, candidate, &value)
                 }))))
             }
             InstKind::SetRemove { receiver, value } => {
+                let capability = self.collection_key_capability(frame_index, *receiver)?;
                 let id = self.heap_operand(frame_index, *receiver)?;
                 let value = self.value(frame_index, *value)?;
                 let position = match self.heap.get(id) {
                     Some(HeapEntry::Set(values)) => values
                         .iter()
-                        .position(|candidate| self.runtime_value_equals(candidate, &value)),
+                        .position(|candidate| {
+                            self.collection_value_equals_with_capability(&capability, candidate, &value)
+                        }),
                     _ => {
                         return Err(ExecutionFault::Internal(
                             "SetRemove receiver is not a set".into(),
@@ -4888,7 +4944,7 @@ impl<'module> Interpreter<'module> {
                 let value = self.value(frame_index, *value)?;
                 let mut active = std::collections::HashSet::new();
                 let mut budget = 100_000usize;
-                let encoded = self.json_value(&value, &mut active, 0, &mut budget)
+                let encoded = self.json_value(&value, &mut active, 0, &mut budget, None)
                     .and_then(|value| serde_json::to_string(&value).map_err(|_| ()))
                     .ok();
                 let result = if let Some(encoded) = encoded {
@@ -4898,6 +4954,331 @@ impl<'module> Interpreter<'module> {
                     Value::Nullable(None)
                 };
                 Ok(Some(result))
+            }
+            InstKind::JsonStringifyDynamicPretty { value } => {
+                let value = self.value(frame_index, *value)?;
+                let limits = zirk_runtime_core::json::JsonLimits::default();
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let encoded = self
+                    .json_value(&value, &mut active, 0, &mut budget, Some(limits))
+                    .and_then(|value| {
+                        zirk_runtime_core::json::serialize_pretty_value_with_limits(
+                            &value, limits,
+                        )
+                        .map_err(|_| ())
+                    })
+                    .ok();
+                let result = if let Some(encoded) = encoded {
+                    let string = self.allocate_string(encoded)?;
+                    Value::Nullable(Some(Box::new(Value::Heap(string))))
+                } else {
+                    Value::Nullable(None)
+                };
+                Ok(Some(result))
+            }
+            InstKind::JsonCanonicalizeDynamic { value } => {
+                let value = self.value(frame_index, *value)?;
+                let limits = zirk_runtime_core::json::JsonLimits::default();
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let encoded = self
+                    .json_value(&value, &mut active, 0, &mut budget, Some(limits))
+                    .and_then(|value| {
+                        zirk_runtime_core::json::canonicalize_value_with_limits(&value, limits)
+                            .map_err(|_| ())
+                    })
+                    .ok();
+                let result = if let Some(encoded) = encoded {
+                    let string = self.allocate_string(encoded)?;
+                    Value::Nullable(Some(Box::new(Value::Heap(string))))
+                } else {
+                    Value::Nullable(None)
+                };
+                Ok(Some(result))
+            }
+            InstKind::JsonStringifyDynamicWithLimits {
+                value,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => {
+                let value = self.value(frame_index, *value)?;
+                let limit = |interpreter: &Self, operand| -> Result<usize, ExecutionFault> {
+                    match interpreter.value(frame_index, operand)? {
+                        Value::Int(value) if !value.width.signed() => {
+                            usize::try_from(value.unsigned()).map_err(|_| ExecutionFault::Runtime {
+                                category: "JsonConversionError".into(),
+                                message: "JSON limit exceeds this platform's address range".into(),
+                            })
+                        }
+                        _ => Err(ExecutionFault::Internal(
+                            "JsonStringifyDynamicWithLimits expects UInt64 limit operands".into(),
+                        )),
+                    }
+                };
+                let limits = zirk_runtime_core::json::JsonLimits {
+                    max_document_bytes: limit(self, *max_document_bytes)?,
+                    max_nesting_depth: limit(self, *max_nesting_depth)?,
+                    max_string_bytes: limit(self, *max_string_bytes)?,
+                    max_container_items: limit(self, *max_container_items)?,
+                    max_number_bytes: limit(self, *max_number_bytes)?,
+                };
+                if zirk_runtime_core::json::validate_limits(limits).is_err() {
+                    return Ok(Some(Value::Nullable(None)));
+                }
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let encoded = self
+                    .json_value(&value, &mut active, 0, &mut budget, Some(limits))
+                    .and_then(|value| {
+                        zirk_runtime_core::json::serialize_value_with_limits(&value, limits)
+                            .map_err(|_| ())
+                    })
+                    .ok();
+                let result = if let Some(encoded) = encoded {
+                    let string = self.allocate_string(encoded)?;
+                    Value::Nullable(Some(Box::new(Value::Heap(string))))
+                } else {
+                    Value::Nullable(None)
+                };
+                Ok(Some(result))
+            }
+            InstKind::JsonNullDynamic => Ok(Some(Value::Nullable(None))),
+            InstKind::JsonStreamReaderCreate {
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => {
+                let limit = |interpreter: &Self, operand| -> Result<usize, ExecutionFault> {
+                    match interpreter.value(frame_index, operand)? {
+                        Value::Int(value) if !value.width.signed() => {
+                            usize::try_from(value.unsigned()).map_err(|_| ExecutionFault::Runtime {
+                                category: "JsonConversionError".into(),
+                                message: "JSON limit exceeds this platform's address range".into(),
+                            })
+                        }
+                        _ => Err(ExecutionFault::Internal(
+                            "JsonStreamReaderCreate expects UInt64 limit operands".into(),
+                        )),
+                    }
+                };
+                let limits = zirk_runtime_core::json::JsonLimits {
+                    max_document_bytes: limit(self, *max_document_bytes)?,
+                    max_nesting_depth: limit(self, *max_nesting_depth)?,
+                    max_string_bytes: limit(self, *max_string_bytes)?,
+                    max_container_items: limit(self, *max_container_items)?,
+                    max_number_bytes: limit(self, *max_number_bytes)?,
+                };
+                let handle = zirk_runtime_core::json::stream_reader_create(limits).unwrap_or(0);
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    handle.into(),
+                    IntWidth::U64,
+                ))))
+            }
+            InstKind::JsonStreamReaderPush { handle, chunk } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderPush handle is not an integer".into(),
+                    ));
+                };
+                let handle = handle.unsigned();
+                let chunk = self.string_operand(frame_index, *chunk)?;
+                let result = u64::try_from(handle)
+                    .ok()
+                    .is_some_and(|handle| {
+                        zirk_runtime_core::json::stream_reader_push(handle, chunk.as_bytes())
+                            .is_ok()
+                    });
+                Ok(Some(Value::Boolean(result)))
+            }
+            InstKind::JsonStreamReaderPushBytes { handle, chunk } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderPushBytes handle is not an integer".into(),
+                    ));
+                };
+                let Value::Heap(array_id) = self.value(frame_index, *chunk)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderPushBytes chunk is not an array".into(),
+                    ));
+                };
+                let Some(HeapEntry::Array(values)) = self.heap.get(array_id) else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderPushBytes chunk is not a live array".into(),
+                    ));
+                };
+                if values.len() > zirk_runtime_core::json::JSON_STREAM_CHUNK_BYTES {
+                    return Ok(Some(Value::Boolean(false)));
+                }
+                let mut bytes = Vec::with_capacity(values.len());
+                for value in values {
+                    let Value::Int(value) = value else {
+                        return Err(ExecutionFault::Internal(
+                            "JsonStreamReaderPushBytes array element is not a byte".into(),
+                        ));
+                    };
+                    let byte = u8::try_from(value.unsigned()).map_err(|_| {
+                        ExecutionFault::Internal(
+                            "JsonStreamReaderPushBytes element is outside UInt8".into(),
+                        )
+                    })?;
+                    bytes.push(byte);
+                }
+                let result = u64::try_from(handle.unsigned()).ok().is_some_and(|handle| {
+                    zirk_runtime_core::json::stream_reader_push(handle, &bytes).is_ok()
+                });
+                Ok(Some(Value::Boolean(result)))
+            }
+            InstKind::JsonStreamReaderFinish {
+                handle,
+                list_dynamic_id,
+            } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderFinish handle is not an integer".into(),
+                    ));
+                };
+                let value = u64::try_from(handle.unsigned())
+                    .ok()
+                    .and_then(|handle| {
+                        zirk_runtime_core::json::stream_reader_finish(handle).ok()
+                    });
+                let value = if let Some(value) = value {
+                    let mut budget = 100_000usize;
+                    Some(Box::new(self.json_dynamic_value(
+                        value,
+                        *list_dynamic_id,
+                        zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                        0,
+                        &mut budget,
+                    )?))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(value)))
+            }
+            InstKind::JsonStreamReaderCancel { handle } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamReaderCancel handle is not an integer".into(),
+                    ));
+                };
+                if let Ok(handle) = u64::try_from(handle.unsigned()) {
+                    let _ = zirk_runtime_core::json::stream_reader_cancel(handle);
+                }
+                Ok(None)
+            }
+            InstKind::JsonStreamWriterCreate {
+                value,
+                max_chunk_bytes: _,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+                ..
+            } => {
+                let value = self.value(frame_index, *value)?;
+                let limit = |interpreter: &Self, operand| -> Result<usize, ExecutionFault> {
+                    match interpreter.value(frame_index, operand)? {
+                        Value::Int(value) if !value.width.signed() => {
+                            usize::try_from(value.unsigned()).map_err(|_| ExecutionFault::Runtime {
+                                category: "JsonConversionError".into(),
+                                message: "JSON limit exceeds this platform's address range".into(),
+                            })
+                        }
+                        _ => Err(ExecutionFault::Internal(
+                            "JsonStreamWriterCreate expects UInt64 limit operands".into(),
+                        )),
+                    }
+                };
+                let limits = zirk_runtime_core::json::JsonLimits {
+                    max_document_bytes: limit(self, *max_document_bytes)?,
+                    max_nesting_depth: limit(self, *max_nesting_depth)?,
+                    max_string_bytes: limit(self, *max_string_bytes)?,
+                    max_container_items: limit(self, *max_container_items)?,
+                    max_number_bytes: limit(self, *max_number_bytes)?,
+                };
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let value = self
+                    .json_value(&value, &mut active, 0, &mut budget, Some(limits))
+                    .ok();
+                let handle = value
+                    .and_then(|value| {
+                        zirk_runtime_core::json::stream_writer_create(
+                            value,
+                            limits,
+                            zirk_runtime_core::json::JsonStreamFormat::Compact,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or(0);
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    handle.into(),
+                    IntWidth::U64,
+                ))))
+            }
+            InstKind::JsonStreamWriterNextStatus {
+                handle,
+                max_chunk_bytes,
+            } => {
+                let integer = |interpreter: &Self, operand| -> Result<u64, ExecutionFault> {
+                    match interpreter.value(frame_index, operand)? {
+                        Value::Int(value) if !value.width.signed() => {
+                            u64::try_from(value.unsigned()).map_err(|_| {
+                                ExecutionFault::Runtime {
+                                    category: "JsonConversionError".into(),
+                                    message: "JSON stream handle or chunk limit is too large".into(),
+                                }
+                            })
+                        }
+                        _ => Err(ExecutionFault::Internal(
+                            "JsonStreamWriterNextStatus expects UInt64 operands".into(),
+                        )),
+                    }
+                };
+                let handle = integer(self, *handle)?;
+                let max_chunk_bytes = usize::try_from(integer(self, *max_chunk_bytes)?)
+                    .unwrap_or(usize::MAX);
+                let status = zirk_runtime_core::json::stream_writer_next_status(
+                    handle,
+                    max_chunk_bytes,
+                );
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    u64::from(status).into(),
+                    IntWidth::U32,
+                ))))
+            }
+            InstKind::JsonStreamWriterTake { handle } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamWriterTake handle is not an integer".into(),
+                    ));
+                };
+                let chunk = u64::try_from(handle.unsigned())
+                    .ok()
+                    .and_then(|handle| {
+                        zirk_runtime_core::json::stream_writer_take(handle).ok()
+                    })
+                    .unwrap_or_default();
+                Ok(Some(Value::Heap(self.allocate_string(chunk)?)))
+            }
+            InstKind::JsonStreamWriterCancel { handle } => {
+                let Value::Int(handle) = self.value(frame_index, *handle)? else {
+                    return Err(ExecutionFault::Internal(
+                        "JsonStreamWriterCancel handle is not an integer".into(),
+                    ));
+                };
+                if let Ok(handle) = u64::try_from(handle.unsigned()) {
+                    let _ = zirk_runtime_core::json::stream_writer_cancel(handle);
+                }
+                Ok(None)
             }
             InstKind::JsonParseDynamic {
                 document,
@@ -4912,6 +5293,7 @@ impl<'module> Interpreter<'module> {
                     Some(Box::new(self.json_dynamic_value(
                         parsed,
                         *list_dynamic_id,
+                        zirk_runtime_core::json::MAX_NESTING_DEPTH,
                         0,
                         &mut budget,
                     )?))
@@ -4919,6 +5301,279 @@ impl<'module> Interpreter<'module> {
                     None
                 };
                 Ok(Some(Value::Nullable(value)))
+            }
+            InstKind::Json5ParseDynamic {
+                document,
+                list_dynamic_id,
+            } => {
+                let document = self.string_operand(frame_index, *document)?;
+                let parsed = zirk_runtime_core::json::parse_json5(&document).ok();
+                let value = if let Some(parsed) = parsed {
+                    let mut budget = 100_000usize;
+                    Some(Box::new(self.json5_dynamic_value(
+                        parsed,
+                        *list_dynamic_id,
+                        zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                        0,
+                        &mut budget,
+                    )?))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(value)))
+            }
+            InstKind::JsonParseDynamicWithLimits {
+                document,
+                list_dynamic_id,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => {
+                let document = self.string_operand(frame_index, *document)?;
+                let limit = |interpreter: &Self, operand| -> Result<usize, ExecutionFault> {
+                    match interpreter.value(frame_index, operand)? {
+                        Value::Int(value) if !value.width.signed() => {
+                            usize::try_from(value.unsigned()).map_err(|_| {
+                                ExecutionFault::Runtime {
+                                    category: "JsonConversionError".into(),
+                                    message: "JSON limit exceeds this platform's address range".into(),
+                                }
+                            })
+                        }
+                        _ => Err(ExecutionFault::Internal(
+                            "JsonParseDynamicWithLimits expects UInt64 limit operands".into(),
+                        )),
+                    }
+                };
+                let limits = zirk_runtime_core::json::JsonLimits {
+                    max_document_bytes: limit(self, *max_document_bytes)?,
+                    max_nesting_depth: limit(self, *max_nesting_depth)?,
+                    max_string_bytes: limit(self, *max_string_bytes)?,
+                    max_container_items: limit(self, *max_container_items)?,
+                    max_number_bytes: limit(self, *max_number_bytes)?,
+                };
+                let parsed = zirk_runtime_core::json::validate_document_with_limits(
+                    &document, limits,
+                )
+                .ok()
+                .and_then(|()| serde_json::from_str::<serde_json::Value>(&document).ok());
+                let value = if let Some(parsed) = parsed {
+                    let mut budget = document.len().saturating_add(1);
+                    Some(Box::new(self.json_dynamic_value(
+                        parsed,
+                        *list_dynamic_id,
+                        limits.max_nesting_depth,
+                        0,
+                        &mut budget,
+                    )?))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(value)))
+            }
+            InstKind::JsonPointerDynamic {
+                value,
+                pointer,
+                list_dynamic_id,
+            } => {
+                let value = self.value(frame_index, *value)?;
+                let pointer = self.string_operand(frame_index, *pointer)?;
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let selected = self
+                    .json_value(&value, &mut active, 0, &mut budget, None)
+                    .ok()
+                    .and_then(|document| {
+                        zirk_runtime_core::json::lookup_pointer(&document, &pointer)
+                            .ok()
+                            .cloned()
+                    });
+                let selected = if let Some(selected) = selected {
+                    let mut budget = 100_000usize;
+                    Some(Box::new(self.json_dynamic_value(
+                        selected,
+                        *list_dynamic_id,
+                        zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                        0,
+                        &mut budget,
+                    )?))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(selected)))
+            }
+            InstKind::JsonPointerErrorKind { value, pointer } => {
+                let value = self.value(frame_index, *value)?;
+                let pointer = self.string_operand(frame_index, *pointer)?;
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let kind = self
+                    .json_value(&value, &mut active, 0, &mut budget, None)
+                    .ok()
+                    .map(|document| {
+                        match zirk_runtime_core::json::lookup_pointer(&document, &pointer) {
+                            Ok(_) => 0,
+                            Err(zirk_runtime_core::json::JsonPointerError::Syntax) => 1,
+                            Err(zirk_runtime_core::json::JsonPointerError::Index) => 2,
+                            Err(zirk_runtime_core::json::JsonPointerError::NotFound) => 3,
+                            Err(zirk_runtime_core::json::JsonPointerError::WrongContainer) => 4,
+                        }
+                    })
+                    .unwrap_or(5);
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    kind as u128,
+                    IntWidth::I32,
+                ))))
+            }
+            InstKind::JsonPathDynamic {
+                value,
+                query,
+                list_dynamic_id,
+            } => {
+                let value = self.value(frame_index, *value)?;
+                let query = self.string_operand(frame_index, *query)?;
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let selected = self
+                    .json_value(&value, &mut active, 0, &mut budget, None)
+                    .ok()
+                    .and_then(|document| {
+                        zirk_runtime_core::json::query_jsonpath(&document, &query).ok()
+                    });
+                let selected = if let Some(selected) = selected {
+                    let mut budget = 100_000usize;
+                    let mut values = Vec::with_capacity(selected.len());
+                    for item in selected {
+                        values.push(self.json_dynamic_value(
+                            item,
+                            *list_dynamic_id,
+                            zirk_runtime_core::json::MAX_NESTING_DEPTH,
+                            0,
+                            &mut budget,
+                        )?);
+                    }
+                    let bytes = std::mem::size_of::<HeapEntry>()
+                        + values.len() * std::mem::size_of::<Value>();
+                    let id = self
+                        .heap
+                        .allocate(HeapEntry::List(values), bytes, self.limits)
+                        .map_err(ExecutionFault::Limit)?;
+                    Some(Box::new(Value::Heap(id)))
+                } else {
+                    None
+                };
+                Ok(Some(Value::Nullable(selected)))
+            }
+            InstKind::JsonPathErrorKind { value, query } => {
+                let value = self.value(frame_index, *value)?;
+                let query = self.string_operand(frame_index, *query)?;
+                let mut active = std::collections::HashSet::new();
+                let mut budget = 100_000usize;
+                let kind = self
+                    .json_value(&value, &mut active, 0, &mut budget, None)
+                    .ok()
+                    .map(|document| {
+                        match zirk_runtime_core::json::query_jsonpath(&document, &query) {
+                            Ok(_) => 0,
+                            Err(zirk_runtime_core::json::JsonPathError::Syntax) => 1,
+                            Err(zirk_runtime_core::json::JsonPathError::Function) => 2,
+                            Err(zirk_runtime_core::json::JsonPathError::Limit) => 3,
+                            Err(zirk_runtime_core::json::JsonPathError::Input) => 4,
+                        }
+                    })
+                    .unwrap_or(4);
+                Ok(Some(Value::Int(IntegerValue::from_bits(
+                    kind as u128,
+                    IntWidth::I32,
+                ))))
+            }
+            InstKind::JsonSchemaValidateDynamic {
+                value,
+                schema,
+                resolver,
+                list_dynamic_id,
+            } => {
+                let value = self.value(frame_index, *value)?;
+                let schema = self.string_operand(frame_index, *schema)?;
+                let limits = zirk_runtime_core::json::JsonLimits::default();
+                let mut active = std::collections::HashSet::new();
+                let mut budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+                let Some(instance) = self
+                    .json_value(&value, &mut active, 0, &mut budget, Some(limits))
+                    .ok()
+                else {
+                    return Ok(Some(Value::Nullable(None)));
+                };
+                let Ok(instance_document) =
+                    zirk_runtime_core::json::serialize_value_with_limits(&instance, limits)
+                else {
+                    return Ok(Some(Value::Nullable(None)));
+                };
+                let resolver_documents = if let Some(resolver) = resolver {
+                    let resolver_value = self.value(frame_index, *resolver)?;
+                    let mut active = std::collections::HashSet::new();
+                    let mut budget = zirk_runtime_core::json::HARD_MAX_CONTAINER_ITEMS;
+                    let Some(serde_json::Value::Object(resources)) = self
+                        .json_value(&resolver_value, &mut active, 0, &mut budget, Some(limits))
+                        .ok()
+                    else {
+                        return Ok(Some(Value::Nullable(None)));
+                    };
+                    let mut documents = Vec::with_capacity(resources.len());
+                    for (uri, resource) in resources {
+                        let Ok(document) =
+                            zirk_runtime_core::json::serialize_value_with_limits(&resource, limits)
+                        else {
+                            return Ok(Some(Value::Nullable(None)));
+                        };
+                        documents.push((uri, document));
+                    }
+                    Some(documents)
+                } else {
+                    None
+                };
+                let issues = if let Some(resolver_documents) = resolver_documents {
+                    zirk_runtime_core::json::validate_json_schema_with_resolver(
+                        &schema,
+                        &instance_document,
+                        limits,
+                        &resolver_documents,
+                    )
+                } else {
+                    zirk_runtime_core::json::validate_json_schema(
+                        &schema,
+                        &instance_document,
+                        limits,
+                    )
+                }
+                .ok();
+                let Some(issues) = issues else {
+                    return Ok(Some(Value::Nullable(None)));
+                };
+                let mut conversion_budget = 100_000usize;
+                let mut values = Vec::with_capacity(issues.len());
+                for issue in issues {
+                    let value = serde_json::json!({
+                        "instance_pointer": issue.instance_pointer,
+                        "message": issue.message,
+                    });
+                    values.push(self.json_dynamic_value(
+                        value,
+                        *list_dynamic_id,
+                        limits.max_nesting_depth,
+                        0,
+                        &mut conversion_budget,
+                    )?);
+                }
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    + values.len() * std::mem::size_of::<Value>();
+                let id = self
+                    .heap
+                    .allocate(HeapEntry::List(values), bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Some(Value::Nullable(Some(Box::new(Value::Heap(id))))))
             }
             InstKind::BuildValue { class, fields } => {
                 let fields = fields
@@ -5634,6 +6289,11 @@ impl<'module> Interpreter<'module> {
         if name.starts_with("zirk_rt_date_")
             || name.starts_with("zirk_rt_time_")
             || name.starts_with("zirk_rt_datetime_")
+            || name.starts_with("zirk_rt_instant_")
+            || name.starts_with("zirk_rt_period_")
+            || name.starts_with("zirk_rt_timeshift_")
+            || name.starts_with("zirk_rt_timezone_")
+            || name.starts_with("zirk_rt_zoned_datetime_")
         {
             return self.execute_temporal_intrinsic(name, arguments, ty);
         }
@@ -6601,7 +7261,13 @@ impl<'module> Interpreter<'module> {
         arguments: &[Value],
         ty: IrType,
     ) -> Result<Value, ExecutionFault> {
+        use zirk_runtime_core::locale as core_locale;
         use zirk_runtime_core::temporal as tmp;
+        use zirk_runtime_core::zoned_temporal::{
+            DstPolicy, GapPolicy, Instant as CoreInstant, OverlapPolicy, Period as CorePeriod,
+            TimeShift as CoreTimeShift, TimeZone as CoreTimeZone,
+            ZonedDateTime as CoreZonedDateTime,
+        };
         let int64 = |index: usize| self.integer_from_value(arguments.get(index));
         let int32 = |index: usize| self.i32_argument(arguments.get(index));
         let wide = |index: usize| self.int128_argument(arguments.get(index));
@@ -6658,9 +7324,55 @@ impl<'module> Interpreter<'module> {
                 Ok(Value::Boolean(tmp::parse_date_text(&text(0)?).is_some()))
             }
             "zirk_rt_date_parse_value" => int(tmp::parse_date_text(&text(0)?).unwrap_or(0)),
+            "zirk_rt_date_parse_locale_ok" => Ok(Value::Boolean(
+                core_locale::parse_date_named(&text(0)?, &text(1)?, &text(2)?).is_ok(),
+            )),
+            "zirk_rt_date_parse_locale_value" => {
+                int(
+                    core_locale::parse_date_named(&text(0)?, &text(1)?, &text(2)?)
+                        .unwrap_or_default(),
+                )
+            }
+            "zirk_rt_date_parse_locale_error_kind" => int(i64::from(
+                core_locale::parse_date_named(&text(0)?, &text(1)?, &text(2)?)
+                    .err()
+                    .map_or(0, |error| match error {
+                        core_locale::LocaleError::InvalidInput => 10,
+                        core_locale::LocaleError::AmbiguousInput => 11,
+                        _ => 1,
+                    }),
+            )),
             "zirk_rt_date_format" => self
                 .allocate_string(tmp::date_format(check_days(0)?, &text(1)?))
                 .map(Value::Heap),
+            "zirk_rt_date_format_locale_ok" => {
+                let (year, month, day) = tmp::civil_from_days(check_days(0)?);
+                Ok(Value::Boolean(
+                    core_locale::format_date_named(
+                        year,
+                        month as u8,
+                        day as u8,
+                        &text(1)?,
+                        &text(2)?,
+                    )
+                    .is_ok(),
+                ))
+            }
+            "zirk_rt_date_format_locale_value" => {
+                let (year, month, day) = tmp::civil_from_days(check_days(0)?);
+                let rendered = core_locale::format_date_named(
+                    year,
+                    month as u8,
+                    day as u8,
+                    &text(1)?,
+                    &text(2)?,
+                )
+                .map_err(|error| ExecutionFault::Runtime {
+                    category: "LocaleError".into(),
+                    message: format!("{error:?}"),
+                })?;
+                self.allocate_string(rendered).map(Value::Heap)
+            }
             "zirk_rt_time_is_valid" => Ok(Value::Boolean(tmp::time_is_valid(
                 int32(0)?,
                 int32(1)?,
@@ -6688,15 +7400,245 @@ impl<'module> Interpreter<'module> {
                 Ok(Value::Boolean(tmp::parse_time_text(&text(0)?).is_some()))
             }
             "zirk_rt_time_parse_value" => int(tmp::parse_time_text(&text(0)?).unwrap_or(0)),
+            "zirk_rt_time_parse_locale_ok" => Ok(Value::Boolean(
+                core_locale::parse_time_named(&text(0)?, &text(1)?, &text(2)?).is_ok(),
+            )),
+            "zirk_rt_time_parse_locale_value" => {
+                int(
+                    core_locale::parse_time_named(&text(0)?, &text(1)?, &text(2)?)
+                        .unwrap_or_default(),
+                )
+            }
+            "zirk_rt_time_parse_locale_error_kind" => int(i64::from(
+                core_locale::parse_time_named(&text(0)?, &text(1)?, &text(2)?)
+                    .err()
+                    .map_or(0, |error| match error {
+                        core_locale::LocaleError::InvalidInput => 10,
+                        core_locale::LocaleError::AmbiguousInput => 11,
+                        _ => 1,
+                    }),
+            )),
             "zirk_rt_time_format" => self
                 .allocate_string(tmp::time_format(int64(0)?, &text(1)?))
                 .map(Value::Heap),
+            "zirk_rt_time_format_locale_ok" => Ok(Value::Boolean(
+                core_locale::format_time_named(
+                    tmp::time_hour(int64(0)?) as u8,
+                    tmp::time_minute(int64(0)?) as u8,
+                    tmp::time_second(int64(0)?) as u8,
+                    tmp::time_nanosecond(int64(0)?) as u32,
+                    &text(1)?,
+                    &text(2)?,
+                )
+                .is_ok(),
+            )),
+            "zirk_rt_time_format_locale_value" => {
+                let rendered = core_locale::format_time_named(
+                    tmp::time_hour(int64(0)?) as u8,
+                    tmp::time_minute(int64(0)?) as u8,
+                    tmp::time_second(int64(0)?) as u8,
+                    tmp::time_nanosecond(int64(0)?) as u32,
+                    &text(1)?,
+                    &text(2)?,
+                )
+                .map_err(|error| ExecutionFault::Runtime {
+                    category: "LocaleError".into(),
+                    message: format!("{error:?}"),
+                })?;
+                self.allocate_string(rendered).map(Value::Heap)
+            }
             "zirk_rt_datetime_new" => wide_result(tmp::datetime_pack(check_days(0)?, int64(1)?)),
             "zirk_rt_datetime_days" => int(tmp::datetime_days(check_datetime(0)?)),
             "zirk_rt_datetime_nanos" => int(tmp::datetime_nanos(check_datetime(0)?)),
             "zirk_rt_datetime_to_string" => self
                 .allocate_string(tmp::datetime_to_string(check_datetime(0)?))
                 .map(Value::Heap),
+            "zirk_rt_datetime_format_locale_ok" => {
+                let value = check_datetime(0)?;
+                let (year, month, day) = tmp::civil_from_days(tmp::datetime_days(value));
+                let nanos = tmp::datetime_nanos(value);
+                Ok(Value::Boolean(
+                    core_locale::format_datetime_named(
+                        year,
+                        month as u8,
+                        day as u8,
+                        tmp::time_hour(nanos) as u8,
+                        tmp::time_minute(nanos) as u8,
+                        tmp::time_second(nanos) as u8,
+                        tmp::time_nanosecond(nanos) as u32,
+                        &text(1)?,
+                        &text(2)?,
+                    )
+                    .is_ok(),
+                ))
+            }
+            "zirk_rt_datetime_format_locale_value" => {
+                let value = check_datetime(0)?;
+                let (year, month, day) = tmp::civil_from_days(tmp::datetime_days(value));
+                let nanos = tmp::datetime_nanos(value);
+                let rendered = core_locale::format_datetime_named(
+                    year,
+                    month as u8,
+                    day as u8,
+                    tmp::time_hour(nanos) as u8,
+                    tmp::time_minute(nanos) as u8,
+                    tmp::time_second(nanos) as u8,
+                    tmp::time_nanosecond(nanos) as u32,
+                    &text(1)?,
+                    &text(2)?,
+                )
+                .map_err(|error| ExecutionFault::Runtime {
+                    category: "LocaleError".into(),
+                    message: format!("{error:?}"),
+                })?;
+                self.allocate_string(rendered).map(Value::Heap)
+            }
+            "zirk_rt_datetime_in_zone_ok" => {
+                let overlap = match text(2)?.as_str() {
+                    "reject" => OverlapPolicy::Reject,
+                    "earlier" => OverlapPolicy::EarlierInstant,
+                    "later" => OverlapPolicy::LaterInstant,
+                    _ => return Ok(Value::Boolean(false)),
+                };
+                let gap = match text(3)?.as_str() {
+                    "reject" => GapPolicy::Reject,
+                    "forward" => GapPolicy::ShiftForwardByGap,
+                    "backward" => GapPolicy::ShiftBackwardByGap,
+                    _ => return Ok(Value::Boolean(false)),
+                };
+                let zone = match CoreTimeZone::parse_identifier(&text(1)?) {
+                    Ok(zone) => zone,
+                    Err(_) => return Ok(Value::Boolean(false)),
+                };
+                let policy = DstPolicy { overlap, gap };
+                Ok(Value::Boolean(
+                    CoreZonedDateTime::from_packed_local_datetime(wide(0)?, zone, policy).is_ok(),
+                ))
+            }
+            "zirk_rt_datetime_in_zone_error_kind" => {
+                let overlap = match text(2)?.as_str() {
+                    "reject" => OverlapPolicy::Reject,
+                    "earlier" => OverlapPolicy::EarlierInstant,
+                    "later" => OverlapPolicy::LaterInstant,
+                    _ => {
+                        return IntegerValue::from_literal(6, IntWidth::I32)
+                            .map(Value::Int)
+                            .map_err(ExecutionFault::Internal);
+                    }
+                };
+                let gap = match text(3)?.as_str() {
+                    "reject" => GapPolicy::Reject,
+                    "forward" => GapPolicy::ShiftForwardByGap,
+                    "backward" => GapPolicy::ShiftBackwardByGap,
+                    _ => {
+                        return IntegerValue::from_literal(6, IntWidth::I32)
+                            .map(Value::Int)
+                            .map_err(ExecutionFault::Internal);
+                    }
+                };
+                let zone_text = text(1)?;
+                let packed = wide(0)?;
+                let error = CoreTimeZone::parse_identifier(&zone_text)
+                    .and_then(|zone| {
+                        CoreZonedDateTime::from_packed_local_datetime(
+                            packed,
+                            zone,
+                            DstPolicy { overlap, gap },
+                        )
+                    })
+                    .err()
+                    .map_or(0, |error| error.stable_code());
+                IntegerValue::from_literal(i128::from(error), IntWidth::I32)
+                    .map(Value::Int)
+                    .map_err(ExecutionFault::Internal)
+            }
+            "zirk_rt_datetime_in_zone_value" => {
+                let overlap = match text(2)?.as_str() {
+                    "reject" => OverlapPolicy::Reject,
+                    "earlier" => OverlapPolicy::EarlierInstant,
+                    "later" => OverlapPolicy::LaterInstant,
+                    _ => {
+                        return Err(ExecutionFault::Runtime {
+                            category: "LocaleError".into(),
+                            message: "invalid overlap policy".into(),
+                        });
+                    }
+                };
+                let gap = match text(3)?.as_str() {
+                    "reject" => GapPolicy::Reject,
+                    "forward" => GapPolicy::ShiftForwardByGap,
+                    "backward" => GapPolicy::ShiftBackwardByGap,
+                    _ => {
+                        return Err(ExecutionFault::Runtime {
+                            category: "LocaleError".into(),
+                            message: "invalid gap policy".into(),
+                        });
+                    }
+                };
+                let zone = CoreTimeZone::parse_identifier(&text(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "LocaleError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let value = CoreZonedDateTime::from_packed_local_datetime(
+                    wide(0)?,
+                    zone,
+                    DstPolicy { overlap, gap },
+                )
+                .map_err(|error| ExecutionFault::Runtime {
+                    category: "LocaleError".into(),
+                    message: format!("{error:?}"),
+                })?;
+                self.allocate_string(value.encode_runtime_value())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_datetime_format_locale_in_zone_ok" => {
+                let value = check_datetime(0)?;
+                let (year, month, day) = tmp::civil_from_days(tmp::datetime_days(value));
+                let nanos = tmp::datetime_nanos(value);
+                Ok(Value::Boolean(
+                    core_locale::format_local_datetime_in_zone(
+                        year,
+                        month as u8,
+                        day as u8,
+                        tmp::time_hour(nanos) as u8,
+                        tmp::time_minute(nanos) as u8,
+                        tmp::time_second(nanos) as u8,
+                        tmp::time_nanosecond(nanos) as u32,
+                        &text(1)?,
+                        &text(2)?,
+                        &text(3)?,
+                        &text(4)?,
+                        &text(5)?,
+                    )
+                    .is_ok(),
+                ))
+            }
+            "zirk_rt_datetime_format_locale_in_zone_value" => {
+                let value = check_datetime(0)?;
+                let (year, month, day) = tmp::civil_from_days(tmp::datetime_days(value));
+                let nanos = tmp::datetime_nanos(value);
+                let rendered = core_locale::format_local_datetime_in_zone(
+                    year,
+                    month as u8,
+                    day as u8,
+                    tmp::time_hour(nanos) as u8,
+                    tmp::time_minute(nanos) as u8,
+                    tmp::time_second(nanos) as u8,
+                    tmp::time_nanosecond(nanos) as u32,
+                    &text(1)?,
+                    &text(2)?,
+                    &text(3)?,
+                    &text(4)?,
+                    &text(5)?,
+                )
+                .map_err(|error| ExecutionFault::Runtime {
+                    category: "LocaleError".into(),
+                    message: format!("{error:?}"),
+                })?;
+                self.allocate_string(rendered).map(Value::Heap)
+            }
             "zirk_rt_datetime_start_of_ok" | "zirk_rt_datetime_end_of_ok" => {
                 Ok(Value::Boolean(tmp::datetime_unit_ok(&text(0)?)))
             }
@@ -6711,6 +7653,547 @@ impl<'module> Interpreter<'module> {
             )),
             "zirk_rt_datetime_parse_value" => {
                 wide_result(tmp::parse_datetime_text(&text(0)?).unwrap_or(0))
+            }
+            "zirk_rt_datetime_parse_locale_ok" => Ok(Value::Boolean(
+                core_locale::parse_datetime_named(&text(0)?, &text(1)?, &text(2)?).is_ok(),
+            )),
+            "zirk_rt_datetime_parse_locale_value" => {
+                let packed = core_locale::parse_datetime_named(&text(0)?, &text(1)?, &text(2)?)
+                    .map(|(year, month, day, hour, minute, second, nanosecond)| {
+                        i128::from(tmp::days_from_civil(year, i32::from(month), i32::from(day)))
+                            * 86_400_000_000_000_i128
+                            + i128::from(hour) * 3_600_000_000_000_i128
+                            + i128::from(minute) * 60_000_000_000_i128
+                            + i128::from(second) * 1_000_000_000_i128
+                            + i128::from(nanosecond)
+                    })
+                    .unwrap_or_default();
+                wide_result(packed)
+            }
+            "zirk_rt_datetime_parse_locale_error_kind" => int(i64::from(
+                core_locale::parse_datetime_named(&text(0)?, &text(1)?, &text(2)?)
+                    .err()
+                    .map_or(0, |error| match error {
+                        core_locale::LocaleError::InvalidInput => 10,
+                        core_locale::LocaleError::AmbiguousInput => 11,
+                        _ => 1,
+                    }),
+            )),
+            "zirk_rt_instant_parse_ok" => Ok(Value::Boolean(
+                CoreInstant::parse_rfc3339(&text(0)?).is_ok(),
+            )),
+            "zirk_rt_instant_parse_value" => wide_result(
+                CoreInstant::parse_rfc3339(&text(0)?)
+                    .map(CoreInstant::unix_nanoseconds)
+                    .unwrap_or(0),
+            ),
+            "zirk_rt_period_new" => {
+                wide_result(CorePeriod::new(int32(0)?, int32(1)?, int32(2)?, int32(3)?).encode())
+            }
+            "zirk_rt_period_component" => {
+                let period = CorePeriod::decode(wide(0)?);
+                let value = match int32(1)? {
+                    0 => period.years(),
+                    1 => period.months(),
+                    2 => period.weeks(),
+                    3 => period.days(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "invalid Period field index".into(),
+                        ));
+                    }
+                };
+                int(i64::from(value))
+            }
+            "zirk_rt_period_parse_ok" => {
+                Ok(Value::Boolean(CorePeriod::parse_iso(&text(0)?).is_ok()))
+            }
+            "zirk_rt_period_parse_value" => wide_result(
+                CorePeriod::parse_iso(&text(0)?)
+                    .map(CorePeriod::encode)
+                    .unwrap_or(0),
+            ),
+            "zirk_rt_period_to_string" => self
+                .allocate_string(CorePeriod::decode(wide(0)?).to_iso_string())
+                .map(Value::Heap),
+            "zirk_rt_timeshift_clock" => {
+                let delta = if matches!(arguments.get(2), Some(Value::Boolean(true))) {
+                    -i128::from(int64(1)?)
+                } else {
+                    i128::from(int64(1)?)
+                };
+                let shift = CoreTimeShift::clock(int64(0)?, delta).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.allocate_string(shift.to_runtime_token())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_timeshift_calendar_ok" => {
+                let overlap = text(4)?;
+                let gap = text(5)?;
+                Ok(Value::Boolean(
+                    matches!(overlap.as_str(), "reject" | "earlier" | "later")
+                        && matches!(gap.as_str(), "reject" | "forward" | "backward"),
+                ))
+            }
+            "zirk_rt_timeshift_calendar_value" => {
+                let overlap = match text(5)?.as_str() {
+                    "reject" => OverlapPolicy::Reject,
+                    "earlier" => OverlapPolicy::EarlierInstant,
+                    "later" => OverlapPolicy::LaterInstant,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "invalid checked overlap policy".into(),
+                        ));
+                    }
+                };
+                let gap = match text(6)?.as_str() {
+                    "reject" => GapPolicy::Reject,
+                    "forward" => GapPolicy::ShiftForwardByGap,
+                    "backward" => GapPolicy::ShiftBackwardByGap,
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "invalid checked gap policy".into(),
+                        ));
+                    }
+                };
+                let shift = CoreTimeShift::new(
+                    CorePeriod::new(int32(0)?, int32(1)?, int32(2)?, int32(3)?),
+                    i128::from(int64(4)?),
+                    DstPolicy { overlap, gap },
+                );
+                self.allocate_string(shift.to_runtime_token())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_timeshift_is_clock" => Ok(Value::Boolean(
+                CoreTimeShift::from_runtime_token(&text(0)?)
+                    .is_ok_and(|shift| shift.kind() == "clock"),
+            )),
+            "zirk_rt_timeshift_to_string" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.allocate_string(shift.to_display_string())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_timeshift_kind" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                self.allocate_string(shift.kind().to_owned())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_timeshift_duration" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                int(i64::try_from(shift.duration_nanoseconds()).map_err(|_| {
+                    ExecutionFault::Runtime {
+                        category: "ArithmeticOverflowError".into(),
+                        message: "TimeShift duration is outside the Duration range".into(),
+                    }
+                })?)
+            }
+            "zirk_rt_timeshift_time" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                int(shift.time_nanoseconds().ok_or_else(|| {
+                    ExecutionFault::Internal("clock field requested on calendar shift".into())
+                })?)
+            }
+            "zirk_rt_timeshift_day_offset" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                int(i64::from(shift.day_offset().ok_or_else(|| {
+                    ExecutionFault::Internal("clock field requested on calendar shift".into())
+                })?))
+            }
+            "zirk_rt_timeshift_period_component" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let period = shift.period().ok_or_else(|| {
+                    ExecutionFault::Internal("calendar field requested on clock shift".into())
+                })?;
+                let component = match int32(1)? {
+                    0 => period.years(),
+                    1 => period.months(),
+                    2 => period.weeks(),
+                    3 => period.days(),
+                    _ => {
+                        return Err(ExecutionFault::Internal(
+                            "invalid TimeShift period index".into(),
+                        ));
+                    }
+                };
+                int(i64::from(component))
+            }
+            "zirk_rt_timeshift_overlap_policy" | "zirk_rt_timeshift_gap_policy" => {
+                let shift = CoreTimeShift::from_runtime_token(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeShiftError".into(),
+                        message: error.to_string(),
+                    }
+                })?;
+                let policy = shift.dst_policy().ok_or_else(|| {
+                    ExecutionFault::Internal("calendar field requested on clock shift".into())
+                })?;
+                let value = if name.ends_with("overlap_policy") {
+                    match policy.overlap {
+                        OverlapPolicy::Reject => "reject",
+                        OverlapPolicy::EarlierInstant => "earlier",
+                        OverlapPolicy::LaterInstant => "later",
+                    }
+                } else {
+                    match policy.gap {
+                        GapPolicy::Reject => "reject",
+                        GapPolicy::ShiftForwardByGap => "forward",
+                        GapPolicy::ShiftBackwardByGap => "backward",
+                    }
+                };
+                self.allocate_string(value.to_owned()).map(Value::Heap)
+            }
+            "zirk_rt_timeshift_apply_ok" => {
+                let shift_token = text(0)?;
+                let zoned_token = text(1)?;
+                let valid = CoreTimeShift::from_runtime_token(&shift_token)
+                    .and_then(|shift| {
+                        CoreZonedDateTime::parse_runtime_value(&zoned_token)
+                            .and_then(|zoned| shift.apply_to(zoned))
+                    })
+                    .is_ok();
+                Ok(Value::Boolean(valid))
+            }
+            "zirk_rt_timeshift_apply_value" => {
+                let shift_token = text(0)?;
+                let zoned_token = text(1)?;
+                let value = CoreTimeShift::from_runtime_token(&shift_token)
+                    .and_then(|shift| {
+                        CoreZonedDateTime::parse_runtime_value(&zoned_token)
+                            .and_then(|zoned| shift.apply_to(zoned))
+                    })
+                    .map(CoreZonedDateTime::encode_runtime_value)
+                    .unwrap_or_default();
+                self.allocate_string(value).map(Value::Heap)
+            }
+            "zirk_rt_timezone_parse_ok" => Ok(Value::Boolean(
+                CoreTimeZone::parse_identifier(&text(0)?).is_ok(),
+            )),
+            "zirk_rt_timezone_parse_error_kind" => {
+                let error = CoreTimeZone::parse_identifier(&text(0)?)
+                    .err()
+                    .map_or(0, |error| error.stable_code());
+                IntegerValue::from_literal(i128::from(error), IntWidth::I32)
+                    .map(Value::Int)
+                    .map_err(ExecutionFault::Internal)
+            }
+            "zirk_rt_timezone_parse_value" => {
+                let canonical = CoreTimeZone::parse_identifier(&text(0)?)
+                    .map(CoreTimeZone::canonical_identifier)
+                    .unwrap_or_default();
+                self.allocate_string(canonical).map(Value::Heap)
+            }
+            "zirk_rt_timezone_database_version" => self
+                .allocate_string(CoreTimeZone::database_version().to_owned())
+                .map(Value::Heap),
+            "zirk_rt_zoned_datetime_parse_ok" => Ok(Value::Boolean(
+                CoreZonedDateTime::parse_rfc3339(&text(0)?).is_ok(),
+            )),
+            "zirk_rt_zoned_datetime_parse_value" => {
+                let canonical = CoreZonedDateTime::parse_rfc3339(&text(0)?)
+                    .map(CoreZonedDateTime::encode_runtime_value)
+                    .unwrap_or_default();
+                self.allocate_string(canonical).map(Value::Heap)
+            }
+            "zirk_rt_timezone_offset_seconds" => {
+                let zone = CoreTimeZone::parse_identifier(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let instant = CoreInstant::from_unix_nanoseconds(wide(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                int(i64::from(zone.offset_seconds_at(instant).map_err(
+                    |error| ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    },
+                )?))
+            }
+            "zirk_rt_timezone_is_dst" => {
+                let zone = CoreTimeZone::parse_identifier(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let instant = CoreInstant::from_unix_nanoseconds(wide(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                Ok(Value::Boolean(zone.is_dst_at(instant).map_err(
+                    |error| ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    },
+                )?))
+            }
+            "zirk_rt_timezone_abbreviation" => {
+                let zone = CoreTimeZone::parse_identifier(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let instant = CoreInstant::from_unix_nanoseconds(wide(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let abbreviation =
+                    zone.abbreviation_at(instant)
+                        .map_err(|error| ExecutionFault::Runtime {
+                            category: "TemporalError".into(),
+                            message: format!("{error:?}"),
+                        })?;
+                self.allocate_string(abbreviation).map(Value::Heap)
+            }
+            "zirk_rt_timezone_local_datetime" => {
+                let zone = CoreTimeZone::parse_identifier(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let instant = CoreInstant::from_unix_nanoseconds(wide(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let local =
+                    zirk_runtime_core::zoned_temporal::ZonedDateTime::from_instant(instant, zone)
+                        .and_then(|value| value.local_datetime_unix_nanoseconds())
+                        .map_err(|error| ExecutionFault::Runtime {
+                            category: "TemporalError".into(),
+                            message: format!("{error:?}"),
+                        })?;
+                wide_result(local)
+            }
+            "zirk_rt_zoned_datetime_from_instant" => {
+                let instant = CoreInstant::from_unix_nanoseconds(wide(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let zone = CoreTimeZone::parse_identifier(&text(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let value = CoreZonedDateTime::from_instant(instant, zone).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                self.allocate_string(value.encode_runtime_value())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_zoned_datetime_with_zone" => {
+                let value = CoreZonedDateTime::parse_runtime_value(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let zone = CoreTimeZone::parse_identifier(&text(1)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TimeZoneError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let projected = value
+                    .with_zone(zone)
+                    .map_err(|error| ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    })?;
+                self.allocate_string(projected.encode_runtime_value())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_zoned_datetime_instant" => wide_result(
+                CoreZonedDateTime::parse_runtime_value(&text(0)?)
+                    .map_err(|error| ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    })?
+                    .instant()
+                    .unix_nanoseconds(),
+            ),
+            "zirk_rt_zoned_datetime_zone" => {
+                let value = CoreZonedDateTime::parse_runtime_value(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                self.allocate_string(value.zone().canonical_identifier())
+                    .map(Value::Heap)
+            }
+            "zirk_rt_zoned_datetime_local_datetime" => wide_result(
+                CoreZonedDateTime::parse_runtime_value(&text(0)?)
+                    .and_then(|value| value.local_datetime_unix_nanoseconds())
+                    .map_err(|error| ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    })?,
+            ),
+            "zirk_rt_zoned_datetime_offset_seconds" => {
+                let value = CoreZonedDateTime::parse_runtime_value(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                int(i64::from(
+                    value
+                        .zone()
+                        .offset_seconds_at(value.instant())
+                        .map_err(|error| ExecutionFault::Runtime {
+                            category: "TemporalError".into(),
+                            message: format!("{error:?}"),
+                        })?,
+                ))
+            }
+            "zirk_rt_zoned_datetime_is_dst" => {
+                let value = CoreZonedDateTime::parse_runtime_value(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                Ok(Value::Boolean(
+                    value.zone().is_dst_at(value.instant()).map_err(|error| {
+                        ExecutionFault::Runtime {
+                            category: "TemporalError".into(),
+                            message: format!("{error:?}"),
+                        }
+                    })?,
+                ))
+            }
+            "zirk_rt_zoned_datetime_abbreviation" => {
+                let value = CoreZonedDateTime::parse_runtime_value(&text(0)?).map_err(|error| {
+                    ExecutionFault::Runtime {
+                        category: "TemporalError".into(),
+                        message: format!("{error:?}"),
+                    }
+                })?;
+                let abbreviation =
+                    value
+                        .zone()
+                        .abbreviation_at(value.instant())
+                        .map_err(|error| ExecutionFault::Runtime {
+                            category: "TemporalError".into(),
+                            message: format!("{error:?}"),
+                        })?;
+                self.allocate_string(abbreviation).map(Value::Heap)
+            }
+            "zirk_rt_instant_from_unix_seconds_ok" => Ok(Value::Boolean(
+                CoreInstant::from_unix_seconds(int64(0)?).is_ok(),
+            )),
+            "zirk_rt_instant_from_unix_seconds_value" => wide_result(
+                CoreInstant::from_unix_seconds(int64(0)?)
+                    .map(CoreInstant::unix_nanoseconds)
+                    .unwrap_or(0),
+            ),
+            "zirk_rt_instant_from_unix_milliseconds_ok" => Ok(Value::Boolean(
+                CoreInstant::from_unix_milliseconds(int64(0)?).is_ok(),
+            )),
+            "zirk_rt_instant_from_unix_milliseconds_value" => wide_result(
+                CoreInstant::from_unix_milliseconds(int64(0)?)
+                    .map(CoreInstant::unix_nanoseconds)
+                    .unwrap_or(0),
+            ),
+            "zirk_rt_instant_from_unix_nanoseconds_ok" => Ok(Value::Boolean(
+                CoreInstant::from_unix_nanoseconds(wide(0)?).is_ok(),
+            )),
+            "zirk_rt_instant_from_unix_nanoseconds_value" => wide_result(
+                CoreInstant::from_unix_nanoseconds(wide(0)?)
+                    .map(CoreInstant::unix_nanoseconds)
+                    .unwrap_or(0),
+            ),
+            "zirk_rt_instant_unix_seconds" => {
+                let seconds = CoreInstant::from_unix_nanoseconds(wide(0)?)
+                    .map(|value| value.unix_nanoseconds().div_euclid(1_000_000_000))
+                    .map_err(|_| ExecutionFault::Runtime {
+                        category: "ArithmeticOverflowError".into(),
+                        message: "instant is outside the supported timeline range".into(),
+                    })?;
+                int(i64::try_from(seconds).map_err(|_| ExecutionFault::Runtime {
+                    category: "ArithmeticOverflowError".into(),
+                    message: "Unix seconds do not fit Int64".into(),
+                })?)
+            }
+            "zirk_rt_instant_unix_milliseconds" => {
+                let milliseconds = CoreInstant::from_unix_nanoseconds(wide(0)?)
+                    .map(|value| value.unix_nanoseconds().div_euclid(1_000_000))
+                    .map_err(|_| ExecutionFault::Runtime {
+                        category: "ArithmeticOverflowError".into(),
+                        message: "instant is outside the supported timeline range".into(),
+                    })?;
+                int(
+                    i64::try_from(milliseconds).map_err(|_| ExecutionFault::Runtime {
+                        category: "ArithmeticOverflowError".into(),
+                        message: "Unix milliseconds do not fit Int64".into(),
+                    })?,
+                )
+            }
+            "zirk_rt_instant_to_string" => {
+                let instant = CoreInstant::from_unix_nanoseconds(wide(0)?).map_err(|_| {
+                    ExecutionFault::Runtime {
+                        category: "ArithmeticOverflowError".into(),
+                        message: "instant is outside the supported RFC 3339 range".into(),
+                    }
+                })?;
+                self.allocate_string(instant.to_rfc3339().map_err(|_| ExecutionFault::Runtime {
+                    category: "ArithmeticOverflowError".into(),
+                    message: "instant is outside the supported RFC 3339 range".into(),
+                })?)
+                .map(Value::Heap)
             }
             "zirk_rt_datetime_format" => self
                 .allocate_string(tmp::datetime_format(check_datetime(0)?, &text(1)?))
@@ -7598,6 +9081,38 @@ impl<'module> Interpreter<'module> {
             IrType::Boolean => Ok(Value::Boolean(false)),
             IrType::String => self.allocate_string(String::new()).map(Value::Heap),
             IrType::Nullable(_) => Ok(Value::Nullable(None)),
+            IrType::Union(representation_id) => {
+                // `IrType::Union` carries the bridge enum's representation
+                // index, which may be offset by payload enums. The union
+                // descriptor table has its own compact indexing.
+                let layout = self
+                    .module
+                    .union_types
+                    .iter()
+                    .find(|layout| layout.representation_layout == Some(representation_id))
+                    .and_then(|layout| layout.representation_layout)
+                    .ok_or_else(|| {
+                        ExecutionFault::Internal(format!(
+                            "array union default references missing representation {representation_id}"
+                        ))
+                    })?;
+                // Native arrays are zero-initialized. Preserve that tag
+                // shape in the interpreter while leaving a managed or
+                // aggregate payload uninitialized until the source writes
+                // the slot; Array<T> has no definite-assignment contract.
+                self.heap
+                    .allocate(
+                        HeapEntry::Enum {
+                            layout,
+                            variant: 0,
+                            fields: vec![Value::Undefined],
+                        },
+                        std::mem::size_of::<HeapEntry>() + std::mem::size_of::<Value>(),
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
             // Collections default to empty ("empty where meaningful").
             IrType::Array(_) => self
                 .heap
@@ -7690,8 +9205,9 @@ impl<'module> Interpreter<'module> {
         active: &mut std::collections::HashSet<HeapId>,
         depth: usize,
         budget: &mut usize,
+        limits: Option<zirk_runtime_core::json::JsonLimits>,
     ) -> Result<serde_json::Value, ()> {
-        if depth > 128 || *budget == 0 {
+        if depth > limits.map_or(128, |limits| limits.max_nesting_depth) || *budget == 0 {
             return Err(());
         }
         *budget -= 1;
@@ -7702,6 +9218,9 @@ impl<'module> Interpreter<'module> {
                 } else {
                     value.unsigned().to_string()
                 };
+                if limits.is_some_and(|limits| text.len() > limits.max_number_bytes) {
+                    return Err(());
+                }
                 serde_json::from_str(&text).map_err(|_| ())
             }
             Value::Float {
@@ -7709,18 +9228,31 @@ impl<'module> Interpreter<'module> {
                 ..
             } => Err(()),
             Value::Float { text, .. } | Value::Decimal(text) => {
+                if limits.is_some_and(|limits| text.len() > limits.max_number_bytes) {
+                    return Err(());
+                }
                 serde_json::from_str(text).map_err(|_| ())
             }
             Value::Boolean(value) => Ok(serde_json::Value::Bool(*value)),
             Value::Nullable(None) => Ok(serde_json::Value::Null),
-            Value::Nullable(Some(value)) => self.json_value(value, active, depth + 1, budget),
+            Value::Nullable(Some(value)) => {
+                self.json_value(value, active, depth + 1, budget, limits)
+            }
             Value::Heap(id) => match self.heap.get(*id).ok_or(())? {
                 HeapEntry::String(value) | HeapEntry::Char(value) => {
+                    if limits.is_some_and(|limits| value.len() > limits.max_string_bytes) {
+                        return Err(());
+                    }
                     Ok(serde_json::Value::String(value.clone()))
                 }
-                HeapEntry::JsonNumber(value) => serde_json::from_str(value).map_err(|_| ()),
+                HeapEntry::JsonNumber(value) => {
+                    if limits.is_some_and(|limits| value.len() > limits.max_number_bytes) {
+                        return Err(());
+                    }
+                    serde_json::from_str(value).map_err(|_| ())
+                }
                 HeapEntry::DynamicValue { value, .. } => {
-                    self.json_value(value, active, depth + 1, budget)
+                    self.json_value(value, active, depth + 1, budget, limits)
                 }
                 HeapEntry::DynamicObject { properties, .. }
                 | HeapEntry::Object { properties, .. } => {
@@ -7728,10 +9260,18 @@ impl<'module> Interpreter<'module> {
                         return Err(());
                     }
                     let mut result = serde_json::Map::new();
+                    if limits.is_some_and(|limits| properties.len() > limits.max_container_items) {
+                        active.remove(id);
+                        return Err(());
+                    }
                     for (key, value) in properties {
+                        if limits.is_some_and(|limits| key.len() > limits.max_string_bytes) {
+                            active.remove(id);
+                            return Err(());
+                        }
                         result.insert(
                             key.clone(),
-                            self.json_value(value, active, depth + 1, budget)?,
+                            self.json_value(value, active, depth + 1, budget, limits)?,
                         );
                     }
                     active.remove(id);
@@ -7741,9 +9281,13 @@ impl<'module> Interpreter<'module> {
                     if !active.insert(*id) {
                         return Err(());
                     }
+                    if limits.is_some_and(|limits| values.len() > limits.max_container_items) {
+                        active.remove(id);
+                        return Err(());
+                    }
                     let mut result = Vec::with_capacity(values.len());
                     for value in values {
-                        result.push(self.json_value(value, active, depth + 1, budget)?);
+                        result.push(self.json_value(value, active, depth + 1, budget, limits)?);
                     }
                     active.remove(id);
                     Ok(serde_json::Value::Array(result))
@@ -7758,10 +9302,11 @@ impl<'module> Interpreter<'module> {
         &mut self,
         value: serde_json::Value,
         list_dynamic_id: u32,
+        max_depth: usize,
         depth: usize,
         budget: &mut usize,
     ) -> Result<Value, ExecutionFault> {
-        if depth > zirk_runtime_core::json::MAX_NESTING_DEPTH || *budget == 0 {
+        if depth > max_depth || *budget == 0 {
             return Err(ExecutionFault::Runtime {
                 category: "JsonConversionError".into(),
                 message: "JSON document exceeds the supported nesting or value limit".into(),
@@ -7792,6 +9337,7 @@ impl<'module> Interpreter<'module> {
                     result.push(self.json_dynamic_value(
                         value,
                         list_dynamic_id,
+                        max_depth,
                         depth + 1,
                         budget,
                     )?);
@@ -7813,7 +9359,13 @@ impl<'module> Interpreter<'module> {
                         .saturating_add(key.len());
                     result.push((
                         key,
-                        self.json_dynamic_value(value, list_dynamic_id, depth + 1, budget)?,
+                        self.json_dynamic_value(
+                            value,
+                            list_dynamic_id,
+                            max_depth,
+                            depth + 1,
+                            budget,
+                        )?,
                     ));
                 }
                 let id = self
@@ -7842,6 +9394,94 @@ impl<'module> Interpreter<'module> {
             )
             .map(Value::Heap)
             .map_err(ExecutionFault::Limit)
+    }
+
+    fn json5_dynamic_value(
+        &mut self,
+        value: zirk_runtime_core::json::Json5Value,
+        list_dynamic_id: u32,
+        max_depth: usize,
+        depth: usize,
+        budget: &mut usize,
+    ) -> Result<Value, ExecutionFault> {
+        if depth > max_depth || *budget == 0 {
+            return Err(ExecutionFault::Runtime {
+                category: "JsonConversionError".into(),
+                message: "JSON5 document exceeds the supported nesting or value limit".into(),
+            });
+        }
+        *budget -= 1;
+        match value {
+            zirk_runtime_core::json::Json5Value::Null => Ok(Value::Nullable(None)),
+            zirk_runtime_core::json::Json5Value::Boolean(value) => Ok(Value::Boolean(value)),
+            zirk_runtime_core::json::Json5Value::String(value) => {
+                Ok(Value::Heap(self.allocate_string(value)?))
+            }
+            zirk_runtime_core::json::Json5Value::Number(value) => {
+                let mut text = value.to_string();
+                if value.is_finite()
+                    && !text.contains('.')
+                    && !text.contains('e')
+                    && !text.contains('E')
+                {
+                    text.push_str(".0");
+                }
+                Ok(Value::Float {
+                    width: FloatWidth::F64,
+                    text,
+                })
+            }
+            zirk_runtime_core::json::Json5Value::Array(values) => {
+                let mut result = Vec::with_capacity(values.len());
+                for value in values {
+                    result.push(self.json5_dynamic_value(
+                        value,
+                        list_dynamic_id,
+                        max_depth,
+                        depth + 1,
+                        budget,
+                    )?);
+                }
+                let bytes =
+                    std::mem::size_of::<HeapEntry>() + result.len() * std::mem::size_of::<Value>();
+                let id = self
+                    .heap
+                    .allocate(HeapEntry::List(result), bytes, self.limits)
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Value::Heap(id))
+            }
+            zirk_runtime_core::json::Json5Value::Object(properties) => {
+                let mut result = Vec::with_capacity(properties.len());
+                let mut bytes = std::mem::size_of::<HeapEntry>();
+                for (key, value) in properties {
+                    bytes = bytes
+                        .saturating_add(std::mem::size_of::<(String, Value)>())
+                        .saturating_add(key.len());
+                    result.push((
+                        key,
+                        self.json5_dynamic_value(
+                            value,
+                            list_dynamic_id,
+                            max_depth,
+                            depth + 1,
+                            budget,
+                        )?,
+                    ));
+                }
+                let id = self
+                    .heap
+                    .allocate(
+                        HeapEntry::DynamicObject {
+                            properties: result,
+                            sealed: false,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map_err(ExecutionFault::Limit)?;
+                Ok(Value::Heap(id))
+            }
+        }
     }
 
     fn ensure_string_allocation_fits(&self, text_bytes: usize) -> Result<(), ExecutionFault> {
@@ -8379,6 +10019,411 @@ impl<'module> Interpreter<'module> {
         }
     }
 
+    fn collection_key_capability(
+        &self,
+        frame_index: usize,
+        receiver: Operand,
+    ) -> Result<CollectionHashEq, ExecutionFault> {
+        let ty = self
+            .operand_type(frame_index, receiver)
+            .ok_or_else(|| ExecutionFault::Internal("collection receiver has no IR type".into()))?;
+        let key_or_element = match ty {
+            IrType::Map(id) => self.module.map_types.get(id as usize).map(|types| types.0),
+            IrType::Set(id) => self.module.set_types.get(id as usize).copied(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            ExecutionFault::Internal("collection receiver has invalid type metadata".into())
+        })?;
+        self.module
+            .collection_hash_eq_capability(key_or_element)
+            .ok_or_else(|| {
+                ExecutionFault::Internal(format!(
+                    "collection key type {key_or_element:?} has no Hash/Equal capability"
+                ))
+            })
+    }
+
+    fn collection_value_equals_with_capability(
+        &self,
+        capability: &CollectionHashEq,
+        left: &Value,
+        right: &Value,
+    ) -> bool {
+        match capability {
+            CollectionHashEq::Nullable(inner) => match (left, right) {
+                (Value::Nullable(None), Value::Nullable(None)) => true,
+                (Value::Nullable(Some(left)), Value::Nullable(Some(right))) => {
+                    self.collection_value_equals_with_capability(inner, left, right)
+                }
+                _ => false,
+            },
+            CollectionHashEq::Text(kind) => match (left, right) {
+                (Value::Heap(left), Value::Heap(right)) => {
+                    match (self.heap.get(*left), self.heap.get(*right)) {
+                        (Some(HeapEntry::String(left)), Some(HeapEntry::String(right)))
+                            if *kind == CollectionTextKind::String =>
+                        {
+                            zirk_runtime_core::text::equal(left, right)
+                        }
+                        (Some(HeapEntry::Char(left)), Some(HeapEntry::Char(right)))
+                            if *kind == CollectionTextKind::Char =>
+                        {
+                            zirk_runtime_core::text::equal(left, right)
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            },
+            CollectionHashEq::Identity => match (left, right) {
+                (Value::Heap(left), Value::Heap(right)) => left == right,
+                _ => false,
+            },
+            CollectionHashEq::Tuple(fields) => match (left, right) {
+                (Value::Heap(left), Value::Heap(right)) => {
+                    let (
+                        Some(HeapEntry::Tuple {
+                            layout: left_layout,
+                            fields: left_fields,
+                        }),
+                        Some(HeapEntry::Tuple {
+                            layout: right_layout,
+                            fields: right_fields,
+                        }),
+                    ) = (self.heap.get(*left), self.heap.get(*right))
+                    else {
+                        return false;
+                    };
+                    left_layout == right_layout
+                        && left_fields.len() == fields.len()
+                        && right_fields.len() == fields.len()
+                        && fields.iter().zip(left_fields.iter().zip(right_fields)).all(
+                            |(field, (left, right))| {
+                                self.collection_value_equals_with_capability(field, left, right)
+                            },
+                        )
+                }
+                _ => false,
+            },
+            CollectionHashEq::Enum(variants) => match (left, right) {
+                (Value::Heap(left), Value::Heap(right)) => {
+                    let (
+                        Some(HeapEntry::Enum {
+                            layout: left_layout,
+                            variant: left_variant,
+                            fields: left_fields,
+                        }),
+                        Some(HeapEntry::Enum {
+                            layout: right_layout,
+                            variant: right_variant,
+                            fields: right_fields,
+                        }),
+                    ) = (self.heap.get(*left), self.heap.get(*right))
+                    else {
+                        return false;
+                    };
+                    if left_layout != right_layout || left_variant != right_variant {
+                        return false;
+                    }
+                    let Some(variant_fields) = variants.get(*left_variant as usize) else {
+                        return false;
+                    };
+                    left_fields.len() == variant_fields.len()
+                        && right_fields.len() == variant_fields.len()
+                        && variant_fields
+                            .iter()
+                            .zip(left_fields.iter().zip(right_fields))
+                            .all(|(field, (left, right))| {
+                                self.collection_value_equals_with_capability(field, left, right)
+                            })
+                }
+                _ => false,
+            },
+            CollectionHashEq::Union(alternatives) => match (left, right) {
+                (Value::Heap(left), Value::Heap(right)) => {
+                    let (
+                        Some(HeapEntry::Enum {
+                            layout: left_layout,
+                            variant: left_tag,
+                            fields: left_fields,
+                        }),
+                        Some(HeapEntry::Enum {
+                            layout: right_layout,
+                            variant: right_tag,
+                            fields: right_fields,
+                        }),
+                    ) = (self.heap.get(*left), self.heap.get(*right))
+                    else {
+                        return false;
+                    };
+                    if left_layout != right_layout || left_tag != right_tag {
+                        return false;
+                    }
+                    let Some(capability) = alternatives.get(*left_tag as usize) else {
+                        return false;
+                    };
+                    left_fields.len() == 1
+                        && right_fields.len() == 1
+                        && self.collection_value_equals_with_capability(
+                            capability,
+                            &left_fields[0],
+                            &right_fields[0],
+                        )
+                }
+                _ => false,
+            },
+            CollectionHashEq::Integer { .. }
+            | CollectionHashEq::BinaryFloat { .. }
+            | CollectionHashEq::Decimal
+            | CollectionHashEq::Boolean => self.collection_value_equals(left, right),
+        }
+    }
+
+    fn snapshot_collection_value(
+        &mut self,
+        capability: &CollectionHashEq,
+        value: &Value,
+    ) -> Result<Value, ExecutionFault> {
+        match capability {
+            CollectionHashEq::Text(CollectionTextKind::String)
+            | CollectionHashEq::Text(CollectionTextKind::Char) => {
+                let Value::Heap(id) = value else {
+                    return Err(ExecutionFault::Internal(
+                        "text collection key is not a heap value".into(),
+                    ));
+                };
+                let entry = self.heap.get(*id).cloned().ok_or_else(|| {
+                    ExecutionFault::Internal("text collection key is not live".into())
+                })?;
+                let snapshot = match (capability, entry) {
+                    (
+                        CollectionHashEq::Text(CollectionTextKind::String),
+                        HeapEntry::String(text),
+                    ) => HeapEntry::String(text),
+                    (CollectionHashEq::Text(CollectionTextKind::Char), HeapEntry::Char(text)) => {
+                        HeapEntry::Char(text)
+                    }
+                    _ => return Err(ExecutionFault::Internal("text key kind mismatch".into())),
+                };
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(match &snapshot {
+                        HeapEntry::String(text) | HeapEntry::Char(text) => text.len(),
+                        _ => 0,
+                    })
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(snapshot, bytes, self.limits)
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            CollectionHashEq::Nullable(inner) => match value {
+                Value::Nullable(None) => Ok(Value::Nullable(None)),
+                Value::Nullable(Some(value)) => Ok(Value::Nullable(Some(Box::new(
+                    self.snapshot_collection_value(inner, value)?,
+                )))),
+                _ => Err(ExecutionFault::Internal(
+                    "nullable key shape mismatch".into(),
+                )),
+            },
+            CollectionHashEq::Tuple(capabilities) => {
+                let Value::Heap(id) = value else {
+                    return Err(ExecutionFault::Internal(
+                        "tuple key is not a heap value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Tuple { layout, fields }) = self.heap.get(*id).cloned() else {
+                    return Err(ExecutionFault::Internal("tuple key layout mismatch".into()));
+                };
+                if capabilities.len() != fields.len() {
+                    return Err(ExecutionFault::Internal("tuple key arity mismatch".into()));
+                }
+                let fields = capabilities
+                    .iter()
+                    .zip(fields.iter())
+                    .map(|(capability, field)| self.snapshot_collection_value(capability, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(HeapEntry::Tuple { layout, fields }, bytes, self.limits)
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            CollectionHashEq::Enum(variants) => {
+                let Value::Heap(id) = value else {
+                    return Err(ExecutionFault::Internal(
+                        "enum key is not a heap value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Enum {
+                    layout,
+                    variant,
+                    fields,
+                }) = self.heap.get(*id).cloned()
+                else {
+                    return Err(ExecutionFault::Internal("enum key layout mismatch".into()));
+                };
+                let Some(capabilities) = variants.get(variant as usize) else {
+                    return Err(ExecutionFault::Internal(
+                        "enum key variant is invalid".into(),
+                    ));
+                };
+                if capabilities.len() != fields.len() {
+                    return Err(ExecutionFault::Internal("enum key arity mismatch".into()));
+                }
+                let fields = capabilities
+                    .iter()
+                    .zip(fields.iter())
+                    .map(|(capability, field)| self.snapshot_collection_value(capability, field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(fields.len().saturating_mul(std::mem::size_of::<Value>()))
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Enum {
+                            layout,
+                            variant,
+                            fields,
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            CollectionHashEq::Union(alternatives) => {
+                let Value::Heap(id) = value else {
+                    return Err(ExecutionFault::Internal(
+                        "union key is not a heap value".into(),
+                    ));
+                };
+                let Some(HeapEntry::Enum {
+                    layout,
+                    variant,
+                    fields,
+                }) = self.heap.get(*id).cloned()
+                else {
+                    return Err(ExecutionFault::Internal("union key layout mismatch".into()));
+                };
+                let Some(capability) = alternatives.get(variant as usize) else {
+                    return Err(ExecutionFault::Internal("union key tag is invalid".into()));
+                };
+                if fields.len() != 1 {
+                    return Err(ExecutionFault::Internal(
+                        "union payload arity mismatch".into(),
+                    ));
+                }
+                let payload = self.snapshot_collection_value(capability, &fields[0])?;
+                let bytes = std::mem::size_of::<HeapEntry>()
+                    .checked_add(std::mem::size_of::<Value>())
+                    .ok_or(ExecutionFault::Limit(LimitFailure::Heap))?;
+                self.heap
+                    .allocate(
+                        HeapEntry::Enum {
+                            layout,
+                            variant,
+                            fields: vec![payload],
+                        },
+                        bytes,
+                        self.limits,
+                    )
+                    .map(Value::Heap)
+                    .map_err(ExecutionFault::Limit)
+            }
+            _ => Ok(value.clone()),
+        }
+    }
+
+    /// Collection keys and set elements use a total floating-point equality:
+    /// all NaN payloads of the same width form one equivalence class. Ordinary
+    /// language `==` continues to use IEEE partial equality via
+    /// `runtime_value_equals`.
+    fn collection_value_equals(&self, left: &Value, right: &Value) -> bool {
+        match (left, right) {
+            (Value::Nullable(None), Value::Nullable(None)) => true,
+            (Value::Nullable(Some(left)), Value::Nullable(Some(right))) => {
+                self.collection_value_equals(left, right)
+            }
+            (Value::Heap(left), Value::Heap(right)) if left == right => true,
+            (Value::Heap(left), Value::Heap(right)) => {
+                match (self.heap.get(*left), self.heap.get(*right)) {
+                    (Some(HeapEntry::String(left)), Some(HeapEntry::String(right))) => {
+                        zirk_runtime_core::text::equal(left, right)
+                    }
+                    (Some(HeapEntry::Char(left)), Some(HeapEntry::Char(right))) => left == right,
+                    (
+                        Some(HeapEntry::Tuple {
+                            layout: left_layout,
+                            fields: left_fields,
+                        }),
+                        Some(HeapEntry::Tuple {
+                            layout: right_layout,
+                            fields: right_fields,
+                        }),
+                    ) => {
+                        left_layout == right_layout
+                            && left_fields.len() == right_fields.len()
+                            && left_fields
+                                .iter()
+                                .zip(right_fields)
+                                .all(|(left, right)| self.collection_value_equals(left, right))
+                    }
+                    (
+                        Some(HeapEntry::Enum {
+                            layout: left_layout,
+                            variant: left_variant,
+                            fields: left_fields,
+                        }),
+                        Some(HeapEntry::Enum {
+                            layout: right_layout,
+                            variant: right_variant,
+                            fields: right_fields,
+                        }),
+                    ) => {
+                        left_layout == right_layout
+                            && left_variant == right_variant
+                            && left_fields.len() == right_fields.len()
+                            && left_fields
+                                .iter()
+                                .zip(right_fields)
+                                .all(|(left, right)| self.collection_value_equals(left, right))
+                    }
+                    _ => false,
+                }
+            }
+            (
+                Value::Float {
+                    width: left_width,
+                    text: left,
+                },
+                Value::Float {
+                    width: right_width,
+                    text: right,
+                },
+            ) if left_width == right_width => {
+                if *left_width == FloatWidth::F128 {
+                    use zirk_runtime_core::binary_float::Float128;
+                    matches!(
+                        (Float128::from_wire_or_decimal(left), Float128::from_wire_or_decimal(right)),
+                        (Ok(left), Ok(right)) if (left.is_nan() && right.is_nan()) || left.compare(right).is_ok_and(|ordering| ordering == std::cmp::Ordering::Equal)
+                    )
+                } else {
+                    matches!((left.parse::<f64>(), right.parse::<f64>()), (Ok(left), Ok(right)) if (left.is_nan() && right.is_nan()) || left == right)
+                }
+            }
+            (Value::Decimal(left), Value::Decimal(right)) => matches!(
+                (self.parse_decimal(left), self.parse_decimal(right)),
+                (Ok(left), Ok(right))
+                    if zirk_runtime_core::decimal::compare(left, right)
+                        .is_ok_and(|ordering| ordering == 0)
+            ),
+            _ => left == right,
+        }
+    }
+
     /// Parses the decimal spelling a `Value::Float` carries. Infinities and
     /// NaN are valid here — they are produced and consumed like any other
     /// `f64`, and the lowering's own `guard_nan` turns a `NaN` result into a
@@ -8831,6 +10876,15 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::DequePopBack(_)
         | InstKind::DequeClear(_)
         | InstKind::MapNew { .. }
+        | InstKind::JsonStreamReaderCreate { .. }
+        | InstKind::JsonStreamReaderPush { .. }
+        | InstKind::JsonStreamReaderPushBytes { .. }
+        | InstKind::JsonStreamReaderFinish { .. }
+        | InstKind::JsonStreamReaderCancel { .. }
+        | InstKind::JsonStreamWriterCreate { .. }
+        | InstKind::JsonStreamWriterNextStatus { .. }
+        | InstKind::JsonStreamWriterTake { .. }
+        | InstKind::JsonStreamWriterCancel { .. }
         | InstKind::SetNew { .. }
         | InstKind::ArrayListLoad { .. }
         | InstKind::ArrayListStore { .. }
@@ -8968,7 +11022,18 @@ pub fn instruction_support(instruction: &InstKind) -> BrowserSupport {
         | InstKind::ObjectMerge { .. }
         | InstKind::ObjectRest { .. }
         | InstKind::JsonStringifyDynamic { .. }
-        | InstKind::JsonParseDynamic { .. } => BrowserSupport::RuntimeCore,
+        | InstKind::JsonStringifyDynamicPretty { .. }
+        | InstKind::JsonCanonicalizeDynamic { .. }
+        | InstKind::JsonStringifyDynamicWithLimits { .. }
+        | InstKind::JsonParseDynamic { .. }
+        | InstKind::Json5ParseDynamic { .. }
+        | InstKind::JsonParseDynamicWithLimits { .. }
+        | InstKind::JsonPointerDynamic { .. }
+        | InstKind::JsonPathDynamic { .. }
+        | InstKind::JsonSchemaValidateDynamic { .. } => BrowserSupport::RuntimeCore,
+        InstKind::JsonPointerErrorKind { .. } | InstKind::JsonPathErrorKind { .. } => {
+            BrowserSupport::RuntimeCore
+        }
         // New IR operations must be explicitly admitted above before the
         // browser interpreter can execute them. Unknown operations fail
         // closed instead of becoming reachable by default.
@@ -8983,6 +11048,21 @@ mod tests {
         Block, BlockId, EnumLayout, Function, Instruction, IntWidth, ObjectField, Operand, Slot,
         SlotId, StringId, UnionTypeLayout,
     };
+
+    #[test]
+    fn browser_boundary_withholds_all_system_clock_intrinsics() {
+        for name in [
+            "zirk_rt_date_today",
+            "zirk_rt_time_now_utc",
+            "zirk_rt_time_now_local",
+            "zirk_rt_datetime_now_utc",
+            "zirk_rt_datetime_now_local",
+            "zirk_rt_instant_now",
+        ] {
+            assert!(is_host_clock_extern(name), "{name}");
+            assert!(!is_browser_intrinsic(name), "{name}");
+        }
+    }
 
     #[test]
     fn debugger_prepares_before_entry_and_captures_only_paused_live_locals() {
@@ -11242,6 +13322,57 @@ mod tests {
             ),
             Ok(Value::Boolean(false)),
         );
+        for width in [
+            FloatWidth::F16,
+            FloatWidth::F32,
+            FloatWidth::F64,
+            FloatWidth::F128,
+        ] {
+            let nan = Value::Float {
+                width,
+                text: if width == FloatWidth::F128 {
+                    "@f128:7fff8000000000000000000000000000".into()
+                } else {
+                    "NaN".into()
+                },
+            };
+            assert!(interpreter.collection_value_equals(&nan, &nan), "{width:?}");
+            assert_eq!(
+                interpreter.execute_binary(BinaryOp::Eq, nan.clone(), nan.clone()),
+                Ok(Value::Boolean(false)),
+                "collection NaN equivalence must not change language IEEE equality"
+            );
+        }
+        let nan = Value::Float {
+            width: FloatWidth::F64,
+            text: "NaN".into(),
+        };
+        let nested_nan_left = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Tuple {
+                    layout: 7,
+                    fields: vec![nan.clone()],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        let nested_nan_right = interpreter
+            .heap
+            .allocate(
+                HeapEntry::Tuple {
+                    layout: 7,
+                    fields: vec![nan],
+                },
+                16,
+                limits,
+            )
+            .unwrap();
+        assert!(interpreter.collection_value_equals(
+            &Value::Heap(nested_nan_left),
+            &Value::Heap(nested_nan_right),
+        ));
     }
 
     #[test]

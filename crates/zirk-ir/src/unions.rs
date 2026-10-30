@@ -1080,6 +1080,7 @@ fn encode_nullable(n: Nullable, out: &mut Vec<u8>) {
             out.push(58);
             out.extend(i.to_le_bytes());
         }
+        Nullable::Decimal => out.push(59),
     }
 }
 
@@ -1158,6 +1159,7 @@ fn decode_nullable(r: &mut Reader<'_>) -> Result<Nullable, UnionMetadataError> {
         56 => Nullable::Map(r.u32()?),
         57 => Nullable::Set(r.u32()?),
         58 => Nullable::Union(r.u32()?),
+        59 => Nullable::Decimal,
         60..=68 => Nullable::Atomic(atomic_from(r.bytes[r.offset - 1] - 60)?),
         _ => return Err(UnionMetadataError::UnsupportedType),
     })
@@ -1487,6 +1489,60 @@ mod tests {
     }
 
     #[test]
+    fn inline_union_payload_at_the_limit_is_accepted() {
+        let boundary_value = crate::ValueLayout {
+            name: "Boundary".into(),
+            fields: (0..MAX_INLINE_UNION_PAYLOAD_BYTES / 4)
+                .map(|index| crate::ObjectField {
+                    name: format!("field_{index}"),
+                    ty: IrType::Int(IntWidth::I32),
+                })
+                .collect(),
+        };
+        let layout = UnionTypeLayout::with_canonical_alternatives(
+            vec![IrType::Value(0), IrType::Int(IntWidth::I32)],
+            vec![
+                b"record::Boundary".to_vec(),
+                stable_builtin_key(IrType::Int(IntWidth::I32)).unwrap(),
+            ],
+        )
+        .unwrap();
+        let span = zirk_diagnostics::Span::new(4, 8);
+        let mut layout = layout;
+        layout.representation_layout = Some(0);
+        let module = crate::Module {
+            values: vec![boundary_value],
+            union_types: vec![layout],
+            functions: vec![crate::Function {
+                name: "consume".into(),
+                params: vec![],
+                return_type: IrType::Void,
+                slots: vec![crate::Slot {
+                    name: "value".into(),
+                    ty: IrType::Union(0),
+                    span,
+                }],
+                blocks: vec![],
+                entry: crate::BlockId(0),
+                span,
+                gc_roots: vec![],
+            }],
+            ..crate::Module::default()
+        };
+
+        let descriptor = module.union_layout_descriptor(0).unwrap();
+        assert_eq!(
+            descriptor
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.payload_size_bits / 8)
+                .max(),
+            Some(MAX_INLINE_UNION_PAYLOAD_BYTES)
+        );
+        assert!(module.oversized_union_payloads().is_empty());
+    }
+
+    #[test]
     fn nullable_union_member_round_trips_with_its_null_capability() {
         let layout = UnionTypeLayout::new(vec![
             IrType::Nullable(Nullable::String),
@@ -1503,12 +1559,14 @@ mod tests {
         for ty in [
             IrType::Nullable(Nullable::Map(3)),
             IrType::Nullable(Nullable::Set(5)),
+            IrType::Nullable(Nullable::Decimal),
         ] {
             let encoded = type_key(ty).unwrap();
             assert_eq!(decode_type(&encoded).unwrap(), ty);
         }
         assert_eq!(Nullable::of(IrType::Map(3)), Some(Nullable::Map(3)));
         assert_eq!(Nullable::of(IrType::Set(5)), Some(Nullable::Set(5)));
+        assert_eq!(Nullable::of(IrType::Decimal), Some(Nullable::Decimal));
     }
 
     #[test]

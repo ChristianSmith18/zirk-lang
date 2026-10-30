@@ -30,6 +30,37 @@ use std::collections::HashMap;
 use std::path::Path;
 use zirk_diagnostics::{FileId, SourceMap, Span};
 use zirk_ir as ir;
+use zirk_runtime_core::collections::CollectionHashEq;
+
+fn uses_direct_text_collection_snapshot(capability: &CollectionHashEq) -> bool {
+    match capability {
+        CollectionHashEq::Text(_) => true,
+        CollectionHashEq::Nullable(inner) => matches!(inner.as_ref(), CollectionHashEq::Text(_)),
+        _ => false,
+    }
+}
+
+fn has_nested_text_collection_snapshot(capability: &CollectionHashEq) -> bool {
+    match capability {
+        CollectionHashEq::Text(_) => true,
+        CollectionHashEq::Nullable(inner) => has_nested_text_collection_snapshot(inner),
+        CollectionHashEq::Tuple(fields) => fields.iter().any(has_nested_text_collection_snapshot),
+        CollectionHashEq::Enum(variants) => variants
+            .iter()
+            .flatten()
+            .any(has_nested_text_collection_snapshot),
+        CollectionHashEq::Union(alternatives) => {
+            alternatives.iter().any(has_nested_text_collection_snapshot)
+        }
+        _ => false,
+    }
+}
+
+struct CollectionTextLocation<'ctx> {
+    offset: IntValue<'ctx>,
+    presence_guards: Vec<IntValue<'ctx>>,
+    tag_guards: Vec<(IntValue<'ctx>, u32)>,
+}
 
 fn filesystem_operation(binding: &str) -> Option<i32> {
     Some(match binding {
@@ -466,7 +497,7 @@ fn emit_inner<'ctx>(
             fields.push(word.const_int(union_fields.len() as u64, false).into());
             for (value_offset, union_descriptor, present_offset) in union_fields {
                 fields.push(value_offset.into());
-                fields.push(union_descriptor.const_to_int(word).into());
+                fields.push(union_descriptor.into());
                 fields.push(present_offset.into());
             }
 
@@ -581,7 +612,7 @@ fn emit_inner<'ctx>(
             fields.push(word.const_int(union_fields.len() as u64, false).into());
             for (value_offset, union_descriptor, present_offset) in union_fields {
                 fields.push(value_offset.into());
-                fields.push(union_descriptor.const_to_int(word).into());
+                fields.push(union_descriptor.into());
                 fields.push(present_offset.into());
             }
 
@@ -1383,12 +1414,16 @@ fn union_gc_descriptor<'ctx>(
     let union_type = union_struct(context, physical_layout);
     let payload_offset = const_field_offset(context, union_type, &[3]);
     let i64_type = context.i64_type();
-    let mut words = vec![i64_type.const_int(layout.alternatives.len() as u64, false)];
+    let mut words: Vec<BasicValueEnum<'ctx>> = vec![
+        i64_type
+            .const_int(layout.alternatives.len() as u64, false)
+            .into(),
+    ];
     for (alternative, fields) in enum_layout.variants.iter().enumerate() {
         let field = fields[0];
         let payload_type = enum_layout.fields[field as usize].ty;
         let paths = gc_reference_paths_of(module, payload_type);
-        words.push(i64_type.const_int(paths.len() as u64, false));
+        words.push(i64_type.const_int(paths.len() as u64, false).into());
         for path in paths {
             let nested_offset = if path.is_empty() {
                 i64_type.const_zero()
@@ -1404,7 +1439,7 @@ fn union_gc_descriptor<'ctx>(
                 .into_struct_type();
                 const_field_offset(context, payload, &path)
             };
-            words.push(payload_offset.const_add(nested_offset));
+            words.push(payload_offset.const_add(nested_offset).into());
         }
         let payload = llvm_type_in(
             context,
@@ -1415,7 +1450,7 @@ fn union_gc_descriptor<'ctx>(
         )
         .expect("union payload has an LLVM representation");
         let nested_unions = nested_union_paths(module, payload_type);
-        words.push(i64_type.const_int(nested_unions.len() as u64, false));
+        words.push(i64_type.const_int(nested_unions.len() as u64, false).into());
         for nested in nested_unions {
             let representation = nested.representation;
             let (nested_id, _) = module
@@ -1432,27 +1467,90 @@ fn union_gc_descriptor<'ctx>(
                 || i64_type.const_int(u64::MAX, false),
                 |path| const_field_offset(context, payload_type, path),
             );
-            words.push(payload_offset.const_add(value_offset));
-            words.push(nested_descriptor.const_to_int(i64_type));
-            words.push(match nested.present_path {
-                Some(_) => payload_offset.const_add(present_offset),
-                None => i64_type.const_int(u64::MAX, false),
-            });
-            words.push(i64_type.const_int(nested.enum_guards.len() as u64, false));
+            words.push(payload_offset.const_add(value_offset).into());
+            words.push(nested_descriptor.into());
+            words.push(
+                match nested.present_path {
+                    Some(_) => payload_offset.const_add(present_offset),
+                    None => i64_type.const_int(u64::MAX, false),
+                }
+                .into(),
+            );
+            words.push(
+                i64_type
+                    .const_int(nested.enum_guards.len() as u64, false)
+                    .into(),
+            );
             for (tag_path, expected_tag) in nested.enum_guards {
                 let tag_offset = const_field_offset(context, payload_type, &tag_path);
-                words.push(payload_offset.const_add(tag_offset));
-                words.push(i64_type.const_int(expected_tag as u64, false));
+                words.push(payload_offset.const_add(tag_offset).into());
+                words.push(i64_type.const_int(expected_tag as u64, false).into());
             }
         }
     }
-    let descriptor_type = i64_type.array_type(words.len() as u32);
-    let initializer = i64_type.const_array(&words);
+    let initializer = context.const_struct(&words, false);
+    let descriptor_type = initializer.get_type();
     let global = llvm.add_global(descriptor_type, None, &name);
     global.set_initializer(&initializer);
     global.set_constant(true);
     global.set_linkage(Linkage::Private);
     global.as_pointer_value()
+}
+
+/// Emits active-tag root records for unions nested in a collection key or
+/// value. The runtime copies and validates these records when the collection
+/// is created, then applies them to each stored byte snapshot while marking.
+fn collection_union_root_metadata<'ctx>(
+    context: &'ctx Context,
+    llvm: &LlvmModule<'ctx>,
+    module: &ir::Module,
+    ty: ir::IrType,
+    symbol: &str,
+) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+    let paths = nested_union_paths(module, ty);
+    if paths.is_empty() {
+        return (
+            context.ptr_type(AddressSpace::default()).const_null(),
+            context.i64_type().const_zero(),
+        );
+    }
+    let outer_type = llvm_type_in(context, ty, &module.closures, &module.values, &module.enums)
+        .expect("collection union root has an LLVM layout")
+        .into_struct_type();
+    let word = context.i64_type();
+    let mut words: Vec<BasicValueEnum<'ctx>> = Vec::new();
+    for path in paths {
+        let (union_id, _) = module
+            .union_type_for_representation(path.representation)
+            .expect("collection union root has verified representation metadata");
+        let value_offset = if path.value_path.is_empty() {
+            word.const_zero()
+        } else {
+            const_field_offset(context, outer_type, &path.value_path)
+        };
+        let present_offset = path.present_path.as_ref().map_or_else(
+            || word.const_int(u64::MAX, false),
+            |path| const_field_offset(context, outer_type, path),
+        );
+        words.push(value_offset.into());
+        words.push(union_gc_descriptor(context, llvm, module, union_id).into());
+        words.push(present_offset.into());
+        words.push(word.const_int(path.enum_guards.len() as u64, false).into());
+        for (guard_path, expected_tag) in path.enum_guards {
+            words.push(const_field_offset(context, outer_type, &guard_path).into());
+            words.push(word.const_int(u64::from(expected_tag), false).into());
+        }
+    }
+    let initializer = context.const_struct(&words, false);
+    let table_type = initializer.get_type();
+    let global = llvm.add_global(table_type, None, symbol);
+    global.set_initializer(&initializer);
+    global.set_constant(true);
+    global.set_linkage(Linkage::Private);
+    (
+        global.as_pointer_value(),
+        word.const_int(words.len() as u64, false),
+    )
 }
 
 /// The byte offset `path` (design D6, [`gc_reference_paths`]) reaches inside
@@ -1698,6 +1796,10 @@ fn declare_extern_fn<'ctx>(
     let needs_pointer_abi = extern_fn.name.starts_with("zirk_rt_decimal_")
         || extern_fn.name == "zirk_str_from_decimal"
         || extern_fn.name.starts_with("zirk_rt_datetime_")
+        || extern_fn.name.starts_with("zirk_rt_instant_")
+        || extern_fn.name.starts_with("zirk_rt_period_")
+        || extern_fn.name.starts_with("zirk_rt_timezone_")
+        || extern_fn.name.starts_with("zirk_rt_zoned_datetime_")
         || extern_fn.name.starts_with("zirk_int_");
     let ptr = context.ptr_type(AddressSpace::default());
     let by_pointer = |ty: ir::IrType| {
@@ -2257,6 +2359,179 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         (slot, self.byte_size_of(ty))
     }
 
+    fn collection_text_metadata(
+        &self,
+        ty: ir::IrType,
+        capability: &CollectionHashEq,
+        name: &str,
+    ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
+        let mut locations = Vec::new();
+        self.collect_collection_text_locations(
+            ty,
+            capability,
+            self.context.i64_type().const_zero(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut locations,
+        );
+        if locations.is_empty() {
+            return (
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+                self.context.i64_type().const_zero(),
+            );
+        }
+        let mut words = Vec::new();
+        for location in locations {
+            words.push(location.offset);
+            words.push(
+                self.context
+                    .i64_type()
+                    .const_int(location.presence_guards.len() as u64, false),
+            );
+            words.extend(location.presence_guards);
+            words.push(
+                self.context
+                    .i64_type()
+                    .const_int(location.tag_guards.len() as u64, false),
+            );
+            for (offset, tag) in location.tag_guards {
+                words.push(offset);
+                words.push(self.context.i64_type().const_int(tag as u64, false));
+            }
+        }
+        let values = self.context.i64_type().const_array(&words);
+        let global = self.llvm.add_global(values.get_type(), None, name);
+        global.set_initializer(&values);
+        global.set_constant(true);
+        (
+            global.as_pointer_value(),
+            self.context.i64_type().const_int(words.len() as u64, false),
+        )
+    }
+
+    fn collect_collection_text_locations(
+        &self,
+        ty: ir::IrType,
+        capability: &CollectionHashEq,
+        base_offset: IntValue<'ctx>,
+        presence_guards: &mut Vec<IntValue<'ctx>>,
+        tag_guards: &mut Vec<(IntValue<'ctx>, u32)>,
+        output: &mut Vec<CollectionTextLocation<'ctx>>,
+    ) {
+        match (capability, ty) {
+            (CollectionHashEq::Text(_), ir::IrType::String | ir::IrType::Char) => {
+                output.push(CollectionTextLocation {
+                    offset: base_offset,
+                    presence_guards: presence_guards.clone(),
+                    tag_guards: tag_guards.clone(),
+                });
+            }
+            (CollectionHashEq::Nullable(inner), ir::IrType::Nullable(nullable)) => {
+                let parent = self
+                    .llvm_type(ty)
+                    .expect("nullable collection key layout")
+                    .into_struct_type();
+                presence_guards.push(base_offset.const_add(const_field_offset(
+                    self.context,
+                    parent,
+                    &[0],
+                )));
+                self.collect_collection_text_locations(
+                    nullable.inner(),
+                    inner,
+                    base_offset.const_add(const_field_offset(self.context, parent, &[1])),
+                    presence_guards,
+                    tag_guards,
+                    output,
+                );
+                presence_guards.pop();
+            }
+            (CollectionHashEq::Tuple(fields), ir::IrType::Value(id)) => {
+                let layout = &self.module.values[id as usize];
+                let parent = self
+                    .llvm_type(ty)
+                    .expect("tuple collection key layout")
+                    .into_struct_type();
+                for (index, (field, capability)) in layout.fields.iter().zip(fields).enumerate() {
+                    let offset = base_offset.const_add(const_field_offset(
+                        self.context,
+                        parent,
+                        &[index as u32],
+                    ));
+                    self.collect_collection_text_locations(
+                        field.ty,
+                        capability,
+                        offset,
+                        presence_guards,
+                        tag_guards,
+                        output,
+                    );
+                }
+            }
+            (CollectionHashEq::Enum(variants), ir::IrType::Enum(id)) => {
+                let layout = &self.module.enums[id as usize];
+                let parent = self
+                    .llvm_type(ty)
+                    .expect("enum collection key layout")
+                    .into_struct_type();
+                let tag_offset =
+                    base_offset.const_add(const_field_offset(self.context, parent, &[0]));
+                for (variant_tag, (fields, capabilities)) in
+                    layout.variants.iter().zip(variants).enumerate()
+                {
+                    tag_guards.push((tag_offset, variant_tag as u32));
+                    for (field_index, capability) in fields.iter().zip(capabilities) {
+                        let field = &layout.fields[*field_index as usize];
+                        let offset = base_offset.const_add(const_field_offset(
+                            self.context,
+                            parent,
+                            &[*field_index + 1],
+                        ));
+                        self.collect_collection_text_locations(
+                            field.ty,
+                            capability,
+                            offset,
+                            presence_guards,
+                            tag_guards,
+                            output,
+                        );
+                    }
+                    tag_guards.pop();
+                }
+            }
+            (CollectionHashEq::Union(alternatives), ir::IrType::Union(representation)) => {
+                let (_, union) = self
+                    .module
+                    .union_type_for_representation(representation)
+                    .expect("verified union collection layout");
+                assert_eq!(alternatives.len(), union.alternatives.len());
+                let parent = self
+                    .llvm_type(ty)
+                    .expect("union collection key layout")
+                    .into_struct_type();
+                let tag_offset =
+                    base_offset.const_add(const_field_offset(self.context, parent, &[0]));
+                let payload_offset =
+                    base_offset.const_add(const_field_offset(self.context, parent, &[3]));
+                for (tag, (alternative, capability)) in
+                    union.alternatives.iter().zip(alternatives).enumerate()
+                {
+                    tag_guards.push((tag_offset, tag as u32));
+                    self.collect_collection_text_locations(
+                        *alternative,
+                        capability,
+                        payload_offset,
+                        presence_guards,
+                        tag_guards,
+                        output,
+                    );
+                    tag_guards.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Writes a collection key field by field. The runtime compares the
     /// resulting allocation bytes, so aggregate padding must be zeroed and
     /// nested floating zero values normalized recursively.
@@ -2266,8 +2541,25 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
         ty: ir::IrType,
         value: BasicValueEnum<'ctx>,
     ) {
-        match ty {
-            ir::IrType::Float(ir::FloatWidth::F128) => {
+        let capability = self
+            .module
+            .collection_hash_eq_capability(ty)
+            .expect("semantic analysis admitted only hashable collection keys");
+        self.store_collection_value_with_capability(destination, ty, value, &capability);
+    }
+
+    fn store_collection_value_with_capability(
+        &self,
+        destination: PointerValue<'ctx>,
+        ty: ir::IrType,
+        value: BasicValueEnum<'ctx>,
+        capability: &CollectionHashEq,
+    ) {
+        match (capability, ty) {
+            (
+                CollectionHashEq::BinaryFloat { bits: 128 },
+                ir::IrType::Float(ir::FloatWidth::F128),
+            ) => {
                 // Avoid an LLVM fp128 comparison here. On MSVC it can lower
                 // through an ABI-incompatible soft-float helper. Signed zero
                 // is canonicalized directly from the binary128 bits instead.
@@ -2329,12 +2621,59 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .builder
                     .build_and(low_is_zero, high_is_zero, "key.f128.is_zero")
                     .expect("detect signed Float128 zero");
+                let exponent_mask = self
+                    .context
+                    .i64_type()
+                    .const_int(0x7fff_0000_0000_0000, false);
+                let exponent = self
+                    .builder
+                    .build_and(high, exponent_mask, "key.f128.exponent")
+                    .expect("extract Float128 exponent");
+                let exponent_is_all_ones = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        exponent,
+                        exponent_mask,
+                        "key.f128.exponent.is.all.ones",
+                    )
+                    .expect("compare Float128 exponent");
+                let fraction_mask = self
+                    .context
+                    .i128_type()
+                    .const_int_arbitrary_precision(&[u64::MAX, 0x0000_ffff_ffff_ffff]);
+                let fraction = self
+                    .builder
+                    .build_and(bits, fraction_mask, "key.f128.fraction")
+                    .expect("extract Float128 fraction");
+                let fraction_is_nonzero = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        fraction,
+                        self.context.i128_type().const_zero(),
+                        "key.f128.fraction.is.nonzero",
+                    )
+                    .expect("compare Float128 fraction");
+                let is_nan = self
+                    .builder
+                    .build_and(exponent_is_all_ones, fraction_is_nonzero, "key.f128.is.nan")
+                    .expect("detect Float128 NaN");
+                let canonical_nan = self
+                    .context
+                    .i128_type()
+                    .const_int_arbitrary_precision(&[0, 0x7fff_8000_0000_0000]);
+                let normalized_nan = self
+                    .builder
+                    .build_select(is_nan, canonical_nan, bits, "key.f128.canonical_nan")
+                    .expect("canonicalize Float128 NaN")
+                    .into_int_value();
                 let normalized_bits = self
                     .builder
                     .build_select(
                         is_zero,
                         self.context.i128_type().const_zero(),
-                        bits,
+                        normalized_nan,
                         "key.f128.canonical_bits",
                     )
                     .expect("canonicalize Float128 signed zero")
@@ -2351,27 +2690,138 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .build_store(destination, normalized)
                     .expect("store canonical Float128 collection key");
             }
-            ir::IrType::Float(_) => {
+            (CollectionHashEq::BinaryFloat { .. }, ir::IrType::Float(width)) => {
                 let float = value.into_float_value();
-                let zero = float.get_type().const_zero();
+                let (bits_width, exponent_mask, fraction_mask, canonical_nan) = match width {
+                    ir::FloatWidth::F16 => (16, 0x7c00_u64, 0x03ff_u64, 0x7e00_u64),
+                    ir::FloatWidth::F32 => (32, 0x7f80_0000_u64, 0x007f_ffff_u64, 0x7fc0_0000_u64),
+                    ir::FloatWidth::F64 => (
+                        64,
+                        0x7ff0_0000_0000_0000_u64,
+                        0x000f_ffff_ffff_ffff_u64,
+                        0x7ff8_0000_0000_0000_u64,
+                    ),
+                    ir::FloatWidth::F128 => unreachable!("Float128 handled above"),
+                };
+                let int_type = self
+                    .context
+                    .custom_width_int_type(
+                        std::num::NonZeroU32::new(bits_width)
+                            .expect("every floating width is nonzero"),
+                    )
+                    .expect("every floating width is a valid LLVM integer width");
+                let bits = self
+                    .builder
+                    .build_bit_cast(float, int_type, "key.float.bits")
+                    .expect("bitcast floating collection key")
+                    .into_int_value();
+                let magnitude = self
+                    .builder
+                    .build_and(
+                        bits,
+                        int_type.const_int(
+                            if bits_width == 64 {
+                                0x7fff_ffff_ffff_ffff
+                            } else {
+                                (1_u64 << (bits_width - 1)) - 1
+                            },
+                            false,
+                        ),
+                        "key.float.magnitude",
+                    )
+                    .expect("extract floating magnitude");
                 let is_zero = self
                     .builder
-                    .build_float_compare(inkwell::FloatPredicate::OEQ, float, zero, "key.is_zero")
-                    .expect("compare floating collection key with zero");
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        magnitude,
+                        int_type.const_zero(),
+                        "key.float.is.zero",
+                    )
+                    .expect("compare floating zero");
+                let exponent = self
+                    .builder
+                    .build_and(
+                        bits,
+                        int_type.const_int(exponent_mask, false),
+                        "key.float.exponent",
+                    )
+                    .expect("extract floating exponent");
+                let exponent_is_all_ones = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        exponent,
+                        int_type.const_int(exponent_mask, false),
+                        "key.float.exponent.is.all.ones",
+                    )
+                    .expect("compare floating exponent");
+                let fraction = self
+                    .builder
+                    .build_and(
+                        bits,
+                        int_type.const_int(fraction_mask, false),
+                        "key.float.fraction",
+                    )
+                    .expect("extract floating fraction");
+                let fraction_is_nonzero = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        fraction,
+                        int_type.const_zero(),
+                        "key.float.fraction.is.nonzero",
+                    )
+                    .expect("compare floating fraction");
+                let is_nan = self
+                    .builder
+                    .build_and(
+                        exponent_is_all_ones,
+                        fraction_is_nonzero,
+                        "key.float.is.nan",
+                    )
+                    .expect("detect floating NaN");
+                let nan_or_bits = self
+                    .builder
+                    .build_select(
+                        is_nan,
+                        int_type.const_int(canonical_nan, false),
+                        bits,
+                        "key.float.canonical_nan",
+                    )
+                    .expect("canonicalize floating NaN")
+                    .into_int_value();
+                let normalized_bits = self
+                    .builder
+                    .build_select(
+                        is_zero,
+                        int_type.const_zero(),
+                        nan_or_bits,
+                        "key.float.canonical_zero",
+                    )
+                    .expect("canonicalize floating zero")
+                    .into_int_value();
                 let normalized = self
                     .builder
-                    .build_select(is_zero, zero, float, "key.canonical_zero")
-                    .expect("canonicalize floating collection zero");
+                    .build_bit_cast(
+                        normalized_bits,
+                        float.get_type(),
+                        "key.float.canonical_value",
+                    )
+                    .expect("restore canonical floating key");
                 self.builder
                     .build_store(destination, normalized)
                     .expect("store canonical floating collection key");
             }
-            ir::IrType::Value(id) => {
+            (CollectionHashEq::Tuple(field_capabilities), ir::IrType::Value(id)) => {
                 let layout = &self.module.values[id as usize];
                 let struct_ty = self.llvm_type(ty).expect("value layout").into_struct_type();
                 self.zero_collection_aggregate(destination, ty);
                 let value = value.into_struct_value();
-                for (index, field) in layout.fields.iter().enumerate() {
+                assert_eq!(field_capabilities.len(), layout.fields.len());
+                for (index, (field, field_capability)) in
+                    layout.fields.iter().zip(field_capabilities).enumerate()
+                {
                     let source = self
                         .builder
                         .build_extract_value(value, index as u32, "key.field")
@@ -2380,23 +2830,50 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .builder
                         .build_struct_gep(struct_ty, destination, index as u32, "key.field.ptr")
                         .expect("collection key field pointer");
-                    self.store_canonical_collection_value(target, field.ty, source);
+                    self.store_collection_value_with_capability(
+                        target,
+                        field.ty,
+                        source,
+                        field_capability,
+                    );
                 }
             }
-            ir::IrType::Enum(id) => {
+            (CollectionHashEq::Enum(variant_capabilities), ir::IrType::Enum(id)) => {
                 let layout = &self.module.enums[id as usize];
                 let struct_ty = self.llvm_type(ty).expect("enum layout").into_struct_type();
                 self.zero_collection_aggregate(destination, ty);
                 let value = value.into_struct_value();
-                for index in 0..=layout.fields.len() {
-                    let field_ty = if index == 0 {
-                        ir::IrType::Int(ir::IntWidth::I32)
-                    } else {
-                        layout.fields[index - 1].ty
+                assert_eq!(variant_capabilities.len(), layout.variants.len());
+                let tag = self
+                    .builder
+                    .build_extract_value(value, 0, "key.enum.tag")
+                    .expect("extract enum key discriminant");
+                let tag_ptr = self
+                    .builder
+                    .build_struct_gep(struct_ty, destination, 0, "key.enum.tag.ptr")
+                    .expect("enum key discriminant pointer");
+                self.builder
+                    .build_store(tag_ptr, tag)
+                    .expect("store enum key discriminant");
+                for (field_index, field) in layout.fields.iter().enumerate() {
+                    let active_capability =
+                        layout.variants.iter().zip(variant_capabilities).find_map(
+                            |(fields, capabilities)| {
+                                fields
+                                    .iter()
+                                    .position(|index| *index as usize == field_index)
+                                    .and_then(|payload_index| capabilities.get(payload_index))
+                            },
+                        );
+                    let Some(field_capability) = active_capability else {
+                        // This field belongs to no supported variant payload.
+                        // Its zeroed bytes cannot distinguish equal active values.
+                        continue;
                     };
-                    if field_ty == ir::IrType::Void {
+                    if field.ty == ir::IrType::Void {
                         continue;
                     }
+                    let index = field_index + 1;
                     let source = self
                         .builder
                         .build_extract_value(value, index as u32, "key.enum.field")
@@ -2410,10 +2887,118 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                             "key.enum.field.ptr",
                         )
                         .expect("enum collection key field pointer");
-                    self.store_canonical_collection_value(target, field_ty, source);
+                    self.store_collection_value_with_capability(
+                        target,
+                        field.ty,
+                        source,
+                        field_capability,
+                    );
                 }
             }
-            ir::IrType::Nullable(nullable) => {
+            (
+                CollectionHashEq::Union(alternative_capabilities),
+                ir::IrType::Union(representation),
+            ) => {
+                let (union_id, union) = self
+                    .module
+                    .union_type_for_representation(representation)
+                    .expect("verified union collection layout");
+                assert_eq!(alternative_capabilities.len(), union.alternatives.len());
+                let struct_ty = self.llvm_type(ty).expect("union layout").into_struct_type();
+                self.zero_collection_aggregate(destination, ty);
+                let source_slot = self
+                    .builder
+                    .build_alloca(struct_ty, "key.union.source")
+                    .expect("allocate source union key");
+                self.builder
+                    .build_store(source_slot, value)
+                    .expect("store source union key");
+                let source_tag = self
+                    .builder
+                    .build_extract_value(value.into_struct_value(), 0, "key.union.tag")
+                    .expect("extract union key tag")
+                    .into_int_value();
+                let target_tag = self
+                    .builder
+                    .build_struct_gep(struct_ty, destination, 0, "key.union.tag.ptr")
+                    .expect("union key tag pointer");
+                self.builder
+                    .build_store(target_tag, source_tag)
+                    .expect("store canonical union key tag");
+                let source_payload = self
+                    .builder
+                    .build_struct_gep(struct_ty, source_slot, 3, "key.union.source.payload")
+                    .expect("source union payload pointer");
+                let target_payload = self
+                    .builder
+                    .build_struct_gep(struct_ty, destination, 3, "key.union.target.payload")
+                    .expect("target union payload pointer");
+                let parent = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .expect("union key canonicalization function");
+                let merge = self.context.append_basic_block(parent, "key.union.merge");
+                let default = self.context.append_basic_block(parent, "key.union.invalid");
+                let cases = union
+                    .alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(tag, _)| {
+                        let block = self.context.append_basic_block(parent, "key.union.case");
+                        (self.context.i32_type().const_int(tag as u64, false), block)
+                    })
+                    .collect::<Vec<_>>();
+                self.builder
+                    .build_switch(source_tag, default, &cases)
+                    .expect("switch on collection union tag");
+                self.builder.position_at_end(default);
+                self.builder
+                    .build_unconditional_branch(merge)
+                    .expect("invalid union tag merge");
+                for ((tag, block), (alternative, capability)) in cases
+                    .iter()
+                    .zip(union.alternatives.iter().zip(alternative_capabilities))
+                {
+                    let _ = tag;
+                    self.builder.position_at_end(*block);
+                    let payload_ty = self
+                        .llvm_type(*alternative)
+                        .expect("supported union payload LLVM layout");
+                    let source = self
+                        .builder
+                        .build_pointer_cast(
+                            source_payload,
+                            payload_ty.ptr_type(AddressSpace::default()),
+                            "key.union.source.typed",
+                        )
+                        .expect("cast union source payload");
+                    let payload = self
+                        .builder
+                        .build_load(payload_ty, source, "key.union.payload")
+                        .expect("load active union payload");
+                    let target = self
+                        .builder
+                        .build_pointer_cast(
+                            target_payload,
+                            payload_ty.ptr_type(AddressSpace::default()),
+                            "key.union.target.typed",
+                        )
+                        .expect("cast union target payload");
+                    self.store_collection_value_with_capability(
+                        target,
+                        *alternative,
+                        payload,
+                        capability,
+                    );
+                    self.builder
+                        .build_unconditional_branch(merge)
+                        .expect("union key case merge");
+                }
+                self.builder.position_at_end(merge);
+                let _ = union_id;
+            }
+            (CollectionHashEq::Nullable(inner_capability), ir::IrType::Nullable(nullable)) => {
                 let struct_ty = self
                     .llvm_type(ty)
                     .expect("nullable layout")
@@ -2439,9 +3024,14 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     .builder
                     .build_struct_gep(struct_ty, destination, 1, "key.nullable.value.ptr")
                     .expect("nullable value pointer");
-                self.store_canonical_collection_value(inner_ptr, nullable.inner(), inner);
+                self.store_collection_value_with_capability(
+                    inner_ptr,
+                    nullable.inner(),
+                    inner,
+                    inner_capability,
+                );
             }
-            ir::IrType::Decimal => {
+            (CollectionHashEq::Decimal, ir::IrType::Decimal) => {
                 let struct_ty = self
                     .llvm_type(ty)
                     .expect("Decimal layout")
@@ -2462,10 +3052,16 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         .expect("store Decimal key field");
                 }
             }
-            _ => {
+            (CollectionHashEq::Integer { .. }, ir::IrType::Int(_))
+            | (CollectionHashEq::Boolean, ir::IrType::Boolean)
+            | (CollectionHashEq::Text(_), ir::IrType::String | ir::IrType::Char)
+            | (CollectionHashEq::Identity, ir::IrType::Object(_) | ir::IrType::Contract(_)) => {
                 self.builder
                     .build_store(destination, value)
                     .expect("store scalar collection key");
+            }
+            (capability, ty) => {
+                panic!("collection key capability {capability:?} does not match IR type {ty:?}")
             }
         }
     }
@@ -6964,6 +7560,34 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 }
             }
 
+            ir::InstKind::JsonNullDynamic => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let bytes = self
+                    .builder
+                    .build_alloca(self.context.i8_type(), "json_null_payload")
+                    .expect("Dynamic JSON null gets a payload byte");
+                self.builder
+                    .build_store(bytes, self.context.i8_type().const_zero())
+                    .expect("Dynamic JSON null payload is initialized");
+                Some(
+                    self.builder
+                        .build_call(
+                            self.runtime.dynamic_value_new,
+                            &[
+                                self.context.i32_type().const_int(0x0f_0000, false).into(),
+                                bytes.into(),
+                                self.context.i64_type().const_int(1, false).into(),
+                                pointer.const_null().into(),
+                                self.context.i64_type().const_zero().into(),
+                            ],
+                            "json_null_dynamic",
+                        )
+                        .expect("the Dynamic JSON null helper is declared")
+                        .try_as_basic_value()
+                        .basic()
+                        .expect("Dynamic JSON null returns a pointer"),
+                )
+            }
             ir::InstKind::JsonStringifyDynamic { value } => {
                 let pointer = self.context.ptr_type(AddressSpace::default());
                 let output = self.aligned_alloca(pointer.into(), "json_stringify_out");
@@ -7007,6 +7631,162 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.builder
                         .build_insert_value(with_flag, string, 1, "json_string")
                         .expect("the JSON result stores its text")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonStringifyDynamicPretty { value } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_stringify_pretty_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON pretty stringify output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stringify_dynamic_pretty,
+                        &[self.operand(*value).into(), output.into()],
+                        "json_stringify_pretty_status",
+                    )
+                    .expect("the dynamic JSON pretty stringifier is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON pretty stringifier returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_stringify_pretty_present",
+                    )
+                    .expect("JSON pretty stringify status is compared with success");
+                let string = self
+                    .builder
+                    .build_load(pointer, output, "json_stringify_pretty_value")
+                    .expect("the JSON pretty output pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON pretty stringify returns a nullable String")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_pretty_present")
+                    .expect("the JSON pretty result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, string, 1, "json_pretty_string")
+                        .expect("the JSON pretty result stores its text")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonCanonicalizeDynamic { value } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_canonicalize_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON canonicalization output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_canonicalize_dynamic,
+                        &[self.operand(*value).into(), output.into()],
+                        "json_canonicalize_status",
+                    )
+                    .expect("the dynamic JSON canonicalizer is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON canonicalizer returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_canonicalize_present",
+                    )
+                    .expect("JSON canonicalization status is compared with success");
+                let string = self
+                    .builder
+                    .build_load(pointer, output, "json_canonicalize_value")
+                    .expect("the canonical JSON output pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON canonicalization returns a nullable String")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_present")
+                    .expect("the JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, string, 1, "json_string")
+                        .expect("the JSON result stores its text")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonStringifyDynamicWithLimits {
+                value,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_stringify_limited_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("limited JSON stringify output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stringify_dynamic_with_limits,
+                        &[
+                            self.operand(*value).into(),
+                            self.operand(*max_document_bytes).into(),
+                            self.operand(*max_nesting_depth).into(),
+                            self.operand(*max_string_bytes).into(),
+                            self.operand(*max_container_items).into(),
+                            self.operand(*max_number_bytes).into(),
+                            output.into(),
+                        ],
+                        "json_stringify_limited_status",
+                    )
+                    .expect("the limited dynamic JSON stringifier is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the limited JSON stringifier returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_stringify_limited_present",
+                    )
+                    .expect("limited JSON stringify status is compared with success");
+                let string = self
+                    .builder
+                    .build_load(pointer, output, "json_stringify_limited_value")
+                    .expect("limited JSON output pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("limited JSON stringify returns a nullable String")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_present")
+                    .expect("limited JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, string, 1, "json_string")
+                        .expect("limited JSON result stores its text")
                         .as_basic_value_enum(),
                 )
             }
@@ -7064,6 +7844,567 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     self.builder
                         .build_insert_value(with_flag, value, 1, "json_dynamic")
                         .expect("the JSON result stores its Dynamic tree")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonStreamReaderCreate {
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_reader_create,
+                        &[
+                            self.operand(*max_document_bytes).into(),
+                            self.operand(*max_nesting_depth).into(),
+                            self.operand(*max_string_bytes).into(),
+                            self.operand(*max_container_items).into(),
+                            self.operand(*max_number_bytes).into(),
+                        ],
+                        "json_stream_reader_handle",
+                    )
+                    .expect("the incremental JSON reader constructor is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON reader returns its handle"),
+            ),
+            ir::InstKind::JsonStreamReaderPush { handle, chunk } => {
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stream_reader_push,
+                        &[self.operand(*handle).into(), self.operand(*chunk).into()],
+                        "json_stream_reader_push_status",
+                    )
+                    .expect("the incremental JSON reader push is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON reader returns a status")
+                    .into_int_value();
+                Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            status,
+                            self.context.i32_type().const_zero(),
+                            "json_stream_reader_push_ok",
+                        )
+                        .expect("the incremental JSON reader status is compared")
+                        .as_basic_value_enum(),
+                )
+            }
+            ir::InstKind::JsonStreamReaderPushBytes { handle, chunk } => {
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stream_reader_push_bytes,
+                        &[self.operand(*handle).into(), self.operand(*chunk).into()],
+                        "json_stream_reader_push_bytes_status",
+                    )
+                    .expect("the incremental JSON byte reader push is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON byte reader returns a status")
+                    .into_int_value();
+                Some(
+                    self.builder
+                        .build_int_compare(
+                            IntPredicate::EQ,
+                            status,
+                            self.context.i32_type().const_zero(),
+                            "json_stream_reader_push_bytes_ok",
+                        )
+                        .expect("the incremental JSON byte reader status is compared")
+                        .as_basic_value_enum(),
+                )
+            }
+            ir::InstKind::JsonStreamReaderFinish {
+                handle,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_stream_reader_output");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("streamed JSON output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_stream_reader_finish,
+                        &[
+                            self.operand(*handle).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            output.into(),
+                        ],
+                        "json_stream_reader_finish_status",
+                    )
+                    .expect("the incremental JSON reader finish is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON reader returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_stream_reader_present",
+                    )
+                    .expect("the streamed JSON status is compared with success");
+                let value = self
+                    .builder
+                    .build_load(pointer, output, "json_stream_reader_value")
+                    .expect("the streamed Dynamic pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON reader finish returns a nullable Dynamic")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_reader_present")
+                    .expect("the streamed JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, value, 1, "json_reader_dynamic")
+                        .expect("the streamed JSON result stores its Dynamic tree")
+                        .as_basic_value_enum(),
+                )
+            }
+            ir::InstKind::JsonStreamReaderCancel { handle } => {
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_reader_cancel,
+                        &[self.operand(*handle).into()],
+                        "json_stream_reader_cancel",
+                    )
+                    .expect("the incremental JSON reader cancel is declared");
+                None
+            }
+            ir::InstKind::JsonStreamWriterCreate {
+                value,
+                max_chunk_bytes,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+                list_dynamic_id,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_writer_create,
+                        &[
+                            self.operand(*value).into(),
+                            self.operand(*max_chunk_bytes).into(),
+                            self.operand(*max_document_bytes).into(),
+                            self.operand(*max_nesting_depth).into(),
+                            self.operand(*max_string_bytes).into(),
+                            self.operand(*max_container_items).into(),
+                            self.operand(*max_number_bytes).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                        ],
+                        "json_stream_writer_handle",
+                    )
+                    .expect("the incremental JSON writer constructor is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON writer returns its handle"),
+            ),
+            ir::InstKind::JsonStreamWriterNextStatus {
+                handle,
+                max_chunk_bytes,
+            } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_writer_next_status,
+                        &[
+                            self.operand(*handle).into(),
+                            self.operand(*max_chunk_bytes).into(),
+                        ],
+                        "json_stream_writer_status",
+                    )
+                    .expect("the incremental JSON writer pull is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the incremental JSON writer returns a status"),
+            ),
+            ir::InstKind::JsonStreamWriterTake { handle } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_stream_writer_chunk");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON writer output starts absent");
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_writer_take,
+                        &[self.operand(*handle).into(), output.into()],
+                        "json_stream_writer_take_status",
+                    )
+                    .expect("the incremental JSON writer chunk take is declared");
+                Some(
+                    self.builder
+                        .build_load(pointer, output, "json_stream_writer_chunk_value")
+                        .expect("the incremental JSON writer chunk is loaded"),
+                )
+            }
+            ir::InstKind::JsonStreamWriterCancel { handle } => {
+                self.builder
+                    .build_call(
+                        self.runtime.json_stream_writer_cancel,
+                        &[self.operand(*handle).into()],
+                        "json_stream_writer_cancel",
+                    )
+                    .expect("the incremental JSON writer cancel is declared");
+                None
+            }
+
+            ir::InstKind::Json5ParseDynamic {
+                document,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json5_parse_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON5 parse output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json5_parse_dynamic,
+                        &[
+                            self.operand(*document).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            output.into(),
+                        ],
+                        "json5_parse_status",
+                    )
+                    .expect("the dynamic JSON5 parser is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON5 parser returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json5_parse_present",
+                    )
+                    .expect("JSON5 parse status is compared with success");
+                let value = self
+                    .builder
+                    .build_load(pointer, output, "json5_parse_value")
+                    .expect("the parsed Dynamic pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON5 parse returns a nullable Dynamic")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json5_present")
+                    .expect("the JSON5 result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, value, 1, "json5_dynamic")
+                        .expect("the JSON5 result stores its Dynamic tree")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonParseDynamicWithLimits {
+                document,
+                list_dynamic_id,
+                max_document_bytes,
+                max_nesting_depth,
+                max_string_bytes,
+                max_container_items,
+                max_number_bytes,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_parse_limited_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("limited JSON parse output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_parse_dynamic_with_limits,
+                        &[
+                            self.operand(*document).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            self.operand(*max_document_bytes).into(),
+                            self.operand(*max_nesting_depth).into(),
+                            self.operand(*max_string_bytes).into(),
+                            self.operand(*max_container_items).into(),
+                            self.operand(*max_number_bytes).into(),
+                            output.into(),
+                        ],
+                        "json_parse_limited_status",
+                    )
+                    .expect("the limited dynamic JSON parser is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the limited JSON parser returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_parse_limited_present",
+                    )
+                    .expect("limited JSON parse status is compared with success");
+                let value = self
+                    .builder
+                    .build_load(pointer, output, "json_parse_limited_value")
+                    .expect("the limited parse Dynamic pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("limited JSON parse returns a nullable Dynamic")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_present")
+                    .expect("the limited JSON result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, value, 1, "json_dynamic")
+                        .expect("the limited JSON result stores its Dynamic tree")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonPointerDynamic {
+                value,
+                pointer: pointer_value,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_pointer_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON Pointer output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_pointer_dynamic,
+                        &[
+                            self.operand(*value).into(),
+                            self.operand(*pointer_value).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            output.into(),
+                        ],
+                        "json_pointer_status",
+                    )
+                    .expect("the Dynamic JSON Pointer operation is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("JSON Pointer returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_pointer_present",
+                    )
+                    .expect("JSON Pointer status is compared with success");
+                let selected = self
+                    .builder
+                    .build_load(pointer, output, "json_pointer_value")
+                    .expect("the selected Dynamic pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON Pointer returns a nullable Dynamic")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "json_pointer_present")
+                    .expect("the JSON Pointer result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, selected, 1, "json_pointer_dynamic")
+                        .expect("the JSON Pointer result stores its Dynamic value")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonPointerErrorKind { value, pointer } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.json_pointer_error_kind_dynamic,
+                        &[self.operand(*value).into(), self.operand(*pointer).into()],
+                        "json_pointer_error_kind",
+                    )
+                    .expect("the JSON Pointer error classifier is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSON Pointer error classifier returns an i32")
+                    .as_basic_value_enum(),
+            ),
+
+            ir::InstKind::JsonPathDynamic {
+                value,
+                query,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "jsonpath_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSONPath output starts absent");
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.jsonpath_dynamic,
+                        &[
+                            self.operand(*value).into(),
+                            self.operand(*query).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            output.into(),
+                        ],
+                        "jsonpath_status",
+                    )
+                    .expect("the Dynamic JSONPath operation is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("JSONPath returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "jsonpath_present",
+                    )
+                    .expect("JSONPath status is compared with success");
+                let selected = self
+                    .builder
+                    .build_load(pointer, output, "jsonpath_value")
+                    .expect("the JSONPath List pointer is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSONPath returns a nullable List")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(nullable.get_undef(), present, 0, "jsonpath_present")
+                    .expect("the JSONPath result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, selected, 1, "jsonpath_list")
+                        .expect("the JSONPath result stores its List pointer")
+                        .as_basic_value_enum(),
+                )
+            }
+
+            ir::InstKind::JsonPathErrorKind { value, query } => Some(
+                self.builder
+                    .build_call(
+                        self.runtime.jsonpath_error_kind_dynamic,
+                        &[self.operand(*value).into(), self.operand(*query).into()],
+                        "jsonpath_error_kind",
+                    )
+                    .expect("the JSONPath error classifier is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("the JSONPath error classifier returns an i32")
+                    .as_basic_value_enum(),
+            ),
+
+            ir::InstKind::JsonSchemaValidateDynamic {
+                value,
+                schema,
+                resolver,
+                list_dynamic_id,
+            } => {
+                let pointer = self.context.ptr_type(AddressSpace::default());
+                let output = self.aligned_alloca(pointer.into(), "json_schema_validate_out");
+                self.builder
+                    .build_store(output, pointer.const_null())
+                    .expect("JSON Schema output starts absent");
+                let resolver = resolver.map_or_else(
+                    || pointer.const_null().as_basic_value_enum(),
+                    |resolver| self.operand(resolver),
+                );
+                let status = self
+                    .builder
+                    .build_call(
+                        self.runtime.json_schema_validate_dynamic,
+                        &[
+                            self.operand(*value).into(),
+                            self.operand(*schema).into(),
+                            self.context
+                                .i32_type()
+                                .const_int(u64::from(*list_dynamic_id), false)
+                                .into(),
+                            resolver.into(),
+                            output.into(),
+                        ],
+                        "json_schema_validate_status",
+                    )
+                    .expect("the JSON Schema validator is declared")
+                    .try_as_basic_value()
+                    .basic()
+                    .expect("JSON Schema validation returns a status")
+                    .into_int_value();
+                let present = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        status,
+                        self.context.i32_type().const_zero(),
+                        "json_schema_validate_present",
+                    )
+                    .expect("JSON Schema status is compared with success");
+                let issues = self
+                    .builder
+                    .build_load(pointer, output, "json_schema_validate_issues")
+                    .expect("the JSON Schema issue list is loaded");
+                let nullable = self
+                    .llvm_type(instruction.ty)
+                    .expect("JSON Schema validation returns a nullable issue list")
+                    .into_struct_type();
+                let with_flag = self
+                    .builder
+                    .build_insert_value(
+                        nullable.get_undef(),
+                        present,
+                        0,
+                        "json_schema_validate_present",
+                    )
+                    .expect("the JSON Schema result stores its presence flag");
+                Some(
+                    self.builder
+                        .build_insert_value(with_flag, issues, 1, "json_schema_validate_list")
+                        .expect("the JSON Schema result stores its issue list")
                         .as_basic_value_enum(),
                 )
             }
@@ -7861,6 +9202,10 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 if callee.starts_with("zirk_rt_decimal_")
                     || callee == "zirk_str_from_decimal"
                     || callee.starts_with("zirk_rt_datetime_")
+                    || callee.starts_with("zirk_rt_instant_")
+                    || callee.starts_with("zirk_rt_timezone_")
+                    || callee.starts_with("zirk_rt_zoned_datetime_")
+                    || callee.starts_with("zirk_rt_period_")
                     || callee.starts_with("zirk_int_")
                 {
                     let typed: Vec<_> = args
@@ -12619,17 +13964,26 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let result_id = instruction.result.expect("ArrayNew produces a value").0;
                 let (offsets, count) =
                     self.gc_offsets_for(element, &format!("zk.array.offsets.{result_id}"));
+                let (union_roots, union_word_count) = collection_union_root_metadata(
+                    self.context,
+                    self.llvm,
+                    self.module,
+                    element,
+                    &format!("zk.array.union_roots.{result_id}"),
+                );
                 let capacity = self.operand(*capacity).into_int_value();
                 let call = self
                     .builder
                     .build_call(
-                        self.runtime.array_new_with_layout,
+                        self.runtime.array_new_with_union_layout,
                         &[
                             capacity.into(),
                             elem_size.into(),
                             elem_align.into(),
                             offsets.into(),
                             count.into(),
+                            union_roots.into(),
+                            union_word_count.into(),
                         ],
                         "array",
                     )
@@ -12643,15 +13997,24 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let result_id = instruction.result.expect("ListNew produces a value").0;
                 let (offsets, count) =
                     self.gc_offsets_for(element, &format!("zk.list.offsets.{result_id}"));
+                let (union_roots, union_word_count) = collection_union_root_metadata(
+                    self.context,
+                    self.llvm,
+                    self.module,
+                    element,
+                    &format!("zk.list.union_roots.{result_id}"),
+                );
                 let call = self
                     .builder
                     .build_call(
-                        self.runtime.list_new_with_layout,
+                        self.runtime.list_new_with_union_layout,
                         &[
                             elem_size.into(),
                             elem_align.into(),
                             offsets.into(),
                             count.into(),
+                            union_roots.into(),
+                            union_word_count.into(),
                         ],
                         "list",
                     )
@@ -12664,11 +14027,24 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                 let result_id = instruction.result.expect("DequeNew produces a value").0;
                 let (offsets, count) =
                     self.gc_offsets_for(element, &format!("zk.deque.offsets.{result_id}"));
+                let (union_roots, union_word_count) = collection_union_root_metadata(
+                    self.context,
+                    self.llvm,
+                    self.module,
+                    element,
+                    &format!("zk.deque.union_roots.{result_id}"),
+                );
                 let call = self
                     .builder
                     .build_call(
-                        self.runtime.deque_new_with_layout,
-                        &[elem_size.into(), offsets.into(), count.into()],
+                        self.runtime.deque_new_with_union_layout,
+                        &[
+                            elem_size.into(),
+                            offsets.into(),
+                            count.into(),
+                            union_roots.into(),
+                            union_word_count.into(),
+                        ],
                         "deque",
                     )
                     .expect("deque new");
@@ -12704,12 +14080,13 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
 
             ir::InstKind::MapNew { map_id } => {
                 let (key_ty, _) = self.module.map_types[*map_id as usize];
-                let text_key = matches!(
-                    key_ty,
-                    ir::IrType::String
-                        | ir::IrType::Char
-                        | ir::IrType::Nullable(ir::Nullable::String | ir::Nullable::Char)
-                );
+                let key_capability = self
+                    .module
+                    .collection_hash_eq_capability(key_ty)
+                    .expect("semantic analysis admitted only hashable map keys");
+                let text_key = uses_direct_text_collection_snapshot(&key_capability);
+                let nested_text_key =
+                    !text_key && has_nested_text_collection_snapshot(&key_capability);
                 let string_content_keys = self.bool_const(text_key);
                 let (_, value_ty) = self.module.map_types[*map_id as usize];
                 let offsets_for = |ty: ir::IrType, suffix: &str| {
@@ -12769,34 +14146,98 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                     offsets_for(key_ty, "key_offsets")
                 };
                 let (value_offsets, value_count) = offsets_for(value_ty, "value_offsets");
-                let call = self
-                    .builder
-                    .build_call(
+                let result_id = instruction.result.expect("MapNew produces a value").0;
+                let (key_union_roots, key_union_root_words) = if text_key {
+                    (
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null(),
+                        self.context.i64_type().const_zero(),
+                    )
+                } else {
+                    collection_union_root_metadata(
+                        self.context,
+                        self.llvm,
+                        self.module,
+                        key_ty,
+                        &format!("zk.map.key_union_roots.{result_id}"),
+                    )
+                };
+                let (value_union_roots, value_union_root_words) = collection_union_root_metadata(
+                    self.context,
+                    self.llvm,
+                    self.module,
+                    value_ty,
+                    &format!("zk.map.value_union_roots.{result_id}"),
+                );
+                let call = if nested_text_key {
+                    let (text_fields, text_field_word_count) = self.collection_text_metadata(
+                        key_ty,
+                        &key_capability,
+                        &format!("zk.map.text_fields.{result_id}"),
+                    );
+                    self.builder.build_call(
+                        self.runtime.map_new_with_text_fields,
+                        &[
+                            key_offsets.into(),
+                            key_count.into(),
+                            self.byte_size_of(key_ty).into(),
+                            key_union_roots.into(),
+                            key_union_root_words.into(),
+                            value_offsets.into(),
+                            value_count.into(),
+                            value_union_roots.into(),
+                            value_union_root_words.into(),
+                            text_fields.into(),
+                            text_field_word_count.into(),
+                            self.byte_size_of(value_ty).into(),
+                        ],
+                        "map",
+                    )
+                } else {
+                    self.builder.build_call(
                         self.runtime.map_new,
                         &[
                             key_offsets.into(),
                             key_count.into(),
                             self.byte_size_of(key_ty).into(),
+                            key_union_roots.into(),
+                            key_union_root_words.into(),
                             value_offsets.into(),
                             value_count.into(),
+                            value_union_roots.into(),
+                            value_union_root_words.into(),
                             string_content_keys.into(),
                             self.byte_size_of(value_ty).into(),
                         ],
                         "map",
                     )
-                    .expect("map new");
+                }
+                .expect("map new");
                 call.try_as_basic_value().basic()
             }
 
             ir::InstKind::SetNew { set_id } => {
                 let element_ty = self.module.set_types[*set_id as usize];
-                let has_text_equality = matches!(
-                    element_ty,
-                    ir::IrType::String
-                        | ir::IrType::Char
-                        | ir::IrType::Nullable(ir::Nullable::String | ir::Nullable::Char)
-                );
+                let element_capability = self
+                    .module
+                    .collection_hash_eq_capability(element_ty)
+                    .expect("semantic analysis admitted only hashable set elements");
+                let has_text_equality = uses_direct_text_collection_snapshot(&element_capability);
+                let nested_text =
+                    !has_text_equality && has_nested_text_collection_snapshot(&element_capability);
                 let string_content_elements = self.bool_const(has_text_equality);
+                let (union_roots, union_root_words) = collection_union_root_metadata(
+                    self.context,
+                    self.llvm,
+                    self.module,
+                    element_ty,
+                    &format!(
+                        "zk.set.union_roots.{}",
+                        instruction.result.expect("SetNew result").0
+                    ),
+                );
+                let has_union_roots = !nested_union_paths(self.module, element_ty).is_empty();
                 let paths = if has_text_equality {
                     Vec::new()
                 } else {
@@ -12840,9 +14281,63 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         self.context.i64_type().const_int(paths.len() as u64, false),
                     )
                 };
-                let call = self
-                    .builder
-                    .build_call(
+                let call = if nested_text && has_union_roots {
+                    let (text_fields, text_field_word_count) = self.collection_text_metadata(
+                        element_ty,
+                        &element_capability,
+                        &format!(
+                            "zk.set.text_fields.{}",
+                            instruction.result.expect("SetNew result").0
+                        ),
+                    );
+                    self.builder.build_call(
+                        self.runtime.set_new_with_text_fields_and_union_roots,
+                        &[
+                            offsets.into(),
+                            count.into(),
+                            self.byte_size_of(element_ty).into(),
+                            text_fields.into(),
+                            text_field_word_count.into(),
+                            union_roots.into(),
+                            union_root_words.into(),
+                        ],
+                        "set",
+                    )
+                } else if nested_text {
+                    let (text_fields, text_field_word_count) = self.collection_text_metadata(
+                        element_ty,
+                        &element_capability,
+                        &format!(
+                            "zk.set.text_fields.{}",
+                            instruction.result.expect("SetNew result").0
+                        ),
+                    );
+                    self.builder.build_call(
+                        self.runtime.set_new_with_text_fields,
+                        &[
+                            offsets.into(),
+                            count.into(),
+                            self.byte_size_of(element_ty).into(),
+                            text_fields.into(),
+                            text_field_word_count.into(),
+                        ],
+                        "set",
+                    )
+                } else if has_union_roots {
+                    self.builder.build_call(
+                        self.runtime.set_new_with_union_roots,
+                        &[
+                            offsets.into(),
+                            count.into(),
+                            self.byte_size_of(element_ty).into(),
+                            string_content_elements.into(),
+                            union_roots.into(),
+                            union_root_words.into(),
+                        ],
+                        "set",
+                    )
+                } else {
+                    self.builder.build_call(
                         self.runtime.set_new,
                         &[
                             offsets.into(),
@@ -12852,7 +14347,8 @@ impl<'ctx> FunctionEmitter<'ctx, '_> {
                         ],
                         "set",
                     )
-                    .expect("set new");
+                }
+                .expect("set new");
                 call.try_as_basic_value().basic()
             }
 

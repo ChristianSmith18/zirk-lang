@@ -9,6 +9,16 @@ const CAPACITY_OFFSET: usize = HEADER_BYTES + WORD;
 const DATA_PTR_OFFSET: usize = HEADER_BYTES + 2 * WORD;
 const LAYOUT_PTR_OFFSET: usize = HEADER_BYTES + 3 * WORD;
 const LAYOUT_COUNT_OFFSET: usize = HEADER_BYTES + 4 * WORD;
+const ELEMENT_SIZE_OFFSET: usize = HEADER_BYTES + 5 * WORD;
+const UNION_LAYOUT_PTR_OFFSET: usize = HEADER_BYTES + 6 * WORD;
+const UNION_LAYOUT_COUNT_OFFSET: usize = HEADER_BYTES + 7 * WORD;
+
+struct CollectionUnionRoot {
+    offset: usize,
+    descriptor: *const usize,
+    present_offset: Option<usize>,
+    enum_guards: Box<[(usize, u32)]>,
+}
 
 /// Descriptor for a `List<T>` header object: it has a single GC field, the
 /// pointer to the data buffer.
@@ -70,7 +80,32 @@ pub unsafe extern "C" fn zirk_rt_list_new_with_layout(
     reference_offsets: *const usize,
     reference_offset_count: usize,
 ) -> *mut c_void {
-    let size = HEADER_BYTES + 5 * WORD;
+    unsafe {
+        zirk_rt_list_new_with_union_layout(
+            elem_size,
+            elem_align,
+            reference_offsets,
+            reference_offset_count,
+            std::ptr::null(),
+            0,
+        )
+    }
+}
+
+/// Creates a list with per-element tag-aware union tracing metadata.
+///
+/// # Safety
+/// Both metadata tables must remain valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_list_new_with_union_layout(
+    elem_size: usize,
+    elem_align: usize,
+    reference_offsets: *const usize,
+    reference_offset_count: usize,
+    union_words: *const usize,
+    union_word_count: usize,
+) -> *mut c_void {
+    let size = HEADER_BYTES + 8 * WORD;
     let object = unsafe { crate::memory::zirk_rt_alloc(size, 1) };
     let offsets = if reference_offset_count == 0 {
         Vec::new()
@@ -94,6 +129,14 @@ pub unsafe extern "C" fn zirk_rt_list_new_with_layout(
         let count = boxed.len();
         (Box::into_raw(boxed) as *mut usize, count)
     };
+    let union_table = if union_word_count == 0 {
+        std::ptr::null_mut()
+    } else {
+        assert!(!union_words.is_null(), "list union-root metadata is null");
+        let words = unsafe { std::slice::from_raw_parts(union_words, union_word_count) };
+        let boxed = words.to_vec().into_boxed_slice();
+        Box::into_raw(boxed) as *mut usize
+    };
     unsafe {
         set_descriptor(object, &raw const zirk_rt_list_descriptor as *mut c_void);
         write_usize(object, LENGTH_OFFSET, 0);
@@ -101,6 +144,9 @@ pub unsafe extern "C" fn zirk_rt_list_new_with_layout(
         set_ptr(object, DATA_PTR_OFFSET, std::ptr::null_mut());
         set_ptr(object, LAYOUT_PTR_OFFSET, offset_ptr.cast());
         write_usize(object, LAYOUT_COUNT_OFFSET, offset_count);
+        write_usize(object, ELEMENT_SIZE_OFFSET, elem_size);
+        set_ptr(object, UNION_LAYOUT_PTR_OFFSET, union_table.cast());
+        write_usize(object, UNION_LAYOUT_COUNT_OFFSET, union_word_count);
     }
     let _ = elem_align;
     object
@@ -115,6 +161,108 @@ pub(crate) unsafe fn drop_body(list: *mut c_void) {
                 pointer, count,
             )))
         };
+    }
+    let union_pointer = unsafe { read_ptr(list, UNION_LAYOUT_PTR_OFFSET) } as *mut usize;
+    let union_count = unsafe { read_usize(list, UNION_LAYOUT_COUNT_OFFSET) };
+    if !union_pointer.is_null() {
+        unsafe {
+            drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                union_pointer,
+                union_count,
+            )))
+        };
+    }
+}
+
+/// Marks the list's backing allocation and tag-aware references held in its
+/// active elements. Ordinary references in the backing buffer are still
+/// traced by that buffer's own descriptor.
+pub(crate) unsafe fn mark_union_entries(
+    list: *mut c_void,
+    allocations: &crate::collector::AllocationSet,
+    mark: &mut dyn FnMut(*mut c_void),
+) {
+    let data = unsafe { data_pointer(list) };
+    if data.is_null() {
+        return;
+    }
+    mark(data);
+    if !allocations.contains(&(data as usize)) {
+        return;
+    }
+    let element_size = unsafe { read_usize(list, ELEMENT_SIZE_OFFSET) };
+    let length = unsafe { zirk_rt_list_length(list) };
+    let count = unsafe { read_usize(list, UNION_LAYOUT_COUNT_OFFSET) };
+    if count == 0 {
+        return;
+    }
+    let words = unsafe {
+        std::slice::from_raw_parts(
+            read_ptr(list, UNION_LAYOUT_PTR_OFFSET).cast::<usize>(),
+            count,
+        )
+    };
+    let mut roots = Vec::new();
+    let mut cursor = 0;
+    while cursor < words.len() {
+        assert!(
+            words.len() - cursor >= 4,
+            "truncated list union-root metadata"
+        );
+        let offset = words[cursor];
+        let descriptor = words[cursor + 1] as *const usize;
+        let present = words[cursor + 2];
+        let guard_count = words[cursor + 3];
+        cursor += 4;
+        assert!(!descriptor.is_null(), "list union-root descriptor is null");
+        assert!(
+            guard_count <= 64,
+            "list union-root has too many enum guards"
+        );
+        assert!(
+            guard_count
+                .checked_mul(2)
+                .is_some_and(|n| n <= words.len() - cursor),
+            "truncated list enum guards"
+        );
+        let mut guards = Vec::with_capacity(guard_count);
+        for _ in 0..guard_count {
+            let tag_offset = words[cursor];
+            let tag = u32::try_from(words[cursor + 1]).expect("list enum guard exceeds u32");
+            cursor += 2;
+            guards.push((tag_offset, tag));
+        }
+        roots.push(CollectionUnionRoot {
+            offset,
+            descriptor,
+            present_offset: (present != usize::MAX).then_some(present),
+            enum_guards: guards.into_boxed_slice(),
+        });
+    }
+    let data_bytes = unsafe { (data as *const u8).add(HEADER_BYTES) };
+    for index in 0..length {
+        let element = unsafe {
+            std::slice::from_raw_parts(data_bytes.add(index * element_size), element_size)
+        };
+        for root in &roots {
+            if !root.enum_guards.iter().all(|(offset, expected)| {
+                let actual =
+                    unsafe { element.as_ptr().add(*offset).cast::<u32>().read_unaligned() };
+                actual == *expected
+            }) {
+                continue;
+            }
+            let union_root = crate::collector::UnionRoot {
+                base: unsafe { element.as_ptr().add(root.offset) },
+                descriptor: root.descriptor,
+                present: root
+                    .present_offset
+                    .map_or(std::ptr::null(), |offset| unsafe {
+                        element.as_ptr().add(offset)
+                    }),
+            };
+            crate::collector::mark_union_root(&union_root, mark);
+        }
     }
 }
 

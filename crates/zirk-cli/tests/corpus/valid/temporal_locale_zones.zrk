@@ -1,0 +1,43 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut overlap: DateTime = DateTime(Date(2024, 11, 3), Time(1, 30));
+    match overlap.format_locale_in_zone(
+        "America/New_York", "en-US", "long", "earlier", "reject"
+    ) {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(_) => stdout.println("earlier overlap rejected");
+    };
+    match overlap.format_locale_in_zone(
+        "America/New_York", "en-US", "long", "later", "reject"
+    ) {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(_) => stdout.println("later overlap rejected");
+    };
+    match overlap.format_locale_in_zone(
+        "America/New_York", "en-US", "long", "reject", "reject"
+    ) {
+        Result.Ok(value) => stdout.println("unexpected " + value);
+        Result.Error(_) => stdout.println("ambiguous time rejected");
+    };
+
+    inmut gap: DateTime = DateTime(Date(2024, 3, 10), Time(2, 30));
+    match gap.format_locale_in_zone(
+        "America/New_York", "en-US", "long", "reject", "forward"
+    ) {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(_) => stdout.println("gap shift rejected");
+    };
+    match gap.format_locale_in_zone("+09:00", "ja-JP", "long", "reject", "reject") {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(_) => stdout.println("fixed offset rejected");
+    };
+    match gap.format_locale_in_zone(
+        "America/New_York", "en-US", "long", "invalid", "reject"
+    ) {
+        Result.Ok(value) => stdout.println("unexpected " + value);
+        Result.Error(_) => stdout.println("invalid DST policy rejected");
+    };
+}
+
+main();

@@ -106,9 +106,10 @@ value when present and `<Null>` when absent.
 Collections render recursively (`[a, b]`, `{key: value}`, `{element}`), ranges
 mirror their literal (`1..=10:2`), regexes render as `re'pattern'`, opaque
 handles use `<TypeName>`, and a callable uses `<Function name>` or
-`<Function>`. Records, classes and payload enum variants render their visible
-fields; local-class compiler suffixes and synthetic inner-class `outer` fields
-never appear.
+`<Function>`. Structural object values, classes and payload enum variants
+render their visible fields; local-class compiler suffixes and synthetic
+inner-class `outer` fields never appear. The former `record` declaration form
+was removed.
 
 ## Repetition
 

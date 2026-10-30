@@ -82,6 +82,7 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("concurrent_task_capacity_ceiling", "structured concurrency"),
     ("dependent_local_only", "type Dependent"),
     ("extern_call", "`unsafe` journal blocks"),
+    ("instant_now", "extern `zirk_rt_instant_now`"),
     ("native_slice_basic", "`unsafe` journal blocks"),
     (
         "native_slice_bounds_error_caught",

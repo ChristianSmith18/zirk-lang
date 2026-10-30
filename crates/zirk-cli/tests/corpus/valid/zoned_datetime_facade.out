@@ -1,0 +1,15 @@
+-14400
+-18000
+ambiguous local time rejected
+2024-03-10T03:30:00
+nonexistent local time rejected
+2024-03-10T03:30:00
+rejected offset mismatch
+2024-03-10T03:30:00
+-14400
+true
+EDT
+2024-03-10T16:30:00
+true
+false
+true

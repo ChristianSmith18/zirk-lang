@@ -247,6 +247,20 @@ pub enum Base {
     String,
     /// An exact elapsed-time value, stored as nanoseconds.
     Duration,
+    /// An absolute Unix timeline point, stored as signed epoch nanoseconds.
+    Instant,
+    /// Canonical named IANA zone or fixed-offset identifier, stored as an
+    /// immutable text handle.
+    TimeZone,
+    /// An instant paired with a canonical time-zone identifier, stored as an
+    /// opaque immutable runtime text handle.
+    ZonedDateTime,
+    /// A calendar-relative displacement with signed year/month/week/day
+    /// components, packed into the native 128-bit scalar representation.
+    Period,
+    /// An immutable tagged temporal shift for local-clock and zoned-calendar
+    /// arithmetic.
+    TimeShift,
     /// A calendar date (roadmap Phase 7, `date-and-time-types`): stored as a
     /// day count since 1970-01-01 in the proleptic Gregorian calendar.
     Date,
@@ -453,6 +467,12 @@ impl Type {
     pub const OBJECT: Type = Type::of(Base::Object);
     pub const DYNAMIC: Type = Type::of(Base::Dynamic);
     pub const DURATION: Type = Type::of(Base::Duration);
+    /// An absolute timeline instant, stored as signed nanoseconds.
+    pub const INSTANT: Type = Type::of(Base::Instant);
+    pub const TIME_ZONE: Type = Type::of(Base::TimeZone);
+    pub const ZONED_DATE_TIME: Type = Type::of(Base::ZonedDateTime);
+    pub const PERIOD: Type = Type::of(Base::Period);
+    pub const TIME_SHIFT: Type = Type::of(Base::TimeShift);
     /// A calendar date — a day count since 1970-01-01.
     pub const DATE: Type = Type::of(Base::Date);
     /// A clock time of day — nanoseconds since midnight.
@@ -793,6 +813,11 @@ impl Type {
             "Object" => Type::OBJECT,
             "Dynamic" => Type::DYNAMIC,
             "Duration" => Type::DURATION,
+            "Instant" => Type::INSTANT,
+            "TimeZone" => Type::TIME_ZONE,
+            "ZonedDateTime" => Type::ZONED_DATE_TIME,
+            "Period" => Type::PERIOD,
+            "TimeShift" => Type::TIME_SHIFT,
             "Date" => Type::DATE,
             "Time" => Type::TIME,
             "DateTime" => Type::DATETIME,
@@ -843,6 +868,11 @@ pub fn describe(ty: Type, names: &dyn TypeNames) -> String {
         Base::Object => "Object".to_string(),
         Base::Dynamic => "Dynamic".to_string(),
         Base::Duration => "Duration".to_string(),
+        Base::Instant => "Instant".to_string(),
+        Base::TimeZone => "TimeZone".to_string(),
+        Base::ZonedDateTime => "ZonedDateTime".to_string(),
+        Base::Period => "Period".to_string(),
+        Base::TimeShift => "TimeShift".to_string(),
         Base::Date => "Date".to_string(),
         Base::Time => "Time".to_string(),
         Base::DateTime => "DateTime".to_string(),
@@ -1303,14 +1333,7 @@ pub fn pending_type(name: &str) -> Option<PendingType> {
     // Phase 7 brings the stdlib, and with it the collection and temporal
     // families. They are compiler-known native types, not library objects:
     // what that phase adds is their implementation, not their existence.
-    const PHASE_7: &[&str] = &[
-        // `Date`/`Time`/`DateTime` are implemented (`Type::from_name`,
-        // `date-and-time-types`); the zone-aware family stays pending.
-        "Instant",
-        "ZonedDateTime",
-        "TimeZone",
-        "Period",
-    ];
+    const PHASE_7: &[&str] = &[];
     // Phase 7b brings the functional style. `Iterable<T>` and `Iterator<T>`
     // are registered as native contracts in `checker.rs` and are no longer
     // pending here; the remaining functional-style constructs are not types.
@@ -1471,16 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn the_zone_aware_temporal_family_is_pending_not_unknown() {
-        // `Date`/`Time`/`DateTime` are implemented (`date-and-time-types`);
-        // the zone-aware half of the family stays pending.
-        for name in ["Instant", "ZonedDateTime", "TimeZone", "Period"] {
-            assert_eq!(
-                pending_type(name).map(|t| t.phase),
-                Some(Phase::SEVEN),
-                "`{name}` should announce its phase"
-            );
-        }
+    fn the_temporal_family_names_resolve_to_compiler_owned_types() {
         assert!(pending_type("Date").is_none(), "`Date` is implemented");
         assert!(pending_type("Time").is_none(), "`Time` is implemented");
         assert!(
@@ -1490,6 +1504,19 @@ mod tests {
         assert_eq!(Type::from_name("Date"), Some(Type::DATE));
         assert_eq!(Type::from_name("Time"), Some(Type::TIME));
         assert_eq!(Type::from_name("DateTime"), Some(Type::DATETIME));
+        assert_eq!(Type::from_name("Instant"), Some(Type::INSTANT));
+        assert_eq!(Type::from_name("TimeZone"), Some(Type::TIME_ZONE));
+        assert_eq!(
+            Type::from_name("ZonedDateTime"),
+            Some(Type::ZONED_DATE_TIME)
+        );
+        assert_eq!(Type::from_name("Period"), Some(Type::PERIOD));
+        assert_eq!(Type::from_name("TimeShift"), Some(Type::TIME_SHIFT));
+        assert!(pending_type("TimeZone").is_none());
+        assert!(pending_type("ZonedDateTime").is_none());
+        assert!(pending_type("Period").is_none());
+        assert!(pending_type("TimeShift").is_none());
+        assert!(pending_type("Instant").is_none());
     }
 
     #[test]

@@ -1,0 +1,30 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Date(2026, 5, 17).format_locale("en-US", "full") {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(error) => stdout.println(error.message());
+    };
+    match Time(16, 12, 20).format_locale("ja-JP", "medium") {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(error) => stdout.println(error.message());
+    };
+    match DateTime(Date(2026, 5, 17), Time(16, 12, 20)).format_locale("es-CL", "medium") {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(error) => stdout.println(error.message());
+    };
+    match Date(2026, 5, 17).format_locale("zz-ZZ", "short") {
+        Result.Ok(value) => stdout.println("unexpected " + value);
+        Result.Error(error) => stdout.println("rejected " + error.message());
+    };
+    match Date(2026, 5, 17).format_locale("ar-EG-u-nu-arab", "short") {
+        Result.Ok(value) => stdout.println(value);
+        Result.Error(error) => stdout.println(error.message());
+    };
+    match Date(2026, 5, 17).format_locale("en-US", "unsupported-style") {
+        Result.Ok(value) => stdout.println("unexpected " + value);
+        Result.Error(error) => stdout.println("style rejected " + error.message());
+    };
+}
+
+main();

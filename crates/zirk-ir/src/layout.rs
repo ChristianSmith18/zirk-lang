@@ -3,6 +3,7 @@
 use crate::{FloatWidth, IntWidth, IrType, Module, UnionMetadataError};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use zirk_runtime_core::collections::{CollectionHashEq, CollectionTextKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeLayoutKind {
@@ -44,6 +45,83 @@ pub struct RuntimeTypeLayout {
 }
 
 impl Module {
+    /// Derives the shared recursive Hash/Equal capability for one concrete
+    /// collection key or element type. `None` means the type has no lawful
+    /// collection-key representation in the current runtime contract.
+    pub fn collection_hash_eq_capability(&self, ty: IrType) -> Option<CollectionHashEq> {
+        self.derive_collection_hash_eq_capability(ty, &mut HashSet::new())
+    }
+
+    fn derive_collection_hash_eq_capability(
+        &self,
+        ty: IrType,
+        active: &mut HashSet<IrType>,
+    ) -> Option<CollectionHashEq> {
+        if !active.insert(ty) {
+            return None;
+        }
+        let capability = match ty {
+            IrType::Int(width) => CollectionHashEq::Integer {
+                bits: width.bits() as u16,
+                signed: width.signed(),
+            },
+            IrType::Float(width) => CollectionHashEq::BinaryFloat {
+                bits: width.bits() as u16,
+            },
+            IrType::Decimal => CollectionHashEq::Decimal,
+            IrType::Boolean => CollectionHashEq::Boolean,
+            IrType::String => CollectionHashEq::Text(CollectionTextKind::String),
+            IrType::Char => CollectionHashEq::Text(CollectionTextKind::Char),
+            IrType::Nullable(inner) => CollectionHashEq::Nullable(Box::new(
+                self.derive_collection_hash_eq_capability(inner.inner(), active)?,
+            )),
+            IrType::Value(id) => {
+                let value = self.values.get(id as usize)?;
+                CollectionHashEq::Tuple(
+                    value
+                        .fields
+                        .iter()
+                        .map(|field| self.derive_collection_hash_eq_capability(field.ty, active))
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+            IrType::Enum(id) => {
+                let enumeration = self.enums.get(id as usize)?;
+                CollectionHashEq::Enum(
+                    enumeration
+                        .variants
+                        .iter()
+                        .map(|variant| {
+                            variant
+                                .iter()
+                                .map(|field| {
+                                    let field = enumeration.fields.get(*field as usize)?;
+                                    self.derive_collection_hash_eq_capability(field.ty, active)
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+            IrType::Union(representation) => {
+                let (_, union) = self.union_type_for_representation(representation)?;
+                CollectionHashEq::Union(
+                    union
+                        .alternatives
+                        .iter()
+                        .map(|alternative| {
+                            self.derive_collection_hash_eq_capability(*alternative, active)
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                )
+            }
+            IrType::Object(_) | IrType::Contract(_) => CollectionHashEq::Identity,
+            _ => return None,
+        };
+        active.remove(&ty);
+        Some(capability)
+    }
+
     /// Derives a target-independent storage contract for every storable IR
     /// type. The descriptor preserves field offsets, nested layouts, tagged
     /// alternatives and managed-reference paths.

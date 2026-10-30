@@ -358,6 +358,70 @@ fn map_typed_values_round_trip_aggregate_layouts() {
 }
 
 #[test]
+fn float_collection_keys_canonicalize_signed_zero() {
+    let source = corpus("valid").join("float_collection_keys.zrk");
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("floating collection key fixture has expected output");
+    let output = zirk("run", &source, "float_collection_keys", &[]);
+    assert_eq!(
+        output.status, 0,
+        "float_collection_keys failed.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
+fn unions_with_unlowered_payload_identities_fail_before_backend() {
+    let source = corpus("invalid").join("union_unlowered_payloads.zrk");
+    let output = zirk("check", &source, "union_unlowered_payloads", &[]);
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.matches("error[E0423]").count() >= 2,
+        "expected both unsupported union compositions to receive source diagnostics:\n{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("panicked at"), "{}", output.stderr);
+}
+
+#[test]
+fn oversized_union_payload_fails_during_layout_validation() {
+    let source = corpus("invalid").join("union_oversized_payload.zrk");
+    let output = zirk("build", &source, "union_oversized_payload", &[]);
+    assert_ne!(output.status, 0);
+    assert!(
+        output.stderr.contains("error[E0513]")
+            && output
+                .stderr
+                .contains("exceeding the 4096-byte inline limit"),
+        "expected the source diagnostic for oversized inline union payloads:\n{}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("panicked at"), "{}", output.stderr);
+    assert!(
+        !PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("union_oversized_payload")
+            .join("union_oversized_payload")
+            .exists(),
+        "layout validation must fail before a native executable is emitted"
+    );
+}
+
+#[test]
+fn std_collections_aliases_share_builtin_type_identities() {
+    let source = corpus("valid").join("standard_collections_facade.zrk");
+    let expected = std::fs::read_to_string(source.with_extension("out"))
+        .expect("standard collection facade fixture has expected output");
+    let output = zirk("run", &source, "standard_collections_facade", &[]);
+    assert_eq!(
+        output.status, 0,
+        "standard_collections_facade failed.\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), normalize(&expected));
+}
+
+#[test]
 fn float128_printing_keeps_precision_beyond_float64() {
     let source = corpus("valid").join("float128_prints.zrk");
     let expected = std::fs::read_to_string(source.with_extension("out"))
@@ -380,6 +444,11 @@ fn dynamic_object_properties_read_write_and_raise_catchable_missing_errors() {
         "dynamic_object_contract_conformance",
         "dynamic_object_missing_read_catch",
         "dynamic_cast_mismatch_catch",
+        "json_generated_codec",
+        "json_generated_codec_implicit_json",
+        "json_generated_codec_collections",
+        "json_generated_codec_field_defaults",
+        "json_generated_codec_payload_enum",
         "json_contract_codec",
         "object_spread_shallow_copy",
     ] {
@@ -1828,6 +1897,56 @@ fn main(): Void {
 
     assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
     assert_eq!(normalize(&output.stdout), "42\nzirk\n");
+}
+
+#[test]
+fn generic_function_defaults_work_for_inferred_explicit_and_defaulted_types() {
+    let output = crate_of(
+        "generic_function_defaults",
+        &[(
+            "main.zrk",
+            r#"import { stdout } from std.io;
+fn preserve<T>(value: T, label: String = "default label"): T { return value; }
+fn defaulted<T = Int32>(label: String = "default type and value"): String { return label; }
+fn main(): Void {
+    stdout.println(preserve(42));
+    stdout.println(preserve<String>("explicit"));
+    stdout.println(defaulted());
+    stdout.println(defaulted<String>("explicit type"));
+}"#,
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "42\nexplicit\ndefault type and value\nexplicit type\n"
+    );
+}
+
+#[test]
+fn generic_function_bodies_specialize_nested_generic_calls() {
+    let output = crate_of(
+        "generic_nested_function_specialization",
+        &[(
+            "main.zrk",
+            r#"import { stdout } from std.io;
+fn identity<T>(value: T): T { return value; }
+fn relay<T>(value: T): T { return identity(value); }
+fn wrap<T>(value: T): T { return relay(value); }
+fn preserve_list<T>(values: List<T>): List<T> { return identity(values); }
+fn main(): Void {
+    stdout.println(wrap(42));
+    stdout.println(wrap<String>("zirk"));
+    mut values: List<Int32> = List(7);
+    mut preserved: List<Int32> = preserve_list<Int32>(values);
+    stdout.println(preserved[0]);
+}"#,
+        )],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "42\nzirk\n7\n");
 }
 
 #[test]
@@ -10681,6 +10800,663 @@ fn captured_structural_union_payload_survives_forced_gc() {
     assert!(output.stderr.contains("[zirk-gc] collection"));
 }
 
+#[test]
+fn union_narrowing_payload_survives_error_cleanup_and_forced_gc() {
+    let source = "import { stdout } from std.io;\n\
+        type Payload = { kind: \"text\"; text: String };\n\
+        type Value = Payload | Int32;\n\
+        class Churn { value: Int32; construct(value: Int32) { this.value = value; } }\n\
+        fn describe(value: Value): String {\n\
+            if value is Payload { return match value.kind { \"text\" => value.text; }; }\n\
+            return \"number\";\n\
+        }\n\
+        fn fail(value: Value): String throws InvalidArgumentError {\n\
+            if value is Payload { throw InvalidArgumentError(value.text); }\n\
+            return \"number\";\n\
+        }\n\
+        fn main(): Void {\n\
+            inmut value: Value = { kind: \"text\", text: \"payload stays live through cleanup\" };\n\
+            stdout.println(describe(value));\n\
+            try { _ = fail(value); }\n\
+            catch InvalidArgumentError(error) { stdout.println(error.message()); }\n\
+            finally {\n\
+                mut i = 0;\n\
+                while i < 12000 { mut discarded = Churn(i); i = i + 1; }\n\
+                stdout.println(describe(value));\n\
+                stdout.println(\"cleanup\");\n\
+            }\n\
+        }";
+
+    let output = zirk_with_env(
+        source,
+        "gc_union_narrowing_error_cleanup",
+        &[("ZIRK_GC_THRESHOLD", "1"), ("ZIRK_GC_TRACE", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "payload stays live through cleanup\npayload stays live through cleanup\npayload stays live through cleanup\ncleanup\n"
+    );
+    assert!(output.stderr.contains("[zirk-gc] collection"));
+}
+
+#[test]
+fn managed_union_elements_survive_forced_gc_in_ordered_sequences() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    text: String;
+    construct(text: String) { this.text = text; }
+}
+type Item = Payload | Int32;
+fn main(): Void {
+    mut deque: Deque<Item> = Deque();
+    mut queue: Queue<Item> = Queue();
+    mut stack: Stack<Item> = Stack();
+    mut list: List<Item> = List();
+    mut array: Array<Item> = Array(96);
+    mut index: Int32 = 0;
+    while index < 96 {
+        deque.push_back(Payload("deque-" + index.to_string()));
+        queue.enqueue(Payload("queue-" + index.to_string()));
+        stack.push(Payload("stack-" + index.to_string()));
+        list.add(Payload("list-" + index.to_string()));
+        array[index] = Payload("array-" + index.to_string());
+        mut churn: Payload = Payload("temporary-" + index.to_string());
+        index = index + 1;
+    }
+    mut array_clone: Array<Item> = array.clone();
+    mut deque_count: Int32 = 0;
+    for item in deque {
+        if item is Payload {
+            if item.text.length > 0 { deque_count = deque_count + 1; }
+            mut churn: Payload = Payload(item.text);
+        }
+    }
+    mut list_count: Int32 = 0;
+    for item in list {
+        if item is Payload {
+            if item.text.length > 0 { list_count = list_count + 1; }
+            mut churn: Payload = Payload(item.text);
+        }
+    }
+    mut array_count: Int32 = 0;
+    index = 0;
+    while index < 96 {
+        inmut item: Item = array[index];
+        if item is Payload {
+            if item.text.length > 0 { array_count = array_count + 1; }
+            mut churn: Payload = Payload(item.text);
+        }
+        index = index + 1;
+    }
+    mut clone_count: Int32 = 0;
+    index = 0;
+    while index < 96 {
+        inmut item: Item = array_clone[index];
+        if item is Payload {
+            if item.text.length > 0 { clone_count = clone_count + 1; }
+            mut churn: Payload = Payload(item.text);
+        }
+        index = index + 1;
+    }
+    mut queue_count: Int32 = 0;
+    mut queue_done: Boolean = false;
+    while !queue_done {
+        match queue.dequeue() {
+            Result.Ok(item) => {
+                if item is Payload {
+                    if item.text.length > 0 { queue_count = queue_count + 1; }
+                    mut churn: Payload = Payload(item.text);
+                }
+            }
+            Result.Error(_) => { queue_done = true; }
+        }
+    }
+    mut stack_count: Int32 = 0;
+    mut stack_done: Boolean = false;
+    while !stack_done {
+        match stack.pop() {
+            Result.Ok(item) => {
+                if item is Payload {
+                    if item.text.length > 0 { stack_count = stack_count + 1; }
+                    mut churn: Payload = Payload(item.text);
+                }
+            }
+            Result.Error(_) => { stack_done = true; }
+        }
+    }
+    stdout.println(deque_count.to_string());
+    stdout.println(list_count.to_string());
+    stdout.println(array_count.to_string());
+    stdout.println(clone_count.to_string());
+    stdout.println(queue_count.to_string());
+    stdout.println(stack_count.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "managed_union_sequence_gc",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "96\n96\n96\n96\n96\n96\n");
+}
+
+#[test]
+fn removing_union_payloads_from_ordered_sequences_releases_gc_edges() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    text: String;
+    construct(text: String) { this.text = text; }
+}
+type Item = Payload | Int32;
+fn release_deque(): Weak<Payload> {
+    mut values: Deque<Item> = Deque();
+    mut payload: Payload = Payload("deque");
+    mut weak: Weak<Payload> = Weak.from(payload);
+    values.push_back(payload);
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.push_back(Payload("deque-filler"));
+        index = index + 1;
+    }
+    _ = values.pop_front();
+    return weak;
+}
+fn release_queue(): Weak<Payload> {
+    mut values: Queue<Item> = Queue();
+    mut payload: Payload = Payload("queue");
+    mut weak: Weak<Payload> = Weak.from(payload);
+    values.enqueue(payload);
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.enqueue(Payload("queue-filler"));
+        index = index + 1;
+    }
+    _ = values.dequeue();
+    return weak;
+}
+fn release_stack(): Weak<Payload> {
+    mut values: Stack<Item> = Stack();
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.push(Payload("stack-filler"));
+        index = index + 1;
+    }
+    mut payload: Payload = Payload("stack");
+    mut weak: Weak<Payload> = Weak.from(payload);
+    values.push(payload);
+    _ = values.pop();
+    return weak;
+}
+fn main(): Void {
+    mut deque_weak: Weak<Payload> = release_deque();
+    mut queue_weak: Weak<Payload> = release_queue();
+    mut stack_weak: Weak<Payload> = release_stack();
+    mut index: Int32 = 0;
+    while index < 32 {
+        mut churn: Payload = Payload("temporary");
+        index = index + 1;
+    }
+    stdout.println(deque_weak.is_alive.to_string());
+    stdout.println(queue_weak.is_alive.to_string());
+    stdout.println(stack_weak.is_alive.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "union_sequence_edges_released",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "false\nfalse\nfalse\n");
+}
+
+#[test]
+fn growing_deque_keeps_managed_payloads_alive_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut deque: Deque<Payload> = Deque();
+    mut index: Int32 = 0;
+    while index < 96 {
+        deque.push_back(Payload(index));
+        index = index + 1;
+    }
+    index = 0;
+    while index < 96 {
+        mut churn: Payload = Payload(index + 1000);
+        index = index + 1;
+    }
+    mut deque_count: Int32 = 0;
+    for item in deque {
+        mut iter_churn: Payload = Payload(item.value + 1000);
+        deque_count = deque_count + 1;
+    }
+    stdout.println(deque_count.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(source, "deque_growth_gc", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "96\n");
+}
+
+#[test]
+fn growing_queue_keeps_managed_payloads_alive_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut queue: Queue<Payload> = Queue();
+    mut index: Int32 = 0;
+    while index < 96 {
+        queue.enqueue(Payload(index));
+        index = index + 1;
+    }
+    index = 0;
+    while index < 96 {
+        mut churn: Payload = Payload(index + 1000);
+        index = index + 1;
+    }
+    match queue.dequeue() {
+        Result.Ok(item) => stdout.println(item.value.to_string());
+        Result.Error(_) => stdout.println("queue-empty");
+    }
+}
+main();"#;
+
+    let output = zirk_with_env(source, "queue_growth_gc", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "0\n");
+}
+
+#[test]
+fn growing_stack_keeps_managed_payloads_alive_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut stack: Stack<Payload> = Stack();
+    mut index: Int32 = 0;
+    while index < 96 {
+        stack.push(Payload(index));
+        index = index + 1;
+    }
+    index = 0;
+    while index < 96 {
+        mut churn: Payload = Payload(index + 1000);
+        index = index + 1;
+    }
+    match stack.pop() {
+        Result.Ok(item) => stdout.println(item.value.to_string());
+        Result.Error(_) => stdout.println("stack-empty");
+    }
+}
+main();"#;
+
+    let output = zirk_with_env(source, "stack_growth_gc", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "95\n");
+}
+
+#[test]
+fn map_iteration_keeps_managed_values_alive_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut values: Map<Int32, Payload> = Map();
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.set(index, Payload(index));
+        index = index + 1;
+    }
+    mut sum: Int32 = 0;
+    for entry in values.entries() {
+        mut churn: Payload = Payload(entry[1].value + 1000);
+        sum = sum + entry[1].value;
+    }
+    stdout.println(sum.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(source, "map_iteration_gc", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "4560\n");
+}
+
+#[test]
+fn map_iteration_error_cleanup_preserves_entries_under_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn fail_during_iteration(values: Map<Int32, Payload>): Void throws InvalidArgumentError {
+    for entry in values.entries() {
+        throw InvalidArgumentError(entry[1].value.to_string());
+    }
+}
+fn main(): Void {
+    mut values: Map<Int32, Payload> = Map();
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.set(index, Payload(index));
+        index = index + 1;
+    }
+    try {
+        fail_during_iteration(values);
+    }
+    catch InvalidArgumentError(error) {
+        stdout.println(error.message());
+    }
+    index = 0;
+    while index < 12000 {
+        mut discarded: Payload = Payload(index + 1000);
+        index = index + 1;
+    }
+    mut sum: Int32 = 0;
+    for entry in values.entries() {
+        sum = sum + entry[1].value;
+    }
+    stdout.println(sum.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "map_iteration_error_cleanup_gc",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "0\n4560\n");
+}
+
+#[test]
+fn set_iteration_keeps_managed_elements_alive_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn main(): Void {
+    mut values: Set<Payload> = Set();
+    mut index: Int32 = 0;
+    while index < 96 {
+        values.add(Payload(index));
+        index = index + 1;
+    }
+    mut sum: Int32 = 0;
+    for value in values {
+        mut churn: Payload = Payload(value.value + 1000);
+        sum = sum + value.value;
+    }
+    stdout.println(sum.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(source, "set_iteration_gc", &[("ZIRK_GC_THRESHOLD", "1")]);
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "4560\n");
+}
+
+#[test]
+fn array_and_list_retain_managed_values_during_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+class Churn {
+    value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn fill(array: Array<Payload>, list: List<Payload>): Void {
+    mut index: Int32 = 0;
+    while index < 64 {
+        mut payload: Payload = Payload(index);
+        array[index] = payload;
+        list.add(payload);
+        index = index + 1;
+    }
+}
+fn main(): Void {
+    mut array: Array<Payload> = Array(64);
+    mut list: List<Payload> = List();
+    fill(array, list);
+    mut churn_index: Int32 = 0;
+    while churn_index < 128 {
+        mut discarded: Churn = Churn(churn_index);
+        churn_index = churn_index + 1;
+    }
+    mut array_sum: Int32 = 0;
+    mut index: Int32 = 0;
+    while index < 64 {
+        array_sum = array_sum + array[index].value;
+        index = index + 1;
+    }
+    mut list_sum: Int32 = 0;
+    for payload in list { list_sum = list_sum + payload.value; }
+    stdout.println(array_sum.to_string());
+    stdout.println(list_sum.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "array_list_managed_values_forced_gc",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "2016\n2016\n");
+}
+
+#[test]
+fn map_stored_union_payload_survives_forced_gc() {
+    let source = "import { stdout } from std.io;\n\
+        class Payload { text: String; value: Int32; construct(text: String, value: Int32) { this.text = text; this.value = value; } }\n\
+        type Value = Payload | 42;\n\
+        type TextKey = String | Int32;\n\
+        type ManagedValue = Payload | Int32;\n\
+        type NestedValue = { value: Value };\n\
+        enum WrappedValue { Nested(value: NestedValue), Empty }\n\
+        class Churn { value: Int32; construct(value: Int32) { this.value = value; } }\n\
+        fn store(values: Map<Int32, Value>, nested: Map<Int32, NestedValue>, wrapped: Map<Int32, WrappedValue>, union_keys: Map<TextKey, Int32>, union_elements: Set<TextKey>, managed_elements: Set<ManagedValue>): Void {\n\
+            inmut payload: Payload = Payload(\"map union survives\", 1);\n\
+            mut index: Int32 = 1;\n\
+            while index <= 128 { values.set(index, payload); index = index + 1; }\n\
+            inmut replacement: Payload = Payload(\"map union replaced\", 2);\n\
+            values.set(1, replacement);\n\
+            inmut union_value: Value = payload;\n\
+            inmut nested_value: NestedValue = { value: union_value };\n\
+            nested.set(1, nested_value);\n\
+            wrapped.set(1, WrappedValue.Nested(nested_value));\n\
+            mut source_key: String = \"snapshot survives\";\n\
+            inmut text_key: TextKey = source_key;\n\
+            union_keys.set(text_key, 93);\n\
+            union_elements.add(text_key);\n\
+            union_elements.add(7);\n\
+            inmut managed_value: ManagedValue = payload;\n\
+            managed_elements.add(managed_value);\n\
+            mut set_index: Int32 = 0;\n\
+            while set_index < 32 {\n\
+                mut set_payload: Payload = Payload(\"managed set value\", set_index);\n\
+                inmut set_value: ManagedValue = set_payload;\n\
+                managed_elements.add(set_value);\n\
+                set_index = set_index + 1;\n\
+            }\n\
+            source_key[0] = 'x';\n\
+        }\n\
+        fn main(): Void {\n\
+            mut values: Map<Int32, Value> = Map();\n\
+            mut nested: Map<Int32, NestedValue> = Map();\n\
+            mut wrapped: Map<Int32, WrappedValue> = Map();\n\
+            mut union_keys: Map<TextKey, Int32> = Map();\n\
+            mut union_elements: Set<TextKey> = Set();\n\
+            mut managed_elements: Set<ManagedValue> = Set();\n\
+            store(values, nested, wrapped, union_keys, union_elements, managed_elements);\n\
+            mut i = 0;\n\
+            while i < 12000 { mut discarded = Churn(i); i = i + 1; }\n\
+            inmut fallback: Value = 42;\n\
+            mut value: Value = values.get(1) ?? fallback;\n\
+            stdout.println(match value { 42 => \"number\"; _ => value.text; });\n\
+            mut grown_value: Value = values.get(128) ?? fallback;\n\
+            stdout.println(match grown_value { 42 => \"number\"; _ => grown_value.text; });\n\
+            inmut fallback_nested: NestedValue = { value: fallback };\n\
+            inmut nested_value: NestedValue = nested.get(1) ?? fallback_nested;\n\
+            mut nested_union: Value = nested_value.value;\n\
+            stdout.println(match nested_union { 42 => \"number\"; _ => nested_union.text; });\n\
+            inmut wrapped_value: WrappedValue = wrapped.get(1) ?? WrappedValue.Empty;\n\
+            stdout.println(match wrapped_value { WrappedValue.Nested(_) => \"enum nested union survives\"; WrappedValue.Empty => \"empty\"; });\n\
+            stdout.println((union_keys.get(\"snapshot survives\") ?? 0).to_string());\n\
+            stdout.println(union_elements.contains(\"snapshot survives\").to_string());\n\
+            stdout.println(union_elements.contains(7).to_string());\n\
+            mut managed_sum: Int32 = 0;\n\
+            mut managed_count: Int32 = 0;\n\
+            mut original_survives: Boolean = false;\n\
+            for managed_value in managed_elements {\n\
+                if managed_value is Payload {\n\
+                    managed_sum = managed_sum + managed_value.value;\n\
+                    if managed_value.text == \"managed set value\" { managed_count = managed_count + 1; }\n\
+                    if managed_value.text == \"map union survives\" { original_survives = true; }\n\
+                }\n\
+            }\n\
+            stdout.println(managed_sum.to_string());\n\
+            stdout.println(managed_count.to_string());\n\
+            stdout.println(original_survives.to_string());\n\
+        }";
+
+    let output = zirk_with_env(
+        source,
+        "gc_map_stored_union_payload",
+        &[("ZIRK_GC_THRESHOLD", "1"), ("ZIRK_GC_TRACE", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "map union replaced\nmap union survives\nmap union survives\nenum nested union survives\n93\ntrue\ntrue\n497\n32\ntrue\n"
+    );
+    assert!(output.stderr.contains("[zirk-gc] collection"));
+}
+
+#[test]
+fn nested_union_enum_tuple_collection_keys_survive_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+enum Payload { Text(text: String), Number(value: Int32) }
+type Item = Payload | Int32;
+type Composite = Tuple<Item, Int32>;
+enum Envelope { Item(value: Item), Empty }
+class Churn { value: Int32; construct(value: Int32) { this.value = value; } }
+fn fill(values: Map<Composite, Envelope>, keys: Set<Composite>): Void {
+    inmut payload: Item = Payload.Text("nested union key survives");
+    inmut key: Composite = (payload, 7);
+    values.set(key, Envelope.Item(payload));
+    keys.add(key);
+}
+fn main(): Void {
+    mut values: Map<Composite, Envelope> = Map();
+    mut keys: Set<Composite> = Set();
+    fill(values, keys);
+    mut i: Int32 = 0;
+    while i < 12000 { mut discarded = Churn(i); i = i + 1; }
+    inmut payload: Item = Payload.Text("nested union key survives");
+    inmut key: Composite = (payload, 7);
+    inmut fallback: Envelope = Envelope.Empty;
+    mut stored: Envelope = values.get(key) ?? fallback;
+    stdout.println(match stored {
+        Envelope.Item(item) => match item {
+            Payload.Text(text) => text;
+            _ => "wrong payload";
+        };
+        Envelope.Empty => "missing";
+    });
+    stdout.println(keys.contains(key).to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "gc_nested_union_enum_tuple_collection_keys",
+        &[("ZIRK_GC_THRESHOLD", "1"), ("ZIRK_GC_TRACE", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "nested union key survives\ntrue\n"
+    );
+    assert!(output.stderr.contains("[zirk-gc] collection"));
+}
+
+#[test]
+fn enum_text_collection_snapshots_survive_forced_gc() {
+    let source = r#"import { stdout } from std.io;
+enum TextKey { Name(value: String), Character(value: Char), Empty }
+class Churn { value: Int32; construct(value: Int32) { this.value = value; } }
+fn main(): Void {
+    mut values: Map<TextKey, Int32> = Map();
+    mut keys: Set<TextKey> = Set();
+    mut index: Int32 = 0;
+    while index < 64 {
+        mut source: String = "snapshot " + index.to_string();
+        inmut key: TextKey = TextKey.Name(source);
+        values.set(key, index);
+        keys.add(key);
+        source[0] = "x";
+        index = index + 1;
+    }
+    inmut character: TextKey = TextKey.Character('é');
+    values.set(character, 100);
+    keys.add(character);
+    mut discarded: Int32 = 0;
+    while discarded < 12000 {
+        mut value: Churn = Churn(discarded);
+        discarded = discarded + 1;
+    }
+    mut total: Int32 = 0;
+    mut found: Int32 = 0;
+    mut probe: Int32 = 0;
+    while probe < 64 {
+        inmut key: TextKey = TextKey.Name("snapshot " + probe.to_string());
+        if keys.contains(key) { found = found + 1; }
+        total = total + (values.get(key) ?? -1000);
+        probe = probe + 1;
+    }
+    if keys.contains(TextKey.Character('é')) { found = found + 1; }
+    total = total + (values.get(TextKey.Character('é')) ?? -1000);
+    stdout.println(keys.length.to_string());
+    stdout.println(found.to_string());
+    stdout.println(total.to_string());
+}"#;
+    let output = zirk_with_env(
+        source,
+        "gc_enum_text_collection_keys",
+        &[("ZIRK_GC_THRESHOLD", "1"), ("ZIRK_GC_TRACE", "1")],
+    );
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "65\n65\n2116\n");
+    assert!(output.stderr.contains("[zirk-gc] collection"));
+}
+
 /// `docs/decisions/ADR-003-investigacion-fase-4.md`'s probe 1 cycle (two
 /// `Node`s referencing each other through a nullable field), discarded
 /// immediately, repeated under sustained allocation pressure with a small
@@ -11016,6 +11792,40 @@ fn clone_of_a_simple_object_has_independent_identity_and_equal_fields() {
     assert_eq!(normalize(&output.stdout), "false\n1\n2\n");
 }
 
+#[test]
+fn clone_handles_tuple_nullable_enum_and_union_payloads() {
+    let source = "import { stdout } from std.io;\nclass Leaf {\n\
+        mut value: Int32;\n\
+        construct(value: Int32) { this.value = value; }\n\
+    }\n\
+    type LeafOrText = Leaf | String;\n\
+    enum Envelope { Item(value: Tuple<Leaf?, String>), Empty }\n\
+    fn main(): Void {\n\
+        mut leaf: Leaf = Leaf(7);\n\
+        mut maybe: Leaf? = leaf;\n\
+        mut tuple: Tuple<Leaf?, String> = (maybe, \"payload\");\n\
+        mut tuple_copy: Tuple<Leaf?, String> = tuple.clone();\n\
+        mut envelope: Envelope = Envelope.Item(tuple);\n\
+        mut envelope_copy: Envelope = envelope.clone();\n\
+        mut union: LeafOrText = leaf;\n\
+        mut union_copy: LeafOrText = union.clone();\n\
+        stdout.println(tuple_copy[0] is leaf);\n\
+        match envelope_copy {\n\
+            Envelope.Item(value) => stdout.println(value[0] is leaf);\n\
+            Envelope.Empty => stdout.println(\"empty\");\n\
+        }\n\
+        stdout.println(\"cloned\");\n\
+    }";
+
+    let output = zirk_with_env(source, "clone_aggregate_values", &[]);
+    assert_eq!(
+        output.status, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(normalize(&output.stdout), "false\nfalse\ncloned\n");
+}
+
 /// The spec's own named invariant (`zirk-memory-safety`'s "Deep clone
 /// contract", scenario "Graph contains shared child"): `a.left is a.right`
 /// before cloning (both fields alias the same child); after `mut b =
@@ -11176,6 +11986,95 @@ fn a_collection_forced_mid_clone_does_not_corrupt_the_finished_clone() {
     );
 }
 
+#[test]
+fn completed_clone_releases_temporary_roots_after_returning_weak_handle() {
+    let source = r#"import { stdout } from std.io;
+class Payload {
+    mut value: Int32;
+    construct(value: Int32) { this.value = value; }
+}
+fn weak_of_clone(source: Payload): Weak<Payload> {
+    mut cloned: Payload = source.clone();
+    return Weak.from(cloned);
+}
+fn main(): Void {
+    mut original: Payload = Payload(42);
+    mut weak: Weak<Payload> = weak_of_clone(original);
+    mut index: Int32 = 0;
+    while index < 64 {
+        mut temporary: Payload = Payload(index);
+        index = index + 1;
+    }
+    stdout.println(original.value.to_string());
+    stdout.println(weak.is_alive.to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(
+        source,
+        "completed_clone_releases_temporary_roots",
+        &[("ZIRK_GC_THRESHOLD", "1")],
+    );
+
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(normalize(&output.stdout), "42\nfalse\n");
+}
+
+#[test]
+fn map_held_clone_survives_forced_gc_and_preserves_the_original_entry() {
+    let source = r#"import { stdout } from std.io;
+class Node {
+    mut value: Int32;
+    mut next: Node?;
+    construct(value: Int32) { this.value = value; this.next = null; }
+}
+fn build(n: Int32): Node {
+    mut head: Node = Node(0);
+    mut i: Int32 = 1;
+    while i < n {
+        mut fresh: Node = Node(i);
+        fresh.next = head;
+        head = fresh;
+        i = i + 1;
+    }
+    return head;
+}
+fn sum(start: Node): Int32 {
+    mut total: Int32 = 0;
+    mut current: Node? = start;
+    while true {
+        match current {
+            null => { return total; }
+            node => {
+                total = total + node.value;
+                current = node.next;
+            }
+        }
+    }
+    return total;
+}
+fn main(): Void {
+    mut values: Map<Int32, Node> = Map();
+    values.set(1, build(120));
+    mut original: Node = values.get(1) ?? Node(-1);
+    mut cloned: Node = original.clone();
+    cloned.value = -1;
+    stdout.println(sum(original).to_string());
+    stdout.println(sum(cloned).to_string());
+    stdout.println(sum(values.get(1) ?? Node(-2)).to_string());
+    stdout.println((original is cloned).to_string());
+}
+main();"#;
+
+    let output = zirk_with_env(source, "map_held_clone_gc", &[("ZIRK_GC_THRESHOLD", "256")]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        "7140\n7020\n7140\nfalse\n",
+        "the Map must retain the source graph while Clone roots its partially built copy"
+    );
+}
+
 /// A class with a `Pointer<T>` field fails to compile `.clone()` with a
 /// diagnostic naming that field (spec scenario "Graph reaches a non-Clone
 /// member").
@@ -11202,6 +12101,146 @@ fn clone_of_a_class_reaching_a_pointer_field_is_rejected_at_compile_time() {
         output.stderr
     );
     assert!(output.stderr.contains("p"), "stderr:\n{}", output.stderr);
+}
+
+#[test]
+fn json_pretty_serialization_runs_with_bounded_defaults() {
+    let source = corpus("valid").join("json_stringify_pretty_dynamic.zrk");
+    let output = zirk("run", &source, "json_stringify_pretty_dynamic", &[]);
+    assert_eq!(
+        output.status, 0,
+        "pretty JSON serialization failed:\n{}",
+        output.stderr
+    );
+    assert_eq!(
+        normalize(&output.stdout),
+        include_str!("corpus/valid/json_stringify_pretty_dynamic.out")
+    );
+}
+
+#[test]
+fn json_canonicalization_sorts_keys_and_rejects_out_of_domain_numbers() {
+    let source = corpus("valid").join("json_canonicalize_dynamic.zrk");
+    let output = zirk("run", &source, "json_canonicalize_dynamic", &[]);
+    assert_eq!(output.status, 0, "stderr:\n{}", output.stderr);
+    assert_eq!(
+        normalize(&output.stdout),
+        include_str!("corpus/valid/json_canonicalize_dynamic.out")
+    );
+}
+
+#[test]
+fn public_json_stream_reader_and_writer_obey_chunk_and_document_limits() {
+    let source = corpus("valid").join("json_streaming_public_api.zrk");
+    let output = zirk("run", &source, "json_streaming_public_api", &[]);
+    assert_eq!(
+        output.status, 0,
+        "public JSON stream API failed:\n{}",
+        output.stderr
+    );
+    assert_eq!(
+        normalize(&output.stdout),
+        include_str!("corpus/valid/json_streaming_public_api.out")
+    );
+}
+
+#[test]
+fn public_json_stream_writer_applies_async_file_backpressure() {
+    use std::fs;
+    use zirk_runtime_core::permission_grant::PermissionScopes;
+
+    let project = workspace("public_json_stream_writer_async");
+    let home = workspace("public_json_stream_writer_async_home");
+    fs::create_dir_all(project.join("src/data")).unwrap();
+    let output_path = project.join("src/data/result.json");
+    fs::write(&output_path, "").unwrap();
+    fs::write(
+        project.join(".zkinit"),
+        "project { name: \"json.stream.fixture\"; version: \"0.1.0\"; type: application; entry: \"src/main.zrk\"; }\nrequires { filesystem.write; }\n",
+    )
+    .unwrap();
+    seed_exact_test_consent_with_scopes(
+        &project,
+        &home,
+        PermissionScopes {
+            filesystem_write: [output_path
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
+            .into(),
+            ..PermissionScopes::default()
+        },
+    );
+    write_entry(
+        project.join("src/main.zrk"),
+        r#"
+import { JSONLimits } from std.json;
+import { JSONStreamChunk, JSONStreamError, JSONStreamWriter } from std.json;
+import { File } from std.fs;
+import { Path } from std.path;
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut value: Object = { ok: true };
+    concurrent {
+        match JSONStreamWriter.create(value, 4, JSONLimits.defaults()) {
+            Error(_) => stdout.println("stream write failed");
+            Ok(writer) => {
+                mut first = true;
+                mut done = false;
+                mut failed = false;
+                while !done {
+                    match writer.next_chunk() {
+                        JSONStreamChunk.Data(text) => {
+                            if first {
+                                match File.write_text_async(Path.of("src/data/result.json"), text) {
+                                    Ok(_) => {}
+                                    Error(_) => { failed = true; done = true; }
+                                };
+                            } else {
+                                match File.append_text_async(Path.of("src/data/result.json"), text) {
+                                    Ok(_) => {}
+                                    Error(_) => { failed = true; done = true; }
+                                };
+                            }
+                            first = false;
+                        }
+                        JSONStreamChunk.End => { done = true; }
+                        JSONStreamChunk.Error(_) => { failed = true; done = true; }
+                    };
+                }
+                if failed {
+                    stdout.println("stream write failed");
+                } else {
+                    stdout.println("stream write complete");
+                }
+            }
+        };
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let mut command = TestCommand::new(compiler());
+    command.args(["run", "src/main.zrk"]).current_dir(&project);
+    configure_test_home(&mut command, &home);
+    let output = command.output().expect("run the async JSON stream writer");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "stream write complete\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("src/data/result.json")).unwrap(),
+        "{\"ok\":true}"
+    );
 }
 
 #[test]

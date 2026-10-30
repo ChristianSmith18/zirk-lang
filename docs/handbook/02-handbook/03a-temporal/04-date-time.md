@@ -4,8 +4,16 @@
 “2026-08-15 at 14:30” as entered locally, not one universal instant.
 
 ```zirk
-inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
-inmut composed = Date(2026, 8, 15) + Time(14, 30);
+import { stdout } from std.io;
+import { Date, DateTime, Time } from std.time;
+
+fn main(): Void {
+    inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
+    inmut composed = Date(2026, 8, 15) + Time(14, 30);
+    stdout.println(local.to_iso_string());
+    stdout.println(composed.to_iso_string());
+}
+main();
 ```
 
 It exposes `date`, `time` and their component properties through nanoseconds.
@@ -16,18 +24,34 @@ It exposes `date`, `time` and their component properties through nanoseconds.
 
 `DateTime ± Duration` moves the local components by the exact quantity and
 `DateTime - DateTime` yields the local-component `Duration` — not a globally
-meaningful elapsed time across zones. Calendar `Period` arithmetic is
-specified for a later phase.
+meaningful elapsed time across zones. Direct calendar `Period` arithmetic is
+not implemented in the current language API.
 
-## Acquiring a zone
+## Resolving a local time in a zone
+
+`DateTime.in_zone(zone, overlap, gap)` is available when both daylight-saving
+policies are explicit. It returns `Result<ZonedDateTime, LocaleError>`; the
+current language API uses `LocaleError` for rejected ambiguity, rejected gaps,
+and invalid policy strings.
 
 ```zirk
-inmut zoned = local.in_zone(TimeZone("America/Santiago"));
-```
+import { stdout } from std.io;
+import { TimeZone } from std.time;
 
-Zone assignment can fail if the local time is skipped or repeated by DST. Zirk
-rejects without an explicit policy rather than guessing. Once resolved, the
-result is ZonedDateTime and has an absolute `instant`.
+fn main(): Void {
+    match TimeZone.parse("America/Santiago") {
+        Ok(zone) => {
+            inmut local = DateTime(Date(2024, 11, 3), Time(1, 30));
+            match local.in_zone(zone, "earlier", "reject") {
+                Ok(value) => stdout.println(value.local_datetime.to_iso_string());
+                Error(_) => stdout.println("local time could not be resolved");
+            };
+        }
+        Error(_) => stdout.println("zone could not be parsed");
+    };
+}
+main();
+```
 
 Do not record globally ordered events as bare DateTime. Use Instant or
 ZonedDateTime once the zone is known.
@@ -55,17 +79,17 @@ A `Date` + `Time` pair, deliberately without a zone.
 | `DateTime(date, time)` | `DateTime` | Composition construction | implemented |
 | `DateTime.parse(text)` | `Result<DateTime, ParseError>` | Strict ISO parsing | implemented |
 | `date + time` | `DateTime` | Composition | implemented |
-| `DateTime.parse(text, format)` | `Result<DateTime, ParseError>` | Explicit-pattern parsing | specified (Phase 7) |
+| `DateTime.parse(text, format)` | `Result<DateTime, ParseError>` | Explicit-pattern parsing | not implemented; strict ISO parsing is available |
 | `dt.with_date(date)` / `dt.with_time(time)` | `DateTime` | Part replacement | implemented |
 | `dt.with_year`/`with_month`/`with_day` | `DateTime` | Date-component replacement; invalid result throws `InvalidDateError` | implemented |
 | `dt.with_hour`/`with_minute`/`with_second`/`with_nanosecond` | `DateTime` | Time-component replacement; invalid result throws `InvalidTimeError` | implemented |
 | `dt.start_of(unit)` / `dt.end_of(unit)` | `Result<DateTime, ParseError>` | Boundary of `unit` — date units (`"year"`, `"month"`, `"week"`, `"day"`) and clock units (`"hour"`, `"minute"`, `"second"`) | implemented |
 | `dt ± Duration` | `DateTime` | Exact local-component shift | implemented |
-| `dt ± Period` | `DateTime` | Calendar arithmetic preserving local clock | specified (Phase 7) |
+| `dt ± Period` | `DateTime` | Calendar arithmetic preserving local clock | not implemented |
 | `dt - other` | `Duration` | Local component difference — not a global elapsed time | implemented |
-| `dt.in_zone(zone, policy?)` | `Result<ZonedDateTime, TemporalError>` | Localization; fails without an explicit DST policy on gap/overlap | specified (Phase 7) |
+| `dt.in_zone(zone, overlap, gap)` | `Result<ZonedDateTime, LocaleError>` | Local-time resolution with explicit overlap (`reject`/`earlier`/`later`) and gap (`reject`/`forward`/`backward`) choices | implemented |
 | `dt.format(pattern)` | `String` | Pattern formatting (`YYYY`/`MM`/`DD`/`HH`/`mm`/`ss`/`SSS`); unrecognized text is literal | implemented |
-| `dt.format(pattern, locale)` | `String` | Localized formatting | specified (Phase 7) |
+| `dt.format_locale(locale, style)` | `Result<String, LocaleError>` | Explicit-locale CLDR formatting with short/medium/long/full styles | implemented |
 | `dt.to_iso_string()` / `dt.to_string()` | `String` | Machine/default rendering (the ISO form) | implemented |
 | `dt.is_before`/`is_after`/`is_same`/`is_same_or_before`/`is_same_or_after`/`is_between` | `Boolean` | Local ordering and range | implemented |
 | `dt.is_weekday()` / `dt.is_weekend()` | `Boolean` | Weekday classification | implemented |
@@ -73,15 +97,21 @@ A `Date` + `Time` pair, deliberately without a zone.
 ### Examples
 
 ```zirk
-inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
-inmut composed = Date(2026, 8, 15) + Time(14, 30);
-local + 2h; // 2026-08-15T16:30
+import { stdout } from std.io;
+import { Date, DateTime, Time } from std.time;
 
-match local.start_of("month") {
-    Ok(month_start) => stdout.println(month_start);
-    Error(error) => stderr.println(error);
+fn main(): Void {
+    inmut local = DateTime(Date(2026, 8, 15), Time(14, 30));
+    inmut composed = Date(2026, 8, 15) + Time(14, 30);
+    stdout.println((local + 2h).to_iso_string());
+    stdout.println(composed.to_iso_string());
+
+    match local.start_of("month") {
+        Ok(month_start) => stdout.println(month_start);
+        Error(_) => stdout.println("invalid unit");
+    };
 }
-// `local.in_zone(...)`: specified — `TimeZone` arrives in Phase 7.
+main();
 ```
 
 ---

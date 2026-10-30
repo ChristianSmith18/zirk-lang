@@ -11,6 +11,7 @@ zirk-diagnostics.workspace = true
 zirk-ir.workspace = true
 zirk-ast.workspace = true
 zirk-sema.workspace = true
+zirk-runtime-core = { path = "../zirk-runtime-core", default-features = false }
 
 inkwell = { version = "0.10", default-features = false, features = ["llvm20-1"] }
 llvm-sys = { version = "201.1.0", default-features = false }

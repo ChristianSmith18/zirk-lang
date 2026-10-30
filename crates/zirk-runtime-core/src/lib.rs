@@ -36,6 +36,7 @@ pub mod http_values;
 #[cfg(feature = "native-http")]
 pub mod http_websocket;
 pub mod json;
+pub mod locale;
 #[cfg(feature = "native-http")]
 pub mod network_policy;
 pub mod permission_grant;
@@ -45,3 +46,4 @@ pub mod scalar;
 pub mod stdin;
 pub mod temporal;
 pub mod text;
+pub mod zoned_temporal;

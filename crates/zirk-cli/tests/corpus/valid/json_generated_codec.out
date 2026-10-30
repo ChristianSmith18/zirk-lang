@@ -1,0 +1,9 @@
+Ada
+Santiago
+37
+{"name":"Ada","address":{"city":"Santiago","number":37}}
+true
+invalid numeric field rejected
+missing root property rejected
+missing nested property rejected
+incompatible field rejected

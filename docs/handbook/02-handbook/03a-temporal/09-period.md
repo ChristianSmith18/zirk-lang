@@ -5,37 +5,26 @@ It does not have an exact nanosecond length until applied to calendar/zone
 context.
 
 ```zirk
-Period.years(1)
-Period.months(2)
-Period(weeks: 1, days: 3)
-Period("P1Y2M3D")
+import { stdout } from std.io;
+import { Period } from std.time;
+
+fn main(): Void {
+    stdout.println(Period.years(1).to_iso_string());
+    stdout.println(Period.months(2).to_iso_string());
+    stdout.println(Period.days(10).to_iso_string());
+    match Period.parse("P1Y2M3D") {
+        Ok(value) => stdout.println(value.to_iso_string());
+        Error(_) => stdout.println("invalid period");
+    };
+}
+main();
 ```
 
-Period is an immutable value supporting unary sign, addition/subtraction,
-integer scaling, compound assignment on `mut` bindings and structural equality.
-It has no natural order, scalar division, or context-free total seconds:
-
-```zirk
-Period.months(1) < Period.days(31); // error
-Period.months(1).total_seconds(); // error
-```
-
-The comparison is unknowable without a starting calendar position and, for
-elapsed time, a zone.
-
-## Applying calendar rules
-
-```zirk
-Date(2026, 1, 31) + Period.months(1); // 2026-02-28
-```
-
-Default arithmetic clamps to the last valid target day. `add_strict()` rejects
-when the original day does not exist. DateTime preserves the local clock;
-ZonedDateTime additionally resolves DST under its explicit policy.
-
-`duration_from(start, zone)` converts a Period to exact Duration only with the
-required context. Different starts can produce different results for the same
-Period.
+The currently delivered immutable value surface supports construction,
+component access, strict ISO parsing, and canonical ISO formatting. Applying a
+period directly to `Date` or `DateTime`, scaling/composing periods, and
+converting one to an exact duration are not yet available. Calendar shifts can
+be applied through `TimeShift.calendar(...)` to a `ZonedDateTime`.
 
 ## API
 
@@ -46,36 +35,35 @@ until applied to a calendar/zone context.
 
 | Member | Type | Description | Status |
 | --- | --- | --- | --- |
-| `years` | `Int32` | Year component | specified |
-| `months` | `Int32` | Month component | specified |
-| `weeks` | `Int32` | Week component | specified |
-| `days` | `Int32` | Day component | specified |
-| `is_zero` | `Boolean` | All components zero | specified |
+| `years` | `Int32` | Year component | implemented |
+| `months` | `Int32` | Month component | implemented |
+| `weeks` | `Int32` | Week component | implemented |
+| `days` | `Int32` | Day component | implemented |
 
 ### Methods
 
 | Signature | Returns | Description | Status |
 | --- | --- | --- | --- |
-| `Period(years:, months:, weeks:, days:)` | `Period` | Named-component construction | specified |
-| `Period.years(n)` / `.months(n)` / `.weeks(n)` / `.days(n)` | `Period` | Single-unit constructors | specified |
-| `Period(text)` / `Period.parse(text)` | `Period` / `Result<Period, ParseError>` | ISO 8601 period input (`"P1Y2M3D"`) | specified |
-| `p + q` / `p - q` / `-p` | `Period` | Component-wise arithmetic, unary sign | specified |
-| `p * n` | `Period` | Integer scaling | specified |
-| `p.duration_from(start, zone)` | `Result<Duration, TemporalError>` | Exact conversion only with required context | specified |
-| `p.to_iso_string()` / `p.to_string()` | `String` | ISO/default rendering | specified |
-
-`Period` has no natural order, no scalar division, and no context-free total
-seconds: `Period.months(1) < Period.days(31)` and `.total_seconds()` are errors.
-`Date`/`DateTime`/`ZonedDateTime` accept `Period` arithmetic with end-of-month
-clamping by default; `add_strict()` rejects.
+| `Period(years:, months:, weeks:, days:)` | `Period` | Component construction | implemented |
+| `Period.years(n)` / `.months(n)` / `.weeks(n)` / `.days(n)` | `Period` | Single-component constructors | implemented |
+| `Period.parse(text)` | `Result<Period, ParseError>` | ISO 8601 period input | implemented |
+| `p.to_iso_string()` / `p.to_string()` | `String` | ISO/default rendering | implemented |
 
 ### Examples
 
 ```zirk
-Period.years(1);
-Period(weeks: 1, days: 3);
-Period("P1Y2M3D");
-Date(2026, 1, 31) + Period.months(1); // 2026-02-28
+import { stdout } from std.io;
+import { Period } from std.time;
+
+fn main(): Void {
+    inmut period = Period.days(10);
+    stdout.println(period.to_iso_string());
+    match Period.parse("P1Y2M3D") {
+        Ok(parsed) => stdout.println(parsed.to_iso_string());
+        Error(_) => stdout.println("invalid period");
+    };
+}
+main();
 ```
 
 ---

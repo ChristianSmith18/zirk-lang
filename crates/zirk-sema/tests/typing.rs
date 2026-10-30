@@ -53,7 +53,7 @@ fn parse_and_check(source_text: &str) -> (SourceMap, DiagnosticSink) {
         }
         program.modules.extend(standard_modules);
     }
-    check(&sources, &program, &mut sink);
+    check(&mut sources, &program, &mut sink);
     (sources, sink)
 }
 
@@ -78,7 +78,7 @@ fn project_globals_are_resolved_against_the_merged_program_types() {
         span: None,
     }];
 
-    let checked = check_with_globals(&sources, &program, &globals, &mut sink);
+    let checked = check_with_globals(&mut sources, &program, &globals, &mut sink);
     assert!(
         !sink.has_errors(),
         "global type should resolve from the project source graph: {}",
@@ -102,7 +102,7 @@ fn project_global_default_selects_one_constructor_and_reports_ambiguity() {
         let tokens = tokenize(source, &mut sink);
         let program = parse(source, &tokens, &mut sink);
         let checked = check_with_globals(
-            &sources,
+            &mut sources,
             &program,
             &[ProjectGlobalSpec {
                 name: "person".into(),
@@ -183,7 +183,7 @@ fn project_global_get_and_set_are_typed_from_manifest_keys() {
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
     let checked = check_with_globals(
-        &sources,
+        &mut sources,
         &program,
         &[
             ProjectGlobalSpec {
@@ -249,7 +249,7 @@ fn project_global_calls_reject_wrong_types_dynamic_unknown_and_readonly_writes()
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
     let _checked = check_with_globals(
-        &sources,
+        &mut sources,
         &program,
         &[
             ProjectGlobalSpec {
@@ -311,7 +311,7 @@ fn project_global_snapshots_reject_types_without_deep_clone_semantics() {
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
     let _checked = check_with_globals(
-        &sources,
+        &mut sources,
         &program,
         &[ProjectGlobalSpec {
             name: "holder".into(),
@@ -351,7 +351,7 @@ fn project_global_watch_infers_subscription_element_type() {
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
     let checked = check_with_globals(
-        &sources,
+        &mut sources,
         &program,
         &[ProjectGlobalSpec {
             name: "counter".into(),
@@ -510,7 +510,7 @@ fn suspension_summary(source_text: &str, function_name: &str) -> zirk_sema::Effe
         .find(|function| function.name.name == function_name)
         .unwrap_or_else(|| panic!("test function `{function_name}` is missing"));
     let span = function.name.span;
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         !sink.has_errors(),
         "test program should check:\n{}",
@@ -596,7 +596,7 @@ fn suspension_summary_tracks_timer_callback_separately_from_registration() {
             _ => None,
         })
         .expect("Timer.after callback lambda");
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(!sink.has_errors(), "{}", sink.render(RenderStyle::Human));
     let main_effect = checked.suspend_summaries[&main_span];
     assert!(!main_effect.may_suspend);
@@ -1722,9 +1722,9 @@ fn invalid_char_identity_comparison() {
 }
 
 #[test]
-fn invalid_temporal_type_states_its_phase() {
-    let output = rejected_body("mut x: Instant = 1;");
-    assert!(output.contains("Phase 7"), "{output}");
+fn invalid_temporal_assignment_reports_the_type_mismatch() {
+    let output = rejected_body("mut x: TimeZone = 1;");
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
 }
 
 #[test]
@@ -1787,7 +1787,7 @@ fn valid_bitwise_and_shift_on_int32() {
 fn invalid_bitwise_on_boolean() {
     let output = rejected_body("mut a = true; mut x = a & true;");
     assert!(output.contains(codes::TYPE_MISMATCH.as_str()));
-    assert!(output.contains("requires numbers"));
+    assert!(output.contains("requires integer values"));
 }
 
 // --- No truthiness ----------------------------------------------------------
@@ -2588,7 +2588,7 @@ fn invalid_one_error_does_not_cascade() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    check(&sources, &program, &mut sink);
+    check(&mut sources, &program, &mut sink);
 
     assert_eq!(
         sink.len(),
@@ -2609,7 +2609,7 @@ fn invalid_several_independent_errors_are_all_reported() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    check(&sources, &program, &mut sink);
+    check(&mut sources, &program, &mut sink);
 
     assert_eq!(
         sink.len(),
@@ -2778,6 +2778,23 @@ fn generic_contract_assignability_preserves_the_implemented_type_argument() {
         wrong_argument.contains(codes::TYPE_MISMATCH.as_str()),
         "{wrong_argument}"
     );
+}
+
+#[test]
+fn nested_generic_contract_mismatch_reports_substituted_types() {
+    let output = rejected(
+        "enum Box<T> { Full(value: T) }
+         contract Container<T> { item: T; }
+         contract Nested<T> implements Container<Box<T>> { }
+         class Wrong implements Nested<Int32> {
+             item: Box<String>;
+             construct(item: Box<String>) { this.item = item; }
+         }
+         fn main(): Void { }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(output.contains("Box<Int32>"), "{output}");
+    assert!(output.contains("Box<String>"), "{output}");
 }
 
 #[test]
@@ -4820,6 +4837,32 @@ fn unused_generic_function_template_is_accepted() {
 }
 
 #[test]
+fn generic_function_body_errors_are_reported_once_at_declaration_site() {
+    let output = rejected(
+        "fn invalid<T>(value: T): Void { mut text: String = value; }\n\
+         fn main(): Void { invalid<Int32>(1); invalid<String>(\"text\"); }",
+    );
+    assert_eq!(
+        output.matches("error[E0403]").count(),
+        1,
+        "the generic body error belongs to the declaration and must not repeat per instantiation:\n{output}"
+    );
+}
+
+#[test]
+fn recursive_generic_function_rejects_type_growing_specialization() {
+    let output = rejected(
+        "fn grow<T>(value: T): Void { mut values: Array<T> = Array(1); grow_again<Array<T>>(values); }\n\
+         fn grow_again<U>(value: U): Void { grow<U>(value); }\n\
+         fn main(): Void { grow<Int32>(1); }",
+    );
+    assert!(
+        output.contains("error[E0423]") && output.contains("type-growing specialization"),
+        "recursive generic type growth must fail during semantic analysis:\n{output}"
+    );
+}
+
+#[test]
 fn explicit_generic_function_arguments_seed_type_inference() {
     accepted(
         "fn identity<T>(value: T): T { return value; }
@@ -4855,7 +4898,7 @@ fn generic_call_substitution_is_preserved_for_ir_specialization() {
         },
         other => panic!("expected let statement, got {other:?}"),
     };
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let generic = checked.functions.get("identity").unwrap();
     assert_eq!(generic.type_params.len(), 1);
     assert_eq!(
@@ -4943,7 +4986,7 @@ fn generic_method_substitution_is_preserved_for_ir_specialization() {
         },
         other => panic!("expected let statement, got {other:?}"),
     };
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         checked.generic_call_substitutions[&call.span]
             .substitutions
@@ -5266,7 +5309,7 @@ fn valid_two_instantiations_of_the_same_class_are_the_same_type() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert_eq!(
         checked.generic_instances.len(),
@@ -5341,6 +5384,36 @@ fn valid_generic_enum_with_multiple_type_parameters() {
              mut a: Either<Int32, String> = Either.Left(1);
              mut b: Either<Int32, String> = Either.Right(\"x\");
          }",
+    );
+}
+
+#[test]
+fn generic_enum_match_reuses_the_expected_instantiation_for_empty_variants() {
+    accepted(
+        "enum Box<T> { Full(value: T), Empty }
+         fn rebox<T>(value: Box<T>): Box<T> {
+             return match value {
+                 Box.Full(payload) => Box.Full(payload),
+                 Box.Empty => Box.Empty,
+             };
+         }
+         fn main(): Void {
+             mut number: Box<Int32> = rebox(Box.Full(42));
+             mut text: Box<String> = rebox(Box.Full(\"hello\"));
+         }",
+    );
+}
+
+#[test]
+fn generic_enum_empty_variant_without_expected_instantiation_is_rejected() {
+    let output = rejected(
+        "enum Box<T> { Empty }
+         fn main(): Void { mut value = Box.Empty; }",
+    );
+    assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
+    assert!(
+        output.contains("needs an expected instantiation"),
+        "{output}"
     );
 }
 
@@ -6799,7 +6872,7 @@ fn type_algebra_baseline_has_unambiguous_expected_types() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7031,7 +7104,7 @@ fn valid_union_order_is_irrelevant() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert_eq!(
         checked.unions.len(),
@@ -7088,7 +7161,7 @@ fn generated_algebra_permutations_and_groupings_share_canonical_types() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7123,7 +7196,7 @@ fn valid_union_duplicates_collapse() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert_eq!(
         checked.unions[0].len(),
@@ -7145,7 +7218,7 @@ fn valid_union_flattens_nested_alias_members() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7174,7 +7247,7 @@ fn never_is_absorbed_by_unions_and_intersections() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7201,7 +7274,7 @@ fn singleton_type_values_are_canonical_and_reused_by_constants() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7241,7 +7314,7 @@ fn tuple_types_are_written_as_types_without_literal_wrappers() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7268,7 +7341,7 @@ fn direct_object_type_shapes_keep_literal_discriminants() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         sink.diagnostics()
             .iter()
@@ -7304,7 +7377,7 @@ fn enum_case_literals_are_typed_and_interned_directly() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         sink.diagnostics()
             .iter()
@@ -7365,7 +7438,7 @@ fn satisfies_checks_assignability_and_preserves_singleton_type() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         sink.diagnostics()
             .iter()
@@ -7466,7 +7539,7 @@ fn primitive_union_members_absorb_owned_singletons() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7504,7 +7577,7 @@ fn primitive_and_enum_union_coverage_absorbs_singleton_members() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7588,7 +7661,7 @@ fn union_normalization_absorbs_only_sound_numeric_supertypes() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let choices = checked
         .classes
         .iter()
@@ -7665,7 +7738,7 @@ fn numeric_union_normalization_matches_all_existing_lossless_assignability_pairs
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(entry, &mut sink);
     let program = parse(entry, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let class = checked
         .classes
         .iter()
@@ -7719,7 +7792,7 @@ fn singleton_boolean_and_temporal_values_flow_into_union_nodes() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -7756,7 +7829,7 @@ fn valid_union_with_null_is_a_plain_nullable_type() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert_eq!(checked.unions.len(), 0);
 }
@@ -7775,7 +7848,7 @@ fn valid_union_subsumes_a_subclass_alternative() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     // `Dog` is subsumed by `Animal`, so nothing needed a `Union` at all.
     assert_eq!(checked.unions.len(), 0);
@@ -8062,7 +8135,7 @@ fn intersections_reduce_only_proven_primitive_and_singleton_contradictions() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -8090,7 +8163,7 @@ fn intersection_members_are_sorted_deduplicated_and_interned() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -8135,7 +8208,7 @@ fn anonymous_shapes_preserve_properties_and_intern_independent_of_source_order()
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let holder = checked
         .classes
         .iter()
@@ -8312,7 +8385,7 @@ fn decimal_singletons_normalize_scale_without_binary_float_conversion() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(entry, &mut sink);
     let program = parse(entry, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let amounts = checked
         .classes
         .iter()
@@ -9431,7 +9504,7 @@ fn native_capacity_errors_are_known_runtime_error_subclasses() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),
@@ -10031,6 +10104,46 @@ fn valid_class_may_write_implements_clone_explicitly() {
 }
 
 #[test]
+fn clone_derives_recursively_for_tuples_nullable_values_unions_and_enums() {
+    accepted(
+        "class Leaf { mut value: Int32; construct(value: Int32) { this.value = value; } }
+         type TextOrLeaf = String | Leaf;
+         enum Wrapped<T> { Value(value: Tuple<T, Leaf>), Empty }
+         enum ScalarPayloads { Amount(value: Decimal?), OnDate(value: Date) }
+         fn main(): Void {
+             mut maybe: Int32? = null;
+             mut tuple: Tuple<Int32?, String> = (maybe, \"ok\");
+             mut tuple_copy: Tuple<Int32?, String> = tuple.clone();
+             mut generic_tuple: Tuple<Int32, Leaf> = (42, Leaf(1));
+             mut value: Wrapped<Int32> = Wrapped.Value(generic_tuple);
+             mut value_copy: Wrapped<Int32> = value.clone();
+             mut union: TextOrLeaf = Leaf(2);
+             mut union_copy: TextOrLeaf = union.clone();
+             mut scalar: ScalarPayloads = ScalarPayloads.Amount(null);
+             mut scalar_copy: ScalarPayloads = scalar.clone();
+         }",
+    );
+}
+
+#[test]
+fn non_clone_enum_diagnostic_names_variant_and_nested_field_path() {
+    let output = rejected(
+        "enum Packet { Ready, Invalid(payload: Tuple<Int32, Pointer<Int32>>) }
+         fn main(): Void {
+             mut x: Int32 = 1;
+             unsafe {
+                 mut packet: Packet = Packet.Invalid((7, Pointer.from(x)));
+                 mut copy: Packet = packet.clone();
+             }
+         }",
+    );
+    assert!(output.contains(codes::NOT_CLONE.as_str()), "{output}");
+    assert!(output.contains("Invalid"), "{output}");
+    assert!(output.contains("payload"), "{output}");
+    assert!(output.contains("tuple element 1"), "{output}");
+}
+
+#[test]
 fn valid_manual_clone_implementation_is_dispatched_as_an_ordinary_method() {
     // `Greeter`-typed field: not `Clone`-derivable on its own (a
     // contract-typed member's implementors are not all known to be
@@ -10324,7 +10437,9 @@ fn priority_queue_requires_a_total_order_and_exposes_typed_fifo_operations() {
 fn valid_collection_value_layouts_cover_scalars_aggregates_and_handles() {
     accepted(
         "enum Direction { North, East }\n\
+         contract UserView { id: Int32; }\n\
          class User { construct() { } }\n\
+         class ViewedUser implements UserView { id: Int32; construct(id: Int32) { this.id = id; } }\n\
          fn main(): Void {\n\
              mut integers: Map<String, UInt64> = Map();\n\
              mut flags: Map<String, Boolean> = Map();\n\
@@ -10334,6 +10449,7 @@ fn valid_collection_value_layouts_cover_scalars_aggregates_and_handles() {
              mut dates: Map<String, Date> = Map();\n\
              mut times: Map<String, Time> = Map();\n\
              mut nullable_values: Map<String, Int32?> = Map();\n\
+             mut decimal_values: Map<String, Decimal> = Map();\n\
              mut tuple_values: Map<String, Tuple<Int32, String>> = Map();\n\
              mut wide_values: Map<String, Int128> = Map();\n\
              mut float128_values: Map<String, Float128> = Map();\n\
@@ -10355,6 +10471,11 @@ fn valid_collection_value_layouts_cover_scalars_aggregates_and_handles() {
              mut nested_point_keys: Set<Tuple<Tuple<Int32, Int32>, Tuple<Int32, Int32>>> = Set();\n\
              mut date_set: Set<Date> = Set();\n\
              mut time_set: Set<Time> = Set();\n\
+             mut boolean_keys: Set<Boolean> = Set();\n\
+             mut duration_keys: Set<Duration> = Set();\n\
+             mut datetime_keys: Set<DateTime> = Set();\n\
+             mut user_keys: Set<User> = Set();\n\
+             mut contract_keys: Set<UserView> = Set();\n\
          }",
     );
 }
@@ -10382,12 +10503,19 @@ fn invalid_set_of_an_unhashable_element() {
 #[test]
 fn invalid_collection_keys_reject_unsupported_aggregate_types() {
     for (source, description) in [
-        ("mut s: Set<Decimal?> = Set();", "Set<Decimal?>"),
         (
-            "mut m: Map<Tuple<Int32, String>, Boolean> = Map();",
+            "mut m: Map<Tuple<Int32, Range<Int32>>, Boolean> = Map();",
             "tuple key",
         ),
+        (
+            "mut m: Map<Tuple<Int32, Tuple<Decimal?, Range<Int32>>>, Boolean> = Map();",
+            "nested tuple key",
+        ),
         ("mut m: Map<List<Int32>, Boolean> = Map();", "list key"),
+        ("mut s: Set<Array<Int32>> = Set();", "array element"),
+        ("mut s: Set<Range<Int32>> = Set();", "range element"),
+        ("mut s: Set<Object> = Set();", "Object element"),
+        ("mut s: Set<Dynamic> = Set();", "Dynamic element"),
     ] {
         let output = rejected_body(source);
         assert!(
@@ -10395,17 +10523,39 @@ fn invalid_collection_keys_reject_unsupported_aggregate_types() {
             "{description}: {output}"
         );
         assert!(output.contains("unhashable"), "{description}: {output}");
+        if description == "Object element" {
+            assert!(
+                output.contains("mutable `Object` references do not have immutable structural Hash/Equal semantics"),
+                "Object rejection should explain the structural-hash limitation: {output}"
+            );
+            assert!(output.contains("stable identity semantics"), "{output}");
+        }
+        if description.contains("tuple") {
+            assert!(
+                output.contains("Tuple<Int32,"),
+                "{description}: the diagnostic must include its nested type path: {output}"
+            );
+        }
     }
+    let generic_enum = rejected(
+        "enum GenericKey<T> { Value(value: T), Empty }\n\
+         fn main(): Void { mut s: Set<GenericKey<List<Int32>>> = Set(); }",
+    );
+    assert!(
+        generic_enum.contains(codes::TYPE_MISMATCH.as_str()),
+        "{generic_enum}"
+    );
+    assert!(
+        generic_enum.contains("unhashable element type"),
+        "{generic_enum}"
+    );
 }
 
 #[test]
-fn structural_and_union_keys_without_canonical_equality_are_rejected_early() {
-    for source in [
-        "type Key = { id: Int32 };\n\
-         fn main(): Void { mut values: Set<Key> = Set(); }",
-        "type Key = Int32 | Boolean;\n\
-         fn main(): Void { mut values: Set<Key> = Set(); }",
-    ] {
+fn structural_keys_without_canonical_equality_are_rejected_early() {
+    for source in ["type Key = { id: Int32 };\n\
+         fn main(): Void { mut values: Set<Key> = Set(); }"]
+    {
         let output = rejected(source);
         assert!(output.contains(codes::TYPE_MISMATCH.as_str()), "{output}");
         assert!(output.contains("unhashable"), "{output}");
@@ -10414,20 +10564,44 @@ fn structural_and_union_keys_without_canonical_equality_are_rejected_early() {
 
 #[test]
 fn nullable_scalar_collection_keys_are_accepted_when_the_layout_is_canonical() {
-    accepted_body(
-        "mut nullable: Set<Int32?> = Set();\n\
-         mut nullable_text: Set<String?> = Set();\n\
-         mut nullable_float: Set<Float64?> = Set();\n\
-         mut tuples: Map<Tuple<Int32, Boolean>, String> = Map();",
+    accepted(
+        "contract Identified { id: Int32; }\n\
+         class User implements Identified { mut id: Int32; construct(id: Int32) { this.id = id; } }\n\
+         class Box<T> { mut value: T; construct(value: T) { this.value = value; } }\n\
+         enum GenericKey<T> { Value(value: T), Empty }\n\
+         enum Status { Ready(value: Int32), Missing }\n\
+         fn main(): Void {\n\
+             mut nullable: Set<Int32?> = Set();\n\
+             mut nullable_text: Set<String?> = Set();\n\
+             mut nullable_float: Set<Float64?> = Set();\n\
+             mut nullable_boolean: Set<Boolean?> = Set();\n\
+             mut nullable_char: Set<Char?> = Set();\n\
+             mut nullable_decimal: Set<Decimal?> = Set();\n\
+             mut nullable_duration: Set<Duration?> = Set();\n\
+             mut nullable_date: Set<Date?> = Set();\n\
+             mut nullable_time: Set<Time?> = Set();\n\
+             mut nullable_datetime: Set<DateTime?> = Set();\n\
+             mut nullable_enum: Set<Status?> = Set();\n\
+             mut nullable_user: Set<User?> = Set();\n\
+             mut generic_instances: Set<Box<Int32>> = Set();\n\
+             mut generic_map: Map<Box<String>, Int32> = Map();\n\
+             mut generic_enum_set: Set<GenericKey<Int32>> = Set();\n\
+             mut generic_enum_map: Map<GenericKey<Int32>, Int32> = Map();\n\
+             mut nullable_contract: Set<Identified?> = Set();\n\
+             mut nullable_decimal_map: Map<Decimal?, String> = Map();\n\
+             mut nullable_decimal_tuple: Set<Tuple<Decimal?, Boolean>> = Set();\n\
+             mut tuples: Map<Tuple<Int32, Boolean>, String> = Map();\n\
+         }",
     );
 }
 
 #[test]
 fn invalid_map_values_fail_early_when_nullable_lookup_is_unsupported() {
     for (source, description) in [
-        ("mut m: Map<String, Decimal> = Map();", "Decimal"),
         ("mut m: Map<String, Void> = Map();", "Void"),
         ("mut m: Map<String, Fn(Int32) => Int32> = Map();", "Fn("),
+        ("mut m: Map<String, Range<Int32>> = Map();", "Range<Int32>"),
+        ("mut m: Map<String, Regex> = Map();", "Regex"),
     ] {
         let output = rejected_body(source);
         assert!(
@@ -10464,9 +10638,20 @@ fn valid_collection_keys_accept_int32_payload_enums() {
 }
 
 #[test]
-fn invalid_map_key_payload_enum_is_rejected_at_its_type_span() {
+fn valid_collection_keys_accept_text_payload_enums() {
+    accepted(
+        "enum TextKey { Name(value: String), Character(value: Char), Empty }\n\
+         fn main(): Void {\n\
+             mut names: Set<TextKey> = Set();\n\
+             mut values: Map<TextKey, Int32> = Map();\n\
+         }",
+    );
+}
+
+#[test]
+fn invalid_map_key_payload_enum_with_unsupported_field_is_rejected_at_its_type_span() {
     let output = rejected(
-        "enum Outcome { Success(value: String), Failure }\n\
+        "enum Outcome { Success(value: Range<Int32>), Failure }\n\
          fn main(): Void {\n\
              mut outcomes: Map<Outcome, Int32> = Map();\n\
          }",
@@ -10558,9 +10743,9 @@ fn valid_temporal_arithmetic_and_comparison() {
          mut d4: Date = d - 1;\n\
          mut days: Int64 = d - Date(2026, 9, 1);\n\
          mut t: Time = Time(23, 30);\n\
-         mut t2: Time = t + 2h;\n\
-         mut t3: Time = 2h + t;\n\
-         mut t4: Time = t - 1h;\n\
+         mut t2: TimeShift = t + 2h;\n\
+         mut t3: TimeShift = 2h + t;\n\
+         mut t4: TimeShift = t - 1h;\n\
          mut diff: Duration = t - Time(1, 0);\n\
          mut dt: DateTime = d + t;\n\
          mut dt2: DateTime = t + d;\n\
@@ -11170,7 +11355,7 @@ fn ownership_program(source_text: &str) -> zirk_sema::CheckedProgram {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         !sink.has_errors(),
         "fixture must type-check:\n{}",
@@ -11691,7 +11876,7 @@ fn service_callback_semantics_record_sites_for_lowering() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(sources.file(file), &mut sink);
     let program = parse(sources.file(file), &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let output = sink.render(RenderStyle::Human);
 
     assert!(!output.contains(codes::NOT_LOWERED.as_str()), "{output}");
@@ -11855,7 +12040,7 @@ fn checked_union_records_transitive_source_aliases_for_diagnostics() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert!(!sink.has_errors(), "{}", sink.render(RenderStyle::Human));
     let aliases = checked
@@ -11943,7 +12128,7 @@ fn keyof_returns_finite_visible_structural_and_tuple_keys() {
         let mut sink = DiagnosticSink::new();
         let tokens = tokenize(source, &mut sink);
         let program = parse(source, &tokens, &mut sink);
-        let checked = check(&sources, &program, &mut sink);
+        let checked = check(&mut sources, &program, &mut sink);
         (checked, sink)
     }
 
@@ -12000,7 +12185,7 @@ fn indexed_access_resolves_finite_keys_optional_properties_readonly_fields_and_u
         let mut sink = DiagnosticSink::new();
         let tokens = tokenize(source, &mut sink);
         let program = parse(source, &tokens, &mut sink);
-        let checked = check(&sources, &program, &mut sink);
+        let checked = check(&mut sources, &program, &mut sink);
         (checked, sink)
     }
 
@@ -12065,7 +12250,7 @@ fn conditional_types_distribute_only_for_naked_generic_parameters() {
     let mut diagnostics = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut diagnostics);
     let program = parse(source_file, &tokens, &mut diagnostics);
-    let output = check(&sources, &program, &mut diagnostics);
+    let output = check(&mut sources, &program, &mut diagnostics);
     assert!(
         diagnostics.is_empty(),
         "conditional aliases should type-check: {}",
@@ -12099,7 +12284,7 @@ fn conditional_infer_binds_generic_components_only_in_true_branch() {
     let mut diagnostics = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut diagnostics);
     let program = parse(source_file, &tokens, &mut diagnostics);
-    let checked = check(&sources, &program, &mut diagnostics);
+    let checked = check(&mut sources, &program, &mut diagnostics);
     assert!(
         diagnostics.is_empty(),
         "conditional infer should type-check: {}",
@@ -12138,7 +12323,7 @@ fn mapped_types_transform_finite_keys_and_keep_source_modifiers() {
     let mut diagnostics = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut diagnostics);
     let program = parse(source_file, &tokens, &mut diagnostics);
-    let checked = check(&sources, &program, &mut diagnostics);
+    let checked = check(&mut sources, &program, &mut diagnostics);
     let rendered = diagnostics.render(RenderStyle::Human);
     assert!(
         !rendered.contains("mapped type produced a duplicate key"),
@@ -12192,7 +12377,7 @@ fn template_literal_types_expand_finite_string_numeric_and_boolean_unions() {
     let mut diagnostics = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut diagnostics);
     let program = parse(source_file, &tokens, &mut diagnostics);
-    let checked = check(&sources, &program, &mut diagnostics);
+    let checked = check(&mut sources, &program, &mut diagnostics);
     let rendered = diagnostics.render(RenderStyle::Human);
     assert!(
         !rendered.contains("template interpolation requires")
@@ -12241,7 +12426,7 @@ fn open_template_inference_resolves_keyof_and_contextual_indexed_callbacks() {
         let mut sink = DiagnosticSink::new();
         let tokens = tokenize(source, &mut sink);
         let program = parse(source, &tokens, &mut sink);
-        let program = check(&sources, &program, &mut sink);
+        let program = check(&mut sources, &program, &mut sink);
         (program, sink)
     }
 
@@ -12376,7 +12561,7 @@ fn open_template_matching_stops_at_the_deterministic_source_budget() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     let output = sink.render(RenderStyle::Human);
     assert!(
         output.contains("E0482") && output.contains("open template matching limit exceeded"),
@@ -12409,7 +12594,7 @@ fn standard_type_utilities_resolve_structures_unions_and_callables() {
     let mut diagnostics = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut diagnostics);
     let program = parse(source_file, &tokens, &mut diagnostics);
-    let checked = check(&sources, &program, &mut diagnostics);
+    let checked = check(&mut sources, &program, &mut diagnostics);
     let rendered = diagnostics.render(RenderStyle::Human);
     assert!(
         !rendered.contains("utility has the wrong number")
@@ -12512,7 +12697,7 @@ fn callable_unions_require_all_alternatives_and_intersections_select_one_signatu
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source_file, &mut sink);
     let program = parse(source_file, &tokens, &mut sink);
-    let _checked = check(&sources, &program, &mut sink);
+    let _checked = check(&mut sources, &program, &mut sink);
     let valid_diagnostics = sink.render(RenderStyle::Human);
     assert!(
         !valid_diagnostics.contains(codes::TYPE_MISMATCH.as_str())

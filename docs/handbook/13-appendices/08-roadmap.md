@@ -13,10 +13,13 @@ enum static helpers, field initializers, the `as?` nullable cast,
 contracts, type-parameter defaults on generic types, comparison operators as
 contracts, generic contract dispatch for classes, and positional variance
 verification. The former `record` and `interface` declaration forms were
-removed; use `Object`/tuples and `contract`. Still assigned to later changes:
-trait defaults under generic substitution, nested contract arguments
-(`Container<Box<T>>`), and type-parameter defaults and bodies for user-defined
-generic functions.
+removed; use `Object`/tuples and `contract`. The active
+`complete-data-types-and-standard-library-coverage` change adds local
+implementation and interpreter/native cases for generic enum dispatch,
+user-defined generic bodies and defaults, trait defaults under generic
+substitution, and nested contract arguments (`Container<Box<T>>`). The
+cross-host execution matrix for those cases remains open; see the active
+change's task and evidence matrices before treating this work as complete.
 
 The native type-algebra slice adds recursive n-ary unions/intersections,
 canonical singleton and constant types, generic aliases and erased type

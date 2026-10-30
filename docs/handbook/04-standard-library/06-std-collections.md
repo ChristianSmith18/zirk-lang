@@ -21,10 +21,11 @@ families. Hashing uses a per-process defensive seed while iteration preserves
 insertion order.
 
 > **Implementation status:** the sequence and keyed collection types below
-> are compiler-known language surfaces; this chapter is not an importable
-> `std.collections` package. The package is a proposed distribution surface,
-> not part of the current delivery. The Zirk feature catalog records the
-> stage and target evidence for each family.
+> are available through the bundled `std.collections` source facade and retain
+> their existing compiler-owned type identities and runtime operations. The
+> explicit import is stable; unqualified built-in spellings remain compatible.
+> The Zirk feature catalog records the stage and target evidence for each
+> family.
 > `Array<T>`, `List<T>` and `Range<T>` (`start..end`, `start..end:step`,
 > inferred descending direction, slicing, expansion, and `Iterable<T>` for
 > integer `T` and `Duration`)
@@ -37,9 +38,13 @@ insertion order.
 > byte-canonical fields, and payload enums with recursively eligible fields
 > are also covered. `Deque<T>`, `PriorityQueue<T>`, `Queue<T>` and `Stack<T>`
 > have constructors, typed operations, interpreter/native parity and focused
-> GC coverage. Remaining Map/Set gaps include aggregate keys/elements requiring
-> content-based `String`/`Char` equality, structural derivation, union-aware
-> equality/hashing and nullable `Decimal`. The 4096-byte inline union payload
+> GC coverage. Map/Set key and element support includes nested `String`/`Char`
+> tuple snapshots, nullable `Decimal`, recursive enum payloads, direct union
+> alternatives (including nullable and tuple-contained unions), and mutable
+> reference identity, including enum payloads with `String`/`Char` fields.
+> Some recursive compositions remain rejected, including intersections and
+> aggregate combinations without a defined canonical Hash/Equal representation. Generated composition, GC-boundary and
+> cross-target evidence is still incomplete. The 4096-byte inline union payload
 > limit is a defined representation boundary; oversized alternatives must be
 > rejected before backend emission.
 
@@ -73,6 +78,7 @@ value contexts project that same result to the value or null. Slices use
 equal-length replacement.
 
 ```zirk
+import { Array, Deque, List, Map, PriorityQueue, Queue, Range, Set, Stack } from std.collections;
 import { stdout } from std.io;
 fn main(): Void {
     mut list: List<Int32> = List();
@@ -136,10 +142,10 @@ layout. Map values preserve their declared byte layouts. Nullable values,
 tuples, and payload enums derive equality when every participating field has a
 canonical stored equality representation. Text keys/elements use normalized
 content, and floating signed zero is normalized before hashing and comparison.
-Tuple fields requiring content-based String/Char equality, other structural
-aggregate derivations, and unions have no canonical equality descriptor yet,
-so the type checker rejects them as keys or
-elements before lowering. Set union, intersection,
+Nested tuple and active enum-variant fields use normalized content snapshots
+for `String` and `Char`; nullable Decimal and the tested union key/element
+layouts use recursive capabilities. Intersections and other compositions
+without a canonical recursive descriptor are rejected before lowering. Set union, intersection,
 difference and symmetric difference preserve deterministic result order
 without mutating their inputs.
 Sets include union, intersection, difference, symmetric difference and subset,
@@ -234,6 +240,8 @@ with collision defenses. Stable comparison sorting is `O(n log n)`. Lazy
 iterator adapters use constant adapter storage unless their documented
 operation (such as sorting/grouping) must buffer. Allocation/size limits return
 typed failures rather than silently dropping values.
+
+Executable evidence: [native/interpreter collection parity](../../../crates/zirk-cli/tests/object_engine_parity.rs), [semantic admission and rejection checks](../../../crates/zirk-sema/tests/typing.rs), and [forced-GC end-to-end cases](../../../crates/zirk-cli/tests/end_to_end.rs).
 
 ---
 

@@ -5,6 +5,13 @@ class MutableKey {
     construct(value: Int32) { this.value = value; }
 }
 
+class Box<T> {
+    mut value: T;
+    construct(value: T) { this.value = value; }
+}
+
+enum GenericKey<T> { Value(value: T), Empty }
+
 fn main(): Void {
     mut first: MutableKey = MutableKey(7);
     mut alias: MutableKey = first;
@@ -18,6 +25,11 @@ fn main(): Void {
     stdout.println(keys.contains(first).to_string());
     stdout.println(keys.contains(distinct).to_string());
     for key in keys { stdout.println(key.value.to_string()); }
+    stdout.println(keys.remove(alias).to_string());
+    stdout.println(keys.remove(first).to_string());
+    stdout.println(keys.add(first).to_string());
+    stdout.println(keys.length.to_string());
+    for key in keys { stdout.println(key.value.to_string()); }
 
     mut values: Map<MutableKey, Int32> = Map();
     values.set(first, 12);
@@ -29,5 +41,32 @@ fn main(): Void {
     stdout.println((references.get(alias) ?? first).value.to_string());
     stdout.println(references.entries().length.to_string());
     for value in references.values() { stdout.println(value.value.to_string()); }
+
+    mut generic_first: Box<Int32> = Box(5);
+    mut generic_alias: Box<Int32> = generic_first;
+    mut generic_distinct: Box<Int32> = Box(5);
+    mut generic_keys: Set<Box<Int32>> = Set();
+    stdout.println(generic_keys.add(generic_first).to_string());
+    stdout.println(generic_keys.add(generic_alias).to_string());
+    stdout.println(generic_keys.add(generic_distinct).to_string());
+    generic_first.value = 8;
+    stdout.println(generic_keys.contains(generic_alias).to_string());
+    stdout.println(generic_keys.remove(generic_first).to_string());
+    stdout.println(generic_keys.length.to_string());
+    mut generic_values: Map<Box<Int32>, Int32> = Map();
+    generic_values.set(generic_first, 21);
+    stdout.println((generic_values.get(generic_alias) ?? 0).to_string());
+    stdout.println(generic_values.contains_key(generic_distinct).to_string());
+
+    mut enum_keys: Set<GenericKey<Int32>> = Set();
+    stdout.println(enum_keys.add(GenericKey.Value(7)).to_string());
+    stdout.println(enum_keys.add(GenericKey.Value(7)).to_string());
+    stdout.println(enum_keys.add(GenericKey.Value(8)).to_string());
+    mut empty_key: GenericKey<Int32> = GenericKey.Empty;
+    stdout.println(enum_keys.add(empty_key).to_string());
+    stdout.println(enum_keys.length.to_string());
+    mut enum_values: Map<GenericKey<Int32>, String> = Map();
+    enum_values.set(GenericKey.Value(7), "seven");
+    stdout.println((enum_values.get(GenericKey.Value(7)) ?? "missing").to_string());
 }
 main();

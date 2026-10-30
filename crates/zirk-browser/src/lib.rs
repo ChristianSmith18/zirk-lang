@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use wasm_bindgen::prelude::wasm_bindgen;
-use zirk_ast::{Ident, ImportSource, ModuleDecl};
-use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceIdentity, SourceMap};
+use zirk_ast::{Ident, ImportDecl, ImportName, ImportSource, ModuleDecl};
+use zirk_diagnostics::{DiagnosticSink, SourceFile, SourceIdentity, SourceMap, Span};
 
 pub mod contract;
 
@@ -215,6 +215,39 @@ pub fn check_source(
     let mut sink = DiagnosticSink::new();
     let tokens = zirk_lexer::tokenize(sources.file(file), &mut sink);
     let mut program = zirk_parser::parse(sources.file(file), &tokens, &mut sink);
+    let derives_json_codec = program.classes.iter().any(|class| {
+        class.implements.iter().any(|implemented| {
+            implemented.name == "JSONCodec" && program.imports.iter().any(|import| {
+                matches!(&import.source, ImportSource::Package { path, .. } if path == "std.json")
+                    && import
+                        .names
+                        .iter()
+                        .any(|name| name.name.name == "JSONCodec")
+            })
+        })
+    });
+    let has_json_binding = program.imports.iter().any(|import| {
+        import
+            .names
+            .iter()
+            .any(|name| name.bound_name().name == "JSON")
+    });
+    if derives_json_codec && !has_json_binding {
+        let end = program.span.end;
+        let span = Span::in_file(file, end, end);
+        program.imports.push(ImportDecl {
+            names: vec![ImportName {
+                name: Ident::new("JSON", span),
+                alias: None,
+                span,
+            }],
+            source: ImportSource::Package {
+                path: "std.json".into(),
+                span,
+            },
+            span,
+        });
+    }
     if sink.has_errors() {
         return (None, sink);
     }
@@ -250,13 +283,13 @@ pub fn check_source(
     if sink.has_errors() {
         return (None, sink);
     }
-    let checked = zirk_sema::check(&sources, &program, &mut sink);
+    let checked = zirk_sema::check(&mut sources, &program, &mut sink);
     if sink.has_errors() {
         return (None, sink);
     }
     (
         Some(FrontendResult {
-            program,
+            program: checked.expanded_program.clone().unwrap_or(program),
             checked,
             sources,
         }),

@@ -28,9 +28,18 @@ composition, operators, parsing, DST and errors across the family.
 > (promoting to `DateTime` read at local midnight), `DateTime - DateTime`
 > (`Duration`), total same-type comparisons, and the host-clock
 > `Date.today()`, `Time.now_local()`/`now_utc()` and
-> `DateTime.now_local()`/`now_utc()`. `Instant`, `ZonedDateTime`,
-> `TimeZone`, `Period`, `TimeShift`, locales and zones remain pending —
-> the chapters below document the target surface.
+> `DateTime.now_local()`/`now_utc()`. `Instant` is partially delivered with
+> RFC 3339 parsing, checked Unix-unit factories/properties, ordering, exact
+> `Duration` arithmetic and native `now()`. Explicit-locale formatting is
+> available for civil values, and `DateTime.format_locale_in_zone` supports
+> IANA/fixed-offset output with named DST policies using ICU4X 2.4.0 / CLDR 49.
+> `TimeZone` and `ZonedDateTime` now have partial language APIs for pinned zone
+> parsing, projection, instant-preserving conversion, and explicit local-time
+> resolution. `Period` exposes construction, components, ISO parsing, and
+> formatting; unified `TimeShift` exposes clock and calendar forms. Localized
+> civil parsing is implemented; cross-host evidence and direct `Date`/`DateTime`
+> `Period` operators remain open. The chapters below mark delivered and
+> remaining operations individually.
 
 1. [Choosing a Temporal Type](./01-choosing-a-temporal-type.md)
 2. [Date](./02-date.md)
@@ -46,6 +55,8 @@ composition, operators, parsing, DST and errors across the family.
 12. [Parsing and Formatting](./12-parsing-and-formatting.md)
 13. [Zones and DST](./13-zones-and-dst.md)
 14. [Temporal Errors](./14-temporal-errors.md)
+
+Executable evidence: [native/interpreter temporal parity](../../../../crates/zirk-cli/tests/object_engine_parity.rs), [locale parsing and formatting tests](../../../../crates/zirk-runtime-core/src/locale.rs), and [zone/period/TimeShift tests](../../../../crates/zirk-runtime-core/src/zoned_temporal.rs).
 
 ---
 

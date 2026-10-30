@@ -327,6 +327,8 @@ pub enum Nullable {
     Atomic(crate::AtomicKind),
     /// A union whose complete tagged value may also be absent.
     Union(u32),
+    /// An exact decimal value that may also be absent.
+    Decimal,
 }
 
 impl Nullable {
@@ -349,6 +351,7 @@ impl Nullable {
             Nullable::Set(id) => IrType::Set(id),
             Nullable::Atomic(kind) => IrType::Atomic(kind),
             Nullable::Union(id) => IrType::Union(id),
+            Nullable::Decimal => IrType::Decimal,
         }
     }
 
@@ -372,6 +375,7 @@ impl Nullable {
             IrType::Set(id) => Nullable::Set(id),
             IrType::Atomic(kind) => Nullable::Atomic(kind),
             IrType::Union(id) => Nullable::Union(id),
+            IrType::Decimal => Nullable::Decimal,
             _ => return None,
         })
     }
@@ -468,6 +472,7 @@ impl IrType {
                 Nullable::Set(_) => "Set?",
                 Nullable::Atomic(_) => "Atomic?",
                 Nullable::Union(_) => "union?",
+                Nullable::Decimal => "Float?",
             },
             IrType::Pointer(_) => "Pointer",
             IrType::Weak(_) => "Weak",
@@ -1641,10 +1646,139 @@ pub enum InstKind {
     JsonStringifyDynamic {
         value: Operand,
     },
+    /// Serializes a tagged Dynamic JSON tree with deterministic indentation.
+    /// Unsupported values, cycles, and default-limit violations return an
+    /// absent nullable String.
+    JsonStringifyDynamicPretty {
+        value: Operand,
+    },
+    /// Canonicalizes a Dynamic JSON tree using RFC 8785 JCS. Unsupported
+    /// values, out-of-domain numbers, and resource-limit violations return
+    /// an absent nullable String.
+    JsonCanonicalizeDynamic {
+        value: Operand,
+    },
+    /// Serializes Dynamic JSON values under caller-selected bounded limits.
+    JsonStringifyDynamicWithLimits {
+        value: Operand,
+        max_document_bytes: Operand,
+        max_nesting_depth: Operand,
+        max_string_bytes: Operand,
+        max_container_items: Operand,
+        max_number_bytes: Operand,
+    },
+    /// Creates the tagged Dynamic value for JSON `null` without parsing text.
+    JsonNullDynamic,
     /// Parses JSON text into tagged Dynamic values, using the interned
     /// `List<Dynamic>` layout for array nodes. Invalid input returns absence.
     JsonParseDynamic {
         document: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Parses JSON5 into the ordinary tagged Dynamic model.
+    Json5ParseDynamic {
+        document: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Parses strict JSON with caller-selected limits already validated
+    /// against runtime-core's hard ceilings.
+    JsonParseDynamicWithLimits {
+        document: Operand,
+        list_dynamic_id: u32,
+        max_document_bytes: Operand,
+        max_nesting_depth: Operand,
+        max_string_bytes: Operand,
+        max_container_items: Operand,
+        max_number_bytes: Operand,
+    },
+    /// Creates an opaque reader handle whose source chunks are parsed through
+    /// a bounded channel rather than concatenated into a full document.
+    JsonStreamReaderCreate {
+        max_document_bytes: Operand,
+        max_nesting_depth: Operand,
+        max_string_bytes: Operand,
+        max_container_items: Operand,
+        max_number_bytes: Operand,
+    },
+    /// Pushes one text chunk into an incremental JSON reader. False indicates
+    /// a stale handle or a reader that has already failed/finished.
+    JsonStreamReaderPush {
+        handle: Operand,
+        chunk: Operand,
+    },
+    /// Pushes raw bytes (which may split a UTF-8 scalar across chunks) into an
+    /// incremental JSON reader.
+    JsonStreamReaderPushBytes {
+        handle: Operand,
+        chunk: Operand,
+    },
+    /// Finishes a reader handle and materializes its validated Dynamic value.
+    JsonStreamReaderFinish {
+        handle: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Cancels and releases an incremental reader handle.
+    JsonStreamReaderCancel {
+        handle: Operand,
+    },
+    /// Starts bounded, pull-based JSON serialization from a Dynamic value.
+    JsonStreamWriterCreate {
+        value: Operand,
+        max_chunk_bytes: Operand,
+        max_document_bytes: Operand,
+        max_nesting_depth: Operand,
+        max_string_bytes: Operand,
+        max_container_items: Operand,
+        max_number_bytes: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Pulls the next writer chunk: 0 data, 1 end, 2 serialization error.
+    JsonStreamWriterNextStatus {
+        handle: Operand,
+        max_chunk_bytes: Operand,
+    },
+    /// Takes the chunk produced by the immediately preceding status call.
+    JsonStreamWriterTake {
+        handle: Operand,
+    },
+    /// Cancels and releases an incremental JSON writer.
+    JsonStreamWriterCancel {
+        handle: Operand,
+    },
+    /// Selects an RFC 6901 pointer from an ordinary Dynamic JSON value.
+    /// Invalid pointers or values return absence.
+    JsonPointerDynamic {
+        value: Operand,
+        pointer: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Classifies an already-failed JSON Pointer lookup: 1 syntax, 2 array
+    /// index, 3 missing path, 4 wrong container, 5 unrepresentable value.
+    JsonPointerErrorKind {
+        value: Operand,
+        pointer: Operand,
+    },
+    /// Selects an RFC 9535 JSONPath result into a managed `List<Dynamic>`.
+    /// Invalid inputs return absence; `JsonPathErrorKind` classifies it.
+    JsonPathDynamic {
+        value: Operand,
+        query: Operand,
+        list_dynamic_id: u32,
+    },
+    /// Classifies an RFC 9535 query failure: 1 syntax, 2 function, 3 limits,
+    /// and 4 a Dynamic value that cannot be represented as JSON.
+    JsonPathErrorKind {
+        value: Operand,
+        query: Operand,
+    },
+    /// Validates a Dynamic JSON value against a bounded Draft 2020-12 schema
+    /// and returns validation issues in a nullable `List<Dynamic>`.
+    JsonSchemaValidateDynamic {
+        value: Operand,
+        schema: Operand,
+        /// Optional Dynamic object mapping canonical resource URIs to schema
+        /// documents. `None` rejects all external references.
+        resolver: Option<Operand>,
         list_dynamic_id: u32,
     },
 

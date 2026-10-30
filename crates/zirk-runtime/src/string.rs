@@ -267,13 +267,11 @@ pub unsafe extern "C" fn zirk_str_from_u128(value: *const u128) -> *mut c_void {
 
 /// Converts a `Float32` (surface name) into a `String`.
 ///
-/// `Float16`/`Float128` have no equivalent: neither is a stable
-/// Rust primitive type (`f16`/`f128` are unstable as of this compiler's
-/// toolchain pin), so there is no `Display` implementation to reach for
-/// either without a hand-rolled decimal conversion this task does not build.
-/// Printing either width is a known, tracked gap, consistent with
-/// `Float128` arithmetic's own portability gap on Windows. The exact
-/// base-ten `Float` has its own exact formatter, `zirk_str_from_decimal`.
+/// `Float16` has no stable Rust primitive type or `Display` implementation
+/// in the pinned toolchain. `Float128` is formatted by the dedicated
+/// `zirk_float128_to_string` runtime path so it retains binary128 precision.
+/// The exact base-ten `Float` has its own formatter,
+/// `zirk_str_from_decimal`.
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_str_from_f32(value: f32) -> *mut c_void {
     let text = value.to_string();

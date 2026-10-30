@@ -7,23 +7,24 @@ Composition is explicit and type-directed:
 | `Date` | `+` | `Time` | `DateTime` |
 | `DateTime` | `in_zone` | `TimeZone` | `ZonedDateTime` |
 | `Instant` | `in_zone` | `TimeZone` | `ZonedDateTime` |
-| `Date` | `±` | `Period` | `Date` |
-| `DateTime` | `±` | `Period`/`Duration` | `DateTime` |
+| `DateTime` | `±` | `Duration` | `DateTime` |
 | `Instant` | `±` | `Duration` | `Instant` |
-| `ZonedDateTime` | `±` | `Period`/`Duration` | `ZonedDateTime` |
 | `Time` | `±` | `Duration` | `TimeShift` |
+| `ZonedDateTime` | `apply_to` | calendar `TimeShift` | `Result<ZonedDateTime, TimeShiftError>` |
 | two timeline points | `-` | same kind | `Duration` |
 
-Readable methods mirror operators: `date.at(time)`, `datetime.in_zone(zone)`,
-`instant.in_zone(zone)`, `value.add(amount)` and `value.subtract(amount)`.
+`Period` currently provides value construction, component access, ISO parsing,
+and formatting; direct period arithmetic on temporal values is not available.
+`TimeShift.calendar(...)` makes the calendar operation and DST policies
+explicit before applying it to a zoned value.
 
 Invalid combinations are compile-time errors:
 
-```zirk
-date + duration; // lacks clock and zone
-instant + period; // lacks calendar/zone context
-zone + duration; // zone rules are not a timeline point
-date + instant; // unrelated meanings
+```text
+date + duration; // compile-time error: no clock or zone context
+instant + period; // compile-time error: no calendar/zone context
+zone + duration; // compile-time error: a zone is not a timeline point
+date + instant; // compile-time error: unrelated temporal meanings
 ```
 
 The sealed Temporal family exists for shared contracts and generic APIs, not

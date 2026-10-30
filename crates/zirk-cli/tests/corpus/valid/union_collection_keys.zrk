@@ -1,0 +1,95 @@
+import { stdout } from std.io;
+
+type Key = Int32 | String;
+type Numeric = Boolean | Decimal;
+type Widened = Int32 | Decimal;
+
+enum Boxed {
+    Value(value: Numeric),
+    Empty
+}
+
+class Animal {
+    construct() { }
+}
+
+class Dog extends Animal {
+    construct() { super(); }
+}
+
+type Pet = Animal | Dog;
+
+fn main(): Void {
+    mut source: String = "kept";
+    mut values: Map<Key, Int32> = Map();
+    values.set(7, 70);
+    values.set(source, 80);
+    source[0] = 'x';
+    stdout.println((values.get(7) ?? 0).to_string());
+    stdout.println((values.get("kept") ?? 0).to_string());
+    stdout.println(values.contains_key("xept").to_string());
+    values.set("kept", 81);
+    stdout.println(values.length.to_string());
+    stdout.println((values.get("kept") ?? 0).to_string());
+
+    mut elements: Set<Key> = Set();
+    elements.add(7);
+    elements.add("kept");
+    elements.add(7);
+    stdout.println(elements.length.to_string());
+    stdout.println(elements.contains(7).to_string());
+    stdout.println(elements.contains("kept").to_string());
+
+    mut nested: Map<Tuple<Key, Int32>, Int32> = Map();
+    inmut nested_text: Key = "nested";
+    inmut nested_number: Key = 7;
+    nested.set((nested_text, 3), 93);
+    stdout.println((nested.get((nested_text, 3)) ?? 0).to_string());
+    nested.set((nested_number, 3), 73);
+    stdout.println((nested.get((nested_number, 3)) ?? 0).to_string());
+    stdout.println(nested.length.to_string());
+
+    mut enum_keys: Map<Boxed, Int32> = Map();
+    inmut boxed_boolean: Numeric = true;
+    inmut boxed_decimal: Numeric = 11.0;
+    enum_keys.set(Boxed.Value(boxed_boolean), 100);
+    enum_keys.set(Boxed.Value(boxed_decimal), 111);
+    stdout.println((enum_keys.get(Boxed.Value(boxed_decimal)) ?? 0).to_string());
+    enum_keys.set(Boxed.Value(boxed_decimal), 112);
+    stdout.println(enum_keys.length.to_string());
+    stdout.println((enum_keys.get(Boxed.Value(boxed_decimal)) ?? 0).to_string());
+    stdout.println((enum_keys.get(Boxed.Value(boxed_boolean)) ?? 0).to_string());
+
+    mut nested_values: Map<Int32, Tuple<Numeric, Int32>> = Map();
+    nested_values.set(1, (boxed_boolean, 5));
+    inmut nested_result: Tuple<Numeric, Int32> = nested_values.get(1) ?? (boxed_decimal, 0);
+    stdout.println(match nested_result[0] { true => "boolean"; _ => "decimal"; });
+    stdout.println(nested_result[1].to_string());
+
+    mut normalized_keys: Map<Widened, Int32> = Map();
+    normalized_keys.set(3, 30);
+    normalized_keys.set(3.0, 31);
+    stdout.println(normalized_keys.length.to_string());
+    stdout.println((normalized_keys.get(3) ?? 0).to_string());
+
+    mut pets: Map<Pet, Int32> = Map();
+    inmut dog: Pet = Dog();
+    pets.set(dog, 12);
+    stdout.println((pets.get(dog) ?? 0).to_string());
+
+    mut nullable_union_map: Map<Key?, Int32> = Map();
+    nullable_union_map.set(null, 5);
+    inmut nullable_text: Key? = "optional";
+    nullable_union_map.set(nullable_text, 6);
+    stdout.println((nullable_union_map.get(null) ?? 0).to_string());
+    stdout.println((nullable_union_map.get(nullable_text) ?? 0).to_string());
+    stdout.println(nullable_union_map.length.to_string());
+
+    mut nullable_union_set: Set<Key?> = Set();
+    nullable_union_set.add(null);
+    nullable_union_set.add(nullable_text);
+    nullable_union_set.add(nullable_text);
+    stdout.println(nullable_union_set.length.to_string());
+}
+
+main();

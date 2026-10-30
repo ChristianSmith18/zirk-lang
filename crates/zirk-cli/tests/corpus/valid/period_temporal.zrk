@@ -1,0 +1,21 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut mixed = Period(1, -2, 3, -4);
+    stdout.println(mixed.years);
+    stdout.println(mixed.months);
+    stdout.println(mixed.weeks);
+    stdout.println(mixed.days);
+    stdout.println(mixed.to_iso_string());
+    stdout.println(Period.months(-3).to_iso_string());
+    match Period.parse("P1Y2M3W4D") {
+        Ok(parsed) => stdout.println(parsed.to_iso_string());
+        Error(_) => stdout.println("period parse failed");
+    };
+    match Period.parse("P1DT2H") {
+        Ok(_) => stdout.println("accepted exact-time period");
+        Error(_) => stdout.println("rejected exact-time fields");
+    };
+}
+
+main();

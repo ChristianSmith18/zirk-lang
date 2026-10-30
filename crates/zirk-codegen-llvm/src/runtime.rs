@@ -549,12 +549,18 @@ pub mod symbols {
     pub const ARRAY_NEW: &str = "zirk_rt_array_new";
     /// `zirk_rt_array_new_with_layout(capacity, elem_size, elem_align, offsets, count)`.
     pub const ARRAY_NEW_WITH_LAYOUT: &str = "zirk_rt_array_new_with_layout";
+    /// Tag-aware array allocation with per-element union trace metadata.
+    pub const ARRAY_NEW_WITH_UNION_LAYOUT: &str = "zirk_rt_array_new_with_union_layout";
     /// `zirk_rt_list_new(elem_size, elem_align, is_ref) -> *mut c_void`.
     pub const LIST_NEW: &str = "zirk_rt_list_new";
     /// `zirk_rt_list_new_with_layout(elem_size, elem_align, offsets, count) -> *mut c_void`.
     pub const LIST_NEW_WITH_LAYOUT: &str = "zirk_rt_list_new_with_layout";
+    /// Tag-aware list allocation with per-element union trace metadata.
+    pub const LIST_NEW_WITH_UNION_LAYOUT: &str = "zirk_rt_list_new_with_union_layout";
     /// `zirk_rt_deque_new_with_layout(elem_size, offsets, count) -> *mut c_void`.
     pub const DEQUE_NEW_WITH_LAYOUT: &str = "zirk_rt_deque_new_with_layout";
+    /// Tag-aware sequence allocation: `elem_size, offsets, count, union_roots, union_words`.
+    pub const DEQUE_NEW_WITH_UNION_LAYOUT: &str = "zirk_rt_deque_new_with_union_layout";
     pub const DEQUE_LENGTH: &str = "zirk_rt_deque_length";
     pub const DEQUE_VERSION: &str = "zirk_rt_deque_version";
     pub const DEQUE_PUSH_FRONT: &str = "zirk_rt_deque_push_front";
@@ -576,8 +582,10 @@ pub mod symbols {
     /// `zirk_rt_array_slice_with_layout(array, start, end, step, elem_size, elem_align, offsets, count)`.
     pub const ARRAY_SLICE_WITH_LAYOUT: &str = "zirk_rt_array_slice_with_layout";
     /// `zirk_rt_map_new_with_layout(key_offsets, key_count, key_size,
-    /// value_offsets, value_count, string_content_keys, value_size)`.
+    /// key_union_roots, key_union_root_words, value_offsets, value_count,
+    /// value_union_roots, value_union_root_words, string_content_keys, value_size)`.
     pub const MAP_NEW_WITH_LAYOUT: &str = "zirk_rt_map_new_with_layout";
+    pub const MAP_NEW_WITH_TEXT_FIELDS: &str = "zirk_rt_map_new_with_text_fields";
     /// `zirk_rt_map_length(map) -> i64`.
     pub const MAP_LENGTH: &str = "zirk_rt_map_length";
     /// `zirk_rt_map_version(map) -> u64`.
@@ -641,10 +649,34 @@ pub mod symbols {
     /// Copies a Dynamic payload to a typed destination after tag validation.
     pub const DYNAMIC_VALUE_COPY_TO: &str = "zirk_rt_dynamic_value_copy_to";
     pub const JSON_STRINGIFY_DYNAMIC: &str = "zirk_rt_json_stringify_dynamic";
+    pub const JSON_STRINGIFY_DYNAMIC_PRETTY: &str = "zirk_rt_json_stringify_dynamic_pretty";
+    pub const JSON_CANONICALIZE_DYNAMIC: &str = "zirk_rt_json_canonicalize_dynamic";
+    pub const JSON_STRINGIFY_DYNAMIC_WITH_LIMITS: &str =
+        "zirk_rt_json_stringify_dynamic_with_limits";
     pub const JSON_PARSE_DYNAMIC: &str = "zirk_rt_json_parse_dynamic";
+    pub const JSON5_PARSE_DYNAMIC: &str = "zirk_rt_json5_parse_dynamic";
+    pub const JSON_PARSE_DYNAMIC_WITH_LIMITS: &str = "zirk_rt_json_parse_dynamic_with_limits";
+    pub const JSON_STREAM_READER_CREATE: &str = "zirk_rt_json_stream_reader_create";
+    pub const JSON_STREAM_READER_PUSH: &str = "zirk_rt_json_stream_reader_push";
+    pub const JSON_STREAM_READER_PUSH_BYTES: &str = "zirk_rt_json_stream_reader_push_bytes";
+    pub const JSON_STREAM_READER_FINISH: &str = "zirk_rt_json_stream_reader_finish";
+    pub const JSON_STREAM_READER_CANCEL: &str = "zirk_rt_json_stream_reader_cancel";
+    pub const JSON_STREAM_WRITER_CREATE: &str = "zirk_rt_json_stream_writer_create";
+    pub const JSON_STREAM_WRITER_NEXT_STATUS: &str = "zirk_rt_json_stream_writer_next_status";
+    pub const JSON_STREAM_WRITER_TAKE: &str = "zirk_rt_json_stream_writer_take";
+    pub const JSON_STREAM_WRITER_CANCEL: &str = "zirk_rt_json_stream_writer_cancel";
+    pub const JSON_POINTER_DYNAMIC: &str = "zirk_rt_json_pointer_dynamic";
+    pub const JSON_POINTER_ERROR_KIND_DYNAMIC: &str = "zirk_rt_json_pointer_error_kind_dynamic";
+    pub const JSONPATH_DYNAMIC: &str = "zirk_rt_jsonpath_dynamic";
+    pub const JSONPATH_ERROR_KIND_DYNAMIC: &str = "zirk_rt_jsonpath_error_kind_dynamic";
+    pub const JSON_SCHEMA_VALIDATE_DYNAMIC: &str = "zirk_rt_json_schema_validate_dynamic";
     /// `zirk_rt_set_new_with_layout(element_offsets, count, element_size,
     /// string_content_elements) -> *mut c_void`.
     pub const SET_NEW_WITH_LAYOUT: &str = "zirk_rt_set_new_with_layout";
+    pub const SET_NEW_WITH_TEXT_FIELDS: &str = "zirk_rt_set_new_with_text_fields";
+    pub const SET_NEW_WITH_UNION_ROOTS: &str = "zirk_rt_set_new_with_union_roots";
+    pub const SET_NEW_WITH_TEXT_FIELDS_AND_UNION_ROOTS: &str =
+        "zirk_rt_set_new_with_text_fields_and_union_roots";
     /// `zirk_rt_set_length(set) -> i64`.
     pub const SET_LENGTH: &str = "zirk_rt_set_length";
     /// `zirk_rt_set_values(set, size, align, offsets, count) -> Array<T>`.
@@ -753,7 +785,9 @@ pub struct Runtime<'ctx> {
     pub chan_capacity: FunctionValue<'ctx>,
     pub chan_drain: FunctionValue<'ctx>,
     pub list_new_with_layout: FunctionValue<'ctx>,
+    pub list_new_with_union_layout: FunctionValue<'ctx>,
     pub deque_new_with_layout: FunctionValue<'ctx>,
+    pub deque_new_with_union_layout: FunctionValue<'ctx>,
     pub deque_length: FunctionValue<'ctx>,
     pub deque_version: FunctionValue<'ctx>,
     pub deque_push_front: FunctionValue<'ctx>,
@@ -771,6 +805,7 @@ pub struct Runtime<'ctx> {
     pub priority_queue_is_empty: FunctionValue<'ctx>,
     pub priority_queue_version: FunctionValue<'ctx>,
     pub array_new_with_layout: FunctionValue<'ctx>,
+    pub array_new_with_union_layout: FunctionValue<'ctx>,
     pub array_clone_with_layout: FunctionValue<'ctx>,
     pub array_slice_with_layout: FunctionValue<'ctx>,
     pub branch_fail: FunctionValue<'ctx>,
@@ -1037,6 +1072,7 @@ pub struct Runtime<'ctx> {
     pub array_new: FunctionValue<'ctx>,
     pub list_new: FunctionValue<'ctx>,
     pub map_new: FunctionValue<'ctx>,
+    pub map_new_with_text_fields: FunctionValue<'ctx>,
     pub map_length: FunctionValue<'ctx>,
     pub map_version: FunctionValue<'ctx>,
     pub map_keys: FunctionValue<'ctx>,
@@ -1067,8 +1103,30 @@ pub struct Runtime<'ctx> {
     pub dynamic_value_tag: FunctionValue<'ctx>,
     pub dynamic_value_copy_to: FunctionValue<'ctx>,
     pub json_stringify_dynamic: FunctionValue<'ctx>,
+    pub json_stringify_dynamic_pretty: FunctionValue<'ctx>,
+    pub json_canonicalize_dynamic: FunctionValue<'ctx>,
+    pub json_stringify_dynamic_with_limits: FunctionValue<'ctx>,
     pub json_parse_dynamic: FunctionValue<'ctx>,
+    pub json5_parse_dynamic: FunctionValue<'ctx>,
+    pub json_parse_dynamic_with_limits: FunctionValue<'ctx>,
+    pub json_stream_reader_create: FunctionValue<'ctx>,
+    pub json_stream_reader_push: FunctionValue<'ctx>,
+    pub json_stream_reader_push_bytes: FunctionValue<'ctx>,
+    pub json_stream_reader_finish: FunctionValue<'ctx>,
+    pub json_stream_reader_cancel: FunctionValue<'ctx>,
+    pub json_stream_writer_create: FunctionValue<'ctx>,
+    pub json_stream_writer_next_status: FunctionValue<'ctx>,
+    pub json_stream_writer_take: FunctionValue<'ctx>,
+    pub json_stream_writer_cancel: FunctionValue<'ctx>,
+    pub json_pointer_dynamic: FunctionValue<'ctx>,
+    pub json_pointer_error_kind_dynamic: FunctionValue<'ctx>,
+    pub jsonpath_dynamic: FunctionValue<'ctx>,
+    pub jsonpath_error_kind_dynamic: FunctionValue<'ctx>,
+    pub json_schema_validate_dynamic: FunctionValue<'ctx>,
     pub set_new: FunctionValue<'ctx>,
+    pub set_new_with_text_fields: FunctionValue<'ctx>,
+    pub set_new_with_union_roots: FunctionValue<'ctx>,
+    pub set_new_with_text_fields_and_union_roots: FunctionValue<'ctx>,
     pub set_length: FunctionValue<'ctx>,
     pub set_values: FunctionValue<'ctx>,
     pub set_sorted_elements: FunctionValue<'ctx>,
@@ -2213,6 +2271,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
                 ptr.into(),
                 context.i32_type().into(),
                 ptr.into(),
+                ptr.into(),
                 context.i64_type().into(),
                 context.i64_type().into(),
                 context.i64_type().into(),
@@ -2840,6 +2899,22 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ),
         external,
     );
+    let array_new_with_union_layout = module.add_function(
+        symbols::ARRAY_NEW_WITH_UNION_LAYOUT,
+        ptr.fn_type(
+            &[
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
     let list_new = module.add_function(
         symbols::LIST_NEW,
         ptr.fn_type(&[i64.into(), i64.into(), context.bool_type().into()], false),
@@ -2850,9 +2925,32 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         ptr.fn_type(&[i64.into(), i64.into(), ptr.into(), i64.into()], false),
         external,
     );
+    let list_new_with_union_layout = module.add_function(
+        symbols::LIST_NEW_WITH_UNION_LAYOUT,
+        ptr.fn_type(
+            &[
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
     let deque_new_with_layout = module.add_function(
         symbols::DEQUE_NEW_WITH_LAYOUT,
         ptr.fn_type(&[i64.into(), ptr.into(), i64.into()], false),
+        external,
+    );
+    let deque_new_with_union_layout = module.add_function(
+        symbols::DEQUE_NEW_WITH_UNION_LAYOUT,
+        ptr.fn_type(
+            &[i64.into(), ptr.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
         external,
     );
     let deque_length = module.add_function(
@@ -2977,7 +3075,32 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
                 i64.into(),
                 ptr.into(),
                 i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
                 context.bool_type().into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let map_new_with_text_fields = module.add_function(
+        symbols::MAP_NEW_WITH_TEXT_FIELDS,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
                 i64.into(),
             ],
             false,
@@ -3191,11 +3314,173 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
         external,
     );
+    let json_stringify_dynamic_pretty = module.add_function(
+        symbols::JSON_STRINGIFY_DYNAMIC_PRETTY,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let json_canonicalize_dynamic = module.add_function(
+        symbols::JSON_CANONICALIZE_DYNAMIC,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let json_stringify_dynamic_with_limits = module.add_function(
+        symbols::JSON_STRINGIFY_DYNAMIC_WITH_LIMITS,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
     let json_parse_dynamic = module.add_function(
         symbols::JSON_PARSE_DYNAMIC,
         context
             .i32_type()
             .fn_type(&[ptr.into(), context.i32_type().into(), ptr.into()], false),
+        external,
+    );
+    let json5_parse_dynamic = module.add_function(
+        symbols::JSON5_PARSE_DYNAMIC,
+        context
+            .i32_type()
+            .fn_type(&[ptr.into(), context.i32_type().into(), ptr.into()], false),
+        external,
+    );
+    let json_parse_dynamic_with_limits = module.add_function(
+        symbols::JSON_PARSE_DYNAMIC_WITH_LIMITS,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                context.i32_type().into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let json_stream_reader_create = module.add_function(
+        symbols::JSON_STREAM_READER_CREATE,
+        i64.fn_type(
+            &[i64.into(), i64.into(), i64.into(), i64.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let json_stream_reader_push = module.add_function(
+        symbols::JSON_STREAM_READER_PUSH,
+        context.i32_type().fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let json_stream_reader_push_bytes = module.add_function(
+        symbols::JSON_STREAM_READER_PUSH_BYTES,
+        context.i32_type().fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let json_stream_reader_finish = module.add_function(
+        symbols::JSON_STREAM_READER_FINISH,
+        context
+            .i32_type()
+            .fn_type(&[i64.into(), context.i32_type().into(), ptr.into()], false),
+        external,
+    );
+    let json_stream_reader_cancel = module.add_function(
+        symbols::JSON_STREAM_READER_CANCEL,
+        context.void_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let json_stream_writer_create = module.add_function(
+        symbols::JSON_STREAM_WRITER_CREATE,
+        i64.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                i64.into(),
+                context.i32_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let json_stream_writer_next_status = module.add_function(
+        symbols::JSON_STREAM_WRITER_NEXT_STATUS,
+        context.i32_type().fn_type(&[i64.into(), i64.into()], false),
+        external,
+    );
+    let json_stream_writer_take = module.add_function(
+        symbols::JSON_STREAM_WRITER_TAKE,
+        context.i32_type().fn_type(&[i64.into(), ptr.into()], false),
+        external,
+    );
+    let json_stream_writer_cancel = module.add_function(
+        symbols::JSON_STREAM_WRITER_CANCEL,
+        context.void_type().fn_type(&[i64.into()], false),
+        external,
+    );
+    let json_pointer_dynamic = module.add_function(
+        symbols::JSON_POINTER_DYNAMIC,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let json_pointer_error_kind_dynamic = module.add_function(
+        symbols::JSON_POINTER_ERROR_KIND_DYNAMIC,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let jsonpath_dynamic = module.add_function(
+        symbols::JSONPATH_DYNAMIC,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let jsonpath_error_kind_dynamic = module.add_function(
+        symbols::JSONPATH_ERROR_KIND_DYNAMIC,
+        context.i32_type().fn_type(&[ptr.into(), ptr.into()], false),
+        external,
+    );
+    let json_schema_validate_dynamic = module.add_function(
+        symbols::JSON_SCHEMA_VALIDATE_DYNAMIC,
+        context.i32_type().fn_type(
+            &[
+                ptr.into(),
+                ptr.into(),
+                context.i32_type().into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        ),
         external,
     );
     let set_new = module.add_function(
@@ -3206,6 +3491,45 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
                 i64.into(),
                 i64.into(),
                 context.bool_type().into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let set_new_with_text_fields = module.add_function(
+        symbols::SET_NEW_WITH_TEXT_FIELDS,
+        ptr.fn_type(
+            &[ptr.into(), i64.into(), i64.into(), ptr.into(), i64.into()],
+            false,
+        ),
+        external,
+    );
+    let set_new_with_union_roots = module.add_function(
+        symbols::SET_NEW_WITH_UNION_ROOTS,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                context.bool_type().into(),
+                ptr.into(),
+                i64.into(),
+            ],
+            false,
+        ),
+        external,
+    );
+    let set_new_with_text_fields_and_union_roots = module.add_function(
+        symbols::SET_NEW_WITH_TEXT_FIELDS_AND_UNION_ROOTS,
+        ptr.fn_type(
+            &[
+                ptr.into(),
+                i64.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
+                ptr.into(),
+                i64.into(),
             ],
             false,
         ),
@@ -3602,7 +3926,9 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         chan_capacity,
         chan_drain,
         list_new_with_layout,
+        list_new_with_union_layout,
         deque_new_with_layout,
+        deque_new_with_union_layout,
         deque_length,
         deque_version,
         deque_push_front,
@@ -3620,6 +3946,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         priority_queue_is_empty,
         priority_queue_version,
         array_new_with_layout,
+        array_new_with_union_layout,
         array_clone_with_layout,
         array_slice_with_layout,
         branch_fail,
@@ -3841,6 +4168,7 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         array_new,
         list_new,
         map_new,
+        map_new_with_text_fields,
         map_length,
         map_version,
         map_keys,
@@ -3871,8 +4199,30 @@ pub fn declare<'ctx>(context: &'ctx Context, module: &Module<'ctx>) -> Runtime<'
         dynamic_value_tag,
         dynamic_value_copy_to,
         json_stringify_dynamic,
+        json_stringify_dynamic_pretty,
+        json_canonicalize_dynamic,
+        json_stringify_dynamic_with_limits,
         json_parse_dynamic,
+        json5_parse_dynamic,
+        json_parse_dynamic_with_limits,
+        json_stream_reader_create,
+        json_stream_reader_push,
+        json_stream_reader_push_bytes,
+        json_stream_reader_finish,
+        json_stream_reader_cancel,
+        json_stream_writer_create,
+        json_stream_writer_next_status,
+        json_stream_writer_take,
+        json_stream_writer_cancel,
+        json_pointer_dynamic,
+        json_pointer_error_kind_dynamic,
+        jsonpath_dynamic,
+        jsonpath_error_kind_dynamic,
+        json_schema_validate_dynamic,
         set_new,
+        set_new_with_text_fields,
+        set_new_with_union_roots,
+        set_new_with_text_fields_and_union_roots,
         set_length,
         set_values,
         set_sorted_elements,

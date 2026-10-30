@@ -6,8 +6,8 @@ An algebraic enum defines variants that may carry different typed data.
 enum LoadState {
     Idle;
     Loading(progress: Decimal);
-    Ready(value: Document);
-    Failed(error: LoadError);
+    Ready(value: String);
+    Failed(error: String);
 }
 ```
 
@@ -17,26 +17,47 @@ A dynamic `Object` can model an open payload shape, but it does not enforce
 that only one state is present:
 
 ```zirk
-inmut state: Object = {
-    loading: false,
-    progress: null,
-    document: document,
-    error: null
-};
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut document = "report contents";
+    inmut state: Object = {
+        loading: false,
+        progress: "none",
+        document: document,
+        error: "none"
+    };
+    stdout.println("dynamic object fields can form contradictory states");
+}
+main();
 ```
 
 It permits contradictory states: loading and failed at once, or ready without a
 document. The algebraic enum makes impossible combinations unrepresentable.
 
 ```zirk
-fn render(state: LoadState): Void {
-    match state {
-        Idle => show_idle();
-        Loading(progress) => show_progress(progress);
-        Ready(document) => show_document(document);
-        Failed(error) => show_error(error);
-    }
+import { stdout } from std.io;
+
+enum LoadState {
+    Idle;
+    Loading(progress: Decimal);
+    Ready(value: String);
+    Failed(error: String);
 }
+
+fn render(state: LoadState): String {
+    return match state {
+        LoadState.Idle => "idle",
+        LoadState.Loading(progress) => "loading {progress}",
+        LoadState.Ready(document) => "ready: {document}",
+        LoadState.Failed(error) => "failed: {error}"
+    };
+}
+
+fn main(): Void {
+    stdout.println(render(LoadState.Ready("report contents")));
+}
+main();
 ```
 
 This is the same model used by `Result<T, E>`, iterator steps, application
@@ -56,9 +77,9 @@ satisfies the corresponding contract. Payload extraction is legal only inside
 ## API
 
 Variants carrying zero, one, or several typed payloads; exactly one variant at
-a time. Generic algebraic enums are allowed (generic enum lowering delivered by
-`fase-3-generic-enums` for flat single/multi-parameter cases); broader generic
-enum dispatch and its full target matrix remain incomplete, as recorded in the
+a time. Generic algebraic enums support construction and dispatch across
+distinct and nested instantiations in local interpreter/native cases. The
+complete multi-host execution matrix remains open; see the
 [feature-status matrix](../../11-reference/12-feature-status.md).
 
 ### Properties
@@ -82,25 +103,10 @@ enum dispatch and its full target matrix remain incomplete, as recorded in the
 > (currently `roadmap`, unproposed).
 
 Equality holds when the variant and all associated values are equal; derivable
-only when every payload supports it. Ordering is never inferred.
+only when every payload supports it. Ordering is never inferred. Executable
+evidence: [enum and union native/interpreter parity](../../../../crates/zirk-cli/tests/object_engine_parity.rs), [Clone composition tests](../../../../crates/zirk-cli/tests/end_to_end.rs), and [enum semantic checks](../../../../crates/zirk-sema/tests/typing.rs).
 
 ### Examples
-
-```zirk
-enum LoadState {
-    Idle;
-    Loading(progress: Decimal);
-    Ready(value: Document);
-    Failed(error: LoadError);
-}
-
-match state {
-    Idle => show_idle(),
-    Loading(progress) => show_progress(progress),
-    Ready(document) => show_document(document),
-    Failed(error) => show_error(error),
-}
-```
 
 ---
 

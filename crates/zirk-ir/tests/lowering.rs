@@ -242,7 +242,7 @@ fn instructions(function: &Function) -> Vec<InstKind> {
 /// `synthesize_native_failure_bodies` lowers their bodies — every module's
 /// string table starts with these, whether or not the program itself ever
 /// names one of the classes or triggers a native check.
-const NATIVE_FAILURE_CODES: [&str; 30] = [
+const NATIVE_FAILURE_CODES: [&str; 37] = [
     "E_DIVISION_BY_ZERO",
     "E_INVALID_SHIFT",
     "E_INVALID_REPEAT",
@@ -252,6 +252,13 @@ const NATIVE_FAILURE_CODES: [&str; 30] = [
     "E_MISSING_PROPERTY",
     "E_CONTRACT_VIOLATION",
     "E_JSON_CONVERSION",
+    "E_JSON_POINTER_SYNTAX",
+    "E_JSON_POINTER_INDEX",
+    "E_JSON_POINTER_NOT_FOUND",
+    "E_JSON_POINTER_CONTAINER",
+    "E_JSONPATH_SYNTAX",
+    "E_JSONPATH_FUNCTION",
+    "E_JSON_LIMIT",
     "E_INDEX_OUT_OF_BOUNDS",
     "E_NATIVE_ERROR",
     // Roadmap Phase 7: `InvalidStepError` (a range or slice whose step is

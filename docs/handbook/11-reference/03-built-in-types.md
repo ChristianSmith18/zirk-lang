@@ -15,8 +15,8 @@ examples, and advice on choosing a type, begin with
 | Logic | `Boolean` | value; only `true` or `false` | `false` |
 | Text unit | `Char` | one Unicode grapheme value | invalid without an explicit value |
 | Text | `String` | mutable, shared reference; grapheme-indexed | `""` |
-| Temporal values | `Date`, `Time`, `DateTime`, `Duration` (delivered); `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift` (specified) | immutable value types; nanosecond precision where applicable | type-specific or explicit |
-| Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Deque<T>`, `Queue<T>`, `Stack<T>`, `PriorityQueue<T>`, `Range<T>` | native reference containers except value-like `Range`; Map/Set aggregate Hash/Equal coverage is partial; no importable `std.collections` package | empty where meaningful |
+| Temporal values | `Date`, `Time`, `DateTime`, `Duration` (delivered); `Instant` (RFC 3339 parsing, checked Unix-unit factories, Unix-unit properties, native `now()`, UTC rendering, ordering and `Duration` arithmetic delivered); locale-aware civil formatting and `DateTime.format_locale_in_zone` delivered; partial `TimeZone`/`ZonedDateTime` parsing, projection, instant-preserving conversion, and explicit local DST resolution delivered; `Period` constructors/components/ISO parsing and formatting delivered; unified tagged `TimeShift` clock/calendar forms delivered; localized parsing and broader period arithmetic remain pending | immutable value types; nanosecond precision where applicable | type-specific or explicit |
+| Collections | `Array<T>`, `Array<T, N>`, `List<T>`, `Map<K, V>`, `Set<T>`, `Deque<T>`, `Queue<T>`, `Stack<T>`, `PriorityQueue<T>`, `Range<T>` | bundled `std.collections` facade re-exports canonical built-in identities; Map/Set aggregate Hash/Equal coverage remains partial | empty where meaningful |
 | Callable | `Function(P...) => R`; `Fn(P...) => R` | signature-compatible callable identity with compiler-managed environment | no implicit default |
 | Product | `Tuple(T...)` | immutable heterogeneous value with constant `[N]` access | component defaults where explicitly constructed |
 | Managed observation | `Weak<T>` | non-owning managed reference; upgrades through `T?` | no implicit default |
@@ -111,7 +111,7 @@ Every inhabited value exposes `type` and `to_string()`. Equality, hashing, order
 - Use `UInt*` only when the domain and boundary genuinely require a non-negative binary integer.
 - Use `Decimal` for everyday fractional values, money and exact base-ten domains; use `Float`/`Float*` for graphics, DSP, ML and C interop.
 - Use `Char` for one user-perceived Unicode grapheme and `String` for text.
-- Choose temporal types by meaning, not formatting: a birthday is a delivered `Date`, an elapsed timeout is a delivered `Duration`, and a globally scheduled event will need the specified `ZonedDateTime` or `Instant` APIs when they are delivered.
+- Choose temporal types by meaning, not formatting: a birthday is a delivered `Date`, an elapsed timeout is a delivered `Duration`, and an absolute timestamp can use `Instant`; use of a named time zone or calendar arithmetic through `ZonedDateTime`/`TimeZone` is still in progress.
 - Use `List<T>` when the size changes, `Array<T>` or `T[n]` when it is fixed, `Pointer<T>` only inside `unsafe`, and `Weak<T>` when you do not want to keep an object alive.
 
 See also [Type Member Index](./13-type-member-index.md), [Temporal Reference](./14-temporal-reference.md), and [Choosing a Type](../02-handbook/03-everyday-types/01f-choosing-a-type.md).

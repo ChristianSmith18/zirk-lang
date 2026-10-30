@@ -1,0 +1,62 @@
+{
+  "strict": [
+    { "id": "strict-object-roundtrip", "input": "{\"name\":\"Ada\",\"scores\":[7,8]}", "outcome": "accept-exact-token-preservation" },
+    { "id": "strict-large-integer", "input": "123456789012345678901234567890123456789", "outcome": "accept-exact-token-preservation" },
+    { "id": "strict-malformed", "input": "{\"status\": }", "outcome": "JsonConversionError" },
+    { "id": "strict-duplicate-key", "input": "{\"key\":1,\"key\":2}", "outcome": "JsonConversionError" }
+  ],
+  "pointer": [
+    { "id": "pointer-root", "document": "{\"a\":1}", "pointer": "", "outcome": "{\"a\":1}" },
+    { "id": "pointer-array-index", "document": "{\"a\":[\"x\",\"y\"]}", "pointer": "/a/1", "outcome": "\"y\"" },
+    { "id": "pointer-tilde01-order", "document": "{\"~1\":7}", "pointer": "/~01", "outcome": "7" },
+    { "id": "pointer-slash-escape", "document": "{\"a/b\":7}", "pointer": "/a~1b", "outcome": "7" },
+    { "id": "pointer-invalid-escape", "document": "{}", "pointer": "/~2", "outcome": "JsonPointerSyntaxError" },
+    { "id": "pointer-leading-zero-index", "document": "[1,2]", "pointer": "/01", "outcome": "JsonPointerIndexError" },
+    { "id": "pointer-missing-member", "document": "{}", "pointer": "/absent", "outcome": "JsonPointerNotFound" }
+  ],
+  "jsonpath": [
+    { "id": "jsonpath-name-index", "document": "{\"store\":{\"book\":[{\"title\":\"A\"},{\"title\":\"B\"}]}}", "query": "$.store.book[1].title", "outcome": "[\"B\"]" },
+    { "id": "jsonpath-wildcard", "document": "{\"a\":[1,2]}", "query": "$.a[*]", "outcome": "[1,2]" },
+    { "id": "jsonpath-filter", "document": "{\"items\":[{\"price\":5},{\"price\":15}]}", "query": "$.items[?@.price < 10]", "outcome": "[{\"price\":5}]" },
+    { "id": "jsonpath-no-match", "document": "[1,2]", "query": "$[?@ > 9]", "outcome": "[]" },
+    { "id": "jsonpath-malformed", "document": "{}", "query": "$[?", "outcome": "JsonPathSyntaxError" },
+    { "id": "jsonpath-unknown-function", "document": "[1]", "query": "$[?mystery(@)]", "outcome": "JsonPathFunctionError" },
+    { "id": "jsonpath-step-budget", "document": "[]", "query": "$..*", "outcome": "JsonLimitError" }
+  ],
+  "schema": [
+    { "id": "schema-valid-object", "schema": "{\"type\":\"object\",\"required\":[\"id\"],\"properties\":{\"id\":{\"type\":\"integer\"}}}", "instance": "{\"id\":7}", "outcome": "valid" },
+    { "id": "schema-invalid-type", "schema": "{\"type\":\"integer\"}", "instance": "\"seven\"", "outcome": "validation-error-at-root" },
+    { "id": "schema-local-ref", "schema": "{\"$defs\":{\"count\":{\"type\":\"integer\"}},\"$ref\":\"#/$defs/count\"}", "instance": "7", "outcome": "valid" },
+    { "id": "schema-unresolved-local-ref", "schema": "{\"$ref\":\"#/$defs/missing\"}", "instance": "null", "outcome": "JsonSchemaReferenceError" },
+    { "id": "schema-remote-ref-no-resolver", "schema": "{\"$ref\":\"https://example.invalid/schema\"}", "instance": "null", "outcome": "JsonSchemaResolverRequired" },
+    { "id": "schema-recursion-budget", "schema": "{\"$ref\":\"#\"}", "instance": "null", "outcome": "JsonLimitError" }
+  ],
+  "jcs": [
+    { "id": "jcs-property-order", "input": "{\"z\":1,\"a\":2}", "outcome": "{\"a\":2,\"z\":1}" },
+    { "id": "jcs-array-order", "input": "[2,1]", "outcome": "[2,1]" },
+    { "id": "jcs-negative-zero", "input": "-0", "outcome": "0" },
+    { "id": "jcs-out-of-domain-integer", "input": "9007199254740993", "outcome": "JsonCanonicalDomainError" },
+    { "id": "jcs-duplicate-name", "input": "{\"a\":1,\"a\":2}", "outcome": "JsonCanonicalDomainError" }
+  ],
+  "json5": [
+    { "id": "json5-comments-trailing-comma", "input": "{ // note\n unquoted: 'text', list: [1,2,], }", "outcome": "{\"unquoted\":\"text\",\"list\":[1,2]}" },
+    { "id": "json5-hex-plus-leading-dot", "input": "{ value: +0x10, fraction: .5 }", "outcome": "{\"value\":16,\"fraction\":0.5}" },
+    { "id": "json5-duplicate-last-wins", "input": "{ value: 1, value: 2 }", "outcome": "{\"value\":2}" },
+    { "id": "json5-non-finite", "input": "[Infinity, NaN]", "outcome": "floating-infinity-and-nan" },
+    { "id": "json5-invalid-escape", "input": "{ value: '\\u12' }", "outcome": "Json5SyntaxError" }
+  ],
+  "streaming": [
+    { "id": "stream-split-utf8-and-escape", "chunks-hex": ["7b2274657874223a22e99b", "aaf09f99", "825c7530306539227d"], "outcome": "{\"text\":\"雪🙂é\"}" },
+    { "id": "stream-cancel-before-root-complete", "chunks": ["{\"a\":"], "outcome": "JsonCancelled-no-value-published" },
+    { "id": "stream-read-error-mid-document", "chunks": ["[1,", "<io-error>"], "outcome": "JsonIoError-no-value-published" },
+    { "id": "stream-write-error-mid-document", "sink-fails-after-bytes": 2, "outcome": "JsonIoError-no-success" }
+  ],
+  "limits": [
+    { "id": "limit-default-document-bytes", "limit": "16MiB", "outcome": "default" },
+    { "id": "limit-hard-document-bytes", "limit": "64MiB", "outcome": "absolute-maximum" },
+    { "id": "limit-depth-default-and-maximum", "default": 128, "maximum": 512, "outcome": "JsonLimitError-above-maximum" },
+    { "id": "limit-string-bytes", "maximum": "16MiB", "outcome": "JsonLimitError-before-excess-allocation" },
+    { "id": "limit-container-items", "maximum": 1000000, "outcome": "JsonLimitError-before-excess-allocation" },
+    { "id": "limit-number-token-bytes", "maximum": 4096, "outcome": "JsonLimitError-before-excess-allocation" }
+  ]
+}

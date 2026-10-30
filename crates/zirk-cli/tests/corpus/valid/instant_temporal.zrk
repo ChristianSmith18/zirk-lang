@@ -1,0 +1,27 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    match Instant.parse("2024-03-10T07:30:00Z") {
+        Ok(instant) => {
+            stdout.println(instant);
+            stdout.println(instant.unix_seconds.to_string());
+            stdout.println(instant.unix_milliseconds.to_string());
+            stdout.println(instant.unix_nanoseconds.to_string());
+            stdout.println(instant.to_iso_string());
+            stdout.println(instant < instant + 1s);
+            stdout.println((instant + 2s) - instant);
+        }
+        Error(_) => stdout.println("parse error");
+    };
+    match Instant.parse("1969-12-31T23:59:59.999999999Z") {
+        Ok(before_epoch) => {
+            stdout.println(before_epoch.unix_seconds.to_string());
+            stdout.println(before_epoch.unix_milliseconds.to_string());
+            stdout.println(before_epoch.unix_nanoseconds.to_string());
+        }
+        Error(_) => stdout.println("pre-epoch parse error");
+    };
+    stdout.println(match Instant.parse("not an instant") { Error(_) => true; Ok(_) => false; });
+}
+
+main();

@@ -10,7 +10,7 @@
 //! reaches this point.
 
 use crate::ir::*;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
+use std::collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use zirk_ast as ast;
 use zirk_diagnostics::Span;
@@ -80,6 +80,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         &checked,
         &contract_method_specialization_keys,
     );
+    let generic_contract_default_specializations =
+        specialize_generic_contract_defaults(program, &checked);
     // Generic bodies can mention compound types such as `Result<T, E>` in a
     // match even when no call-site signature mentions that exact
     // instantiation. Materialize those layouts under each monomorphization
@@ -138,10 +140,8 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .collect();
     checked.classes.extend(specialized);
 
-    // The same specialization, for a generic enum's own instantiations
-    // (roadmap task 13.5: `Iteration<T>` is the only one a program can name
-    // today, `resolve_enum_reference`'s own `NOT_LOWERED` gate keeps any
-    // other generic enum from reaching this point). Unlike a contract's
+    // The same specialization, for a generic enum's own instantiations.
+    // Unlike a contract's
     // dispatch table, an enum's representation depends on `T` — its payload
     // is inline — so it needs a concrete `EnumLayout` the same way a generic
     // class's fields do.
@@ -201,6 +201,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         .enumerate()
         .map(|(id, class)| {
             let id = id as u32;
+            let implementing_class_id = id;
             // A generic class's own template — as opposed to one of the
             // specialized copies just appended, which have none of their
             // own — is never instantiated as itself: `this` inside a
@@ -279,7 +280,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                         {
                             UNREACHABLE_ABSTRACT_METHOD.to_string()
                         } else {
-                            body_symbol(checked, method)
+                            class_body_symbol(checked, id, method)
                         };
                     }
                     table
@@ -303,7 +304,7 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                                 if !required.type_params.is_empty() {
                                     UNREACHABLE_ABSTRACT_METHOD.to_string()
                                 } else {
-                                    body_symbol(checked, supplied)
+                                    class_body_symbol(checked, implementing_class_id, supplied)
                                 }
                             })
                             .collect(),
@@ -1241,6 +1242,320 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
             params: vec![IrType::String],
             return_type: IrType::Int(IntWidth::I128),
         },
+        ExternFn {
+            name: "zirk_rt_date_parse_locale_ok".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_date_parse_locale_value".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_date_parse_locale_error_kind".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_time_parse_locale_ok".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_time_parse_locale_value".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_time_parse_locale_error_kind".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_parse_locale_ok".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_parse_locale_value".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_parse_locale_error_kind".to_string(),
+            params: vec![IrType::String, IrType::String, IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_instant_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_period_new".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+            ],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_period_component".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_period_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_period_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_period_to_string".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_clock".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I64),
+                IrType::Int(IntWidth::I64),
+                IrType::Boolean,
+            ],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_calendar_ok".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_calendar_value".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I32),
+                IrType::Int(IntWidth::I64),
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_is_clock".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_to_string".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_kind".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_duration".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_time".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_day_offset".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_period_component".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I32)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_overlap_policy".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_gap_policy".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_apply_ok".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_timeshift_apply_value".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_parse_error_kind".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_database_version".to_string(),
+            params: Vec::new(),
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_parse_ok".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_parse_value".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_offset_seconds".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I128)],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_is_dst".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I128)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_abbreviation".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I128)],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_timezone_local_datetime".to_string(),
+            params: vec![IrType::String, IrType::Int(IntWidth::I128)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_from_instant".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_with_zone".to_string(),
+            params: vec![IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_instant".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_zone".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_local_datetime".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_offset_seconds".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_is_dst".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_zoned_datetime_abbreviation".to_string(),
+            params: vec![IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_seconds_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_seconds_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_milliseconds_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_milliseconds_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_nanoseconds_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_instant_from_unix_nanoseconds_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_now".to_string(),
+            params: vec![],
+            return_type: IrType::Int(IntWidth::I128),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_unix_seconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_unix_milliseconds".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::Int(IntWidth::I64),
+        },
+        ExternFn {
+            name: "zirk_rt_instant_to_string".to_string(),
+            params: vec![IrType::Int(IntWidth::I128)],
+            return_type: IrType::String,
+        },
         // `format(pattern)` — never fails; unknown text is literal.
         ExternFn {
             name: "zirk_rt_date_format".to_string(),
@@ -1255,6 +1570,90 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         ExternFn {
             name: "zirk_rt_datetime_format".to_string(),
             params: vec![IrType::Int(IntWidth::I128), IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_date_format_locale_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_date_format_locale_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_time_format_locale_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_time_format_locale_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I64), IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_format_locale_ok".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String, IrType::String],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_format_locale_value".to_string(),
+            params: vec![IrType::Int(IntWidth::I128), IrType::String, IrType::String],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_format_locale_in_zone_ok".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::String,
+                IrType::String,
+                IrType::String,
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_in_zone_ok".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::String,
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::Boolean,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_in_zone_error_kind".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::String,
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::Int(IntWidth::I32),
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_in_zone_value".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::String,
+                IrType::String,
+                IrType::String,
+            ],
+            return_type: IrType::String,
+        },
+        ExternFn {
+            name: "zirk_rt_datetime_format_locale_in_zone_value".to_string(),
+            params: vec![
+                IrType::Int(IntWidth::I128),
+                IrType::String,
+                IrType::String,
+                IrType::String,
+                IrType::String,
+                IrType::String,
+            ],
             return_type: IrType::String,
         },
         // `Range<T>` (roadmap Phase 7): every part travels as an `i64` —
@@ -2288,6 +2687,9 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
         else {
             continue;
         };
+        if !checked.contracts[id].type_params.is_empty() {
+            continue;
+        }
         for method in &contract.methods {
             let Some(body) = &method.body else { continue };
             let lowering = FunctionLowering::new(
@@ -2298,10 +2700,31 @@ pub fn lower(program: &ast::Program, checked: &CheckedProgram) -> Module {
                 enum_instance_base,
             );
             let (lowered, lifted) =
-                lowering.run_contract_default(contract, method, body, id as u32);
+                lowering.run_contract_default(contract, method, body, id as u32, None);
             module.functions.push(lowered);
             module.functions.extend(lifted);
         }
+    }
+
+    for (contract_id, contract, method, symbol, substitution) in
+        &generic_contract_default_specializations
+    {
+        let body = method
+            .body
+            .as_ref()
+            .expect("specialized default has a body");
+        let lowering = FunctionLowering::new(
+            &mut module,
+            checked,
+            &declarations,
+            instance_base,
+            enum_instance_base,
+        )
+        .with_type_substitution(substitution.clone());
+        let (lowered, lifted) =
+            lowering.run_contract_default(contract, method, body, *contract_id, Some(symbol));
+        module.functions.push(lowered);
+        module.functions.extend(lifted);
     }
 
     for function in &program.functions {
@@ -2572,6 +2995,13 @@ fn synthesize_native_failure_bodies<'a>(
         (native.missing_property, "E_MISSING_PROPERTY"),
         (native.contract_violation, "E_CONTRACT_VIOLATION"),
         (native.json_conversion, "E_JSON_CONVERSION"),
+        (native.json_pointer_syntax, "E_JSON_POINTER_SYNTAX"),
+        (native.json_pointer_index, "E_JSON_POINTER_INDEX"),
+        (native.json_pointer_not_found, "E_JSON_POINTER_NOT_FOUND"),
+        (native.json_pointer_container, "E_JSON_POINTER_CONTAINER"),
+        (native.json_path_syntax, "E_JSONPATH_SYNTAX"),
+        (native.json_path_function, "E_JSONPATH_FUNCTION"),
+        (native.json_limit, "E_JSON_LIMIT"),
         // Roadmap Phase 4e, `fase-4e-native-slice`: two more native failure
         // classes, built through the exact same
         // `Checker::register_native_failure` closure and needing the same
@@ -2597,6 +3027,19 @@ fn synthesize_native_failure_bodies<'a>(
         // constructors throw.
         (native.invalid_date, "E_INVALID_DATE"),
         (native.invalid_time, "E_INVALID_TIME"),
+        (native.locale_error, "E_LOCALE"),
+        (native.time_shift_error, "E_TIME_SHIFT"),
+        (native.unknown_time_zone, "E_UNKNOWN_TIME_ZONE"),
+        (native.invalid_time_zone, "E_INVALID_TIME_ZONE"),
+        (native.ambiguous_local_time, "E_AMBIGUOUS_LOCAL_TIME"),
+        (native.nonexistent_local_time, "E_NONEXISTENT_LOCAL_TIME"),
+        (native.invalid_dst_policy, "E_INVALID_DST_POLICY"),
+        (native.temporal_range, "E_TEMPORAL_RANGE"),
+        (
+            native.ambiguous_localized_input,
+            "E_AMBIGUOUS_LOCALIZED_INPUT",
+        ),
+        (native.invalid_localized_input, "E_INVALID_LOCALIZED_INPUT"),
         (native.cancelled_error, "E_CANCELLED"),
         (native.timeout_error, "E_TIMEOUT"),
         (native.task_capacity_error, "E_TASK_CAPACITY"),
@@ -2838,6 +3281,97 @@ type GenericContractMethodSpecialization = (
     HashMap<u32, Type>,
 );
 
+type GenericContractDefaultSpecialization = (
+    u32,
+    ast::ContractDecl,
+    ast::MethodDecl,
+    String,
+    HashMap<u32, Type>,
+);
+
+fn generic_contract_default_symbol(class: &str, contract: &str, method: &str) -> String {
+    format!("{class}$contract${contract}$default${method}")
+}
+
+fn contract_substitution_for_class(
+    checked: &CheckedProgram,
+    class_id: u32,
+    target: u32,
+) -> Option<HashMap<u32, Type>> {
+    fn visit(
+        checked: &CheckedProgram,
+        contract_id: u32,
+        args: &[Type],
+        target: u32,
+        seen: &mut HashSet<(u32, Vec<Type>)>,
+    ) -> Option<HashMap<u32, Type>> {
+        if !seen.insert((contract_id, args.to_vec())) {
+            return None;
+        }
+        let contract = checked.contracts.get(contract_id as usize)?;
+        let substitution: HashMap<_, _> = contract
+            .type_params
+            .iter()
+            .copied()
+            .zip(args.iter().copied())
+            .collect();
+        if contract_id == target {
+            return Some(substitution);
+        }
+        let substitution_pairs: Vec<_> = substitution.iter().map(|(id, ty)| (*id, *ty)).collect();
+        for parent in &contract.implements {
+            let parent_args: Vec<_> = parent
+                .args
+                .iter()
+                .map(|arg| substitute_generic_type(checked, *arg, &substitution_pairs))
+                .collect();
+            if let Some(found) = visit(checked, parent.contract, &parent_args, target, seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let class = checked.classes.get(class_id as usize)?;
+    for instance_id in &class.contract_instances {
+        let instance = checked.contract_instances.get(*instance_id as usize)?;
+        let mut seen = HashSet::new();
+        if let Some(substitution) = visit(
+            checked,
+            instance.contract,
+            &instance.args,
+            target,
+            &mut seen,
+        ) {
+            return Some(substitution);
+        }
+    }
+    None
+}
+
+fn class_body_symbol(
+    checked: &CheckedProgram,
+    class_id: u32,
+    method: &zirk_sema::MethodInfo,
+) -> String {
+    let Some(contract_id) = method.from_contract else {
+        return body_symbol(checked, method);
+    };
+    let Some(contract) = checked.contracts.get(contract_id as usize) else {
+        return body_symbol(checked, method);
+    };
+    if contract.type_params.is_empty()
+        || contract_substitution_for_class(checked, class_id, contract_id).is_none()
+    {
+        return body_symbol(checked, method);
+    }
+    generic_contract_default_symbol(
+        &checked.classes[class_id as usize].name,
+        &contract.name,
+        &method.name,
+    )
+}
+
 /// Collects the finite set of generic contract-method instantiations actually
 /// used in the checked program. The order is stable and is shared by calls
 /// and every implementing object's dispatch table.
@@ -2965,6 +3499,60 @@ fn specialize_generic_contract_methods(
     specializations
 }
 
+fn specialize_generic_contract_defaults(
+    program: &ast::Program,
+    checked: &CheckedProgram,
+) -> Vec<GenericContractDefaultSpecialization> {
+    let mut result = Vec::new();
+    let mut emitted = HashSet::new();
+    for (class_id, class) in checked.classes.iter().enumerate() {
+        for adopted in class
+            .methods
+            .iter()
+            .filter(|method| method.from_contract.is_some())
+        {
+            let contract_id = adopted.from_contract.expect("filtered contract default");
+            let Some(contract_info) = checked.contracts.get(contract_id as usize) else {
+                continue;
+            };
+            if contract_info.type_params.is_empty() {
+                continue;
+            }
+            let Some(substitution) =
+                contract_substitution_for_class(checked, class_id as u32, contract_id)
+            else {
+                continue;
+            };
+            let Some(contract_decl) = program
+                .contracts
+                .iter()
+                .find(|declaration| declaration.name.name == contract_info.name)
+            else {
+                continue;
+            };
+            let Some(method_decl) = contract_decl
+                .methods
+                .iter()
+                .find(|method| method.name.name == adopted.name && method.body.is_some())
+            else {
+                continue;
+            };
+            let symbol =
+                generic_contract_default_symbol(&class.name, &contract_info.name, &adopted.name);
+            if emitted.insert(symbol.clone()) {
+                result.push((
+                    contract_id,
+                    contract_decl.clone(),
+                    method_decl.clone(),
+                    symbol,
+                    substitution,
+                ));
+            }
+        }
+    }
+    result
+}
+
 /// Emits one static-method body per concrete generic call. Restricting this
 /// first slice to non-generic owners and direct type-parameter ABI positions
 /// keeps class specialization and nested generic-layout rules independent.
@@ -3085,8 +3673,12 @@ fn specialize_generic_functions(
         .collect();
     let mut specializations = Vec::new();
     let mut emitted = HashSet::new();
+    let mut pending: VecDeque<_> = calls
+        .into_iter()
+        .map(|call| (call, HashMap::<u32, Type>::new()))
+        .collect();
 
-    for call in calls {
+    while let Some((call, enclosing_substitution)) = pending.pop_front() {
         let Some(signature) = checked.functions.get(&call.callable).cloned() else {
             continue;
         };
@@ -3105,7 +3697,11 @@ fn specialize_generic_functions(
         let Some(arguments) = signature
             .type_params
             .iter()
-            .map(|parameter| call.substitutions.get(parameter).copied())
+            .map(|parameter| {
+                call.substitutions.get(parameter).map(|argument| {
+                    substitute_specialized_type(checked, *argument, &enclosing_substitution)
+                })
+            })
             .collect::<Option<Vec<_>>>()
         else {
             continue;
@@ -3123,7 +3719,16 @@ fn specialize_generic_functions(
         // Keep synthetic substitutions such as a deferred `T[K]` placeholder
         // alongside ordinary generic arguments. They are part of the checked
         // callback signature but never become runtime type metadata.
-        let mut substitution = call.substitutions.clone();
+        let mut substitution: HashMap<_, _> = call
+            .substitutions
+            .iter()
+            .map(|(parameter, argument)| {
+                (
+                    *parameter,
+                    substitute_specialized_type(checked, *argument, &enclosing_substitution),
+                )
+            })
+            .collect();
         substitution.extend(
             signature
                 .type_params
@@ -3162,7 +3767,40 @@ fn specialize_generic_functions(
         let mut specialized_declaration = declaration.clone();
         specialized_declaration.name.name = symbol;
         specialized_declaration.type_params.clear();
-        specializations.push((specialized_declaration, substitution));
+        specializations.push((specialized_declaration, substitution.clone()));
+
+        let body_types: Vec<_> = checked
+            .expr_types
+            .iter()
+            .filter(|(span, _)| {
+                span.file == declaration.span.file
+                    && span.start >= declaration.body.span.start
+                    && span.end <= declaration.body.span.end
+            })
+            .map(|(_, ty)| *ty)
+            .collect();
+        for ty in body_types {
+            materialize_specialized_type(checked, ty, &substitution);
+        }
+
+        // A call inside a generic template is recorded against its unresolved
+        // type parameters. Revisit those calls under each concrete outer
+        // specialization so direct forwarding such as `wrap<T>(x) {
+        // return identity(x); }` receives the same concrete monomorphization
+        // as an equivalent call written at top level.
+        let nested_calls: Vec<_> = checked
+            .generic_call_substitutions
+            .iter()
+            .filter(|(span, _)| {
+                span.file == declaration.span.file
+                    && span.start >= declaration.body.span.start
+                    && span.end <= declaration.body.span.end
+            })
+            .map(|(_, nested)| nested.clone())
+            .collect();
+        for nested in nested_calls {
+            pending.push_back((nested, substitution.clone()));
+        }
     }
 
     specializations
@@ -4129,6 +4767,13 @@ fn specialize_enum(
     index: usize,
 ) -> EnumType {
     let original = &checked.enums[instance.enum_id as usize];
+    // Preserve the ID slot used while checking an uninstantiated generic
+    // body, but do not expose that symbolic placeholder as a concrete source
+    // enum specialization.
+    let symbolic = instance
+        .args
+        .iter()
+        .any(|arg| type_contains_param(checked, *arg, &mut HashSet::new()));
     let subst: Vec<(u32, Type)> = original
         .type_params
         .iter()
@@ -4137,7 +4782,11 @@ fn specialize_enum(
         .collect();
 
     EnumType {
-        name: format!("{}${}", original.name, index),
+        name: if symbolic {
+            format!("__zirk_generic_enum_template${index}")
+        } else {
+            format!("{}${index}", original.name)
+        },
         variants: original
             .variants
             .iter()
@@ -4457,6 +5106,11 @@ fn union_member_canonical_key(member: Base, checked: &CheckedProgram) -> Vec<u8>
         Base::Date => (32, 0),
         Base::Time => (33, 0),
         Base::DateTime => (34, 0),
+        Base::Instant => (35, 0),
+        Base::TimeZone => (56, 0),
+        Base::ZonedDateTime => (57, 0),
+        Base::Period => (58, 0),
+        Base::TimeShift => (59, 0),
         Base::Enum(id) => {
             let name = checked.enums[id as usize].name.as_bytes();
             let mut key = vec![6];
@@ -4536,7 +5190,7 @@ fn union_member_canonical_key(member: Base, checked: &CheckedProgram) -> Vec<u8>
             key.extend_from_slice(&id.to_be_bytes());
             return key;
         }
-        _ => unreachable!("checker rejects unsupported union alternatives"),
+        _ => unreachable!("checker rejects unsupported union alternatives: {member:?}"),
     };
     let mut key = vec![group];
     key.extend_from_slice(&id.to_be_bytes());
@@ -4566,6 +5220,16 @@ fn ir_type(
         Base::Date => IrType::Int(IntWidth::I64),
         Base::Time => IrType::Int(IntWidth::I64),
         Base::DateTime => IrType::Int(IntWidth::I128),
+        // `Instant` is an absolute Unix timeline point in epoch nanoseconds.
+        Base::Instant => IrType::Int(IntWidth::I128),
+        // Time-zone identity is stored as its canonical immutable identifier.
+        Base::TimeZone => IrType::String,
+        // A zoned instant is an opaque immutable canonical runtime string.
+        Base::ZonedDateTime => IrType::String,
+        // Period's four signed 32-bit fields use one canonical 128-bit word.
+        Base::Period => IrType::Int(IntWidth::I128),
+        // TimeShift carries one of its tagged clock/calendar encodings.
+        Base::TimeShift => IrType::String,
         Base::Regex => IrType::Regex,
         Base::Char => IrType::Char,
         // The runtime-issued callback capability carries its stable service ID.
@@ -5602,7 +6266,11 @@ impl<'a> FunctionLowering<'a> {
         let arguments: Vec<Type> = template
             .type_params
             .iter()
-            .map(|parameter| info.substitutions.get(parameter).copied())
+            .map(|parameter| {
+                info.substitutions.get(parameter).map(|argument| {
+                    substitute_specialized_type(self.checked, *argument, &self.type_substitution)
+                })
+            })
             .collect::<Option<_>>()?;
         if arguments
             .iter()
@@ -5780,6 +6448,43 @@ impl<'a> FunctionLowering<'a> {
                     base => bases.push(base),
                 }
             }
+            let source_bases = bases.clone();
+            let class_id = |base: Base| match base {
+                Base::Class(id) => Some(id),
+                Base::Instance(id) => self
+                    .checked
+                    .generic_instances
+                    .get(id as usize)
+                    .map(|instance| instance.class),
+                _ => None,
+            };
+            bases.retain(|candidate| {
+                !source_bases.iter().any(|other| {
+                    if other == candidate {
+                        return false;
+                    }
+                    if Type::of(*other).accepts(Type::of(*candidate)) {
+                        return true;
+                    }
+                    let (Some(superclass), Some(mut subclass)) =
+                        (class_id(*other), class_id(*candidate))
+                    else {
+                        return false;
+                    };
+                    while let Some(parent) = self
+                        .checked
+                        .classes
+                        .get(subclass as usize)
+                        .and_then(|class| class.base)
+                    {
+                        if parent == superclass {
+                            return true;
+                        }
+                        subclass = parent;
+                    }
+                    false
+                })
+            });
             // The checker stores union members in canonical order, whereas a
             // source alias preserves its written order. Compare normalized
             // sets instead of assuming those orderings coincide.
@@ -5796,6 +6501,19 @@ impl<'a> FunctionLowering<'a> {
                     let mut ty = Type::of(Base::Union(id as u32));
                     ty.nullable = nullable || reference.nullable;
                     ty
+                })
+                .or_else(|| {
+                    // Semantic union normalization removes alternatives
+                    // already accepted by a remaining supertype (for
+                    // example `Int32 | Decimal` becomes `Decimal`). Mirror
+                    // that canonical result when resolving the source alias
+                    // instead of looking for a union node that was never
+                    // interned.
+                    (bases.len() == 1).then(|| {
+                        let mut ty = Type::of(bases[0]);
+                        ty.nullable = nullable || reference.nullable;
+                        ty
+                    })
                 })
                 .unwrap_or_else(|| {
                     panic!("the checker did not intern source union members {bases:?}")
@@ -6075,6 +6793,24 @@ impl<'a> FunctionLowering<'a> {
             // checker's own `resolve_type` does — cycles were already rejected
             // there, so this cannot recurse forever.
             if let Some(target) = self.checked.type_aliases.get(&declared).cloned() {
+                let params = self
+                    .checked
+                    .type_alias_params
+                    .get(&declared)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut substitutions = HashMap::new();
+                for (index, parameter) in params.iter().enumerate() {
+                    let argument = if let Some(argument) = reference.arguments.get(index) {
+                        argument.clone()
+                    } else if let Some(default) = &parameter.default {
+                        zirk_sema::substitute_alias_type_ref(default, &substitutions)
+                    } else {
+                        panic!("the checker verified all type arguments for alias `{declared}`");
+                    };
+                    substitutions.insert(parameter.name.name.clone(), argument);
+                }
+                let target = zirk_sema::substitute_alias_type_ref(&target, &substitutions);
                 let mut resolved = self.resolve_written_type(&target);
                 resolved.nullable = reference.nullable;
                 return resolved;
@@ -6258,7 +6994,20 @@ impl<'a> FunctionLowering<'a> {
             } else {
                 let members = &self.checked.unions[union_id as usize];
                 let actual_member = actual.without_null().base;
-                if let Some(member) = members.iter().find(|member| **member == actual_member) {
+                let exact_member = members.iter().find(|member| **member == actual_member);
+                // Union normalization may soundly absorb a numeric source
+                // type into a wider alternative (for example Int128 into
+                // Decimal). Materialize that widening before injecting the
+                // payload; matching only identical bases leaves an invalid
+                // scalar in the union's physical slot.
+                let numeric_member = members.iter().find(|member| {
+                    let numeric =
+                        |base| matches!(base, Base::Int(_) | Base::Float(_) | Base::Decimal);
+                    numeric(**member)
+                        && numeric(actual_member)
+                        && Type::of(**member).accepts(actual.without_null())
+                });
+                if let Some(member) = exact_member.or(numeric_member) {
                     let canonical = union_member_canonical_key(*member, self.checked);
                     let layout = &self.module.union_types[union_id as usize];
                     let Some(variant) = layout
@@ -7065,6 +7814,7 @@ impl<'a> FunctionLowering<'a> {
         method: &ast::MethodDecl,
         body: &ast::Block,
         id: u32,
+        specialized_symbol: Option<&str>,
     ) -> (Function, Vec<Function>) {
         // The checker's resolved return type — which is what an unannotated
         // trait default's inferred type lives in (`return-type-inference`),
@@ -7108,7 +7858,9 @@ impl<'a> FunctionLowering<'a> {
 
         let lifted = std::mem::take(&mut self.lifted);
         let lowered = Function {
-            name: contract_method_symbol(&contract.name.name, &method.name.name),
+            name: specialized_symbol
+                .map(str::to_owned)
+                .unwrap_or_else(|| contract_method_symbol(&contract.name.name, &method.name.name)),
             params,
             return_type: self.return_type,
             gc_roots: gc_roots_of(self.module, &self.slots),
@@ -10092,12 +10844,14 @@ impl<'a> FunctionLowering<'a> {
                     } else if let IrType::Union(_) = ty
                         && let Some(narrowed) = self.checked.expr_types.get(&span).copied()
                         && !narrowed.is_unknown()
-                        && matches!(
-                            narrowed.without_null().base,
-                            Base::Class(_) | Base::Shape(_)
-                        )
+                        && !matches!(narrowed.without_null().base, Base::Union(_))
                         && let Some(union_id) = self.union_id_for_ir_type(ty)
                     {
+                        // A successful exact type test narrows any canonical
+                        // union alternative, including built-in collections
+                        // that have no independent runtime type descriptor.
+                        // Materialize its payload from the active tag before
+                        // member lowering uses the refined source type.
                         let key =
                             union_member_canonical_key(narrowed.without_null().base, self.checked);
                         let layout = &self.module.union_types[union_id as usize];
@@ -10234,7 +10988,7 @@ impl<'a> FunctionLowering<'a> {
                 let (id, name) = self.operator_method_of(e).expect("checked above");
                 let class = &self.checked.classes[id as usize];
                 let method = class.method(&name).expect("the checker resolved it");
-                let symbol = body_symbol(self.checked, method);
+                let symbol = class_body_symbol(self.checked, id, method);
                 let returns = self.ir_type(method.returns);
                 let param = method
                     .params
@@ -11624,6 +12378,9 @@ impl<'a> FunctionLowering<'a> {
                     let semantic = self.checked.expr_types[&e.span];
                     let returns = self.ir_type(semantic);
                     return match binding.as_str() {
+                        "std.json.null_dynamic" => {
+                            self.emit(InstKind::JsonNullDynamic, returns, span)
+                        }
                         "std.json.stringify_dynamic" => {
                             let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
                             let nullable_ty = IrType::Nullable(Nullable::String);
@@ -11650,6 +12407,118 @@ impl<'a> FunctionLowering<'a> {
                             self.throw_native_failure(
                                 native.json_conversion,
                                 "value cannot be represented as JSON",
+                                span,
+                            );
+                            self.current = success;
+                            let encoded =
+                                self.emit(InstKind::Load(encoded_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(encoded), returns, span)
+                        }
+                        "std.json.stringify_pretty_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::String);
+                            let encoded = self.emit(
+                                InstKind::JsonStringifyDynamicPretty { value },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(encoded), IrType::Boolean, span);
+                            let encoded_slot = self.spill(encoded, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "value cannot be represented as JSON",
+                                span,
+                            );
+                            self.current = success;
+                            let encoded =
+                                self.emit(InstKind::Load(encoded_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(encoded), returns, span)
+                        }
+                        "std.json.canonicalize_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::String);
+                            let encoded = self.emit(
+                                InstKind::JsonCanonicalizeDynamic { value },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(encoded), IrType::Boolean, span);
+                            let encoded_slot = self.spill(encoded, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "value cannot be represented in the RFC 8785 canonical domain",
+                                span,
+                            );
+                            self.current = success;
+                            let encoded =
+                                self.emit(InstKind::Load(encoded_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(encoded), returns, span)
+                        }
+                        "std.json.stringify_dynamic_with_limits" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let limits = e.args[1..]
+                                .iter()
+                                .map(|argument| {
+                                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                                })
+                                .collect::<Vec<_>>();
+                            let nullable_ty = IrType::Nullable(Nullable::String);
+                            let encoded = self.emit(
+                                InstKind::JsonStringifyDynamicWithLimits {
+                                    value,
+                                    max_document_bytes: limits[0],
+                                    max_nesting_depth: limits[1],
+                                    max_string_bytes: limits[2],
+                                    max_container_items: limits[3],
+                                    max_number_bytes: limits[4],
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(encoded), IrType::Boolean, span);
+                            let encoded_slot = self.spill(encoded, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON value exceeds the supplied limits or cannot be represented",
                                 span,
                             );
                             self.current = success;
@@ -11691,6 +12560,471 @@ impl<'a> FunctionLowering<'a> {
                             self.current = success;
                             let parsed = self.emit(InstKind::Load(parsed_slot), nullable_ty, span);
                             self.emit(InstKind::Unwrap(parsed), returns, span)
+                        }
+                        "std.json.parse5_dynamic" => {
+                            let document = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+                            let parsed = self.emit(
+                                InstKind::Json5ParseDynamic {
+                                    document,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent = self.emit(InstKind::IsNull(parsed), IrType::Boolean, span);
+                            let parsed_slot = self.spill(parsed, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON5 document is invalid or exceeds conversion limits",
+                                span,
+                            );
+                            self.current = success;
+                            let parsed = self.emit(InstKind::Load(parsed_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(parsed), returns, span)
+                        }
+                        "std.json.parse_dynamic_with_limits" => {
+                            let document = self.lower_expr_as(&e.args[0].value, IrType::String);
+                            let limits = e.args[1..]
+                                .iter()
+                                .map(|argument| {
+                                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                                })
+                                .collect::<Vec<_>>();
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+                            let parsed = self.emit(
+                                InstKind::JsonParseDynamicWithLimits {
+                                    document,
+                                    list_dynamic_id,
+                                    max_document_bytes: limits[0],
+                                    max_nesting_depth: limits[1],
+                                    max_string_bytes: limits[2],
+                                    max_container_items: limits[3],
+                                    max_number_bytes: limits[4],
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent = self.emit(InstKind::IsNull(parsed), IrType::Boolean, span);
+                            let parsed_slot = self.spill(parsed, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON document is invalid or exceeds the supplied limits",
+                                span,
+                            );
+                            self.current = success;
+                            let parsed = self.emit(InstKind::Load(parsed_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(parsed), returns, span)
+                        }
+                        "std.json.pointer_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let pointer = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let value_slot = self.spill(value, IrType::Dynamic, span);
+                            let pointer_slot = self.spill(pointer, IrType::String, span);
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+                            let selected = self.emit(
+                                InstKind::JsonPointerDynamic {
+                                    value,
+                                    pointer,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(selected), IrType::Boolean, span);
+                            let selected_slot = self.spill(selected, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            let value =
+                                self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+                            let pointer =
+                                self.emit(InstKind::Load(pointer_slot), IrType::String, span);
+                            let error_kind = self.emit(
+                                InstKind::JsonPointerErrorKind { value, pointer },
+                                IrType::Int(IntWidth::I32),
+                                span,
+                            );
+                            let error_kind_slot =
+                                self.spill(error_kind, IrType::Int(IntWidth::I32), span);
+                            for (kind, error, message) in [
+                                (
+                                    1,
+                                    native.json_pointer_syntax,
+                                    "JSON Pointer has invalid RFC 6901 syntax",
+                                ),
+                                (
+                                    2,
+                                    native.json_pointer_index,
+                                    "JSON Pointer contains an invalid array index",
+                                ),
+                                (
+                                    3,
+                                    native.json_pointer_not_found,
+                                    "JSON Pointer path does not exist",
+                                ),
+                                (
+                                    4,
+                                    native.json_pointer_container,
+                                    "JSON Pointer traverses the wrong JSON container",
+                                ),
+                            ] {
+                                let actual = self.emit(
+                                    InstKind::Load(error_kind_slot),
+                                    IrType::Int(IntWidth::I32),
+                                    span,
+                                );
+                                let expected = self.const_int_at(
+                                    i128::from(kind),
+                                    IrType::Int(IntWidth::I32),
+                                    span,
+                                );
+                                let matches = self.emit(
+                                    InstKind::Binary {
+                                        op: BinaryOp::Eq,
+                                        left: actual,
+                                        right: expected,
+                                    },
+                                    IrType::Boolean,
+                                    span,
+                                );
+                                let typed_error = self.new_block();
+                                let next = self.new_block();
+                                self.terminate(Terminator::Branch {
+                                    condition: matches,
+                                    then_block: typed_error,
+                                    else_block: next,
+                                });
+                                self.current = typed_error;
+                                self.throw_native_failure(error, message, span);
+                                self.current = next;
+                            }
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON Pointer value cannot be represented as ordinary JSON",
+                                span,
+                            );
+                            self.current = success;
+                            let selected =
+                                self.emit(InstKind::Load(selected_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(selected), returns, span)
+                        }
+                        "std.json.pointer_error_kind_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let pointer = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::JsonPointerErrorKind { value, pointer },
+                                IrType::Int(IntWidth::I32),
+                                span,
+                            )
+                        }
+                        "std.json.jsonpath_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let query = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let value_slot = self.spill(value, IrType::Dynamic, span);
+                            let query_slot = self.spill(query, IrType::String, span);
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::List(list_dynamic_id));
+                            let selected = self.emit(
+                                InstKind::JsonPathDynamic {
+                                    value,
+                                    query,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent =
+                                self.emit(InstKind::IsNull(selected), IrType::Boolean, span);
+                            let selected_slot = self.spill(selected, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JSONPath errors");
+                            let value =
+                                self.emit(InstKind::Load(value_slot), IrType::Dynamic, span);
+                            let query = self.emit(InstKind::Load(query_slot), IrType::String, span);
+                            let error_kind = self.emit(
+                                InstKind::JsonPathErrorKind { value, query },
+                                IrType::Int(IntWidth::I32),
+                                span,
+                            );
+                            let error_kind_slot =
+                                self.spill(error_kind, IrType::Int(IntWidth::I32), span);
+                            for (kind, error, message) in [
+                                (
+                                    1,
+                                    native.json_path_syntax,
+                                    "JSONPath query has invalid RFC 9535 syntax",
+                                ),
+                                (
+                                    2,
+                                    native.json_path_function,
+                                    "JSONPath query uses an invalid function extension",
+                                ),
+                                (
+                                    3,
+                                    native.json_limit,
+                                    "JSONPath query exceeded a configured hard limit",
+                                ),
+                            ] {
+                                let actual = self.emit(
+                                    InstKind::Load(error_kind_slot),
+                                    IrType::Int(IntWidth::I32),
+                                    span,
+                                );
+                                let expected = self.const_int_at(
+                                    i128::from(kind),
+                                    IrType::Int(IntWidth::I32),
+                                    span,
+                                );
+                                let matches = self.emit(
+                                    InstKind::Binary {
+                                        op: BinaryOp::Eq,
+                                        left: actual,
+                                        right: expected,
+                                    },
+                                    IrType::Boolean,
+                                    span,
+                                );
+                                let typed_error = self.new_block();
+                                let next = self.new_block();
+                                self.terminate(Terminator::Branch {
+                                    condition: matches,
+                                    then_block: typed_error,
+                                    else_block: next,
+                                });
+                                self.current = typed_error;
+                                self.throw_native_failure(error, message, span);
+                                self.current = next;
+                            }
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSONPath input cannot be represented as ordinary JSON",
+                                span,
+                            );
+                            self.current = success;
+                            let selected =
+                                self.emit(InstKind::Load(selected_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(selected), returns, span)
+                        }
+                        "std.json.schema_validate_dynamic"
+                        | "std.json.schema_validate_with_resolver_dynamic" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let schema = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            let resolver = (binding
+                                == "std.json.schema_validate_with_resolver_dynamic")
+                                .then(|| self.lower_expr_as(&e.args[2].value, IrType::Dynamic));
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::List(list_dynamic_id));
+                            let issues = self.emit(
+                                InstKind::JsonSchemaValidateDynamic {
+                                    value,
+                                    schema,
+                                    resolver,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent = self.emit(InstKind::IsNull(issues), IrType::Boolean, span);
+                            let issues_slot = self.spill(issues, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "JSON Schema is invalid, unresolved, or exceeds conversion limits",
+                                span,
+                            );
+                            self.current = success;
+                            let issues = self.emit(InstKind::Load(issues_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(issues), returns, span)
+                        }
+                        "std.json.stream_reader_create" => {
+                            let limits = e
+                                .args
+                                .iter()
+                                .map(|argument| {
+                                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                                })
+                                .collect::<Vec<_>>();
+                            self.emit(
+                                InstKind::JsonStreamReaderCreate {
+                                    max_document_bytes: limits[0],
+                                    max_nesting_depth: limits[1],
+                                    max_string_bytes: limits[2],
+                                    max_container_items: limits[3],
+                                    max_number_bytes: limits[4],
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.json.stream_reader_push" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let chunk = self.lower_expr_as(&e.args[1].value, IrType::String);
+                            self.emit(
+                                InstKind::JsonStreamReaderPush { handle, chunk },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.json.stream_reader_push_bytes" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let chunk = self.lower_expr(&e.args[1].value);
+                            self.emit(
+                                InstKind::JsonStreamReaderPushBytes { handle, chunk },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.json.stream_reader_finish" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            let nullable_ty = IrType::Nullable(Nullable::Dynamic);
+                            let parsed = self.emit(
+                                InstKind::JsonStreamReaderFinish {
+                                    handle,
+                                    list_dynamic_id,
+                                },
+                                nullable_ty,
+                                span,
+                            );
+                            let absent = self.emit(InstKind::IsNull(parsed), IrType::Boolean, span);
+                            let parsed_slot = self.spill(parsed, nullable_ty, span);
+                            let fail = self.new_block();
+                            let success = self.new_block();
+                            self.terminate(Terminator::Branch {
+                                condition: absent,
+                                then_block: fail,
+                                else_block: success,
+                            });
+                            self.current = fail;
+                            let native = self
+                                .checked
+                                .native_exceptions
+                                .expect("JSON conversion registers JsonConversionError");
+                            self.throw_native_failure(
+                                native.json_conversion,
+                                "streamed JSON document is invalid or exceeds its limits",
+                                span,
+                            );
+                            self.current = success;
+                            let parsed = self.emit(InstKind::Load(parsed_slot), nullable_ty, span);
+                            self.emit(InstKind::Unwrap(parsed), returns, span)
+                        }
+                        "std.json.stream_reader_cancel" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::JsonStreamReaderCancel { handle }, returns, span)
+                        }
+                        "std.json.stream_writer_create" => {
+                            let value = self.lower_expr_as(&e.args[0].value, IrType::Dynamic);
+                            let limits = e
+                                .args
+                                .iter()
+                                .skip(1)
+                                .map(|argument| {
+                                    self.lower_expr_as(&argument.value, IrType::Int(IntWidth::U64))
+                                })
+                                .collect::<Vec<_>>();
+                            let list_dynamic_id = self.list_id_for(IrType::Dynamic);
+                            self.emit(
+                                InstKind::JsonStreamWriterCreate {
+                                    value,
+                                    max_chunk_bytes: limits[0],
+                                    max_document_bytes: limits[1],
+                                    max_nesting_depth: limits[2],
+                                    max_string_bytes: limits[3],
+                                    max_container_items: limits[4],
+                                    max_number_bytes: limits[5],
+                                    list_dynamic_id,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.json.stream_writer_next_status" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let max_chunk_bytes =
+                                self.lower_expr_as(&e.args[1].value, IrType::Int(IntWidth::U64));
+                            self.emit(
+                                InstKind::JsonStreamWriterNextStatus {
+                                    handle,
+                                    max_chunk_bytes,
+                                },
+                                returns,
+                                span,
+                            )
+                        }
+                        "std.json.stream_writer_take" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::JsonStreamWriterTake { handle }, returns, span)
+                        }
+                        "std.json.stream_writer_cancel" => {
+                            let handle =
+                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            self.emit(InstKind::JsonStreamWriterCancel { handle }, returns, span)
                         }
                         _ => unreachable!("closed JSON binding registry"),
                     };
@@ -12132,9 +13466,14 @@ impl<'a> FunctionLowering<'a> {
                             let IrType::Enum(enum_id) = returns else {
                                 unreachable!("WebSocket send returns a typed Result enum")
                             };
-                            let handle =
-                                self.lower_expr_as(&e.args[0].value, IrType::Int(IntWidth::U64));
+                            let handle_ty = IrType::Int(IntWidth::U64);
+                            let handle = self.lower_and_hold_as(
+                                &e.args[0].value,
+                                handle_ty,
+                                self.opens_blocks(&e.args[1].value),
+                            );
                             let record = self.lower_expr(&e.args[1].value);
+                            let handle = self.reload(handle, e.args[0].span);
                             self.emit(
                                 InstKind::HttpWebSocketSend {
                                     handle,
@@ -13068,7 +14407,8 @@ impl<'a> FunctionLowering<'a> {
                 // versus `String.contains`, or `Environment.get_or` versus
                 // `Result.get_or`).
                 if let Some(operand) = self.lower_class_static_call(e, span) {
-                    return operand;
+                    let ty = self.type_of_operand(operand);
+                    return self.lower_throws_check(operand, ty, span);
                 }
                 // `native-type-member-surface` statics and native methods
                 // have to be lowered before any lookup that would try to
@@ -13079,6 +14419,9 @@ impl<'a> FunctionLowering<'a> {
                 // lowered ahead of the native statics for the same reason —
                 // their base is a type name no value lookup can resolve.
                 if let Some(operand) = self.lower_enum_static_call(e, span) {
+                    return operand;
+                }
+                if let Some(operand) = self.lower_period_constructor(e, span) {
                     return operand;
                 }
                 if let Some(operand) = self.lower_native_static_call(e, span) {
@@ -13455,7 +14798,7 @@ impl<'a> FunctionLowering<'a> {
             IrType::Value(id) => self.lower_tuple_field_conjunction(id, left, right, span),
             IrType::Object(id) => {
                 if let Some(method) = self.checked.classes[id as usize].method("_equals") {
-                    let symbol = body_symbol(self.checked, method);
+                    let symbol = class_body_symbol(self.checked, id, method);
                     let returns = self.ir_type(method.returns);
                     self.emit(
                         InstKind::Call {
@@ -19722,6 +21065,7 @@ impl<'a> FunctionLowering<'a> {
             let member_base = match pattern {
                 ast::Pattern::Int(_) => Some(Base::Int(SemaIntWidth::I32)),
                 ast::Pattern::Str(_) => Some(Base::String),
+                ast::Pattern::Bool(_) => Some(Base::Boolean),
                 _ => None,
             };
             if let Some(variant) = member_base.and_then(|base| {
@@ -20269,6 +21613,13 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.missing_property
                 || id == n.contract_violation
                 || id == n.json_conversion
+                || id == n.json_pointer_syntax
+                || id == n.json_pointer_index
+                || id == n.json_pointer_not_found
+                || id == n.json_pointer_container
+                || id == n.json_path_syntax
+                || id == n.json_path_function
+                || id == n.json_limit
                 || id == n.invalid_shift
                 || id == n.invalid_repeat
                 || id == n.float_nan
@@ -20285,6 +21636,16 @@ impl<'a> FunctionLowering<'a> {
                 || id == n.iterator_invalidated
                 || id == n.invalid_date
                 || id == n.invalid_time
+                || id == n.locale_error
+                || id == n.time_shift_error
+                || id == n.unknown_time_zone
+                || id == n.invalid_time_zone
+                || id == n.ambiguous_local_time
+                || id == n.nonexistent_local_time
+                || id == n.invalid_dst_policy
+                || id == n.temporal_range
+                || id == n.ambiguous_localized_input
+                || id == n.invalid_localized_input
                 || id == n.cancelled_error
                 || id == n.task_capacity_error
                 || id == n.timer_capacity_error
@@ -22730,15 +24091,12 @@ impl<'a> FunctionLowering<'a> {
         // The parameter types are similarly the concrete types the checker
         // saw at the call site, so `T` in `put(x: T)` becomes the
         // instantiated `Int32`/`String`/etc. for this receiver.
-        let receiver = if intersection_receiver {
-            let object = self.lower_expr(&field.object);
-            // The intersection retains a single object address. Re-type that
-            // address to the selected contract only at the dispatch site;
-            // this is a static view and performs no allocation or wrapping.
-            self.emit(InstKind::Retype(object), IrType::Contract(id), field.span)
-        } else {
-            self.lower_expr(&field.object)
-        };
+        // Later arguments may open control-flow blocks (including checked
+        // conversions and calls with exception checkpoints). Preserve the
+        // receiver in a slot and reload it on the dispatch block so contract
+        // calls never capture an SSA value from a predecessor block.
+        let receiver_branches = call.args.iter().any(|arg| self.opens_blocks(&arg.value));
+        let receiver = self.lower_and_hold(&field.object, receiver_branches);
         let specialization = call_info.and_then(|call_info| {
             let contract_method = self.checked.contracts[id as usize]
                 .methods
@@ -22772,6 +24130,15 @@ impl<'a> FunctionLowering<'a> {
             }
         }
         let args = self.lower_args_for_params(call, &params);
+        let receiver = self.reload(receiver, field.span);
+        let receiver = if intersection_receiver {
+            // The intersection retains a single object address. Re-type that
+            // address to the selected contract only at the dispatch site;
+            // this is a static view and performs no allocation or wrapping.
+            self.emit(InstKind::Retype(receiver), IrType::Contract(id), field.span)
+        } else {
+            receiver
+        };
 
         Some(self.emit(
             InstKind::CallContract {
@@ -22883,7 +24250,7 @@ impl<'a> FunctionLowering<'a> {
                     false,
                 )
             })
-            .unwrap_or_else(|| body_symbol(self.checked, method));
+            .unwrap_or_else(|| class_body_symbol(self.checked, id, method));
         let returns = self
             .checked
             .result_projections
@@ -23648,6 +25015,66 @@ impl<'a> FunctionLowering<'a> {
             .is_some_and(|ty| matches!(ty.base, zirk_sema::Base::Duration))
     }
 
+    /// Whether `call` is one of the native temporal methods. These methods
+    /// operate on integer-backed scalars, so their callee field cannot be
+    /// resolved as an ordinary object property before dispatch.
+    fn is_temporal_method_call(&self, call: &ast::CallExpr) -> bool {
+        let ast::Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        if field.safe
+            || !matches!(
+                field.name.name.as_str(),
+                "is_before"
+                    | "is_after"
+                    | "is_same"
+                    | "is_same_or_before"
+                    | "is_same_or_after"
+                    | "is_between"
+                    | "is_weekday"
+                    | "is_weekend"
+                    | "with_year"
+                    | "with_month"
+                    | "with_day"
+                    | "with_hour"
+                    | "with_minute"
+                    | "with_second"
+                    | "with_nanosecond"
+                    | "with_date"
+                    | "with_time"
+                    | "start_of"
+                    | "end_of"
+                    | "format"
+                    | "offset_seconds_at"
+                    | "is_dst_at"
+                    | "abbreviation_at"
+                    | "local_datetime_at"
+                    | "in_zone"
+                    | "with_zone"
+                    | "apply_to"
+                    | "to_iso_string"
+            )
+        {
+            return false;
+        }
+        self.checked
+            .expr_types
+            .get(&field.object.span())
+            .is_some_and(|ty| {
+                matches!(
+                    ty.base,
+                    zirk_sema::Base::Date
+                        | zirk_sema::Base::Time
+                        | zirk_sema::Base::DateTime
+                        | zirk_sema::Base::Instant
+                        | zirk_sema::Base::Period
+                        | zirk_sema::Base::TimeShift
+                        | zirk_sema::Base::TimeZone
+                        | zirk_sema::Base::ZonedDateTime
+                )
+            })
+    }
+
     /// Maps a semantic integer width to the IR's own `IntWidth`.
     fn ir_int_width(&self, width: zirk_sema::IntWidth) -> IntWidth {
         use IntWidth;
@@ -23690,10 +25117,262 @@ impl<'a> FunctionLowering<'a> {
             return None;
         }
         let sema = self.checked.expr_types.get(&field.object.span()).copied()?;
+        let sema = substitute_specialized_type(&self.checked, sema, &self.type_substitution);
         let base = sema.base;
+        if base == zirk_sema::Base::TimeShift
+            && field.name.name == "apply_to"
+            && call.args.len() == 1
+        {
+            let shift = self.lower_expr(&field.object);
+            let shift_slot = self.spill(shift, IrType::String, span);
+            let zoned = self.lower_expr(&call.args[0].value);
+            let zoned_slot = self.spill(zoned, IrType::String, span);
+            let shift = self.emit(InstKind::Load(shift_slot), IrType::String, span);
+            let zoned = self.emit(InstKind::Load(zoned_slot), IrType::String, span);
+            let ok = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_timeshift_apply_ok".to_string(),
+                    args: vec![shift, zoned],
+                },
+                IrType::Boolean,
+                span,
+            );
+            return Some(self.build_result_from_flag(
+                call,
+                span,
+                ok,
+                move |lower| {
+                    let shift = lower.emit(InstKind::Load(shift_slot), IrType::String, span);
+                    let zoned = lower.emit(InstKind::Load(zoned_slot), IrType::String, span);
+                    lower.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_timeshift_apply_value".to_string(),
+                            args: vec![shift, zoned],
+                        },
+                        IrType::String,
+                        span,
+                    )
+                },
+                "TimeShift cannot be applied to this form or temporal value",
+            ));
+        }
+        if base == zirk_sema::Base::DateTime && field.name.name == "in_zone" && call.args.len() == 3
+        {
+            let receiver = self.lower_expr(&field.object);
+            let receiver_slot = self.spill(receiver, IrType::Int(IntWidth::I128), span);
+            let mut argument_slots = Vec::with_capacity(3);
+            for argument in &call.args {
+                let value = self.lower_expr(&argument.value);
+                argument_slots.push(self.spill(value, IrType::String, span));
+            }
+            let mut args = vec![self.emit(
+                InstKind::Load(receiver_slot),
+                IrType::Int(IntWidth::I128),
+                span,
+            )];
+            args.extend(
+                argument_slots
+                    .iter()
+                    .map(|slot| self.emit(InstKind::Load(*slot), IrType::String, span)),
+            );
+            let ok = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_in_zone_ok".to_string(),
+                    args,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let error_args = vec![
+                self.emit(
+                    InstKind::Load(receiver_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                ),
+                self.emit(InstKind::Load(argument_slots[0]), IrType::String, span),
+                self.emit(InstKind::Load(argument_slots[1]), IrType::String, span),
+                self.emit(InstKind::Load(argument_slots[2]), IrType::String, span),
+            ];
+            let error_code = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_datetime_in_zone_error_kind".to_string(),
+                    args: error_args,
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let native = self
+                .checked
+                .native_exceptions
+                .expect("the checker registered typed temporal errors");
+            return Some(self.build_result_from_flag_with_error_codes(
+                call,
+                span,
+                ok,
+                error_code,
+                move |lower| {
+                    let mut args = vec![lower.emit(
+                        InstKind::Load(receiver_slot),
+                        IrType::Int(IntWidth::I128),
+                        span,
+                    )];
+                    args.extend(
+                        argument_slots
+                            .iter()
+                            .map(|slot| lower.emit(InstKind::Load(*slot), IrType::String, span)),
+                    );
+                    lower.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_datetime_in_zone_value".to_string(),
+                            args,
+                        },
+                        IrType::String,
+                        span,
+                    )
+                },
+                &[
+                    (2, native.unknown_time_zone, "unknown time-zone identifier"),
+                    (
+                        3,
+                        native.invalid_time_zone,
+                        "invalid fixed time-zone offset",
+                    ),
+                    (4, native.ambiguous_local_time, "local time is ambiguous"),
+                    (
+                        5,
+                        native.nonexistent_local_time,
+                        "local time does not exist",
+                    ),
+                    (
+                        6,
+                        native.invalid_dst_policy,
+                        "invalid daylight-saving policy",
+                    ),
+                    (
+                        8,
+                        native.temporal_range,
+                        "local time is outside the supported range",
+                    ),
+                ],
+                "local time, time zone, or DST policy is unsupported",
+            ));
+        }
+        if base == zirk_sema::Base::ZonedDateTime
+            && call.args.len() == 1
+            && matches!(
+                field.name.name.as_str(),
+                "is_before" | "is_after" | "is_same"
+            )
+        {
+            let left = self.lower_expr(&field.object);
+            let left_slot = self.spill(left, IrType::String, span);
+            let right = self.lower_expr(&call.args[0].value);
+            let right_slot = self.spill(right, IrType::String, span);
+            let left = self.emit(InstKind::Load(left_slot), IrType::String, span);
+            let right = self.emit(InstKind::Load(right_slot), IrType::String, span);
+            let left = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_zoned_datetime_instant".to_string(),
+                    args: vec![left],
+                },
+                IrType::Int(IntWidth::I128),
+                span,
+            );
+            let right = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_zoned_datetime_instant".to_string(),
+                    args: vec![right],
+                },
+                IrType::Int(IntWidth::I128),
+                span,
+            );
+            let op = match field.name.name.as_str() {
+                "is_before" => BinaryOp::Lt,
+                "is_after" => BinaryOp::Gt,
+                _ => BinaryOp::Eq,
+            };
+            return Some(self.emit(InstKind::Binary { op, left, right }, IrType::Boolean, span));
+        }
+        if matches!(
+            (base, field.name.name.as_str()),
+            (zirk_sema::Base::Instant, "in_zone") | (zirk_sema::Base::ZonedDateTime, "with_zone")
+        ) && call.args.len() == 1
+        {
+            let receiver_ty = self.ir_type(sema);
+            let receiver = self.lower_expr(&field.object);
+            let receiver_slot = self.spill(receiver, receiver_ty, span);
+            let zone = self.lower_expr(&call.args[0].value);
+            let zone_slot = self.spill(zone, IrType::String, span);
+            let (callee, args) = if base == zirk_sema::Base::Instant {
+                (
+                    "zirk_rt_zoned_datetime_from_instant",
+                    vec![
+                        self.emit(
+                            InstKind::Load(receiver_slot),
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        ),
+                        self.emit(InstKind::Load(zone_slot), IrType::String, span),
+                    ],
+                )
+            } else {
+                (
+                    "zirk_rt_zoned_datetime_with_zone",
+                    vec![
+                        self.emit(InstKind::Load(receiver_slot), IrType::String, span),
+                        self.emit(InstKind::Load(zone_slot), IrType::String, span),
+                    ],
+                )
+            };
+            return Some(self.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args,
+                },
+                IrType::String,
+                span,
+            ));
+        }
+        if base == zirk_sema::Base::TimeZone && call.args.len() == 1 {
+            let receiver = self.lower_expr(&field.object);
+            let receiver_slot = self.spill(receiver, IrType::String, span);
+            let instant = self.lower_expr(&call.args[0].value);
+            let instant_slot = self.spill(instant, IrType::Int(IntWidth::I128), span);
+            let receiver = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+            let instant = self.emit(
+                InstKind::Load(instant_slot),
+                IrType::Int(IntWidth::I128),
+                span,
+            );
+            let (callee, result) = match field.name.name.as_str() {
+                "offset_seconds_at" => (
+                    "zirk_rt_timezone_offset_seconds",
+                    IrType::Int(IntWidth::I32),
+                ),
+                "is_dst_at" => ("zirk_rt_timezone_is_dst", IrType::Boolean),
+                "abbreviation_at" => ("zirk_rt_timezone_abbreviation", IrType::String),
+                "local_datetime_at" => (
+                    "zirk_rt_timezone_local_datetime",
+                    IrType::Int(IntWidth::I128),
+                ),
+                _ => return None,
+            };
+            return Some(self.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args: vec![receiver, instant],
+                },
+                result,
+                span,
+            ));
+        }
         if !matches!(
             base,
-            zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime
+            zirk_sema::Base::Period
+                | zirk_sema::Base::Date
+                | zirk_sema::Base::Time
+                | zirk_sema::Base::DateTime
+                | zirk_sema::Base::Instant
         ) {
             return None;
         }
@@ -23889,7 +25568,13 @@ impl<'a> FunctionLowering<'a> {
                     "unknown temporal unit",
                 ))
             }
-            "format" if call.args.len() == 1 => {
+            "format"
+                if call.args.len() == 1
+                    && matches!(
+                        base,
+                        zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime
+                    ) =>
+            {
                 let kind = match base {
                     zirk_sema::Base::Date => "date",
                     zirk_sema::Base::Time => "time",
@@ -23908,21 +25593,138 @@ impl<'a> FunctionLowering<'a> {
                     span,
                 ))
             }
-            "to_iso_string" if call.args.is_empty() => {
+            "format_locale"
+                if call.args.len() == 2
+                    && matches!(
+                        base,
+                        zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime
+                    ) =>
+            {
                 let kind = match base {
                     zirk_sema::Base::Date => "date",
                     zirk_sema::Base::Time => "time",
                     _ => "datetime",
                 };
                 let receiver = self.lower_expr(&field.object);
-                Some(self.emit(
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let locale = self.lower_expr(&call.args[0].value);
+                let locale_slot = self.spill(locale, IrType::String, span);
+                let style = self.lower_expr(&call.args[1].value);
+                let style_slot = self.spill(style, IrType::String, span);
+                let receiver = self.emit(InstKind::Load(receiver_slot), value_ty, span);
+                let locale = self.emit(InstKind::Load(locale_slot), IrType::String, span);
+                let style = self.emit(InstKind::Load(style_slot), IrType::String, span);
+                let ok = self.emit(
                     InstKind::Call {
-                        callee: format!("zirk_rt_{kind}_to_string"),
-                        args: vec![receiver],
+                        callee: format!("zirk_rt_{kind}_format_locale_ok"),
+                        args: vec![receiver, locale, style],
                     },
-                    IrType::String,
+                    IrType::Boolean,
                     span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let receiver = lower.emit(InstKind::Load(receiver_slot), value_ty, span);
+                        let locale = lower.emit(InstKind::Load(locale_slot), IrType::String, span);
+                        let style = lower.emit(InstKind::Load(style_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_rt_{kind}_format_locale_value"),
+                                args: vec![receiver, locale, style],
+                            },
+                            IrType::String,
+                            span,
+                        )
+                    },
+                    "locale, style, or temporal value is unsupported",
                 ))
+            }
+            "format_locale_in_zone"
+                if call.args.len() == 5 && base == zirk_sema::Base::DateTime =>
+            {
+                let receiver = self.lower_expr(&field.object);
+                let receiver_slot = self.spill(receiver, value_ty, span);
+                let mut argument_slots = Vec::with_capacity(call.args.len());
+                for argument in &call.args {
+                    let value = self.lower_expr(&argument.value);
+                    argument_slots.push(self.spill(value, IrType::String, span));
+                }
+                let mut args = vec![self.emit(InstKind::Load(receiver_slot), value_ty, span)];
+                args.extend(
+                    argument_slots
+                        .iter()
+                        .map(|slot| self.emit(InstKind::Load(*slot), IrType::String, span)),
+                );
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_datetime_format_locale_in_zone_ok".to_string(),
+                        args,
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let mut args =
+                            vec![lower.emit(InstKind::Load(receiver_slot), value_ty, span)];
+                        args.extend(
+                            argument_slots.iter().map(|slot| {
+                                lower.emit(InstKind::Load(*slot), IrType::String, span)
+                            }),
+                        );
+                        lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_rt_datetime_format_locale_in_zone_value".to_string(),
+                                args,
+                            },
+                            IrType::String,
+                            span,
+                        )
+                    },
+                    "locale, time zone, DST policy, or temporal value is unsupported",
+                ))
+            }
+            "to_iso_string" if call.args.is_empty() => {
+                let receiver = self.lower_expr(&field.object);
+                if base == zirk_sema::Base::Period {
+                    Some(self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_period_to_string".to_string(),
+                            args: vec![receiver],
+                        },
+                        IrType::String,
+                        span,
+                    ))
+                } else if base == zirk_sema::Base::Instant {
+                    Some(self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_instant_to_string".to_string(),
+                            args: vec![receiver],
+                        },
+                        IrType::String,
+                        span,
+                    ))
+                } else {
+                    let kind = match base {
+                        zirk_sema::Base::Date => "date",
+                        zirk_sema::Base::Time => "time",
+                        _ => "datetime",
+                    };
+                    Some(self.emit(
+                        InstKind::Call {
+                            callee: format!("zirk_rt_{kind}_to_string"),
+                            args: vec![receiver],
+                        },
+                        IrType::String,
+                        span,
+                    ))
+                }
             }
             _ => None,
         }
@@ -25186,6 +26988,125 @@ impl<'a> FunctionLowering<'a> {
         self.emit(InstKind::Load(result_slot), result_ty, span)
     }
 
+    /// Builds a `Result<T, ParentError>` while retaining a concrete runtime
+    /// error subtype selected by a stable runtime error code.
+    fn build_result_from_flag_with_error_codes(
+        &mut self,
+        call: &ast::CallExpr,
+        span: Span,
+        ok: Operand,
+        error_code: Operand,
+        produce: impl FnOnce(&mut Self) -> Operand,
+        cases: &[(i32, u32, &'static str)],
+        fallback_message: &str,
+    ) -> Operand {
+        let result_sema = self
+            .checked
+            .result_projections
+            .get(&call.span)
+            .or_else(|| self.checked.expr_types.get(&call.span))
+            .copied()
+            .expect("the checker recorded this call's Result type");
+        let result_ty = self.ir_type(result_sema);
+        let IrType::Enum(result_enum) = result_ty else {
+            unreachable!("Result<T,E> always lowers to IrType::Enum")
+        };
+        let zirk_sema::Base::EnumInstance(instance_id) = result_sema.base else {
+            unreachable!("temporal operations always type to a Result instance")
+        };
+        let error_ty = self.checked.enum_instances[instance_id as usize].args[1];
+        let zirk_sema::Base::Class(_) = error_ty.base else {
+            unreachable!("typed temporal errors are RuntimeError classes")
+        };
+
+        let error_code = self.spill(error_code, IrType::Int(IntWidth::I32), span);
+        let result_slot = self.declare_slot("<result>", result_ty, span);
+        let ok_block = self.new_block();
+        let error_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: ok,
+            then_block: ok_block,
+            else_block: error_block,
+        });
+
+        self.current = ok_block;
+        let value = produce(self);
+        let ok_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 0,
+                fields: vec![value],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, ok_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = error_block;
+        for &(code, class_id, message) in cases {
+            let current_code =
+                self.emit(InstKind::Load(error_code), IrType::Int(IntWidth::I32), span);
+            let expected_code = self.emit(
+                InstKind::ConstInt(i128::from(code)),
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let matches = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: current_code,
+                    right: expected_code,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let matched_block = self.new_block();
+            let next_block = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: matches,
+                then_block: matched_block,
+                else_block: next_block,
+            });
+
+            self.current = matched_block;
+            let error = self.build_native_failure(class_id, message, span);
+            let error = self.emit(InstKind::Retype(error), self.ir_type(error_ty), span);
+            let error_value = self.emit(
+                InstKind::BuildEnum {
+                    enum_id: result_enum,
+                    variant: 1,
+                    fields: vec![error],
+                },
+                result_ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result_slot, error_value), span);
+            self.terminate(Terminator::Jump(continue_block));
+            self.current = next_block;
+        }
+
+        let zirk_sema::Base::Class(fallback_class) = error_ty.base else {
+            unreachable!()
+        };
+        let fallback = self.build_native_failure(fallback_class, fallback_message, span);
+        let error_value = self.emit(
+            InstKind::BuildEnum {
+                enum_id: result_enum,
+                variant: 1,
+                fields: vec![fallback],
+            },
+            result_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, error_value), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), result_ty, span)
+    }
+
     /// `IntN.parse(text)`, `FloatN.parse(text)`, `Regex.parse(pattern)` —
     /// static calls on type names (`native-type-member-surface`). The
     /// checker recorded the callee's span in `scalar_static_accesses` and
@@ -25200,6 +27121,206 @@ impl<'a> FunctionLowering<'a> {
         let ast::Expr::Path(base) = &*field.object else {
             return None;
         };
+        if base.name == "Period" {
+            if field.name.name == "parse" && call.args.len() == 1 {
+                let text = self.lower_expr(&call.args[0].value);
+                let text_slot = self.spill(text, IrType::String, span);
+                let probe = self.emit(InstKind::Load(text_slot), IrType::String, span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_period_parse_ok".to_string(),
+                        args: vec![probe],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                return Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: "zirk_rt_period_parse_value".to_string(),
+                                args: vec![text],
+                            },
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        )
+                    },
+                    "period text is not a valid ISO 8601 calendar period",
+                ));
+            }
+            if call.args.len() == 1
+                && matches!(
+                    field.name.name.as_str(),
+                    "years" | "months" | "weeks" | "days"
+                )
+            {
+                let value = self.lower_expr(&call.args[0].value);
+                let value = self.convert_numeric(
+                    value,
+                    self.type_of_operand(value),
+                    IrType::Int(IntWidth::I32),
+                    span,
+                );
+                let zero = self.const_int_at(0, IrType::Int(IntWidth::I32), span);
+                let components = match field.name.name.as_str() {
+                    "years" => vec![value, zero, zero, zero],
+                    "months" => vec![zero, value, zero, zero],
+                    "weeks" => vec![zero, zero, value, zero],
+                    _ => vec![zero, zero, zero, value],
+                };
+                return Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_period_new".to_string(),
+                        args: components,
+                    },
+                    IrType::Int(IntWidth::I128),
+                    span,
+                ));
+            }
+        }
+        if base.name == "TimeShift" && field.name.name == "calendar" && call.args.len() == 4 {
+            let period = self.lower_expr(&call.args[0].value);
+            let period_slot = self.spill(period, IrType::Int(IntWidth::I128), span);
+            let duration = self.lower_expr(&call.args[1].value);
+            let duration_slot = self.spill(duration, IrType::Int(IntWidth::I64), span);
+            let overlap = self.lower_expr(&call.args[2].value);
+            let overlap_slot = self.spill(overlap, IrType::String, span);
+            let gap = self.lower_expr(&call.args[3].value);
+            let gap_slot = self.spill(gap, IrType::String, span);
+            let mut components = Vec::with_capacity(4);
+            for index in 0..4 {
+                let period = self.emit(
+                    InstKind::Load(period_slot),
+                    IrType::Int(IntWidth::I128),
+                    span,
+                );
+                let index = self.const_int_at(index, IrType::Int(IntWidth::I32), span);
+                components.push(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_period_component".to_string(),
+                        args: vec![period, index],
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ));
+            }
+            let component_slots: Vec<_> = components
+                .into_iter()
+                .map(|component| self.spill(component, IrType::Int(IntWidth::I32), span))
+                .collect();
+            let overlap = self.emit(InstKind::Load(overlap_slot), IrType::String, span);
+            let gap = self.emit(InstKind::Load(gap_slot), IrType::String, span);
+            let mut probe_args: Vec<_> = component_slots
+                .iter()
+                .map(|slot| self.emit(InstKind::Load(*slot), IrType::Int(IntWidth::I32), span))
+                .collect();
+            probe_args.extend([overlap, gap]);
+            let ok = self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_timeshift_calendar_ok".to_string(),
+                    args: probe_args,
+                },
+                IrType::Boolean,
+                span,
+            );
+            return Some(self.build_result_from_flag(
+                call,
+                span,
+                ok,
+                move |lower| {
+                    let mut args: Vec<_> = component_slots
+                        .iter()
+                        .map(|slot| {
+                            lower.emit(InstKind::Load(*slot), IrType::Int(IntWidth::I32), span)
+                        })
+                        .collect();
+                    args.push(lower.emit(
+                        InstKind::Load(duration_slot),
+                        IrType::Int(IntWidth::I64),
+                        span,
+                    ));
+                    args.push(lower.emit(InstKind::Load(overlap_slot), IrType::String, span));
+                    args.push(lower.emit(InstKind::Load(gap_slot), IrType::String, span));
+                    lower.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_timeshift_calendar_value".to_string(),
+                            args,
+                        },
+                        IrType::String,
+                        span,
+                    )
+                },
+                "invalid TimeShift overlap or gap policy",
+            ));
+        }
+        if base.name == "ZonedDateTime" && field.name.name == "from_instant" {
+            let instant = self.lower_expr(&call.args[0].value);
+            let instant_slot = self.spill(instant, IrType::Int(IntWidth::I128), span);
+            let zone = self.lower_expr(&call.args[1].value);
+            let zone_slot = self.spill(zone, IrType::String, span);
+            let instant = self.emit(
+                InstKind::Load(instant_slot),
+                IrType::Int(IntWidth::I128),
+                span,
+            );
+            let zone = self.emit(InstKind::Load(zone_slot), IrType::String, span);
+            return Some(self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_zoned_datetime_from_instant".to_string(),
+                    args: vec![instant, zone],
+                },
+                IrType::String,
+                span,
+            ));
+        }
+        if base.name == "Instant" {
+            let (kind, width) = match field.name.name.as_str() {
+                "from_unix_seconds" => ("seconds", IntWidth::I64),
+                "from_unix_milliseconds" => ("milliseconds", IntWidth::I64),
+                "from_unix_nanoseconds" => ("nanoseconds", IntWidth::I128),
+                _ => ("", IntWidth::I64),
+            };
+            if !kind.is_empty() && call.args.len() == 1 {
+                let input = self.lower_expr(&call.args[0].value);
+                let input = self.emit(
+                    InstKind::IntCast(input),
+                    IrType::Int(width),
+                    call.args[0].value.span(),
+                );
+                let input_slot = self.spill(input, IrType::Int(width), span);
+                let probe_arg = self.emit(InstKind::Load(input_slot), IrType::Int(width), span);
+                let ok = self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_instant_from_unix_{kind}_ok"),
+                        args: vec![probe_arg],
+                    },
+                    IrType::Boolean,
+                    span,
+                );
+                return Some(self.build_result_from_flag(
+                    call,
+                    span,
+                    ok,
+                    move |lower| {
+                        let value =
+                            lower.emit(InstKind::Load(input_slot), IrType::Int(width), span);
+                        lower.emit(
+                            InstKind::Call {
+                                callee: format!("zirk_rt_instant_from_unix_{kind}_value"),
+                                args: vec![value],
+                            },
+                            IrType::Int(IntWidth::I128),
+                            span,
+                        )
+                    },
+                    "the Unix timestamp is outside the supported instant range",
+                ));
+            }
+        }
         // `Date.today()` / `Time.now_local()` / `DateTime.now_utc()`
         // (`date-and-time-types`): host-clock constructors lowered to their
         // runtime calls — the base names a type, never a value.
@@ -25207,6 +27328,10 @@ impl<'a> FunctionLowering<'a> {
             ("Date", "today") => Some(("zirk_rt_date_today", IrType::Int(IntWidth::I64))),
             ("Time", "now_local") => Some(("zirk_rt_time_now_local", IrType::Int(IntWidth::I64))),
             ("Time", "now_utc") => Some(("zirk_rt_time_now_utc", IrType::Int(IntWidth::I64))),
+            ("Instant", "now") => Some(("zirk_rt_instant_now", IrType::Int(IntWidth::I128))),
+            ("TimeZone", "database_version") => {
+                Some(("zirk_rt_timezone_database_version", IrType::String))
+            }
             ("DateTime", "now_local") => {
                 Some(("zirk_rt_datetime_now_local", IrType::Int(IntWidth::I128)))
             }
@@ -25222,6 +27347,79 @@ impl<'a> FunctionLowering<'a> {
                 },
                 returns,
                 span,
+            ));
+        }
+        if field.name.name == "parse_locale" {
+            let (kind, value_ty) = match base.name.as_str() {
+                "Date" => ("date", IrType::Int(IntWidth::I64)),
+                "Time" => ("time", IrType::Int(IntWidth::I64)),
+                "DateTime" => ("datetime", IrType::Int(IntWidth::I128)),
+                _ => return None,
+            };
+            let slots: Vec<_> = call
+                .args
+                .iter()
+                .map(|argument| {
+                    let value = self.lower_expr(&argument.value);
+                    self.spill(value, IrType::String, span)
+                })
+                .collect();
+            let args = slots
+                .iter()
+                .map(|slot| self.emit(InstKind::Load(*slot), IrType::String, span))
+                .collect::<Vec<_>>();
+            let ok = self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_rt_{kind}_parse_locale_ok"),
+                    args: args.clone(),
+                },
+                IrType::Boolean,
+                span,
+            );
+            let error_code = self.emit(
+                InstKind::Call {
+                    callee: format!("zirk_rt_{kind}_parse_locale_error_kind"),
+                    args,
+                },
+                IrType::Int(IntWidth::I32),
+                span,
+            );
+            let native = self
+                .checked
+                .native_exceptions
+                .expect("localized parse errors are registered");
+            return Some(self.build_result_from_flag_with_error_codes(
+                call,
+                span,
+                ok,
+                error_code,
+                move |lower| {
+                    let values = slots
+                        .iter()
+                        .map(|slot| lower.emit(InstKind::Load(*slot), IrType::String, span))
+                        .collect();
+                    lower.emit(
+                        InstKind::Call {
+                            callee: format!("zirk_rt_{kind}_parse_locale_value"),
+                            args: values,
+                        },
+                        value_ty,
+                        span,
+                    )
+                },
+                &[
+                    (
+                        10,
+                        native.invalid_localized_input,
+                        "localized text does not match the requested style",
+                    ),
+                    (
+                        11,
+                        native.ambiguous_localized_input,
+                        "localized temporal input is ambiguous",
+                    ),
+                ],
+                "locale, style, or localized temporal input is unsupported",
             ));
         }
         if field.name.name != "parse" {
@@ -25255,11 +27453,21 @@ impl<'a> FunctionLowering<'a> {
             // `Date.parse`/`Time.parse`/`DateTime.parse`
             // (`temporal-rich-api`): strict ISO text in, `Result<_, ParseError>`
             // out through the shared `(ok, value)` probe.
-            zirk_sema::Base::Date | zirk_sema::Base::Time | zirk_sema::Base::DateTime => {
+            zirk_sema::Base::Date
+            | zirk_sema::Base::Time
+            | zirk_sema::Base::DateTime
+            | zirk_sema::Base::Instant
+            | zirk_sema::Base::Period
+            | zirk_sema::Base::TimeZone
+            | zirk_sema::Base::ZonedDateTime => {
                 let (kind, value_ty) = match target.base {
                     zirk_sema::Base::Date => ("date", IrType::Int(IntWidth::I64)),
                     zirk_sema::Base::Time => ("time", IrType::Int(IntWidth::I64)),
-                    _ => ("datetime", IrType::Int(IntWidth::I128)),
+                    zirk_sema::Base::DateTime => ("datetime", IrType::Int(IntWidth::I128)),
+                    zirk_sema::Base::Instant => ("instant", IrType::Int(IntWidth::I128)),
+                    zirk_sema::Base::Period => ("period", IrType::Int(IntWidth::I128)),
+                    zirk_sema::Base::TimeZone => ("timezone", IrType::String),
+                    _ => ("zoned_datetime", IrType::String),
                 };
                 let text_slot = self.spill(text, IrType::String, span);
                 let ok = self.emit(
@@ -25270,23 +27478,56 @@ impl<'a> FunctionLowering<'a> {
                     IrType::Boolean,
                     span,
                 );
-                Some(self.build_result_from_flag(
-                    call,
-                    span,
-                    ok,
-                    move |lower| {
-                        let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
-                        lower.emit(
-                            InstKind::Call {
-                                callee: format!("zirk_rt_{kind}_parse_value"),
-                                args: vec![text],
-                            },
-                            value_ty,
-                            span,
-                        )
-                    },
-                    "the text is not a valid ISO 8601 temporal value",
-                ))
+                let produce = move |lower: &mut Self| {
+                    let text = lower.emit(InstKind::Load(text_slot), IrType::String, span);
+                    lower.emit(
+                        InstKind::Call {
+                            callee: format!("zirk_rt_{kind}_parse_value"),
+                            args: vec![text],
+                        },
+                        value_ty,
+                        span,
+                    )
+                };
+                if target.base == zirk_sema::Base::TimeZone {
+                    let text = self.emit(InstKind::Load(text_slot), IrType::String, span);
+                    let error_code = self.emit(
+                        InstKind::Call {
+                            callee: "zirk_rt_timezone_parse_error_kind".to_string(),
+                            args: vec![text],
+                        },
+                        IrType::Int(IntWidth::I32),
+                        span,
+                    );
+                    let native = self
+                        .checked
+                        .native_exceptions
+                        .expect("the checker registered typed time-zone errors");
+                    Some(self.build_result_from_flag_with_error_codes(
+                        call,
+                        span,
+                        ok,
+                        error_code,
+                        produce,
+                        &[
+                            (2, native.unknown_time_zone, "unknown time-zone identifier"),
+                            (
+                                3,
+                                native.invalid_time_zone,
+                                "invalid fixed time-zone offset",
+                            ),
+                        ],
+                        "invalid time-zone identifier",
+                    ))
+                } else {
+                    Some(self.build_result_from_flag(
+                        call,
+                        span,
+                        ok,
+                        produce,
+                        "the text is not a valid ISO 8601 temporal value",
+                    ))
+                }
             }
             zirk_sema::Base::Regex => {
                 let text_slot = self.spill(text, IrType::String, span);
@@ -26266,7 +28507,9 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.lower_sequence_collect(receiver, receiver_ty, element_ty, span))
             }
             ("contains", 1, IrType::Array(_) | IrType::List(_)) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
                 let needle = self.lower_expr_as(&call.args[0].value, element_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.lower_sequence_contains(receiver, receiver_ty, element_ty, needle, span))
             }
             ("reverse", 0, IrType::Array(_) | IrType::List(_)) => {
@@ -26296,12 +28539,16 @@ impl<'a> FunctionLowering<'a> {
                 Some(self.lower_sequence_edge(receiver, receiver_ty, element_ty, true, true, span))
             }
             ("add", 1, IrType::List(_)) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
                 let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(InstKind::ListAdd { receiver, value }, IrType::Void, span))
             }
             ("insert", 2, IrType::List(_)) => {
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
                 let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
                 let value = self.lower_expr_as(&call.args[1].value, element_ty);
+                let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                 Some(self.emit(
                     InstKind::ListInsert {
                         receiver,
@@ -26316,8 +28563,10 @@ impl<'a> FunctionLowering<'a> {
                 let receiver_ty = self.value_types[&receiver.0];
                 let element_ty = self.array_list_element_type(receiver_ty);
                 let arg_ty = self.type_of(&call.args[0].value, call.args[0].value.span());
+                let receiver_slot = self.spill(receiver, receiver_ty, span);
                 if arg_ty == element_ty {
                     let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                    let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                     Some(self.emit(
                         InstKind::ListRemoveValue { receiver, value },
                         IrType::Boolean,
@@ -26325,9 +28574,11 @@ impl<'a> FunctionLowering<'a> {
                     ))
                 } else if matches!(arg_ty, IrType::Int(_)) {
                     let index = self.lower_expr_as(&call.args[0].value, IrType::Int(IntWidth::I64));
+                    let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                     Some(self.emit(InstKind::ListRemove { receiver, index }, IrType::Void, span))
                 } else {
                     let value = self.lower_expr_as(&call.args[0].value, element_ty);
+                    let receiver = self.emit(InstKind::Load(receiver_slot), receiver_ty, span);
                     Some(self.emit(
                         InstKind::ListRemoveValue { receiver, value },
                         IrType::Boolean,
@@ -30689,14 +32940,15 @@ impl<'a> FunctionLowering<'a> {
             }
         }
 
-        // A nominal class alternative is represented by its canonical union
-        // tag. The checked projection occurs only in branches where the
-        // semantic flow state narrowed a path to this alternative.
+        // Any exact union alternative with a canonical portable identity can
+        // be tested by its active tag, including collection alternatives that
+        // do not carry an independent runtime type tag. The checked projection
+        // occurs only in branches where flow analysis narrowed the value.
         if matches!(actual_ir, IrType::Union(_))
-            && let Base::Class(class_id) = target.base
             && let Some(union_id) = self.union_id_for_ir_type(actual_ir)
+            && self.checked.unions[union_id as usize].contains(&target.without_null().base)
         {
-            let key = union_member_canonical_key(Base::Class(class_id), self.checked);
+            let key = union_member_canonical_key(target.without_null().base, self.checked);
             let layout = &self.module.union_types[union_id as usize];
             let Some(alternative) = layout
                 .canonical_alternatives
@@ -30887,6 +33139,33 @@ impl<'a> FunctionLowering<'a> {
             });
         }
         None
+    }
+
+    fn lower_period_constructor(&mut self, call: &ast::CallExpr, span: Span) -> Option<Operand> {
+        let ast::Expr::Path(callee) = &*call.callee else {
+            return None;
+        };
+        if callee.name != "Period" || call.args.len() != 4 {
+            return None;
+        }
+        let mut components = Vec::with_capacity(4);
+        for argument in &call.args {
+            let value = self.lower_expr(&argument.value);
+            components.push(self.convert_numeric(
+                value,
+                self.type_of_operand(value),
+                IrType::Int(IntWidth::I32),
+                span,
+            ));
+        }
+        Some(self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_period_new".to_string(),
+                args: components,
+            },
+            IrType::Int(IntWidth::I128),
+            span,
+        ))
     }
 
     fn lower_null_comparison(&mut self, expr: &ast::BinaryExpr, span: Span) -> Operand {
@@ -31129,16 +33408,30 @@ impl<'a> FunctionLowering<'a> {
             let ast::Expr::Path(enum_name) = &*expr.object else {
                 unreachable!("a variant access names its enum")
             };
-            let enum_id = self.enum_id_of(enum_name);
             let discriminant = self.discriminant(enum_name, &expr.name.name);
-            return if enum_has_payload(self.checked, enum_id) {
+            let value_type = self
+                .checked
+                .expr_types
+                .get(&expr.span)
+                .copied()
+                .map(Type::without_null)
+                .map(|ty| self.ir_type(ty))
+                .unwrap_or_else(|| {
+                    let enum_id = self.enum_id_of(enum_name);
+                    if enum_has_payload(self.checked, enum_id) {
+                        IrType::Enum(enum_id)
+                    } else {
+                        IrType::Int(IntWidth::I32)
+                    }
+                });
+            return if let IrType::Enum(enum_id) = value_type {
                 self.emit(
                     InstKind::BuildEnum {
                         enum_id,
                         variant: discriminant as u32,
                         fields: Vec::new(),
                     },
-                    IrType::Enum(enum_id),
+                    value_type,
                     span,
                 )
             } else {
@@ -31160,7 +33453,13 @@ impl<'a> FunctionLowering<'a> {
         {
             return operand;
         }
-        if let Some(operand) = self.lower_duration_property(&expr.object, &expr.name.name, span) {
+        if self
+            .checked
+            .expr_types
+            .get(&expr.object.span())
+            .is_some_and(|ty| ty.base == Base::Duration)
+            && let Some(operand) = self.lower_duration_property(&expr.object, &expr.name.name, span)
+        {
             return operand;
         }
         if let Some(operand) = self.lower_temporal_property(&expr.object, &expr.name.name, span) {
@@ -31499,7 +33798,10 @@ impl<'a> FunctionLowering<'a> {
             unreachable!("a scalar static access names a type")
         };
         let Some(ty) = Type::from_name(&base.name) else {
-            unreachable!("the checker only records existing scalar types")
+            unreachable!(
+                "the checker recorded non-scalar static `{}`.{}",
+                base.name, member
+            )
         };
         match ty.base {
             zirk_sema::Base::Int(width) => {
@@ -31517,14 +33819,22 @@ impl<'a> FunctionLowering<'a> {
         let value = match member {
             "MIN" => {
                 if width.signed() {
-                    -(1i128 << (bits - 1))
+                    if bits == 128 {
+                        i128::MIN
+                    } else {
+                        -(1i128 << (bits - 1))
+                    }
                 } else {
                     0
                 }
             }
             "MAX" => {
                 if width.signed() {
-                    (1i128 << (bits - 1)) - 1
+                    if bits == 128 {
+                        i128::MAX
+                    } else {
+                        (1i128 << (bits - 1)) - 1
+                    }
                 } else if bits == 128 {
                     u128::MAX as i128
                 } else {
@@ -31726,6 +34036,86 @@ impl<'a> FunctionLowering<'a> {
         let ty = *self.checked.expr_types.get(&object.span())?;
         let receiver = self.lower_expr(object);
         match ty.base {
+            Base::Instant => match member {
+                "unix_nanoseconds" => Some(receiver),
+                "unix_seconds" | "unix_milliseconds" => Some(self.emit(
+                    InstKind::Call {
+                        callee: format!("zirk_rt_instant_{member}"),
+                        args: vec![receiver],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                )),
+                _ => None,
+            },
+            Base::TimeZone if member == "canonical_identifier" => Some(receiver),
+            Base::Period if matches!(member, "years" | "months" | "weeks" | "days") => {
+                let index = match member {
+                    "years" => 0,
+                    "months" => 1,
+                    "weeks" => 2,
+                    _ => 3,
+                };
+                let index = self.const_int_at(index, IrType::Int(IntWidth::I32), span);
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_period_component".to_string(),
+                        args: vec![receiver, index],
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ))
+            }
+            Base::TimeShift => match member {
+                "kind" => Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_timeshift_kind".to_string(),
+                        args: vec![receiver],
+                    },
+                    IrType::String,
+                    span,
+                )),
+                "duration" => Some(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_timeshift_duration".to_string(),
+                        args: vec![receiver],
+                    },
+                    IrType::Int(IntWidth::I64),
+                    span,
+                )),
+                "time" | "day_offset" | "period" | "overlap_policy" | "gap_policy" => {
+                    Some(self.lower_timeshift_optional_property(receiver, member, span))
+                }
+                _ => None,
+            },
+            Base::ZonedDateTime => {
+                let (callee, result) = match member {
+                    "instant" => (
+                        "zirk_rt_zoned_datetime_instant",
+                        IrType::Int(IntWidth::I128),
+                    ),
+                    "zone" => ("zirk_rt_zoned_datetime_zone", IrType::String),
+                    "local_datetime" => (
+                        "zirk_rt_zoned_datetime_local_datetime",
+                        IrType::Int(IntWidth::I128),
+                    ),
+                    "offset_seconds" => (
+                        "zirk_rt_zoned_datetime_offset_seconds",
+                        IrType::Int(IntWidth::I32),
+                    ),
+                    "is_dst" => ("zirk_rt_zoned_datetime_is_dst", IrType::Boolean),
+                    "abbreviation" => ("zirk_rt_zoned_datetime_abbreviation", IrType::String),
+                    _ => return None,
+                };
+                Some(self.emit(
+                    InstKind::Call {
+                        callee: callee.to_string(),
+                        args: vec![receiver],
+                    },
+                    result,
+                    span,
+                ))
+            }
             Base::Date => {
                 let i32_call = |this: &mut Self, callee: &str| {
                     this.emit(
@@ -31929,6 +34319,125 @@ impl<'a> FunctionLowering<'a> {
             }
             _ => None,
         }
+    }
+
+    fn lower_timeshift_optional_property(
+        &mut self,
+        receiver: Operand,
+        member: &str,
+        span: Span,
+    ) -> Operand {
+        let receiver_slot = self.spill(receiver, IrType::String, span);
+        let receiver_for_tag = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+        let clock_form = self.emit(
+            InstKind::Call {
+                callee: "zirk_rt_timeshift_is_clock".to_string(),
+                args: vec![receiver_for_tag],
+            },
+            IrType::Boolean,
+            span,
+        );
+        let active_clock_field = matches!(member, "time" | "day_offset");
+        let active = if active_clock_field {
+            clock_form
+        } else {
+            self.emit(
+                InstKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: clock_form,
+                },
+                IrType::Boolean,
+                span,
+            )
+        };
+        let (inner, callee, raw_ty) = match member {
+            "time" => (
+                IrType::Int(IntWidth::I64),
+                "zirk_rt_timeshift_time",
+                IrType::Int(IntWidth::I64),
+            ),
+            "day_offset" => (
+                IrType::Int(IntWidth::I32),
+                "zirk_rt_timeshift_day_offset",
+                IrType::Int(IntWidth::I32),
+            ),
+            "period" => (IrType::Int(IntWidth::I128), "", IrType::Int(IntWidth::I128)),
+            "overlap_policy" => (
+                IrType::String,
+                "zirk_rt_timeshift_overlap_policy",
+                IrType::String,
+            ),
+            "gap_policy" => (
+                IrType::String,
+                "zirk_rt_timeshift_gap_policy",
+                IrType::String,
+            ),
+            _ => unreachable!("only nullable TimeShift fields reach this lowerer"),
+        };
+        let nullable = Nullable::of(inner).expect("TimeShift nullable fields use nullable scalars");
+        let nullable_ty = IrType::Nullable(nullable);
+        let result_slot = self.declare_slot("<timeshift-field>", nullable_ty, span);
+        let value_block = self.new_block();
+        let absent_block = self.new_block();
+        let continue_block = self.new_block();
+        self.terminate(Terminator::Branch {
+            condition: active,
+            then_block: value_block,
+            else_block: absent_block,
+        });
+
+        self.current = value_block;
+        let receiver = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+        let value = if member == "period" {
+            let mut components = Vec::with_capacity(4);
+            for index in 0..4 {
+                let receiver = self.emit(InstKind::Load(receiver_slot), IrType::String, span);
+                let index = self.const_int_at(index, IrType::Int(IntWidth::I32), span);
+                components.push(self.emit(
+                    InstKind::Call {
+                        callee: "zirk_rt_timeshift_period_component".to_string(),
+                        args: vec![receiver, index],
+                    },
+                    IrType::Int(IntWidth::I32),
+                    span,
+                ));
+            }
+            self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_period_new".to_string(),
+                    args: components,
+                },
+                raw_ty,
+                span,
+            )
+        } else {
+            self.emit(
+                InstKind::Call {
+                    callee: callee.to_string(),
+                    args: vec![receiver],
+                },
+                raw_ty,
+                span,
+            )
+        };
+        let wrapped = self.emit(
+            InstKind::Wrap {
+                base: nullable,
+                value,
+            },
+            nullable_ty,
+            span,
+        );
+        self.emit_effect(InstKind::Store(result_slot, wrapped), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = absent_block;
+        let absent = self.emit(InstKind::NullValue(nullable), nullable_ty, span);
+        self.emit_effect(InstKind::Store(result_slot, absent), span);
+        self.terminate(Terminator::Jump(continue_block));
+
+        self.current = continue_block;
+        self.emit(InstKind::Load(result_slot), nullable_ty, span)
     }
 
     fn lower_tuple_length(&mut self, object: &ast::Expr, span: Span) -> Operand {
@@ -32248,7 +34757,7 @@ impl<'a> FunctionLowering<'a> {
                         )
                     });
                 };
-                let name = body_symbol(self.checked, method);
+                let name = class_body_symbol(self.checked, id, method);
                 let returns = self.ir_type(method.returns);
                 let params = method.params.iter().map(|p| self.ir_type(p.ty)).collect();
                 let dispatch = SafeDispatch::Object {
@@ -32709,7 +35218,12 @@ impl<'a> FunctionLowering<'a> {
             .checked
             .expr_types
             .get(&expr.object.span())
-            .is_some_and(|ty| matches!(ty.base, Base::Date | Base::Time | Base::DateTime))
+            .is_some_and(|ty| {
+                matches!(
+                    ty.base,
+                    Base::Date | Base::Time | Base::DateTime | Base::Instant
+                )
+            })
         {
             if let Some(&ty) = self.checked.expr_types.get(&expr.span)
                 && !ty.is_unknown()
@@ -32745,19 +35259,40 @@ impl<'a> FunctionLowering<'a> {
                 .unwrap_or(IrType::Int(IntWidth::I32));
         }
         if self.checked.variant_accesses.contains(&expr.span) {
-            let ast::Expr::Path(enum_name) = &*expr.object else {
-                unreachable!("a variant access names its enum")
-            };
-            let enum_id = self.enum_id_of(enum_name);
-            // A variant without associated data is exactly its discriminant
-            // — unless the enum it belongs to carries a payload elsewhere,
-            // in which case every value of it shares that representation
-            // (see `Self::lower_field`).
-            return if enum_has_payload(self.checked, enum_id) {
-                IrType::Enum(enum_id)
-            } else {
-                IrType::Int(IntWidth::I32)
-            };
+            return self
+                .checked
+                .expr_types
+                .get(&expr.span)
+                .copied()
+                .map(|ty| self.ir_type(ty))
+                .unwrap_or_else(|| {
+                    let ast::Expr::Path(enum_name) = &*expr.object else {
+                        unreachable!("a variant access names its enum")
+                    };
+                    let enum_id = self.enum_id_of(enum_name);
+                    if enum_has_payload(self.checked, enum_id) {
+                        IrType::Enum(enum_id)
+                    } else {
+                        IrType::Int(IntWidth::I32)
+                    }
+                });
+        }
+        if let IrType::Contract(contract_id) = self.type_of(&expr.object, expr.object.span()) {
+            let property_type = self
+                .checked
+                .expr_types
+                .get(&expr.span)
+                .copied()
+                .filter(|ty| !ty.is_unknown())
+                .or_else(|| {
+                    self.checked.contracts[contract_id as usize]
+                        .properties
+                        .iter()
+                        .find(|property| property.name == expr.name.name)
+                        .map(|property| property.ty)
+                })
+                .expect("the checker resolves contract property types");
+            return self.ir_type(property_type);
         }
         let field_ty = self.field_position(&expr.object, &expr.name.name).1;
         if !expr.safe || matches!(field_ty, IrType::Nullable(_)) {
@@ -34006,20 +36541,45 @@ impl<'a> FunctionLowering<'a> {
         // receiver to recognize it by — the checker's own recorded
         // expression type says which it is (a `record` resolves to
         // `IrType::Value`, an enum to `Int32` or `IrType::Enum`).
-        match self
+        let receiver_semantic_type = self
             .checked
             .expr_types
             .get(&field.object.span())
-            .map(|t| t.base)
-        {
-            Some(Base::Enum(_) | Base::EnumInstance(_)) => return true,
+            .copied()
+            .map(|ty| substitute_specialized_type(self.checked, ty, &self.type_substitution));
+        match receiver_semantic_type.map(|ty| ty.base) {
+            Some(Base::Enum(_) | Base::EnumInstance(_) | Base::Union(_)) => return true,
             Some(Base::Tuple(_)) => return true,
+            Some(
+                Base::Int(_)
+                | Base::Float(_)
+                | Base::Decimal
+                | Base::Boolean
+                | Base::String
+                | Base::Char
+                | Base::Duration
+                | Base::Date
+                | Base::Time
+                | Base::DateTime
+                | Base::Range(_)
+                | Base::Null,
+            ) => return true,
             Some(Base::Class(id)) => {
                 return self.checked.classes[id as usize].method("clone").is_none();
             }
             _ => {}
         }
         match self.type_of(&field.object, field.object.span()) {
+            IrType::Int(_)
+            | IrType::Float(_)
+            | IrType::Decimal
+            | IrType::Boolean
+            | IrType::String
+            | IrType::Char
+            | IrType::Value(_)
+            | IrType::Enum(_)
+            | IrType::Union(_)
+            | IrType::Range => true,
             IrType::Object(id) => self.checked.classes[id as usize].method("clone").is_none(),
             IrType::Callable(_) => true,
             _ => false,
@@ -34112,6 +36672,9 @@ impl<'a> FunctionLowering<'a> {
                 self.emit(InstKind::BuildValue { class: id, fields }, ty, span)
             }
             IrType::Enum(id) => self.lower_clone_enum(value, id, ty, span),
+            IrType::Union(representation) => {
+                self.lower_clone_union(value, representation, ty, span)
+            }
             _ => value,
         }
     }
@@ -34206,6 +36769,84 @@ impl<'a> FunctionLowering<'a> {
         // last variant was tested — its `next` is dead by construction, but
         // a jump keeps the terminator-correctness the IR requires.
         self.terminate(Terminator::Jump(done));
+        self.current = done;
+        self.emit(InstKind::Load(result), ty, span)
+    }
+
+    /// Clones only the active alternative of a tagged union. Projection and
+    /// injection preserve the canonical tag while recursively cloning the
+    /// selected payload using its own value semantics.
+    fn lower_clone_union(
+        &mut self,
+        value: Operand,
+        representation: u32,
+        ty: IrType,
+        span: Span,
+    ) -> Operand {
+        let (union_id, layout) = self
+            .module
+            .union_type_for_representation(representation)
+            .expect("verified union clone has a canonical layout");
+        let alternatives = layout.alternatives.clone();
+        let source = self.spill(value, ty, span);
+        let result = self.declare_slot("<clone_union>", ty, span);
+        let done = self.new_block();
+        let mut next = self.current;
+
+        for (alternative, alternative_ty) in alternatives.iter().copied().enumerate() {
+            self.current = next;
+            let loaded = self.emit(InstKind::Load(source), ty, span);
+            let tag = self.emit(InstKind::UnionTag(loaded), IrType::Int(IntWidth::U32), span);
+            let expected = self.emit(
+                InstKind::ConstInt(alternative as i128),
+                IrType::Int(IntWidth::U32),
+                span,
+            );
+            let matches = self.emit(
+                InstKind::Binary {
+                    op: BinaryOp::Eq,
+                    left: tag,
+                    right: expected,
+                },
+                IrType::Boolean,
+                span,
+            );
+            let body = self.new_block();
+            let following = self.new_block();
+            self.terminate(Terminator::Branch {
+                condition: matches,
+                then_block: body,
+                else_block: following,
+            });
+
+            self.current = body;
+            let loaded = self.emit(InstKind::Load(source), ty, span);
+            let payload = self.emit(
+                InstKind::UnionProject {
+                    value: loaded,
+                    union_id,
+                    alternative: alternative as u32,
+                },
+                alternative_ty,
+                span,
+            );
+            let cloned = self.lower_clone_value(payload, alternative_ty, span);
+            let rebuilt = self.emit(
+                InstKind::UnionInject {
+                    union_id,
+                    alternative: alternative as u32,
+                    payload: cloned,
+                },
+                ty,
+                span,
+            );
+            self.emit_effect(InstKind::Store(result, rebuilt), span);
+            self.terminate(Terminator::Jump(done));
+            next = following;
+        }
+
+        self.current = next;
+        self.terminate(Terminator::Unreachable);
         self.current = done;
         self.emit(InstKind::Load(result), ty, span)
     }
@@ -34566,6 +37207,11 @@ impl<'a> FunctionLowering<'a> {
                     self.lower_expr(expr);
                 }
             }
+            ast::Expr::Call(e) if self.checked.standard_json_calls.contains_key(&e.span) => {
+                let result = self.lower_expr(expr);
+                let returns = self.type_of_operand(result);
+                self.lower_throws_check(result, returns, expr.span());
+            }
             ast::Expr::Call(e)
                 if matches!(
                     &*e.callee,
@@ -34728,7 +37374,7 @@ impl<'a> FunctionLowering<'a> {
 
         if let IrType::Object(id) = ty {
             if let Some(method) = self.checked.classes[id as usize].method("to_string") {
-                let name = body_symbol(self.checked, method);
+                let name = class_body_symbol(self.checked, id, method);
                 let virtual_index = method.overridden.then_some(method.index as u32);
                 return match virtual_index {
                     Some(index) => self.emit(
@@ -35363,6 +38009,30 @@ impl<'a> FunctionLowering<'a> {
             zirk_sema::Base::DateTime => self.emit(
                 InstKind::Call {
                     callee: "zirk_rt_datetime_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Instant => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_instant_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::Period => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_period_to_string".to_string(),
+                    args: vec![operand],
+                },
+                IrType::String,
+                span,
+            ),
+            zirk_sema::Base::TimeShift => self.emit(
+                InstKind::Call {
+                    callee: "zirk_rt_timeshift_to_string".to_string(),
                     args: vec![operand],
                 },
                 IrType::String,
@@ -36852,7 +39522,9 @@ impl<'a> FunctionLowering<'a> {
             || self.is_regex_method_call(call)
             || self.is_regex_match_group_call(call)
             || self.is_duration_method_call(call)
+            || self.is_temporal_method_call(call)
             || self.is_string_method_call(call)
+            || self.is_derived_clone_call(call)
             || self.is_char_method_call(call)
             || self.is_scalar_method_call(call)
             || self.is_native_static_call(call)
@@ -37535,7 +40207,7 @@ impl<'a> FunctionLowering<'a> {
         let temporal_base = left_base.or(right_base);
         let mixes_duration = matches!(
             temporal_base,
-            Some(zirk_sema::Base::Date | zirk_sema::Base::DateTime)
+            Some(zirk_sema::Base::Date | zirk_sema::Base::DateTime | zirk_sema::Base::Instant)
         ) && (self.is_duration(&expr.left) || self.is_duration(&expr.right));
         if mixes_duration && matches!(expr.op, Add | Sub) {
             let i128ty = IrType::Int(IntWidth::I128);
@@ -37596,8 +40268,11 @@ impl<'a> FunctionLowering<'a> {
         // narrowed to the `i64` `Duration` — a span past ±292 years cannot
         // be a `Duration` and throws `ArithmeticOverflowError`.
         if expr.op == Sub
-            && left_base == Some(zirk_sema::Base::DateTime)
-            && right_base == Some(zirk_sema::Base::DateTime)
+            && left_base == right_base
+            && matches!(
+                left_base,
+                Some(zirk_sema::Base::DateTime | zirk_sema::Base::Instant)
+            )
         {
             let i128ty = IrType::Int(IntWidth::I128);
             let i64ty = IrType::Int(IntWidth::I64);
@@ -37654,8 +40329,9 @@ impl<'a> FunctionLowering<'a> {
             return self.emit(InstKind::IntCast(diff), i64ty, span);
         }
 
-        // `Time`(+|-)`Duration` wraps modulo one day; `Time - Time` is the
-        // `Duration` between them. Both are `i64` runtime calls.
+        // `Time`(+|-)`Duration` returns the tagged clock `TimeShift`, which
+        // retains both the wrapped clock and the signed day carry. `Time -
+        // Time` remains an exact `Duration`.
         let time = [left_base, right_base]
             .iter()
             .flatten()
@@ -37669,36 +40345,19 @@ impl<'a> FunctionLowering<'a> {
                         &expr.left
                     }) =>
                 {
-                    let (time_op, duration_op, negate) = if left_base == Some(zirk_sema::Base::Time)
-                    {
-                        (left, right, expr.op == Sub)
-                    } else {
-                        (right, left, false)
-                    };
-                    let nanos = if negate {
-                        // `0 - delta` plain: the negated count is only ever
-                        // read modulo one day by `zirk_rt_time_add_nanos`,
-                        // so the wrap on `i64::MIN` is unobservable — and a
-                        // plain op opens no block `time_op` would cross.
-                        let zero = self.const_int_at(0, IrType::Int(IntWidth::I64), span);
-                        self.emit(
-                            InstKind::Binary {
-                                op: BinaryOp::Sub,
-                                left: zero,
-                                right: duration_op,
-                            },
-                            IrType::Int(IntWidth::I64),
-                            span,
-                        )
-                    } else {
-                        duration_op
-                    };
+                    let (time_op, duration_op, subtract) =
+                        if left_base == Some(zirk_sema::Base::Time) {
+                            (left, right, expr.op == Sub)
+                        } else {
+                            (right, left, false)
+                        };
+                    let subtract = self.emit(InstKind::ConstBool(subtract), IrType::Boolean, span);
                     return self.emit(
                         InstKind::Call {
-                            callee: "zirk_rt_time_add_nanos".to_string(),
-                            args: vec![time_op, nanos],
+                            callee: "zirk_rt_timeshift_clock".to_string(),
+                            args: vec![time_op, duration_op, subtract],
                         },
-                        IrType::Int(IntWidth::I64),
+                        IrType::String,
                         span,
                     );
                 }

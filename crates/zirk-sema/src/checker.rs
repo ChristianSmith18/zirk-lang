@@ -29,8 +29,559 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use unicode_segmentation::UnicodeSegmentation;
 use zirk_ast::*;
 use zirk_diagnostics::{Code, Diagnostic, DiagnosticSink, SourceMap, Span};
+use zirk_runtime_core::collections::{CollectionHashEq, CollectionTextKind};
 
-fn substitute_alias_type_ref(reference: &TypeRef, bindings: &HashMap<String, TypeRef>) -> TypeRef {
+fn json_codec_type_source(reference: &TypeRef) -> Option<String> {
+    if reference.expression.is_some()
+        || reference.value.is_some()
+        || reference.function.is_some()
+        || !reference.union_with.is_empty()
+        || !reference.intersection_with.is_empty()
+        || reference.fixed_size.is_some()
+    {
+        return None;
+    }
+    let mut source = reference.name.clone();
+    if !reference.arguments.is_empty() {
+        let arguments = reference
+            .arguments
+            .iter()
+            .map(json_codec_type_source)
+            .collect::<Option<Vec<_>>>()?;
+        source.push('<');
+        source.push_str(&arguments.join(", "));
+        source.push('>');
+    }
+    if reference.nullable {
+        source.push('?');
+    }
+    Some(source)
+}
+
+fn json_codec_enum_instance(reference: &TypeRef, declaration: &EnumDecl) -> Option<EnumDecl> {
+    if declaration.type_params.len() != reference.arguments.len() {
+        return None;
+    }
+    let bindings = declaration
+        .type_params
+        .iter()
+        .zip(&reference.arguments)
+        .map(|(parameter, argument)| (parameter.name.name.clone(), argument.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut instance = declaration.clone();
+    instance.type_params.clear();
+    for variant in &mut instance.variants {
+        for field in &mut variant.associated {
+            field.ty = substitute_alias_type_ref(&field.ty, &bindings);
+        }
+    }
+    Some(instance)
+}
+
+fn json_codec_schema_type(
+    reference: &TypeRef,
+    generated_types: &HashSet<String>,
+    generated_enums: &HashMap<String, EnumDecl>,
+) -> Option<serde_json::Value> {
+    if reference.expression.is_some()
+        || reference.value.is_some()
+        || reference.function.is_some()
+        || !reference.union_with.is_empty()
+        || !reference.intersection_with.is_empty()
+        || reference.fixed_size.is_some()
+    {
+        return None;
+    }
+    if reference.nullable {
+        let mut inner = reference.clone();
+        inner.nullable = false;
+        return Some(serde_json::json!({
+            "anyOf": [
+                json_codec_schema_type(&inner, generated_types, generated_enums)?,
+                {"type": "null"}
+            ]
+        }));
+    }
+    let base_schema = match reference.name.as_str() {
+        "String" | "Char" => serde_json::json!({"type": "string"}),
+        "Boolean" => serde_json::json!({"type": "boolean"}),
+        "Int8" | "Int16" | "Int32" | "Int64" | "UInt8" | "UInt16" | "UInt32" | "UInt64"
+        | "BigInt" => serde_json::json!({"type": "integer"}),
+        "Float32" | "Float64" | "Float128" | "Decimal" => {
+            serde_json::json!({"type": "number"})
+        }
+        "List" | "Array" if reference.arguments.len() == 1 => serde_json::json!({
+            "type": "array",
+            "items": json_codec_schema_type(&reference.arguments[0], generated_types, generated_enums)?
+        }),
+        "Set" if reference.arguments.len() == 1 => serde_json::json!({
+            "type": "array",
+            "items": json_codec_schema_type(&reference.arguments[0], generated_types, generated_enums)?
+        }),
+        "Map" if reference.arguments.len() == 2 => serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "array",
+                "prefixItems": [
+                    json_codec_schema_type(&reference.arguments[0], generated_types, generated_enums)?,
+                    json_codec_schema_type(&reference.arguments[1], generated_types, generated_enums)?
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+            }
+        }),
+        name if generated_types.contains(name) => serde_json::json!({"type": "object"}),
+        name if generated_enums.contains_key(name) => {
+            let enum_decl = json_codec_enum_instance(reference, &generated_enums[name])?;
+            if enum_decl
+                .variants
+                .iter()
+                .all(|variant| variant.associated.is_empty())
+            {
+                serde_json::json!({
+                    "type": "string",
+                    "enum": enum_decl.variants.iter().map(|variant| &variant.name.name).collect::<Vec<_>>()
+                })
+            } else {
+                let alternatives = enum_decl
+                    .variants
+                    .iter()
+                    .map(|variant| {
+                        let tag = serde_json::json!({"const": variant.name.name});
+                        if variant.associated.is_empty() {
+                            Some(serde_json::json!({
+                                "type": "object",
+                                "properties": {"$variant": tag},
+                                "required": ["$variant"],
+                                "additionalProperties": false
+                            }))
+                        } else {
+                            let mut properties = serde_json::Map::new();
+                            let mut required = Vec::new();
+                            for field in &variant.associated {
+                                let Some(schema) = json_codec_schema_type(
+                                    &field.ty,
+                                    generated_types,
+                                    generated_enums,
+                                ) else {
+                                    return None;
+                                };
+                                properties.insert(field.name.name.clone(), schema);
+                                required.push(field.name.name.clone());
+                            }
+                            Some(serde_json::json!({
+                                "type": "object",
+                                "properties": {
+                                    "$variant": tag,
+                                    "$payload": {
+                                        "type": "object",
+                                        "properties": properties,
+                                        "required": required,
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "required": ["$variant", "$payload"],
+                                "additionalProperties": false
+                            }))
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                serde_json::json!({"oneOf": alternatives})
+            }
+        }
+        _ => return None,
+    };
+    Some(base_schema)
+}
+
+fn json_codec_decode_code(
+    reference: &TypeRef,
+    input: &str,
+    target: &str,
+    generated_types: &HashSet<String>,
+    generated_enums: &HashMap<String, EnumDecl>,
+    output: &mut String,
+    next_id: &mut u32,
+    field_name: &str,
+) -> Option<()> {
+    let ty = json_codec_type_source(reference)?;
+    if reference.nullable {
+        let mut inner = reference.clone();
+        inner.nullable = false;
+        let raw = format!("__json_raw_{}", *next_id);
+        let decoded = format!("__json_unwrapped_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "inmut {raw}: Dynamic = {input};\nmut {target}: {ty} = null;\nif JSON.stringify({raw}) != \"null\" {{\n"
+        ));
+        json_codec_decode_code(
+            &inner,
+            &raw,
+            &decoded,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+            field_name,
+        )?;
+        output.push_str(&format!("{target} = {decoded};\n}}\n"));
+        return Some(());
+    }
+
+    if matches!(reference.name.as_str(), "List" | "Array" | "Set") && reference.arguments.len() == 1
+    {
+        let raw = format!("__json_items_{}", *next_id);
+        let item = format!("__json_item_{}", *next_id);
+        let converted = format!("__json_converted_{}", *next_id);
+        let index = format!("__json_index_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "inmut {raw}: List<Dynamic> = {input} as List<Dynamic>;\n"
+        ));
+        if reference.name == "Array" {
+            output.push_str(&format!(
+                "mut {target}: {ty} = Array({raw}.length);\nmut {index}: Int32 = 0;\n"
+            ));
+        } else if reference.name == "Set" {
+            output.push_str(&format!("mut {target}: {ty} = Set();\n"));
+        } else {
+            output.push_str(&format!("mut {target}: {ty} = List();\n"));
+        }
+        output.push_str(&format!("for {item} in {raw} {{\n"));
+        json_codec_decode_code(
+            &reference.arguments[0],
+            &item,
+            &converted,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+            field_name,
+        )?;
+        if reference.name == "Array" {
+            output.push_str(&format!(
+                "{target}[{index}] = {converted};\n{index} += 1;\n"
+            ));
+        } else if reference.name == "Set" {
+            output.push_str(&format!("{target}.add({converted});\n"));
+        } else {
+            output.push_str(&format!("{target}.add({converted});\n"));
+        }
+        output.push_str("}\n");
+        return Some(());
+    }
+
+    if reference.name == "Map" && reference.arguments.len() == 2 {
+        let raw = format!("__json_map_items_{}", *next_id);
+        let pair = format!("__json_map_pair_{}", *next_id);
+        let key = format!("__json_map_key_{}", *next_id);
+        let value = format!("__json_map_value_{}", *next_id);
+        let entry = format!("__json_map_entry_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "inmut {raw}: List<Dynamic> = {input} as List<Dynamic>;\nmut {target}: {ty} = Map();\nfor {pair} in {raw} {{\ninmut {entry}: List<Dynamic> = {pair} as List<Dynamic>;\n"
+        ));
+        json_codec_decode_code(
+            &reference.arguments[0],
+            &format!("{entry}[0]"),
+            &key,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+            field_name,
+        )?;
+        json_codec_decode_code(
+            &reference.arguments[1],
+            &format!("{entry}[1]"),
+            &value,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+            field_name,
+        )?;
+        output.push_str(&format!("{target}.set({key}, {value});\n}}\n"));
+        return Some(());
+    }
+
+    if let Some(enum_decl) = generated_enums
+        .get(&reference.name)
+        .and_then(|declaration| json_codec_enum_instance(reference, declaration))
+    {
+        let first = enum_decl.variants.first()?;
+        let raw = format!("__json_enum_name_{}", *next_id);
+        let matched = format!("__json_enum_matched_{}", *next_id);
+        *next_id += 1;
+        let has_payload = enum_decl
+            .variants
+            .iter()
+            .any(|variant| !variant.associated.is_empty());
+        if !has_payload {
+            output.push_str(&format!(
+                "inmut {raw}: String = {input} as String;\nmut {target}: {ty} = {ty}.{};\nmut {matched}: Boolean = {raw} == \"{}\";\n",
+                first.name.name, first.name.name
+            ));
+            for variant in enum_decl.variants.iter().skip(1) {
+                output.push_str(&format!(
+                    "if {raw} == \"{}\" {{ {target} = {ty}.{}; {matched} = true; }}\n",
+                    variant.name.name, variant.name.name
+                ));
+            }
+        } else {
+            output.push_str(&format!(
+                "inmut {raw}: String = JSON.pointer({input}, \"/$variant\") as String;\nmut {target}: {ty};\nmatch {raw} {{\n"
+            ));
+            for variant in &enum_decl.variants {
+                let pattern = &variant.name.name;
+                if variant.associated.is_empty() {
+                    output.push_str(&format!(
+                        "\"{pattern}\" => {{ {target} = {}.{pattern}; }}\n",
+                        reference.name
+                    ));
+                } else {
+                    let mut arguments = Vec::new();
+                    let mut branch = String::new();
+                    for field in &variant.associated {
+                        let field_target = format!("__json_enum_{}_{}", *next_id, field.name.name);
+                        *next_id += 1;
+                        let pointer = format!(
+                            "/$payload/{}",
+                            field.name.name.replace('~', "~0").replace('/', "~1")
+                        );
+                        json_codec_decode_code(
+                            &field.ty,
+                            &format!("JSON.pointer({input}, \"{pointer}\")"),
+                            &field_target,
+                            generated_types,
+                            generated_enums,
+                            &mut branch,
+                            next_id,
+                            field_name,
+                        )?;
+                        arguments.push(field_target);
+                    }
+                    output.push_str(&format!(
+                        "\"{pattern}\" => {{\n{branch}{target} = {}.{pattern}({});\n}}\n",
+                        reference.name,
+                        arguments.join(", "),
+                        branch = branch
+                    ));
+                }
+            }
+            output.push_str(&format!(
+                "_ => {{ throw JsonConversionError(\"field `{field_name}` has an unknown enum variant\"); }}\n}}\n"
+            ));
+            return Some(());
+        }
+        output.push_str(&format!(
+            "if !{matched} {{ throw JsonConversionError(\"field `{field_name}` has an unknown enum variant\"); }}\n"
+        ));
+        return Some(());
+    }
+
+    let expression = if generated_types.contains(&reference.name) {
+        format!("{}.decode_json({input})", reference.name)
+    } else if matches!(
+        reference.name.as_str(),
+        "Int8"
+            | "Int16"
+            | "Int32"
+            | "Int64"
+            | "UInt8"
+            | "UInt16"
+            | "UInt32"
+            | "UInt64"
+            | "BigInt"
+            | "Float32"
+            | "Float64"
+            | "Float128"
+            | "Decimal"
+    ) {
+        format!(
+            "match {}.parse(JSON.stringify({input})) {{ Ok(parsed) => parsed; Error(_) => {{ throw JsonConversionError(\"field `{field_name}` has an invalid numeric value\"); 0 as {}; }} }}",
+            reference.name, reference.name
+        )
+    } else {
+        format!("{input} as {ty}")
+    };
+    output.push_str(&format!("inmut {target}: {ty} = {expression};\n"));
+    Some(())
+}
+
+fn json_codec_encode_code(
+    reference: &TypeRef,
+    input: &str,
+    target: &str,
+    generated_types: &HashSet<String>,
+    generated_enums: &HashMap<String, EnumDecl>,
+    output: &mut String,
+    next_id: &mut u32,
+) -> Option<()> {
+    if reference.nullable {
+        let mut inner = reference.clone();
+        inner.nullable = false;
+        let inner_type = json_codec_type_source(&inner)?;
+        let encoded = format!("__json_encoded_{}", *next_id);
+        let unwrapped = format!("__json_unwrapped_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "mut {target}: Dynamic = JSON.null_value();\nif {input} != null {{\n"
+        ));
+        output.push_str(&format!(
+            "inmut {unwrapped}: {inner_type} = JSON.unwrap_nullable<{inner_type}>({input});\n"
+        ));
+        json_codec_encode_code(
+            &inner,
+            &unwrapped,
+            &encoded,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+        )?;
+        output.push_str(&format!("{target} = {encoded};\n}}\n"));
+        return Some(());
+    }
+    if matches!(reference.name.as_str(), "List" | "Array" | "Set") && reference.arguments.len() == 1
+    {
+        let item = format!("__json_encode_item_{}", *next_id);
+        let encoded = format!("__json_encode_value_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "mut {target}: List<Dynamic> = List();\nfor {item} in {input} {{\n"
+        ));
+        json_codec_encode_code(
+            &reference.arguments[0],
+            &item,
+            &encoded,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+        )?;
+        output.push_str(&format!("{target}.add({encoded});\n}}\n"));
+        return Some(());
+    }
+    if reference.name == "Map" && reference.arguments.len() == 2 {
+        let entry = format!("__json_map_entry_{}", *next_id);
+        let pair = format!("__json_map_pair_{}", *next_id);
+        let key = format!("__json_map_key_{}", *next_id);
+        let value = format!("__json_map_value_{}", *next_id);
+        *next_id += 1;
+        output.push_str(&format!(
+            "mut {target}: List<Dynamic> = List();\nfor {entry} in {input}.entries() {{\nmut {pair}: List<Dynamic> = List();\n"
+        ));
+        json_codec_encode_code(
+            &reference.arguments[0],
+            &format!("{entry}[0]"),
+            &key,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+        )?;
+        json_codec_encode_code(
+            &reference.arguments[1],
+            &format!("{entry}[1]"),
+            &value,
+            generated_types,
+            generated_enums,
+            output,
+            next_id,
+        )?;
+        output.push_str(&format!(
+            "{pair}.add({key});\n{pair}.add({value});\n{target}.add({pair});\n}}\n"
+        ));
+        return Some(());
+    }
+    if let Some(enum_decl) = generated_enums
+        .get(&reference.name)
+        .and_then(|declaration| json_codec_enum_instance(reference, declaration))
+    {
+        if enum_decl
+            .variants
+            .iter()
+            .all(|variant| variant.associated.is_empty())
+        {
+            output.push_str(&format!("inmut {target}: Dynamic = {input}.name;\n"));
+            return Some(());
+        }
+        output.push_str(&format!(
+            "mut {target}: Dynamic = JSON.null_value();\nmatch {input} {{\n"
+        ));
+        for variant in &enum_decl.variants {
+            let pattern = if variant.associated.is_empty() {
+                format!("{}.{}", reference.name, variant.name.name)
+            } else {
+                let bindings = variant
+                    .associated
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format!("__json_enum_value_{}_{}", *next_id, index))
+                    .collect::<Vec<_>>();
+                format!(
+                    "{}.{}({})",
+                    reference.name,
+                    variant.name.name,
+                    bindings.join(", ")
+                )
+            };
+            let mut branch = String::new();
+            if variant.associated.is_empty() {
+                branch.push_str(&format!(
+                    "mut __json_enum_object_{}: Object = {{ \"$variant\": \"{}\" }};\n{target} = __json_enum_object_{};\n",
+                    *next_id, variant.name.name, *next_id
+                ));
+            } else {
+                let bindings = variant
+                    .associated
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format!("__json_enum_value_{}_{}", *next_id, index))
+                    .collect::<Vec<_>>();
+                let mut properties = Vec::new();
+                for (index, field) in variant.associated.iter().enumerate() {
+                    let encoded = format!("__json_enum_encoded_{}_{}", *next_id, index);
+                    json_codec_encode_code(
+                        &field.ty,
+                        &bindings[index],
+                        &encoded,
+                        generated_types,
+                        generated_enums,
+                        &mut branch,
+                        next_id,
+                    )?;
+                    properties.push(format!("{}: {}", field.name.name, encoded));
+                }
+                let object_id = *next_id;
+                *next_id += 1;
+                branch.push_str(&format!(
+                    "mut __json_enum_payload_{object_id}: Object = {{ {} }};\nmut __json_enum_object_{object_id}: Object = {{ \"$variant\": \"{}\", \"$payload\": __json_enum_payload_{object_id} }};\n{target} = __json_enum_object_{object_id};\n",
+                    properties.join(", "), variant.name.name
+                ));
+                output.push_str(&format!("{pattern} => {{\n{branch}}}\n"));
+                continue;
+            }
+            output.push_str(&format!("{pattern} => {{\n{branch}}}\n"));
+        }
+        output.push_str("}\n");
+        return Some(());
+    }
+    let expression = if generated_types.contains(&reference.name) {
+        format!("{}.encode_json({input})", reference.name)
+    } else {
+        input.to_owned()
+    };
+    output.push_str(&format!("inmut {target}: Dynamic = {expression};\n"));
+    Some(())
+}
+
+pub fn substitute_alias_type_ref(
+    reference: &TypeRef,
+    bindings: &HashMap<String, TypeRef>,
+) -> TypeRef {
     if reference.arguments.is_empty()
         && reference.union_with.is_empty()
         && reference.intersection_with.is_empty()
@@ -393,6 +944,7 @@ fn is_borrowed_scalar_value(ty: Type) -> bool {
                 | Base::Date
                 | Base::Time
                 | Base::DateTime
+                | Base::Instant
         )
 }
 
@@ -496,6 +1048,10 @@ pub struct ProjectGlobalSubscriptionCallInfo {
 /// The result of checking, for later stages.
 #[derive(Debug, Default, Clone)]
 pub struct CheckedProgram {
+    /// Program after compiler-owned source transformations such as generated
+    /// `JSONCodec<T>` methods. Backends lower this tree so generated bodies
+    /// and the checked metadata always describe the same declarations.
+    pub expanded_program: Option<Program>,
     /// Compiler-resolved declarations and uses for editor tooling. Identities
     /// are valid only for this checked snapshot.
     pub semantic_index: SemanticIndex,
@@ -728,6 +1284,10 @@ pub struct CheckedProgram {
     /// reference works). `zirk-ir`'s `resolve_written_type` expands them at
     /// the same point the checker does.
     pub type_aliases: HashMap<String, TypeRef>,
+    /// Generic parameters declared by each transparent type alias. Lowering
+    /// uses these to apply the same substitution the checker used when it
+    /// resolved an alias reference.
+    pub type_alias_params: HashMap<String, Vec<TypeParam>>,
     /// Compiler-owned ownership marker ids used by the recursive ownership analysis.
     pub ownership_markers: OwnershipMarkers,
 
@@ -1373,6 +1933,15 @@ pub struct NativeExceptions {
     pub contract_violation: u32,
     /// JSON stringify/parse rejected a value or document.
     pub json_conversion: u32,
+    /// RFC 6901 pointer failures exposed by the public `std.json` API.
+    pub json_pointer_syntax: u32,
+    pub json_pointer_index: u32,
+    pub json_pointer_not_found: u32,
+    pub json_pointer_container: u32,
+    /// RFC 9535 query syntax and extension failures plus bounded JSON limits.
+    pub json_path_syntax: u32,
+    pub json_path_function: u32,
+    pub json_limit: u32,
     /// `IndexOutOfBoundsError` (roadmap Phase 4e, `fase-4e-native-slice`,
     /// design D3): thrown when a `NativeSlice<T>`/`NativeSliceMut<T>` index
     /// is out of range — the "controlled bounds error" the spec's own "View
@@ -1421,6 +1990,22 @@ pub struct NativeExceptions {
     /// s, ns)` receives a component outside its range — hour `24` or a
     /// negative nanosecond count is a construction error, not a wrap.
     pub invalid_time: u32,
+    /// Locale-sensitive temporal formatting returned an unsupported locale,
+    /// style, data resource, or civil value.
+    pub locale_error: u32,
+    /// Runtime-selected LocaleError subtypes for zone and DST outcomes.
+    pub unknown_time_zone: u32,
+    pub invalid_time_zone: u32,
+    pub ambiguous_local_time: u32,
+    pub nonexistent_local_time: u32,
+    pub invalid_dst_policy: u32,
+    pub temporal_range: u32,
+    /// A localized parse has multiple equally valid temporal interpretations.
+    pub ambiguous_localized_input: u32,
+    /// Localized text is malformed or does not match the requested pattern.
+    pub invalid_localized_input: u32,
+    /// Invalid policy, arithmetic range, or form mismatch in a TimeShift.
+    pub time_shift_error: u32,
     /// Concrete `Throwable` stored in `Outcome.Cancelled`.
     pub cancelled_error: u32,
     /// Compiler-known `RuntimeError` raised by a managed pipeline deadline.
@@ -1485,14 +2070,18 @@ pub struct ExternSignature {
 }
 
 /// Checks a program, accumulating diagnostics in the sink.
-pub fn check(sources: &SourceMap, program: &Program, sink: &mut DiagnosticSink) -> CheckedProgram {
+pub fn check(
+    sources: &mut SourceMap,
+    program: &Program,
+    sink: &mut DiagnosticSink,
+) -> CheckedProgram {
     Checker::new(sources, sink).run(program)
 }
 
 /// Checks a project source graph with the application globals declared by its
 /// `.zkinit`. Standalone source checking continues to use [`check`].
 pub fn check_with_globals(
-    sources: &SourceMap,
+    sources: &mut SourceMap,
     program: &Program,
     globals: &[ProjectGlobalSpec],
     sink: &mut DiagnosticSink,
@@ -1505,7 +2094,7 @@ pub fn check_with_globals(
 /// the shared flag and return `Never`. A cancelled analysis yields `None` so
 /// callers cannot accidentally publish its partial snapshot.
 pub fn check_with_globals_cancellable(
-    sources: &SourceMap,
+    sources: &mut SourceMap,
     program: &Program,
     globals: &[ProjectGlobalSpec],
     cancellation: Arc<AtomicBool>,
@@ -1814,7 +2403,7 @@ impl TypeNames for Names<'_> {
 }
 
 struct Checker<'a> {
-    sources: &'a SourceMap,
+    sources: &'a mut SourceMap,
     sink: &'a mut DiagnosticSink,
     project_global_specs: Vec<ProjectGlobalSpec>,
     cancellation: Option<Arc<AtomicBool>>,
@@ -1859,6 +2448,8 @@ struct Checker<'a> {
     enums: Vec<EnumType>,
     classes: Vec<ClassType>,
     contracts: Vec<ContractType>,
+    invalid_json_codec_implementations: HashSet<Span>,
+    generated_source_owners: HashMap<zirk_diagnostics::FileId, zirk_diagnostics::FileId>,
     fn_types: Vec<FnType>,
     /// Interned result types for `Job<T>`.
     job_types: Vec<Type>,
@@ -1919,6 +2510,10 @@ struct Checker<'a> {
     protected_effect_seeds: HashMap<Span, BTreeSet<String>>,
     /// See [`CheckedProgram::generic_call_substitutions`].
     generic_call_substitutions: HashMap<Span, GenericCallInfo>,
+    /// Generic template that owns each nested generic call. Retained through
+    /// body checking so recursive type-growing specialization can be rejected
+    /// after the full call graph is known.
+    generic_call_owners: HashMap<Span, String>,
     /// Bare names opened by more than one imported module. They deliberately
     /// have no source-order winner; callers must use `module.member`.
     ambiguous_imports: HashMap<zirk_diagnostics::FileId, HashSet<String>>,
@@ -2503,12 +3098,12 @@ fn write_const_children(writer: &mut impl Write, values: &[CanonicalConst]) -> f
 }
 
 impl<'a> Checker<'a> {
-    fn new(sources: &'a SourceMap, sink: &'a mut DiagnosticSink) -> Self {
+    fn new(sources: &'a mut SourceMap, sink: &'a mut DiagnosticSink) -> Self {
         Self::with_project_globals(sources, sink, &[])
     }
 
     fn with_project_globals(
-        sources: &'a SourceMap,
+        sources: &'a mut SourceMap,
         sink: &'a mut DiagnosticSink,
         project_global_specs: &[ProjectGlobalSpec],
     ) -> Self {
@@ -2516,7 +3111,7 @@ impl<'a> Checker<'a> {
     }
 
     fn with_project_globals_and_cancellation(
-        sources: &'a SourceMap,
+        sources: &'a mut SourceMap,
         sink: &'a mut DiagnosticSink,
         project_global_specs: &[ProjectGlobalSpec],
         cancellation: impl Into<Option<Arc<AtomicBool>>>,
@@ -2563,6 +3158,8 @@ impl<'a> Checker<'a> {
             enums: Vec::new(),
             classes: Vec::new(),
             contracts: Vec::new(),
+            invalid_json_codec_implementations: HashSet::new(),
+            generated_source_owners: HashMap::new(),
             fn_types: Vec::new(),
             job_types: Vec::new(),
             lambdas: HashMap::new(),
@@ -2603,6 +3200,7 @@ impl<'a> Checker<'a> {
             protected_api_requesters: HashMap::new(),
             protected_effect_seeds: HashMap::new(),
             generic_call_substitutions: HashMap::new(),
+            generic_call_owners: HashMap::new(),
             ambiguous_imports: HashMap::new(),
             module_files: HashSet::new(),
             aliases: HashMap::new(),
@@ -2754,6 +3352,7 @@ impl<'a> Checker<'a> {
                             | "Date"
                             | "Time"
                             | "DateTime"
+                            | "Instant"
                     )
             };
             let Some(return_type) = function.return_type.as_ref().filter(|ty| simple_type(ty))
@@ -3415,6 +4014,9 @@ impl<'a> Checker<'a> {
     // --- Program ----------------------------------------------------------
 
     fn run(mut self, program: &Program) -> CheckedProgram {
+        let mut expanded_program = program.clone();
+        let program = &mut expanded_program;
+
         self.register_const_functions(program);
         self.register_native_iteration_contracts();
         self.register_native_clone_contract();
@@ -3435,7 +4037,7 @@ impl<'a> Checker<'a> {
         for c in &program.contracts {
             self.declare_contract(c);
         }
-        self.resolve_contract_implements(program);
+        self.expand_json_codec_classes(program);
 
         // A class's own name (and how many type parameters it takes) is
         // registered before enums resolve their associated field types
@@ -3462,6 +4064,11 @@ impl<'a> Checker<'a> {
         for e in &program.enums {
             self.register_enum(e);
         }
+
+        // Contract inheritance arguments can mention any declared class or
+        // enum, including nested applications such as `Container<Box<T>>`.
+        // Resolve them only after all nominal type names have been registered.
+        self.resolve_contract_implements(program);
 
         // Classes' members last, in three passes, because a class may
         // extend one declared later in the file and its members depend on
@@ -3550,6 +4157,7 @@ impl<'a> Checker<'a> {
             self.check_function(f);
         }
         self.scopes.pop();
+        self.validate_recursive_generic_specializations();
 
         let suspend_summaries = self.build_suspend_summaries(program);
         let callable_capability_effects = self.build_capability_summaries(program);
@@ -3580,6 +4188,7 @@ impl<'a> Checker<'a> {
         let type_map = self.build_type_map(program);
         let semantic_index = self.build_semantic_index(program, &type_map);
         CheckedProgram {
+            expanded_program: Some(program.clone()),
             semantic_index,
             functions: self.functions,
             project_globals: self.project_globals,
@@ -3666,6 +4275,7 @@ impl<'a> Checker<'a> {
             type_map,
             regex_match_class: self.regex_match_class,
             type_aliases: self.type_aliases,
+            type_alias_params: self.type_alias_params,
             ownership_markers: OwnershipMarkers {
                 resource: self.native_resource.map(|r| r.resource),
                 transferable_resource: self.native_transferable,
@@ -3677,6 +4287,463 @@ impl<'a> Checker<'a> {
     /// declarations and aliases are available, and before function bodies are
     /// checked. The resulting table is shared by every file in the merged
     /// project program.
+    /// Expands self-implementing JSON codec classes to ordinary methods
+    /// before declaration and conformance checks. The methods then use the
+    /// same checker, IR, interpreter, and native paths as handwritten code.
+    fn expand_json_codec_classes(&mut self, program: &mut Program) {
+        let Some(json_codec_contract) = self.contracts.iter().position(|contract| {
+            contract.name == "JSONCodec"
+                && self
+                    .sources
+                    .file(contract.span.file)
+                    .name()
+                    .replace('\\', "/")
+                    .ends_with("stdlib/std/json/json.zrk")
+        }) else {
+            return;
+        };
+
+        fn collect_derived_types(
+            checker: &mut Checker<'_>,
+            classes: &[ClassDecl],
+            json_codec_contract: u32,
+            names: &mut HashSet<String>,
+        ) {
+            for class in classes {
+                if class.implements.iter().any(|implemented| {
+                    let resolved = checker.resolved_name(&implemented.name, implemented.span);
+                    checker.contract_id(&resolved) == Some(json_codec_contract)
+                        && implemented.arguments.len() == 1
+                        && implemented.arguments[0].name == class.name.name
+                }) {
+                    names.insert(class.name.name.clone());
+                }
+                collect_derived_types(checker, &class.nested, json_codec_contract, names);
+            }
+        }
+
+        let mut generated_types = HashSet::new();
+        collect_derived_types(
+            self,
+            &program.classes,
+            json_codec_contract as u32,
+            &mut generated_types,
+        );
+        let generated_enums = program
+            .enums
+            .iter()
+            .map(|enum_decl| (enum_decl.name.name.clone(), enum_decl.clone()))
+            .collect::<HashMap<_, _>>();
+
+        fn expand_nested(
+            checker: &mut Checker<'_>,
+            classes: &mut [ClassDecl],
+            json_codec_contract: u32,
+            generated_types: &HashSet<String>,
+            generated_enums: &HashMap<String, EnumDecl>,
+        ) {
+            for class in classes {
+                expand_nested(
+                    checker,
+                    &mut class.nested,
+                    json_codec_contract,
+                    generated_types,
+                    generated_enums,
+                );
+                let derives_self = class.implements.iter().any(|implemented| {
+                    let resolved = checker.resolved_name(&implemented.name, implemented.span);
+                    checker.contract_id(&resolved) == Some(json_codec_contract)
+                        && implemented.arguments.len() == 1
+                        && implemented.arguments[0].name == class.name.name
+                });
+                if !derives_self {
+                    continue;
+                }
+
+                let has_decode = class
+                    .methods
+                    .iter()
+                    .any(|method| method.name.name == "decode");
+                let has_encode = class
+                    .methods
+                    .iter()
+                    .any(|method| method.name.name == "encode");
+                if has_decode && has_encode {
+                    continue;
+                }
+                if has_decode || has_encode {
+                    if let Some(implemented) = class.implements.iter().find(|implemented| {
+                        let resolved = checker.resolved_name(&implemented.name, implemented.span);
+                        checker.contract_id(&resolved) == Some(json_codec_contract)
+                            && implemented.arguments.len() == 1
+                            && implemented.arguments[0].name == class.name.name
+                    }) {
+                        checker
+                            .invalid_json_codec_implementations
+                            .insert(implemented.span);
+                    }
+                    checker.error(
+                        codes::MISSING_IMPLEMENTATION,
+                        class.span,
+                        format!("`{}` provides only part of its generated JSON codec", class.name.name),
+                        "a self codec either declares both `decode` and `encode`, or omits both to request generation",
+                        Some("add the missing codec method or remove both methods to use compile-time generation".into()),
+                    );
+                    continue;
+                }
+
+                let mut fields = Vec::new();
+                let mut unsupported = None;
+                for field in &class.fields {
+                    if field.is_static {
+                        continue;
+                    }
+                    if field.visibility != Visibility::Public {
+                        unsupported = Some((
+                            field.name.name.clone(),
+                            "generated codecs require public instance fields",
+                        ));
+                        break;
+                    }
+                    let Some(field_type) = json_codec_type_source(&field.ty) else {
+                        unsupported = Some((
+                            field.name.name.clone(),
+                            "this field type is not supported by generated JSON codecs",
+                        ));
+                        break;
+                    };
+                    if json_codec_schema_type(&field.ty, generated_types, generated_enums).is_none()
+                    {
+                        unsupported = Some((
+                            field.name.name.clone(),
+                            "this field type has no generated JSON validation and conversion yet",
+                        ));
+                        break;
+                    }
+                    fields.push((
+                        field.name.name.clone(),
+                        field_type,
+                        field.ty.clone(),
+                        field.default.is_some(),
+                    ));
+                }
+                if let Some((field, reason)) = unsupported {
+                    if let Some(implemented) = class.implements.iter().find(|implemented| {
+                        let resolved = checker.resolved_name(&implemented.name, implemented.span);
+                        checker.contract_id(&resolved) == Some(json_codec_contract)
+                            && implemented.arguments.len() == 1
+                            && implemented.arguments[0].name == class.name.name
+                    }) {
+                        checker
+                            .invalid_json_codec_implementations
+                            .insert(implemented.span);
+                    }
+                    checker.error(
+                        codes::NOT_LOWERED,
+                        class.span,
+                        format!(
+                            "cannot generate JSON codec for field `{field}` of `{}`",
+                            class.name.name
+                        ),
+                        reason,
+                        None,
+                    );
+                    continue;
+                }
+
+                // Immutable defaults cannot be applied after construction. The
+                // derived codec therefore adds a private-shape constructor
+                // overload that receives the codec witness and raw JSON values,
+                // decodes supplied values inside the constructor, and evaluates
+                // the original initializer only when the property is absent.
+                let immutable_default_fields = class
+                    .fields
+                    .iter()
+                    .filter(|field| {
+                        !field.is_static
+                            && field.default.is_some()
+                            && field.mutability != Mutability::Mutable
+                    })
+                    .collect::<Vec<_>>();
+                let uses_immutable_default_constructor = !immutable_default_fields.is_empty();
+
+                let mut schema_properties = serde_json::Map::new();
+                let mut required_properties = Vec::new();
+                for field in class.fields.iter().filter(|field| !field.is_static) {
+                    let schema =
+                        json_codec_schema_type(&field.ty, generated_types, generated_enums)
+                            .expect("field schema was checked above");
+                    schema_properties.insert(field.name.name.clone(), schema);
+                    if field.default.is_none() {
+                        required_properties.push(field.name.name.clone());
+                    }
+                }
+                let schema = serde_json::json!({
+                    "type": "object",
+                    "properties": schema_properties,
+                    "required": required_properties
+                });
+                let schema_document =
+                    serde_json::to_string(&schema).expect("generated JSON Schema is serializable");
+                let schema_literal = serde_json::to_string(&schema_document)
+                    .expect("generated JSON Schema string is serializable")
+                    .replace('{', "\\{")
+                    .replace('}', "\\}");
+
+                let decode_argument_names = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, _, has_default))| !has_default)
+                    .map(|(index, _)| format!("__json_field_{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut next_decode_id = fields.len() as u32;
+                let decode_field_bindings = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, _, has_default))| !has_default)
+                    .map(|(index, (name, _, field_type, _))| {
+                        let pointer = format!("/{}", name.replace('~', "~0").replace('/', "~1"));
+                        let field_expression = format!("JSON.pointer(value, \"{pointer}\")");
+                        let mut code = String::new();
+                        json_codec_decode_code(
+                            field_type,
+                            &field_expression,
+                            &format!("__json_field_{index}"),
+                            generated_types,
+                            generated_enums,
+                            &mut code,
+                            &mut next_decode_id,
+                            name,
+                        );
+                        code
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut next_optional_decode_id = next_decode_id;
+                let optional_field_bindings = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, _, _, has_default))| *has_default)
+                    .map(|(index, (name, _, field_type, _))| {
+                        if uses_immutable_default_constructor
+                            && immutable_default_fields
+                                .iter()
+                                .any(|field| field.name.name == *name)
+                        {
+                            return String::new();
+                        }
+                        let pointer = format!("/{}", name.replace('~', "~0").replace('/', "~1"));
+                        let target = format!("__json_optional_field_{index}");
+                        let mut code = format!("if JSON.has_pointer(value, \"{pointer}\") {{\n");
+                        json_codec_decode_code(
+                            field_type,
+                            &format!("JSON.pointer(value, \"{pointer}\")"),
+                            &target,
+                            generated_types,
+                            generated_enums,
+                            &mut code,
+                            &mut next_optional_decode_id,
+                            name,
+                        );
+                        code.push_str(&format!("__json_instance.{name} = {target};\n}}\n"));
+                        code
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut generated_constructor = String::new();
+                let construct_instance = if uses_immutable_default_constructor {
+                    // More marker parameters than any user constructor can
+                    // declare make this generated overload unambiguous while
+                    // keeping the generated static decode_json API unchanged.
+                    let marker_count = class
+                        .constructors
+                        .iter()
+                        .map(|constructor| constructor.params.len())
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    let mut constructor_params = (0..marker_count)
+                        .map(|index| format!("__json_marker_{index}: Dynamic"))
+                        .collect::<Vec<_>>();
+                    let mut constructor_body = String::new();
+                    let mut constructor_call_args = (0..marker_count)
+                        .map(|_| "value".to_owned())
+                        .collect::<Vec<_>>();
+                    for (index, (field_name, field_type, _, has_default)) in
+                        fields.iter().enumerate()
+                    {
+                        if !has_default {
+                            let parameter = format!("__json_field_{index}");
+                            constructor_params.push(format!("{parameter}: {field_type}"));
+                            constructor_call_args.push(parameter.clone());
+                            constructor_body
+                                .push_str(&format!("this.{field_name} = {parameter};\n"));
+                        }
+                    }
+                    let mut constructor_decode_id = next_optional_decode_id;
+                    for (index, field) in immutable_default_fields.iter().enumerate() {
+                        let raw = format!("__json_default_raw_{index}");
+                        let present = format!("__json_default_present_{index}");
+                        let pointer =
+                            format!("/{}", field.name.name.replace('~', "~0").replace('/', "~1"));
+                        constructor_params.push(format!("{raw}: Dynamic"));
+                        constructor_params.push(format!("{present}: Boolean"));
+                        constructor_call_args.push(format!(
+                            "if JSON.has_pointer(value, \"{pointer}\") {{ JSON.pointer(value, \"{pointer}\") }} else {{ value }}"
+                        ));
+                        constructor_call_args
+                            .push(format!("JSON.has_pointer(value, \"{pointer}\")"));
+                        let decoded = format!("__json_default_decoded_{index}");
+                        let mut decode_body = String::new();
+                        json_codec_decode_code(
+                            &field.ty,
+                            &raw,
+                            &decoded,
+                            generated_types,
+                            generated_enums,
+                            &mut decode_body,
+                            &mut constructor_decode_id,
+                            &field.name.name,
+                        );
+                        let default = field
+                            .default
+                            .as_ref()
+                            .expect("immutable default field")
+                            .span();
+                        let default_expression = checker.sources.file(default.file).slice(default);
+                        constructor_body.push_str(&format!(
+                            "if {present} {{\n{decode_body}this.{field_name} = {decoded};\n}} else {{\nthis.{field_name} = {default_expression};\n}}\n",
+                            field_name = field.name.name
+                        ));
+                    }
+                    let parameters = constructor_params.join(", ");
+                    generated_constructor = format!(
+                        "class {class_name} {{\nconstruct({parameters}) {{\n{constructor_body}}}\n}}\n",
+                        class_name = class.name.name
+                    );
+                    format!(
+                        "mut __json_instance: {name} = {name}({arguments});\n{optional_field_bindings}",
+                        name = class.name.name,
+                        arguments = constructor_call_args.join(", ")
+                    )
+                } else {
+                    format!(
+                        "mut __json_instance: {name} = {name}({decode_argument_names});\n{optional_field_bindings}",
+                        name = class.name.name,
+                    )
+                };
+                let mut next_encode_id = fields.len() as u32;
+                let mut encode_bindings = Vec::new();
+                let encode_fields = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, _, field_type, _))| {
+                        let target = format!("__json_encoded_field_{index}");
+                        let mut code = String::new();
+                        json_codec_encode_code(
+                            field_type,
+                            &format!("value.{name}"),
+                            &target,
+                            generated_types,
+                            generated_enums,
+                            &mut code,
+                            &mut next_encode_id,
+                        );
+                        encode_bindings.push(code);
+                        format!("{name}: {target}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let encode_bindings = encode_bindings.join("\n");
+                let generated_source = format!(
+                    "class __GeneratedJSONCodec {{\n\
+                     decode(value: Dynamic): {name} throws JsonConversionError {{\n\
+                         return {name}.decode_json(value);\n\
+                     }}\n\
+                     static decode_json(value: Dynamic): {name} throws JsonConversionError {{\n\
+                         inmut __json_issues: List<Dynamic> = JSON.validate(value, {schema_literal});\n\
+                         if __json_issues.length > 0 {{ throw JsonConversionError(\"JSON value does not match the declared `{name}` fields\"); }}\n\
+                         {decode_field_bindings}\n\
+                         {construct_instance}\n\
+                         return __json_instance;\n\
+                     }}\n\
+                     encode(value: {name}): Dynamic {{\n\
+                         return {name}.encode_json(value);\n\
+                     }}\n\
+                     static encode_json(value: {name}): Dynamic {{\n\
+                         {encode_bindings}\n\
+                         inmut object: Object = {{ {encode_fields} }};\n\
+                         return object;\n\
+                     }}\n\
+                     }}\n{generated_constructor}",
+                    name = class.name.name,
+                    construct_instance = construct_instance,
+                    generated_constructor = generated_constructor,
+                );
+                let generated_file_id = checker.sources.add(zirk_diagnostics::SourceFile::new(
+                    "<generated-json-codec>",
+                    generated_source.clone(),
+                ));
+                checker
+                    .generated_source_owners
+                    .insert(generated_file_id, class.span.file);
+                let generated_file = checker.sources.file(generated_file_id).clone();
+                let mut generated_sink = DiagnosticSink::new();
+                let tokens = zirk_lexer::tokenize(&generated_file, &mut generated_sink);
+                let generated = zirk_parser::parse(&generated_file, &tokens, &mut generated_sink);
+                let Some(generated_class) = generated.classes.first() else {
+                    checker.error(
+                        codes::NOT_LOWERED,
+                        class.span,
+                        format!(
+                            "failed to generate JSON codec methods for `{}`",
+                            class.name.name
+                        ),
+                        "the generated codec source did not parse",
+                        None,
+                    );
+                    continue;
+                };
+                if generated_sink.has_errors() || generated_class.methods.len() != 4 {
+                    checker.error(
+                        codes::NOT_LOWERED,
+                        class.span,
+                        format!(
+                            "failed to generate JSON codec methods for `{}`",
+                            class.name.name
+                        ),
+                        "the generated codec source did not parse",
+                        None,
+                    );
+                    continue;
+                }
+                class
+                    .methods
+                    .extend(generated_class.methods.iter().cloned());
+                if uses_immutable_default_constructor {
+                    if let Some(generated_target_class) = generated
+                        .classes
+                        .iter()
+                        .find(|generated_class| generated_class.name.name == class.name.name)
+                    {
+                        class
+                            .constructors
+                            .extend(generated_target_class.constructors.iter().cloned());
+                    }
+                }
+            }
+        }
+
+        expand_nested(
+            self,
+            &mut program.classes,
+            json_codec_contract as u32,
+            &generated_types,
+            &generated_enums,
+        );
+    }
+
     fn resolve_project_globals(&mut self, fallback_span: Span) {
         for global in self.project_global_specs.clone() {
             let source_span = global.type_source.as_ref().and_then(|source| {
@@ -4856,7 +5923,11 @@ impl<'a> Checker<'a> {
             | Base::Duration
             | Base::Date
             | Base::Time
-            | Base::DateTime => true,
+            | Base::DateTime
+            | Base::Instant => true,
+            // The unified tagged clock/calendar value has a canonical runtime
+            // token representation shared by the native and interpreter paths.
+            Base::TimeShift => true,
             // `Float16` prints by widening to `Float32` first — always
             // exact, since every `f16` value is representable in `f32`
             // without loss (`Type::accepts`'s float-widening rule). `Float128`
@@ -4959,7 +6030,15 @@ impl<'a> Checker<'a> {
     /// unless marked `share`. The three levels of
     /// `ZIRK_LANGUAGE_SPEC.md` section 7 depend on classes and are Phase 3.
     fn require_visible(&mut self, owner: Span, shared: bool, used: &Ident, what: &str) {
-        if owner.file == used.span.file {
+        let generated_owner = self.generated_source_owners.get(&used.span.file).copied();
+        let used_file = generated_owner.unwrap_or(used.span.file);
+        if owner.file == used_file {
+            return;
+        }
+        // Generated codecs are expanded as ordinary methods and inherit the
+        // source class's imports. The compiler-injected JSON helper is the
+        // sole additional import in that generated scope.
+        if generated_owner.is_some() && used.name == "JSON" {
             return;
         }
 
@@ -4989,7 +6068,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let owner_name = self.sources.file(owner.file).name();
-        let used_name = self.sources.file(used.span.file).name();
+        let used_name = self.sources.file(used_file).name();
         if is_standard_io_source(owner_name) && is_standard_io_source(used_name) {
             return;
         }
@@ -5017,7 +6096,7 @@ impl<'a> Checker<'a> {
         // and `import` would be decoration.
         let imported = self
             .imported
-            .get(&used.span.file)
+            .get(&used_file)
             .is_some_and(|names| names.contains_key(&used.name));
 
         if !imported {
@@ -5786,6 +6865,29 @@ impl<'a> Checker<'a> {
         let contract_violation =
             register_native_failure(&mut self.classes, "ContractViolationError");
         let json_conversion = register_native_failure(&mut self.classes, "JsonConversionError");
+        let json_pointer_syntax =
+            register_native_failure(&mut self.classes, "JsonPointerSyntaxError");
+        let json_pointer_index =
+            register_native_failure(&mut self.classes, "JsonPointerIndexError");
+        let json_pointer_not_found =
+            register_native_failure(&mut self.classes, "JsonPointerNotFoundError");
+        let json_pointer_container =
+            register_native_failure(&mut self.classes, "JsonPointerContainerError");
+        let json_path_syntax = register_native_failure(&mut self.classes, "JsonPathSyntaxError");
+        let json_path_function =
+            register_native_failure(&mut self.classes, "JsonPathFunctionError");
+        let json_limit = register_native_failure(&mut self.classes, "JsonLimitError");
+        for id in [
+            json_pointer_syntax,
+            json_pointer_index,
+            json_pointer_not_found,
+            json_pointer_container,
+            json_path_syntax,
+            json_path_function,
+            json_limit,
+        ] {
+            self.classes[id as usize].abstract_bases = vec![json_conversion];
+        }
         // Roadmap Phase 4e, `fase-4e-native-slice`: `IndexOutOfBoundsError`
         // (thrown by a bounds-checked `view[i]`, design D3) and
         // `NativeError` (returned in `Result<..., NativeError>` by
@@ -5821,6 +6923,51 @@ impl<'a> Checker<'a> {
         // components are already validated values).
         let invalid_date = register_native_failure(&mut self.classes, "InvalidDateError");
         let invalid_time = register_native_failure(&mut self.classes, "InvalidTimeError");
+        let locale_error = register_native_failure(&mut self.classes, "LocaleError");
+        let time_shift_error = register_native_failure(&mut self.classes, "TimeShiftError");
+        let register_native_failure_subtype =
+            |classes: &mut Vec<ClassType>, name: &str, parent: u32| {
+                let id = register_native_failure(classes, name);
+                classes[id as usize].base = Some(parent);
+                id
+            };
+        let unknown_time_zone = register_native_failure_subtype(
+            &mut self.classes,
+            "UnknownTimeZoneError",
+            locale_error,
+        );
+        let invalid_time_zone = register_native_failure_subtype(
+            &mut self.classes,
+            "InvalidTimeZoneError",
+            locale_error,
+        );
+        let ambiguous_local_time = register_native_failure_subtype(
+            &mut self.classes,
+            "AmbiguousLocalTimeError",
+            locale_error,
+        );
+        let nonexistent_local_time = register_native_failure_subtype(
+            &mut self.classes,
+            "NonexistentLocalTimeError",
+            locale_error,
+        );
+        let invalid_dst_policy = register_native_failure_subtype(
+            &mut self.classes,
+            "InvalidDstPolicyError",
+            locale_error,
+        );
+        let temporal_range =
+            register_native_failure_subtype(&mut self.classes, "TemporalRangeError", locale_error);
+        let ambiguous_localized_input = register_native_failure_subtype(
+            &mut self.classes,
+            "AmbiguousLocalizedInputError",
+            locale_error,
+        );
+        let invalid_localized_input = register_native_failure_subtype(
+            &mut self.classes,
+            "InvalidLocalizedInputError",
+            locale_error,
+        );
         // A cancellation outcome must carry a real, non-null Throwable
         // object. Reuse the native failure shape so ordinary class
         // construction, descriptor generation and Throwable methods apply.
@@ -5852,6 +6999,13 @@ impl<'a> Checker<'a> {
             missing_property,
             contract_violation,
             json_conversion,
+            json_pointer_syntax,
+            json_pointer_index,
+            json_pointer_not_found,
+            json_pointer_container,
+            json_path_syntax,
+            json_path_function,
+            json_limit,
             index_out_of_bounds,
             native_error,
             invalid_step,
@@ -5865,6 +7019,16 @@ impl<'a> Checker<'a> {
             iterator_invalidated,
             invalid_date,
             invalid_time,
+            locale_error,
+            time_shift_error,
+            unknown_time_zone,
+            invalid_time_zone,
+            ambiguous_local_time,
+            nonexistent_local_time,
+            invalid_dst_policy,
+            temporal_range,
+            ambiguous_localized_input,
+            invalid_localized_input,
             cancelled_error,
             timeout_error,
             task_capacity_error,
@@ -6476,9 +7640,10 @@ impl<'a> Checker<'a> {
         current: u32,
         subst: &[(u32, Type)],
         out: &mut Vec<(u32, Vec<(u32, Type)>)>,
-        visited: &mut std::collections::HashSet<u32>,
+        visited: &mut std::collections::HashSet<(u32, Vec<Type>)>,
     ) {
-        if !visited.insert(current) {
+        let arguments = subst.iter().map(|(_, ty)| *ty).collect::<Vec<_>>();
+        if !visited.insert((current, arguments)) {
             return;
         }
         out.push((current, subst.to_vec()));
@@ -6598,6 +7763,37 @@ impl<'a> Checker<'a> {
                     satisfied.push(contract);
                     if let Some(instance) = instance {
                         contract_instances.push(instance);
+                    }
+                    for (inherited, inherited_subst) in self
+                        .transitive_contract_substitutions(contract, &subst)
+                        .into_iter()
+                        .skip(1)
+                    {
+                        if !satisfied.contains(&inherited) {
+                            satisfied.push(inherited);
+                        }
+                        let inherited_args = self.contracts[inherited as usize]
+                            .type_params
+                            .iter()
+                            .map(|parameter| {
+                                inherited_subst
+                                    .iter()
+                                    .find(|(id, _)| id == parameter)
+                                    .map(|(_, ty)| *ty)
+                                    .expect(
+                                        "transitive contract substitution covers its parameters",
+                                    )
+                            })
+                            .collect::<Vec<_>>();
+                        if !inherited_args.is_empty() {
+                            let instance = self.intern_contract_instance(GenericContractInstance {
+                                contract: inherited,
+                                args: inherited_args,
+                            });
+                            if !contract_instances.contains(&instance) {
+                                contract_instances.push(instance);
+                            }
+                        }
                     }
                     continue;
                 }
@@ -7040,6 +8236,9 @@ impl<'a> Checker<'a> {
         at: Span,
         subst: &[(u32, Type)],
     ) {
+        if self.invalid_json_codec_implementations.contains(&at) {
+            return;
+        }
         let properties = self.contracts[contract as usize].properties.clone();
         let required = self.contracts[contract as usize].methods.clone();
         let contract_name = self.contracts[contract as usize].name.clone();
@@ -7628,6 +8827,23 @@ impl<'a> Checker<'a> {
     fn type_references_any_param(&self, ty: Type, ids: &[u32]) -> bool {
         match ty.base {
             Base::Param(pid) => ids.contains(&pid),
+            Base::Array(id) => self
+                .array_types
+                .get(id as usize)
+                .is_some_and(|element| self.type_references_any_param(*element, ids)),
+            Base::List(id)
+            | Base::Deque(id)
+            | Base::Queue(id)
+            | Base::Stack(id)
+            | Base::PriorityQueue(id)
+            | Base::Set(id)
+            | Base::Range(id) => self
+                .list_or_collection_element_type(ty.base, id)
+                .is_some_and(|element| self.type_references_any_param(element, ids)),
+            Base::Map(id) => self.map_types.get(id as usize).is_some_and(|map| {
+                self.type_references_any_param(map.key, ids)
+                    || self.type_references_any_param(map.value, ids)
+            }),
             Base::Instance(inst) => self.generic_instances[inst as usize]
                 .args
                 .iter()
@@ -7644,6 +8860,69 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|&b| self.type_references_any_param(Type::of(b), ids)),
             _ => false,
+        }
+    }
+
+    fn list_or_collection_element_type(&self, base: Base, id: u32) -> Option<Type> {
+        let table = match base {
+            Base::List(_)
+            | Base::Deque(_)
+            | Base::Queue(_)
+            | Base::Stack(_)
+            | Base::PriorityQueue(_) => &self.list_types,
+            Base::Set(_) => &self.set_types,
+            Base::Range(_) => &self.range_types,
+            _ => return None,
+        };
+        table.get(id as usize).copied()
+    }
+
+    fn validate_recursive_generic_specializations(&mut self) {
+        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+        let sites: Vec<_> = self
+            .generic_call_owners
+            .iter()
+            .filter_map(|(span, owner)| {
+                let call = self.generic_call_substitutions.get(span)?;
+                graph
+                    .entry(owner.clone())
+                    .or_default()
+                    .push(call.callable.clone());
+                Some((*span, owner.clone(), call.clone()))
+            })
+            .collect();
+
+        fn reaches(graph: &HashMap<String, Vec<String>>, current: &str, target: &str) -> bool {
+            let mut pending = vec![current.to_owned()];
+            let mut visited = HashSet::new();
+            while let Some(current) = pending.pop() {
+                if current == target {
+                    return true;
+                }
+                if !visited.insert(current.clone()) {
+                    continue;
+                }
+                pending.extend(graph.get(&current).into_iter().flatten().cloned());
+            }
+            false
+        }
+
+        for (span, owner, call) in sites {
+            let Some(signature) = self.functions.get(&owner) else {
+                continue;
+            };
+            let parameter_ids = &signature.type_params;
+            let type_growing = call.substitutions.values().any(|ty| {
+                !matches!(ty.base, Base::Param(id) if parameter_ids.contains(&id))
+                    && self.type_references_any_param(*ty, parameter_ids)
+            });
+            if type_growing && reaches(&graph, &call.callable, &owner) {
+                self.not_lowered(
+                    span,
+                    "a recursive generic function body requiring type-growing specialization",
+                    "keep recursive calls at the same generic type arguments",
+                );
+            }
         }
     }
 
@@ -9053,6 +10332,7 @@ impl<'a> Checker<'a> {
                 Base::Date => Some("Date"),
                 Base::Time => Some("Time"),
                 Base::DateTime => Some("DateTime"),
+                Base::Instant => Some("Instant"),
                 Base::Null => Some("Null"),
                 Base::Enum(id) => self
                     .enums
@@ -11440,6 +12720,7 @@ impl<'a> Checker<'a> {
                 Base::Date => Some("Date".into()),
                 Base::Time => Some("Time".into()),
                 Base::DateTime => Some("DateTime".into()),
+                Base::Instant => Some("Instant".into()),
                 Base::Null => Some("Null".into()),
                 Base::Enum(id) => self.enums.get(id as usize).map(|ty| ty.name.clone()),
                 _ => None,
@@ -12036,20 +13317,25 @@ impl<'a> Checker<'a> {
                 Base::Date => (32, 0),
                 Base::Time => (33, 0),
                 Base::DateTime => (34, 0),
+                Base::Instant => (35, 0),
                 Base::Tuple(id) => (27, id),
                 Base::Array(id) => (28, id),
                 Base::List(id) => (29, id),
                 Base::Map(id) => (30, id),
                 Base::Set(id) => (31, id),
-                Base::ServiceContext => (35, 0),
-                Base::ServiceCapacityError => (36, 0),
-                Base::ServiceLifecycleError => (37, 0),
+                Base::ServiceContext => (36, 0),
+                Base::ServiceCapacityError => (37, 0),
+                Base::ServiceLifecycleError => (38, 0),
                 Base::Object => (39, 0),
                 Base::Dynamic => (40, 0),
                 Base::Deque(id) => (45, id),
                 Base::Queue(id) => (51, id),
                 Base::Stack(id) => (52, id),
                 Base::PriorityQueue(id) => (53, id),
+                Base::TimeZone => (54, 0),
+                Base::ZonedDateTime => (55, 0),
+                Base::Period => (56, 0),
+                Base::TimeShift => (57, 0),
             }
         }
         bases.sort_by_key(key);
@@ -12071,15 +13357,16 @@ impl<'a> Checker<'a> {
                 | Base::Date
                 | Base::Time
                 | Base::DateTime
+                | Base::Instant
+                | Base::TimeZone
+                | Base::ZonedDateTime
                 | Base::Regex
                 | Base::Enum(_)
-                | Base::Tuple(_)
                 | Base::Array(_)
                 | Base::List(_)
                 | Base::Deque(_)
                 | Base::Queue(_)
                 | Base::Stack(_)
-                | Base::PriorityQueue(_)
                 | Base::Map(_)
                 | Base::Set(_)
                 | Base::Union(_)
@@ -12990,18 +14277,151 @@ impl<'a> Checker<'a> {
         Type::of(Base::Range(id))
     }
 
-    /// Whether a type has a coherent hash/equality representation implemented
-    /// by the collection runtime. The typed entry ABI preserves wide integer
-    /// and binary-float bits; nullable and tuple fields are admitted only when
-    /// their inner types have the same supported representation recursively.
-    fn is_hashable(&self, ty: Type) -> bool {
+    /// Describes the recursive Hash/Equal capability of a concrete type.
+    /// Semantic eligibility is derived from this descriptor so it can be
+    /// passed unchanged to collection lowering and runtime operations.
+    fn collection_hash_eq(&mut self, ty: Type) -> Option<CollectionHashEq> {
         if ty.nullable {
-            // Decimal has no nullable runtime/IR representation yet.
-            if ty.base == Base::Decimal {
-                return false;
-            }
-            return self.is_hashable(Type::of(ty.base));
+            return Some(CollectionHashEq::Nullable(Box::new(
+                self.collection_hash_eq(Type::of(ty.base))?,
+            )));
         }
+        match ty.base {
+            Base::Int(width) => Some(CollectionHashEq::Integer {
+                bits: width.bits() as u16,
+                signed: width.signed(),
+            }),
+            Base::Float(width) => Some(CollectionHashEq::BinaryFloat {
+                bits: width.bits() as u16,
+            }),
+            Base::Decimal => Some(CollectionHashEq::Decimal),
+            Base::Boolean => Some(CollectionHashEq::Boolean),
+            Base::Char => Some(CollectionHashEq::Text(CollectionTextKind::Char)),
+            Base::String | Base::TimeZone | Base::ZonedDateTime => {
+                Some(CollectionHashEq::Text(CollectionTextKind::String))
+            }
+            // Temporal scalars use the same canonical integer bytes in IR;
+            // the source-level name does not alter Hash/Equal semantics.
+            Base::Duration | Base::Date | Base::Time => Some(CollectionHashEq::Integer {
+                bits: 64,
+                signed: true,
+            }),
+            Base::DateTime | Base::Instant => Some(CollectionHashEq::Integer {
+                bits: 128,
+                signed: true,
+            }),
+            Base::Contract(_) => Some(CollectionHashEq::Identity),
+            // Mutable reference keys use stable object identity. Their
+            // mutable fields never participate in hashing or equality.
+            Base::Class(id) => self.classes.get(id as usize).and_then(|class| {
+                (class.kind == ClassKind::Class).then_some(CollectionHashEq::Identity)
+            }),
+            // A generic class instantiation is still a mutable class
+            // reference. Its type arguments affect the static layout, but
+            // collection equality/hash use the stable object identity just
+            // as they do for the non-generic spelling.
+            Base::Instance(id) => self
+                .generic_instances
+                .get(id as usize)
+                .and_then(|instance| self.classes.get(instance.class as usize))
+                .and_then(|class| {
+                    (class.kind == ClassKind::Class).then_some(CollectionHashEq::Identity)
+                }),
+            Base::Tuple(id) => {
+                let tuple = self.tuple_types.get(id as usize)?.clone();
+                Some(CollectionHashEq::Tuple(
+                    tuple
+                        .elements
+                        .iter()
+                        .map(|field| self.collection_hash_eq(*field))
+                        .collect::<Option<Vec<_>>>()?,
+                ))
+            }
+            Base::Enum(id) => {
+                let enum_ty = self.enums.get(id as usize)?.clone();
+                if !enum_ty
+                    .variants
+                    .iter()
+                    .any(|variant| !variant.associated.is_empty())
+                {
+                    return Some(CollectionHashEq::Integer {
+                        bits: 32,
+                        signed: true,
+                    });
+                }
+                Some(CollectionHashEq::Enum(
+                    enum_ty
+                        .variants
+                        .iter()
+                        .map(|variant| {
+                            variant
+                                .associated
+                                .iter()
+                                .map(|field| self.collection_hash_eq_tuple_field(field.ty))
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ))
+            }
+            Base::EnumInstance(id) => {
+                let instance = self.enum_instances.get(id as usize).cloned()?;
+                let enum_ty = self.enums.get(instance.enum_id as usize).cloned()?;
+                if !enum_ty
+                    .variants
+                    .iter()
+                    .any(|variant| !variant.associated.is_empty())
+                {
+                    return Some(CollectionHashEq::Integer {
+                        bits: 32,
+                        signed: true,
+                    });
+                }
+                let substitutions: Vec<_> = enum_ty
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args)
+                    .collect();
+                Some(CollectionHashEq::Enum(
+                    enum_ty
+                        .variants
+                        .iter()
+                        .map(|variant| {
+                            variant
+                                .associated
+                                .iter()
+                                .map(|field| {
+                                    let field_ty = self.substitute_type(field.ty, &substitutions);
+                                    self.collection_hash_eq_tuple_field(field_ty)
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ))
+            }
+            Base::Union(id) => {
+                let alternatives = self.unions.get(id as usize)?.clone();
+                Some(CollectionHashEq::Union(
+                    alternatives
+                        .into_iter()
+                        .map(Type::of)
+                        .map(|alternative| self.collection_hash_eq(alternative))
+                        .collect::<Option<Vec<_>>>()?,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Enum payload text uses active-variant-aware snapshot descriptors in
+    /// native codegen/runtime, just like recursively nested tuple fields.
+    fn collection_hash_eq_tuple_field(&mut self, ty: Type) -> Option<CollectionHashEq> {
+        self.collection_hash_eq(ty)
+    }
+
+    /// Whether Map can both store a value's concrete layout and represent its
+    /// absent lookup outcome as `Nullable<V>` in the current IR.
+    fn is_map_storage_value(&self, ty: Type) -> bool {
         match ty.base {
             Base::Int(_) | Base::Float(_) | Base::Decimal => true,
             Base::Boolean
@@ -13010,52 +14430,8 @@ impl<'a> Checker<'a> {
             | Base::Duration
             | Base::Date
             | Base::Time
-            // `DateTime` is stored as a canonical epoch-nanosecond scalar,
-            // so byte equality and hashing agree with temporal equality.
             | Base::DateTime
-            | Base::Contract(_) => true,
-            // Mutable reference keys use stable object identity. Their
-            // mutable fields never participate in hashing or equality.
-            Base::Class(id) => self
-                .classes
-                .get(id as usize)
-                .is_some_and(|class| class.kind == ClassKind::Class),
-            Base::Tuple(id) => self.tuple_types.get(id as usize).is_some_and(|tuple| {
-                tuple
-                    .elements
-                    .iter()
-                    .all(|field| self.is_hashable_tuple_field(*field))
-            }),
-            Base::Enum(id) => self.enums.get(id as usize).is_some_and(|enum_ty| {
-                enum_ty.variants.iter().all(|variant| {
-                    variant
-                        .associated
-                        .iter()
-                        .all(|field| self.is_hashable_tuple_field(field.ty))
-                })
-            }),
-            _ => false,
-        }
-    }
-
-    /// Composite byte storage cannot invoke the runtime's special normalized
-    /// text equality, which applies only to direct String/Char keys.
-    fn is_hashable_tuple_field(&self, ty: Type) -> bool {
-        !matches!(ty.base, Base::String | Base::Char) && self.is_hashable(ty)
-    }
-
-    /// Whether Map can both store a value's concrete layout and represent its
-    /// absent lookup outcome as `Nullable<V>` in the current IR.
-    fn is_map_storage_value(&self, ty: Type) -> bool {
-        match ty.base {
-            Base::Int(_) | Base::Float(_) => true,
-            Base::Boolean
-            | Base::Char
-            | Base::String
-            | Base::Duration
-            | Base::Date
-            | Base::Time
-            | Base::DateTime
+            | Base::Instant
             | Base::Atomic(_)
             | Base::Array(_)
             | Base::List(_)
@@ -13095,14 +14471,19 @@ impl<'a> Checker<'a> {
         }
         let key = self.resolve_type(&reference.arguments[0]);
         let value = self.resolve_type(&reference.arguments[1]);
-        if !key.is_unknown() && !self.is_hashable(key) {
+        if !key.is_unknown() && self.collection_hash_eq(key).is_none() {
             let found = self.name(key);
+            let object_key = matches!(key.base, Base::Object);
             self.error(
                 codes::TYPE_MISMATCH,
                 reference.arguments[0].span,
                 format!("`Map<{found}, ...>` has an unhashable key type"),
-                "a `Map` key must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)",
-                None,
+                if object_key {
+                    "mutable `Object` references do not have immutable structural Hash/Equal semantics"
+                } else {
+                    "a `Map` key must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)"
+                },
+                object_key.then(|| "use a declared class or contract reference for stable identity semantics, or use an immutable tuple value".into()),
             );
         }
         if !value.is_unknown() && !self.is_map_storage_value(value) {
@@ -13132,14 +14513,19 @@ impl<'a> Checker<'a> {
             return Type::UNKNOWN;
         }
         let element = self.resolve_type(&reference.arguments[0]);
-        if !element.is_unknown() && !self.is_hashable(element) {
+        if !element.is_unknown() && self.collection_hash_eq(element).is_none() {
             let found = self.name(element);
+            let object_element = matches!(element.base, Base::Object);
             self.error(
                 codes::TYPE_MISMATCH,
                 reference.arguments[0].span,
                 format!("`Set<{found}>` has an unhashable element type"),
-                "a `Set` element must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)",
-                None,
+                if object_element {
+                    "mutable `Object` references do not have immutable structural Hash/Equal semantics"
+                } else {
+                    "a `Set` element must have a coherent Hash and Equal implementation (built-in scalars, text, temporal values, enums, or eligible aggregates)"
+                },
+                object_element.then(|| "use a declared class or contract reference for stable identity semantics, or use an immutable tuple value".into()),
             );
         }
         let id = self.intern_set_type(element);
@@ -13262,6 +14648,11 @@ impl<'a> Checker<'a> {
                 "ServiceCapacityError" => Some(native.service_capacity_error),
                 "ServiceLifecycleError" => Some(native.service_lifecycle_error),
                 "JsonConversionError" => Some(native.json_conversion),
+                "JsonPathSyntaxError" => Some(native.json_path_syntax),
+                "JsonPathFunctionError" => Some(native.json_path_function),
+                "JsonLimitError" => Some(native.json_limit),
+                "AmbiguousLocalizedInputError" => Some(native.ambiguous_localized_input),
+                "InvalidLocalizedInputError" => Some(native.invalid_localized_input),
                 _ => None,
             };
             if let Some(id) = id {
@@ -14773,6 +16164,7 @@ impl<'a> Checker<'a> {
                     | Base::Date
                     | Base::Time
                     | Base::DateTime
+                    | Base::Instant
                     | Base::Regex
             )
         {
@@ -15042,6 +16434,42 @@ impl<'a> Checker<'a> {
                 let returns = self.substitute_type(function.returns, subst);
                 Base::Function(self.intern_fn_type(FnType { params, returns }))
             }
+            Base::Array(id) => {
+                let element = self.substitute_type(self.array_types[id as usize], subst);
+                Base::Array(self.intern_array_type(element))
+            }
+            Base::List(id) => {
+                let element = self.substitute_type(self.list_types[id as usize], subst);
+                Base::List(self.intern_list_type(element))
+            }
+            Base::Deque(id) | Base::Queue(id) | Base::Stack(id) | Base::PriorityQueue(id) => {
+                let element = self.substitute_type(self.list_types[id as usize], subst);
+                let id = self.intern_list_type(element);
+                match ty.base {
+                    Base::Deque(_) => Base::Deque(id),
+                    Base::Queue(_) => Base::Queue(id),
+                    Base::Stack(_) => Base::Stack(id),
+                    Base::PriorityQueue(_) => Base::PriorityQueue(id),
+                    _ => unreachable!(),
+                }
+            }
+            Base::Set(id) => {
+                let element = self.substitute_type(self.set_types[id as usize], subst);
+                Base::Set(self.intern_set_type(element))
+            }
+            Base::Map(id) => {
+                let map = self.map_types[id as usize].clone();
+                let key = self.substitute_type(map.key, subst);
+                let value = self.substitute_type(map.value, subst);
+                Base::Map(self.intern_map_type(key, value))
+            }
+            Base::Shape(id) => {
+                let mut shape = self.structural_types[id as usize].clone();
+                for property in &mut shape.properties {
+                    property.ty = self.substitute_type(property.ty, subst);
+                }
+                Base::Shape(self.intern_structural_type(shape))
+            }
             Base::Union(union_id) => {
                 let members = self.unions[union_id as usize].clone();
                 let members = members
@@ -15049,6 +16477,15 @@ impl<'a> Checker<'a> {
                     .map(|member| self.substitute_type(Type::of(member), subst).base)
                     .collect();
                 Base::Union(self.intern_union(members))
+            }
+            Base::Tuple(tuple_id) => {
+                let elements = self.tuple_types[tuple_id as usize]
+                    .elements
+                    .clone()
+                    .into_iter()
+                    .map(|element| self.substitute_type(element, subst))
+                    .collect();
+                Base::Tuple(self.intern_tuple_type(TupleType { elements }))
             }
             Base::Intersection(intersection_id) => {
                 let members = self.intersections[intersection_id as usize].clone();
@@ -15332,48 +16769,6 @@ impl<'a> Checker<'a> {
             self.unsafe_depth -= 1;
         }
 
-        if !f.type_params.is_empty() {
-            let parameter_ids = self
-                .functions
-                .get(&f.name.name)
-                .map(|signature| signature.type_params.clone())
-                .unwrap_or_default();
-            let expression_types: Vec<_> = self
-                .expr_types
-                .iter()
-                .filter(|(span, _)| {
-                    span.file == f.span.file && span.start >= f.span.start && span.end <= f.span.end
-                })
-                .map(|(&span, &ty)| (span, ty))
-                .collect();
-            let unresolved_generic_call =
-                self.generic_call_substitutions.iter().any(|(span, call)| {
-                    span.file == f.span.file
-                        && span.start >= f.span.start
-                        && span.end <= f.span.end
-                        // `Ok<T,E>(...)` and `Error<T,E>(...)` are enum
-                        // constructors, not nested generic function calls.
-                        // Lowering resolves their concrete Result layout from
-                        // the enclosing monomorphization's substitution.
-                        && !matches!(call.callable.as_str(), "Ok" | "Error")
-                        && call
-                            .substitutions
-                            .values()
-                            .any(|ty| self.type_references_any_param(*ty, &parameter_ids))
-                });
-            if unresolved_generic_call {
-                let span = expression_types
-                    .iter()
-                    .find(|(_, ty)| self.type_references_any_param(*ty, &parameter_ids))
-                    .map(|(span, _)| *span)
-                    .unwrap_or(f.name.span);
-                self.not_lowered(
-                    span,
-                    "a generic function body requiring nested specialization",
-                    "keep calls inside generic bodies independent of unresolved outer type parameters until recursive specialization is supported",
-                );
-            }
-        }
         self.scopes.pop();
 
         // Every path of a non-`Void` function must return a value.
@@ -17541,9 +18936,15 @@ impl<'a> Checker<'a> {
             Base::Void
             | Base::Int(_)
             | Base::Float(_)
+            | Base::Decimal
             | Base::Char
             | Base::Boolean
             | Base::String
+            | Base::Duration
+            | Base::Date
+            | Base::Time
+            | Base::DateTime
+            | Base::Instant
             // A `Range<T>` is three scalars — copying it copies them all.
             | Base::Range(_)
             | Base::Null => true,
@@ -17562,6 +18963,25 @@ impl<'a> Checker<'a> {
                     .zip(instance.args.iter().copied())
                     .collect();
                 self.enum_is_clone(instance.enum_id, &subst, in_progress)
+            }
+            Base::Tuple(id) => self.tuple_types[id as usize]
+                .elements
+                .clone()
+                .into_iter()
+                .all(|element| self.is_clone_type(element, in_progress)),
+            Base::Union(id) => {
+                const UNION_TAG: u32 = 1 << 30;
+                let tag = id | UNION_TAG;
+                if in_progress.contains(&tag) {
+                    return true;
+                }
+                in_progress.push(tag);
+                let alternatives = self.unions[id as usize].clone();
+                let eligible = alternatives.into_iter().all(|alternative| {
+                    self.is_clone_type(Type::of(alternative), in_progress)
+                });
+                in_progress.pop();
+                eligible
             }
             // `Pointer<T>`, `Weak<T>`, a contract/contract-instance-typed
             // member, a generic class instantiation and a function/closure
@@ -17596,7 +19016,8 @@ impl<'a> Checker<'a> {
             | Base::Duration
             | Base::Date
             | Base::Time
-            | Base::DateTime => true,
+            | Base::DateTime
+            | Base::Instant => true,
             Base::Enum(id) => self.enums.get(id as usize).is_some_and(|item| {
                 item.variants
                     .iter()
@@ -17762,6 +19183,76 @@ impl<'a> Checker<'a> {
                     if !self.is_clone_type(f.ty, &mut probe) {
                         let deeper = self.find_non_clone_path(f.ty);
                         return format!("field `{}` of `{}`, {deeper}", f.name, self.name(ty));
+                    }
+                }
+                format!("`{}`", self.name(ty))
+            }
+            Base::Enum(id) => {
+                let variants = self.enums[id as usize].variants.clone();
+                for variant in variants {
+                    for field in variant.associated {
+                        let mut probe = Vec::new();
+                        if !self.is_clone_type(field.ty, &mut probe) {
+                            let deeper = self.find_non_clone_path(field.ty);
+                            return format!(
+                                "variant `{}` field `{}` of `{}`, {deeper}",
+                                variant.name,
+                                field.name,
+                                self.name(ty)
+                            );
+                        }
+                    }
+                }
+                format!("`{}`", self.name(ty))
+            }
+            Base::EnumInstance(id) => {
+                let instance = self.enum_instances[id as usize].clone();
+                let substitutions: Vec<_> = self.enums[instance.enum_id as usize]
+                    .type_params
+                    .iter()
+                    .copied()
+                    .zip(instance.args.iter().copied())
+                    .collect();
+                let variants = self.enums[instance.enum_id as usize].variants.clone();
+                for variant in variants {
+                    for field in variant.associated {
+                        let field_ty = self.substitute_type(field.ty, &substitutions);
+                        let mut probe = Vec::new();
+                        if !self.is_clone_type(field_ty, &mut probe) {
+                            let deeper = self.find_non_clone_path(field_ty);
+                            return format!(
+                                "variant `{}` field `{}` of `{}`, {deeper}",
+                                variant.name,
+                                field.name,
+                                self.name(ty)
+                            );
+                        }
+                    }
+                }
+                format!("`{}`", self.name(ty))
+            }
+            Base::Tuple(id) => {
+                let elements = self.tuple_types[id as usize].elements.clone();
+                for (index, element) in elements.into_iter().enumerate() {
+                    let mut probe = Vec::new();
+                    if !self.is_clone_type(element, &mut probe) {
+                        let deeper = self.find_non_clone_path(element);
+                        return format!("tuple element {index}, {deeper}");
+                    }
+                }
+                format!("`{}`", self.name(ty))
+            }
+            Base::Union(id) => {
+                let alternatives = self.unions[id as usize].clone();
+                for alternative in alternatives {
+                    let alternative_ty = Type::of(alternative);
+                    let mut probe = Vec::new();
+                    if !self.is_clone_type(alternative_ty, &mut probe) {
+                        let deeper = self.find_non_clone_path(alternative_ty);
+                        return format!(
+                            "union alternative `{}`, {deeper}",
+                            self.name(alternative_ty)
+                        );
                     }
                 }
                 format!("`{}`", self.name(ty))
@@ -18797,13 +20288,16 @@ impl<'a> Checker<'a> {
                     .into_iter()
                     .filter_map(|member| {
                         let member_type = Type::of(member);
-                        let member_is_target = self
-                            .assignable_relation(target, member_type)
-                            .unwrap_or(false);
+                        let exact_member = member_type == target.without_null();
+                        let member_is_target = exact_member
+                            || self
+                                .assignable_relation(target, member_type)
+                                .unwrap_or(false);
                         let target_fits_member = self
                             .assignable_relation(member_type, target)
                             .unwrap_or(false);
-                        (member_is_target
+                        (exact_member
+                            || member_is_target
                             || target_fits_member
                             || self.casts_are_related(member_type, target))
                         .then_some(if member_is_target {
@@ -18839,9 +20333,10 @@ impl<'a> Checker<'a> {
             let mut remaining = members
                 .into_iter()
                 .filter(|member| {
-                    !self
-                        .assignable_relation(target, Type::of(*member))
-                        .unwrap_or(false)
+                    Type::of(*member) != target.without_null()
+                        && !self
+                            .assignable_relation(target, Type::of(*member))
+                            .unwrap_or(false)
                 })
                 .map(Type::of)
                 .collect::<Vec<_>>();
@@ -19598,7 +21093,7 @@ impl<'a> Checker<'a> {
                 );
                 Type::UNKNOWN
             }
-            Expr::Field(e) => self.check_field(e),
+            Expr::Field(e) => self.check_field(e, expected),
             Expr::Index(e) => self.check_index(e).1,
             Expr::Slice(e) => self.check_slice(e),
             Expr::Ternary(e) => self.check_ternary(e, expected),
@@ -19611,7 +21106,7 @@ impl<'a> Checker<'a> {
                 self.expected_type = previous_expected;
                 ty
             }
-            Expr::Variant(e) => self.check_variant(e),
+            Expr::Variant(e) => self.check_variant(e, expected),
             Expr::Println(e) => {
                 let member = if e.newline { "println" } else { "print" };
                 let opened_stream = self
@@ -19815,6 +21310,7 @@ impl<'a> Checker<'a> {
             ty.base,
             Base::Int(_)
                 | Base::Float(_)
+                | Base::Decimal
                 | Base::Char
                 | Base::Boolean
                 | Base::String
@@ -19822,6 +21318,7 @@ impl<'a> Checker<'a> {
                 | Base::Date
                 | Base::Time
                 | Base::DateTime
+                | Base::Instant
                 | Base::Enum(_)
                 | Base::Tuple(_)
                 | Base::Union(_)
@@ -20867,6 +22364,12 @@ impl<'a> Checker<'a> {
     fn is_resolvable_type_name(&self, name: &str) -> bool {
         Type::from_name(name).is_some()
             || self.classes.iter().any(|class| class.name == name)
+            || self.native_exceptions.is_some_and(|native| {
+                name == "AmbiguousLocalizedInputError"
+                    && native.ambiguous_localized_input != u32::MAX
+                    || name == "InvalidLocalizedInputError"
+                        && native.invalid_localized_input != u32::MAX
+            })
             || self.contracts.iter().any(|contract| contract.name == name)
             || self.enums.iter().any(|enum_type| enum_type.name == name)
             || self.type_aliases.contains_key(name)
@@ -21179,22 +22682,33 @@ impl<'a> Checker<'a> {
     }
 
     fn check_type_test(&mut self, actual: Type, target: Type, expression: &BinaryExpr) {
+        let target_base = target.without_null().base;
+        let target_is_union_member = match actual.base {
+            Base::Union(id) => self
+                .unions
+                .get(id as usize)
+                .is_some_and(|members| members.contains(&target_base)),
+            _ => false,
+        };
         let target_is_testable = matches!(
-            target.without_null().base,
+            target_base,
             Base::Class(_)
                 | Base::Instance(_)
                 | Base::Contract(_)
                 | Base::ContractInstance(_)
                 | Base::Enum(_)
                 | Base::EnumInstance(_)
-        );
+        ) || target_is_union_member;
         if !target_is_testable {
             self.error(
                 codes::TYPE_MISMATCH,
                 expression.op_span,
-                "a type test requires a nominal type",
-                format!("`{}` has no runtime type tag to test", self.name(target)),
-                Some("test a class, contract, or enum value".into()),
+                "a type test requires a nominal type or an exact union alternative",
+                format!(
+                    "`{}` has no runtime type tag to test outside its tagged union",
+                    self.name(target)
+                ),
+                Some("test a class, contract, enum, or exact member of a tagged union".into()),
             );
             return;
         }
@@ -23186,8 +24700,10 @@ impl<'a> Checker<'a> {
                     // variant constructors are checked. Otherwise `Ok(...)`
                     // arms project independently before the outer return.
                     let saved_expected = self.expected_type;
-                    self.expected_type =
-                        expected.filter(|ty| self.result_type_arguments(*ty).is_some());
+                    self.expected_type = expected.filter(|ty| {
+                        self.result_type_arguments(*ty).is_some()
+                            || matches!(ty.without_null().base, Base::EnumInstance(_))
+                    });
                     let ty = self.check_expr(e);
                     self.expected_type = saved_expected;
                     (ty, ty.base == Base::Never)
@@ -23197,8 +24713,10 @@ impl<'a> Checker<'a> {
                         self.preserve_result_exprs.insert(tail.expr.span());
                     }
                     let saved_expected = self.expected_type;
-                    self.expected_type =
-                        expected.filter(|ty| self.result_type_arguments(*ty).is_some());
+                    self.expected_type = expected.filter(|ty| {
+                        self.result_type_arguments(*ty).is_some()
+                            || matches!(ty.without_null().base, Base::EnumInstance(_))
+                    });
                     let ty = self.check_block_value(b);
                     self.expected_type = saved_expected;
                     (ty, ty.base == Base::Never)
@@ -24520,7 +26038,7 @@ impl<'a> Checker<'a> {
     /// The parser cannot tell them apart — `Direction.North` and `user.name`
     /// have the same shape — so the decision lands here, where it is known
     /// whether the base names a type or a value.
-    fn check_field(&mut self, expr: &FieldExpr) -> Type {
+    fn check_field(&mut self, expr: &FieldExpr, expected: Option<Type>) -> Type {
         // A module is a compile-time namespace, not a runtime receiver.
         // `module.member` resolves through the import table before normal
         // object-field lookup, preserving the declaration's actual type.
@@ -24576,7 +26094,6 @@ impl<'a> Checker<'a> {
                         );
                     }
                     self.static_class_accesses.insert(expr.span, class_id);
-                    self.scalar_static_accesses.insert(expr.span);
                     return field.ty;
                 }
             }
@@ -24605,7 +26122,7 @@ impl<'a> Checker<'a> {
                     variant: expr.name.clone(),
                     span: expr.span,
                 };
-                let ty = self.check_variant(&variant);
+                let ty = self.check_variant(&variant, expected);
                 self.variant_accesses.insert(expr.span);
                 return ty;
             }
@@ -25032,6 +26549,24 @@ impl<'a> Checker<'a> {
             Base::Duration if member.name == "days" => {
                 return Type::of(Base::Int(IntWidth::I64));
             }
+            Base::Instant if member.name == "unix_nanoseconds" => {
+                return Type::of(Base::Int(IntWidth::I128));
+            }
+            Base::Instant
+                if matches!(member.name.as_str(), "unix_seconds" | "unix_milliseconds") =>
+            {
+                return Type::of(Base::Int(IntWidth::I64));
+            }
+            Base::TimeZone if member.name == "canonical_identifier" => return Type::STRING,
+            Base::ZonedDateTime => match member.name.as_str() {
+                "instant" => return Type::INSTANT,
+                "zone" => return Type::TIME_ZONE,
+                "local_datetime" => return Type::DATETIME,
+                "offset_seconds" => return Type::INT32,
+                "is_dst" => return Type::BOOLEAN,
+                "abbreviation" => return Type::STRING,
+                _ => {}
+            },
             // Civil temporal components (`date-and-time-types`): `d.year`,
             // `t.hour`, `dt.date`, … — read-only projections the runtime
             // answers; `nanosecond` is `Int64` since a day's nanoseconds
@@ -25101,6 +26636,20 @@ impl<'a> Checker<'a> {
             Base::DateTime if member.name == "nanosecond" => {
                 return Type::of(Base::Int(IntWidth::I64));
             }
+            Base::Period
+                if matches!(member.name.as_str(), "years" | "months" | "weeks" | "days") =>
+            {
+                return Type::INT32;
+            }
+            Base::TimeShift => match member.name.as_str() {
+                "kind" => return Type::STRING,
+                "duration" => return Type::DURATION,
+                "time" => return Type::TIME.as_nullable(),
+                "day_offset" => return Type::INT32.as_nullable(),
+                "period" => return Type::PERIOD.as_nullable(),
+                "overlap_policy" | "gap_policy" => return Type::STRING.as_nullable(),
+                _ => {}
+            },
             Base::Tuple(_) if member.name == "length" => {
                 return Type::INT32;
             }
@@ -25549,7 +27098,7 @@ impl<'a> Checker<'a> {
     }
 
     /// `Direction.North` in expression position.
-    fn check_variant(&mut self, expr: &VariantExpr) -> Type {
+    fn check_variant(&mut self, expr: &VariantExpr, expected: Option<Type>) -> Type {
         let resolved = self.resolved_name(&expr.enum_name.name, expr.enum_name.span);
         let Some(index) = self.enums.iter().position(|e| e.name == resolved) else {
             self.error(
@@ -25566,7 +27115,7 @@ impl<'a> Checker<'a> {
         let shared = self.enums[index].shared;
         self.require_visible(declared, shared, &expr.enum_name, "enum");
 
-        let enum_type = &self.enums[index];
+        let enum_type = self.enums[index].clone();
         let Some(variant) = enum_type.variant(&expr.variant.name).cloned() else {
             let enum_name = enum_type.name.clone();
             let known: Vec<&str> = enum_type.variants.iter().map(|v| v.name.as_str()).collect();
@@ -25595,6 +27144,36 @@ impl<'a> Checker<'a> {
                     fields.join(", ")
                 )),
             );
+        }
+
+        if variant.associated.is_empty() && !enum_type.type_params.is_empty() {
+            if let Some(expected) = expected
+                && let Base::EnumInstance(instance) = expected.without_null().base
+                && self
+                    .enum_instances
+                    .get(instance as usize)
+                    .is_some_and(|instance| instance.enum_id == index as u32)
+            {
+                // A payload-free variant has no argument from which to infer
+                // the enum's type arguments. Preserve the surrounding
+                // instantiation, including symbolic arguments inside a
+                // generic body, rather than erasing it to the generic enum
+                // declaration.
+                return expected;
+            }
+
+            let enum_name = enum_type.name.clone();
+            self.error(
+                codes::TYPE_MISMATCH,
+                expr.span,
+                format!(
+                    "generic enum variant `{enum_name}.{}` needs an expected instantiation",
+                    expr.variant.name
+                ),
+                "a payload-free variant does not provide values from which to infer its type arguments",
+                Some(format!("provide an expected `{enum_name}<...>` type")),
+            );
+            return Type::UNKNOWN;
         }
 
         Type::of(Base::Enum(index as u32))
@@ -25663,10 +27242,22 @@ impl<'a> Checker<'a> {
             })
             .collect();
         let type_params = self.enums[enum_id as usize].type_params.clone();
+        let returns = if type_params.is_empty() {
+            Type::of(Base::Enum(enum_id))
+        } else {
+            let args = type_params
+                .iter()
+                .copied()
+                .map(|id| Type::of(Base::Param(id)))
+                .collect();
+            Type::of(Base::EnumInstance(
+                self.intern_enum_instance(GenericEnumInstance { enum_id, args }),
+            ))
+        };
         let signature = Signature {
             name: variant_name,
             params,
-            returns: Type::of(Base::Enum(enum_id)),
+            returns,
             shared: true,
             span: field.span,
             type_params: type_params.clone(),
@@ -26894,6 +28485,31 @@ impl<'a> Checker<'a> {
         // Phase 4e, `phase-4e-memory`, design D1).
         let object = self.unpin_type(object);
 
+        if field.name.name == "clone"
+            && expr.args.is_empty()
+            && matches!(
+                object.base,
+                Base::Enum(_) | Base::EnumInstance(_) | Base::Tuple(_) | Base::Union(_)
+            )
+        {
+            let mut in_progress = Vec::new();
+            if self.is_clone_type(object, &mut in_progress) {
+                return object;
+            }
+            let name = self.name(object);
+            let path = self.find_non_clone_path(object);
+            self.error(
+                codes::NOT_CLONE,
+                field.name.span,
+                format!("`{name}` is not `Clone`"),
+                format!("its value reaches {path}, which is not `Clone`"),
+                Some(
+                    "replace the non-Clone payload or provide a compatible clone operation".into(),
+                ),
+            );
+            return Type::UNKNOWN;
+        }
+
         // Dynamic dispatch may mutate the receiver. Preserve only direct
         // read-only properties (the stable discriminant case); all other
         // receiver and projected facts may have become stale.
@@ -26974,45 +28590,6 @@ impl<'a> Checker<'a> {
         self.mark_suspend_unknown();
         if self.parallel_depth > 0 {
             self.parallel_calls.push((expr.span, None));
-        }
-
-        // `.clone()` on an enum (roadmap Phase 7, derived `Clone` on `enum`):
-        // decided structurally — every variant's associated fields must
-        // themselves be `Clone`. A traditional enum (no associated data at
-        // all) qualifies trivially: it is a bare discriminant.
-        if field.name.name == "clone" && expr.args.is_empty() {
-            let (enum_id, subst) = match object.base {
-                Base::Enum(id) => (Some(id), Vec::new()),
-                Base::EnumInstance(id) => {
-                    let instance = self.enum_instances[id as usize].clone();
-                    let subst: Vec<(u32, Type)> = self.enums[instance.enum_id as usize]
-                        .type_params
-                        .iter()
-                        .copied()
-                        .zip(instance.args.iter().copied())
-                        .collect();
-                    (Some(instance.enum_id), subst)
-                }
-                _ => (None, Vec::new()),
-            };
-            if let Some(enum_id) = enum_id {
-                let mut in_progress = Vec::new();
-                if self.enum_is_clone(enum_id, &subst, &mut in_progress) {
-                    return object;
-                }
-                let name = self.name(object);
-                self.error(
-                    codes::NOT_CLONE,
-                    field.name.span,
-                    format!("`{name}` is not `Clone`"),
-                    "a variant's associated field is not `Clone`",
-                    Some(
-                        "implement `Clone` manually where possible, or remove/replace the offending field"
-                            .into(),
-                    ),
-                );
-                return Type::UNKNOWN;
-            }
         }
 
         if let Base::Class(id) = object.base {
@@ -32056,10 +33633,66 @@ impl<'a> Checker<'a> {
         // `Result` carrying its own error type.
         if let Expr::Field(field) = &*expr.callee
             && let Expr::Path(base) = &*field.object
-            && field.name.name == "parse"
+            && (field.name.name == "parse"
+                || (field.name.name == "parse_locale"
+                    && Type::from_name(&base.name).is_some_and(|ty| {
+                        matches!(ty.base, Base::Date | Base::Time | Base::DateTime)
+                    })))
             && !field.safe
             && self.scopes.lookup(&base.name).is_none()
         {
+            if field.name.name == "parse_locale" {
+                let target = Type::from_name(&base.name)
+                    .filter(|t| matches!(t.base, Base::Date | Base::Time | Base::DateTime));
+                if let Some(target) = target {
+                    if expr.args.len() != 3
+                        || expr
+                            .args
+                            .iter()
+                            .any(|argument| argument.name.is_some() || argument.is_spread)
+                    {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            expr.span,
+                            "`parse_locale` takes text, locale, and style strings",
+                            format!("received {} argument(s)", expr.args.len()),
+                            None,
+                        );
+                        for argument in &expr.args {
+                            self.check_expr(&argument.value);
+                        }
+                        return Type::UNKNOWN;
+                    }
+                    for (index, label) in [
+                        (0, "the localized text"),
+                        (1, "the locale"),
+                        (2, "the style"),
+                    ] {
+                        let actual = self.check_expr(&expr.args[index].value);
+                        if !actual.is_unknown() {
+                            self.expect_assignable(
+                                Type::STRING,
+                                actual,
+                                expr.args[index].value.span(),
+                                label,
+                            );
+                        }
+                    }
+                    self.scalar_static_accesses.insert(field.span);
+                    let locale_error = self
+                        .native_exceptions
+                        .expect("the exception hierarchy is registered")
+                        .locale_error;
+                    return self.native_result_with(target, locale_error);
+                }
+            }
+            if field.name.name != "parse" {
+                // Do not reinterpret unrelated names as native scalar statics.
+                for argument in &expr.args {
+                    self.check_expr(&argument.value);
+                }
+                return Type::UNKNOWN;
+            }
             let target = if base.name == "Regex" {
                 Some(Type::REGEX)
             } else {
@@ -32072,6 +33705,9 @@ impl<'a> Checker<'a> {
                             | Base::Date
                             | Base::Time
                             | Base::DateTime
+                            | Base::Instant
+                            | Base::TimeZone
+                            | Base::ZonedDateTime
                     )
                 })
             };
@@ -32120,14 +33756,278 @@ impl<'a> Checker<'a> {
                 let native = self
                     .native_exceptions
                     .expect("the exception hierarchy is registered");
-                let error = if matches!(target.base, Base::Regex) {
-                    native.regex_error
-                } else {
-                    native.parse_error
+                let error = match target.base {
+                    Base::Regex => native.regex_error,
+                    Base::TimeZone => native.locale_error,
+                    _ => native.parse_error,
                 };
                 self.scalar_static_accesses.insert(field.span);
                 return self.native_result_with(target, error);
             }
+        }
+
+        // Unix timeline constructors for `Instant` share the checked
+        // `Result<Instant, ArithmeticOverflowError>` contract. They accept
+        // signed epoch seconds/milliseconds or exact epoch nanoseconds; the
+        // runtime rejects values outside its RFC 3339-capable range.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Instant"
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            let parameter = match field.name.name.as_str() {
+                "from_unix_seconds" | "from_unix_milliseconds" => {
+                    Some(Type::of(Base::Int(IntWidth::I64)))
+                }
+                "from_unix_nanoseconds" => Some(Type::of(Base::Int(IntWidth::I128))),
+                _ => None,
+            };
+            if let Some(parameter) = parameter {
+                if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        format!("`Instant.{}` takes one positional integer", field.name.name),
+                        format!("received {} argument(s)", expr.args.len()),
+                        None,
+                    );
+                    for arg in &expr.args {
+                        self.check_expr(&arg.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let argument = self.check_expr(&expr.args[0].value);
+                if !argument.is_unknown() {
+                    self.expect_assignable(
+                        parameter,
+                        argument,
+                        expr.args[0].value.span(),
+                        "the Unix timestamp",
+                    );
+                }
+                self.scalar_static_accesses.insert(field.span);
+                let arithmetic_overflow = self
+                    .native_exceptions
+                    .expect("native arithmetic errors are registered")
+                    .arithmetic_overflow;
+                return self.native_result_with(Type::INSTANT, arithmetic_overflow);
+            }
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "Period"
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            let unit = matches!(
+                field.name.name.as_str(),
+                "years" | "months" | "weeks" | "days"
+            );
+            if unit {
+                if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        format!("`Period.{}` takes one integer", field.name.name),
+                        format!("received {} argument(s)", expr.args.len()),
+                        None,
+                    );
+                    for argument in &expr.args {
+                        self.check_expr(&argument.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let actual = self.check_expr(&expr.args[0].value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(
+                        Type::INT32,
+                        actual,
+                        expr.args[0].value.span(),
+                        "the period component",
+                    );
+                }
+                self.scalar_static_accesses.insert(field.span);
+                return Type::PERIOD;
+            }
+            if field.name.name == "parse" {
+                if expr.args.len() != 1 || expr.args[0].name.is_some() || expr.args[0].is_spread {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`Period.parse` takes one string",
+                        format!("received {} argument(s)", expr.args.len()),
+                        None,
+                    );
+                    for argument in &expr.args {
+                        self.check_expr(&argument.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let actual = self.check_expr(&expr.args[0].value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(
+                        Type::STRING,
+                        actual,
+                        expr.args[0].value.span(),
+                        "the period text",
+                    );
+                }
+                self.scalar_static_accesses.insert(field.span);
+                let parse_error = self
+                    .native_exceptions
+                    .expect("the exception hierarchy is registered")
+                    .parse_error;
+                return self.native_result_with(Type::PERIOD, parse_error);
+            }
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "TimeShift"
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+            && field.name.name == "calendar"
+        {
+            if expr.args.len() != 4 {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`TimeShift.calendar` takes a Period, Duration, overlap policy, and gap policy",
+                    format!("received {} argument(s)", expr.args.len()),
+                    None,
+                );
+                for argument in &expr.args {
+                    self.check_expr(&argument.value);
+                }
+                return Type::UNKNOWN;
+            }
+            for (index, expected, label) in [
+                (0, Type::PERIOD, "the calendar period"),
+                (1, Type::DURATION, "the exact duration"),
+                (2, Type::STRING, "the overlap policy"),
+                (3, Type::STRING, "the gap policy"),
+            ] {
+                let actual = self.check_expr(&expr.args[index].value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(expected, actual, expr.args[index].value.span(), label);
+                }
+            }
+            self.scalar_static_accesses.insert(field.span);
+            let error = self
+                .native_exceptions
+                .expect("native temporal errors are registered")
+                .time_shift_error;
+            return self.native_result_with(Type::TIME_SHIFT, error);
+        }
+
+        if let Expr::Field(field) = &*expr.callee
+            && !field.safe
+            && field.name.name == "apply_to"
+        {
+            let receiver = self.check_expr(&field.object);
+            if receiver.base != Base::TimeShift || receiver.nullable {
+                // Leave unrelated `apply_to` calls to ordinary method lookup.
+            } else {
+                if expr.args.len() != 1 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`TimeShift.apply_to` takes one ZonedDateTime",
+                        format!("received {} argument(s)", expr.args.len()),
+                        None,
+                    );
+                    for argument in &expr.args {
+                        self.check_expr(&argument.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                let actual = self.check_expr(&expr.args[0].value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(
+                        Type::ZONED_DATE_TIME,
+                        actual,
+                        expr.args[0].value.span(),
+                        "the zoned date-time",
+                    );
+                }
+                if receiver.is_unknown() || actual.is_unknown() {
+                    return Type::UNKNOWN;
+                }
+                let error = self
+                    .native_exceptions
+                    .expect("native temporal errors are registered")
+                    .time_shift_error;
+                return self.native_result_with(Type::ZONED_DATE_TIME, error);
+            }
+        }
+
+        if let Expr::Path(callee) = &*expr.callee
+            && callee.name == "Period"
+            && self.scopes.lookup(&callee.name).is_none()
+        {
+            if expr.args.len() != 4 {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`Period` takes years, months, weeks, and days",
+                    format!("received {} argument(s)", expr.args.len()),
+                    None,
+                );
+                for argument in &expr.args {
+                    self.check_expr(&argument.value);
+                }
+                return Type::UNKNOWN;
+            }
+            for argument in &expr.args {
+                let actual = self.check_expr(&argument.value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(
+                        Type::INT32,
+                        actual,
+                        argument.value.span(),
+                        "the period component",
+                    );
+                }
+            }
+            return Type::PERIOD;
+        }
+
+        // `ZonedDateTime.from_instant(instant, zone)` creates an immutable
+        // view of an already validated timeline point. The TimeZone itself
+        // can only be obtained through its checked parser.
+        if let Expr::Field(field) = &*expr.callee
+            && let Expr::Path(base) = &*field.object
+            && base.name == "ZonedDateTime"
+            && field.name.name == "from_instant"
+            && !field.safe
+            && self.scopes.lookup(&base.name).is_none()
+        {
+            if expr.args.len() != 2 {
+                self.error(
+                    codes::WRONG_ARGUMENT_COUNT,
+                    expr.span,
+                    "`ZonedDateTime.from_instant` takes an instant and a time zone",
+                    format!("received {} argument(s)", expr.args.len()),
+                    None,
+                );
+                for argument in &expr.args {
+                    self.check_expr(&argument.value);
+                }
+                return Type::UNKNOWN;
+            }
+            for (index, expected, label) in [
+                (0, Type::INSTANT, "the instant"),
+                (1, Type::TIME_ZONE, "the time zone"),
+            ] {
+                let actual = self.check_expr(&expr.args[index].value);
+                if !actual.is_unknown() {
+                    self.expect_assignable(expected, actual, expr.args[index].value.span(), label);
+                }
+            }
+            self.scalar_static_accesses.insert(field.span);
+            return Type::ZONED_DATE_TIME;
         }
 
         // `Date.today()` / `Time.now_local()` / `DateTime.now_local()`
@@ -32146,6 +34046,8 @@ impl<'a> Checker<'a> {
                 ("Date", "today") => Some(Type::DATE),
                 ("Time", "now_local") | ("Time", "now_utc") => Some(Type::TIME),
                 ("DateTime", "now_local") | ("DateTime", "now_utc") => Some(Type::DATETIME),
+                ("Instant", "now") => Some(Type::INSTANT),
+                ("TimeZone", "database_version") => Some(Type::STRING),
                 _ => None,
             };
             if let Some(ty) = temporal {
@@ -32231,7 +34133,6 @@ impl<'a> Checker<'a> {
                     );
                 } else {
                     self.static_class_accesses.insert(field.span, class_id);
-                    self.scalar_static_accesses.insert(field.span);
                     let is_bundled_environment = self
                         .sources
                         .file(class.span.file)
@@ -32315,15 +34216,16 @@ impl<'a> Checker<'a> {
                     {
                         self.standard_json_calls.insert(expr.span, binding.into());
                     }
-                    let standard_identity = self.sources.file(class.span.file).identity();
+                    let standard_identity = self.sources.file(class.span.file).identity().cloned();
                     let standard_module = standard_identity
-                        .map(|identity| identity.canonical_module_path.rsplit('.').next())
-                        .flatten()
-                        .unwrap_or_default();
-                    if let Some(binding) = standard_identity.and_then(|identity| {
+                        .as_ref()
+                        .and_then(|identity| identity.canonical_module_path.rsplit('.').next())
+                        .unwrap_or_default()
+                        .to_owned();
+                    if let Some(binding) = standard_identity.as_ref().and_then(|identity| {
                         crate::stdlib::compiler_binding_for_filesystem_member(
                             &identity.package,
-                            standard_module,
+                            &standard_module,
                             &method.name,
                         )
                     }) {
@@ -32331,10 +34233,10 @@ impl<'a> Checker<'a> {
                         self.standard_filesystem_calls
                             .insert(expr.span, binding.into());
                     }
-                    if let Some(binding) = standard_identity.and_then(|identity| {
+                    if let Some(binding) = standard_identity.as_ref().and_then(|identity| {
                         crate::stdlib::compiler_binding_for_path_member(
                             &identity.package,
-                            standard_module,
+                            &standard_module,
                             &method.name,
                         )
                     }) {
@@ -32369,7 +34271,6 @@ impl<'a> Checker<'a> {
                         type_params: method.type_params.clone(),
                         throws: method.throws.clone(),
                     };
-                    self.scalar_static_accesses.insert(field.span);
                     let result = self.check_direct_call(expr, &signature);
                     if let Some(call) = self.generic_call_substitutions.get_mut(&expr.span) {
                         call.owner_class = Some(method.owner);
@@ -33006,13 +34907,179 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            if object.base == Base::Period && !field.safe && !object.nullable {
+                if field.name.name == "to_iso_string" && expr.args.is_empty() {
+                    return Type::STRING;
+                }
+            }
+
             // Civil temporal methods (`temporal-rich-api`): comparison
             // queries, validated `with_*` replacement, unit boundaries,
             // parsing-formatting. Recognized by receiver type and lowered
             // to runtime calls or pure comparisons — `d.is_before(x)`
             // names no declared method.
-            if matches!(object.base, Base::Date | Base::Time | Base::DateTime)
+            if !field.safe && !object.nullable {
+                let zone_target = match (object.base, field.name.name.as_str()) {
+                    (Base::Instant, "in_zone") => Some(Type::ZONED_DATE_TIME),
+                    (Base::ZonedDateTime, "with_zone") => Some(Type::ZONED_DATE_TIME),
+                    _ => None,
+                };
+                if let Some(target) = zone_target {
+                    if expr.args.len() != 1 {
+                        self.error(
+                            codes::WRONG_ARGUMENT_COUNT,
+                            expr.span,
+                            format!("`{}` takes one time zone", field.name.name),
+                            format!("received {} argument(s)", expr.args.len()),
+                            None,
+                        );
+                        for argument in &expr.args {
+                            self.check_expr(&argument.value);
+                        }
+                        return Type::UNKNOWN;
+                    }
+                    let zone = self.check_expr(&expr.args[0].value);
+                    if !zone.is_unknown() {
+                        self.expect_assignable(
+                            Type::TIME_ZONE,
+                            zone,
+                            expr.args[0].value.span(),
+                            "the time zone",
+                        );
+                    }
+                    return target;
+                }
+            }
+            if object.base == Base::DateTime
+                && field.name.name == "in_zone"
                 && !field.safe
+                && !object.nullable
+            {
+                if expr.args.len() != 3 {
+                    self.error(
+                        codes::WRONG_ARGUMENT_COUNT,
+                        expr.span,
+                        "`DateTime.in_zone` takes a time zone, overlap policy, and gap policy",
+                        format!("received {} argument(s)", expr.args.len()),
+                        None,
+                    );
+                    for argument in &expr.args {
+                        self.check_expr(&argument.value);
+                    }
+                    return Type::UNKNOWN;
+                }
+                for (index, expected, label) in [
+                    (0, Type::TIME_ZONE, "the time zone"),
+                    (1, Type::STRING, "the overlap policy"),
+                    (2, Type::STRING, "the gap policy"),
+                ] {
+                    let actual = self.check_expr(&expr.args[index].value);
+                    if !actual.is_unknown() {
+                        self.expect_assignable(
+                            expected,
+                            actual,
+                            expr.args[index].value.span(),
+                            label,
+                        );
+                    }
+                }
+                let native = self
+                    .native_exceptions
+                    .expect("the exception hierarchy is registered");
+                return self.native_result_with(Type::ZONED_DATE_TIME, native.locale_error);
+            }
+            if object.base == Base::TimeZone && !field.safe && !object.nullable {
+                let result = match field.name.name.as_str() {
+                    "offset_seconds_at" if expr.args.len() == 1 => {
+                        let instant = self.check_expr(&expr.args[0].value);
+                        if !instant.is_unknown() {
+                            self.expect_assignable(
+                                Type::INSTANT,
+                                instant,
+                                expr.args[0].value.span(),
+                                "the instant",
+                            );
+                        }
+                        Some(Type::INT32)
+                    }
+                    "is_dst_at" if expr.args.len() == 1 => {
+                        let instant = self.check_expr(&expr.args[0].value);
+                        if !instant.is_unknown() {
+                            self.expect_assignable(
+                                Type::INSTANT,
+                                instant,
+                                expr.args[0].value.span(),
+                                "the instant",
+                            );
+                        }
+                        Some(Type::BOOLEAN)
+                    }
+                    "abbreviation_at" if expr.args.len() == 1 => {
+                        let instant = self.check_expr(&expr.args[0].value);
+                        if !instant.is_unknown() {
+                            self.expect_assignable(
+                                Type::INSTANT,
+                                instant,
+                                expr.args[0].value.span(),
+                                "the instant",
+                            );
+                        }
+                        Some(Type::STRING)
+                    }
+                    "local_datetime_at" if expr.args.len() == 1 => {
+                        let instant = self.check_expr(&expr.args[0].value);
+                        if !instant.is_unknown() {
+                            self.expect_assignable(
+                                Type::INSTANT,
+                                instant,
+                                expr.args[0].value.span(),
+                                "the instant",
+                            );
+                        }
+                        Some(Type::DATETIME)
+                    }
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    return result;
+                }
+            }
+            if object.base == Base::ZonedDateTime && !field.safe && !object.nullable {
+                let result = match field.name.name.as_str() {
+                    "with_zone" if expr.args.len() == 1 => {
+                        let zone = self.check_expr(&expr.args[0].value);
+                        if !zone.is_unknown() {
+                            self.expect_assignable(
+                                Type::TIME_ZONE,
+                                zone,
+                                expr.args[0].value.span(),
+                                "the time zone",
+                            );
+                        }
+                        Some(Type::ZONED_DATE_TIME)
+                    }
+                    "is_before" | "is_after" | "is_same" if expr.args.len() == 1 => {
+                        let other = self.check_expr(&expr.args[0].value);
+                        if !other.is_unknown() {
+                            self.expect_assignable(
+                                Type::ZONED_DATE_TIME,
+                                other,
+                                expr.args[0].value.span(),
+                                "the other zoned date-time",
+                            );
+                        }
+                        Some(Type::BOOLEAN)
+                    }
+                    _ => None,
+                };
+                if let Some(result) = result {
+                    return result;
+                }
+            }
+            if matches!(
+                object.base,
+                Base::Date | Base::Time | Base::DateTime | Base::Instant
+            ) && !field.safe
                 && !object.nullable
             {
                 let temporal = match field.name.name.as_str() {
@@ -33134,7 +35201,10 @@ impl<'a> Checker<'a> {
                             .expect("the exception hierarchy is registered");
                         Some(self.native_result_with(object, native.parse_error))
                     }
-                    "format" if expr.args.len() == 1 => {
+                    "format"
+                        if expr.args.len() == 1
+                            && matches!(object.base, Base::Date | Base::Time | Base::DateTime) =>
+                    {
                         let arg = self.check_expr(&expr.args[0].value);
                         if !arg.is_unknown() {
                             self.expect_assignable(
@@ -33145,6 +35215,51 @@ impl<'a> Checker<'a> {
                             );
                         }
                         Some(Type::STRING)
+                    }
+                    "format_locale"
+                        if expr.args.len() == 2
+                            && matches!(object.base, Base::Date | Base::Time | Base::DateTime) =>
+                    {
+                        for (index, label) in [(0, "the locale"), (1, "the style")] {
+                            let arg = self.check_expr(&expr.args[index].value);
+                            if !arg.is_unknown() {
+                                self.expect_assignable(
+                                    Type::STRING,
+                                    arg,
+                                    expr.args[index].value.span(),
+                                    label,
+                                );
+                            }
+                        }
+                        let native = self
+                            .native_exceptions
+                            .expect("the exception hierarchy is registered");
+                        Some(self.native_result_with(Type::STRING, native.locale_error))
+                    }
+                    "format_locale_in_zone"
+                        if expr.args.len() == 5 && object.base == Base::DateTime =>
+                    {
+                        for (index, label) in [
+                            (0, "the time-zone identifier"),
+                            (1, "the locale"),
+                            (2, "the style"),
+                            (3, "the overlap policy"),
+                            (4, "the gap policy"),
+                        ] {
+                            let arg = self.check_expr(&expr.args[index].value);
+                            if !arg.is_unknown() {
+                                self.expect_assignable(
+                                    Type::STRING,
+                                    arg,
+                                    expr.args[index].value.span(),
+                                    label,
+                                );
+                            }
+                        }
+                        let native = self
+                            .native_exceptions
+                            .expect("the exception hierarchy is registered");
+                        Some(self.native_result_with(Type::STRING, native.locale_error))
                     }
                     "to_iso_string" if expr.args.is_empty() => Some(Type::STRING),
                     _ => None,
@@ -34072,13 +36187,26 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // Seed from the expected result before matching arguments. A nested
+        // generic construction such as `Wrapper<T>.Inner(Box.Empty)` needs
+        // the outer expected `Wrapper<Int32>` to specialize the argument
+        // parameter to `Box<Int32>` before `Box.Empty` is checked.
+        if let Some(expected) = expected.filter(|expected| !expected.is_unknown()) {
+            self.unify_declared_with_actual(
+                signature.returns,
+                expected,
+                &mut seed,
+                expr.span,
+                &signature.name,
+            );
+        }
+
         // Resolve every context that is already explicit before checking the
         // arguments. In particular, an `Ok<T>(value)` constructor seeded by
         // an expected `Result<Result<U,E>, F>` must preserve its `Result<U,E>`
         // payload instead of projecting it before generic inference begins.
         let slots = self.match_arguments(expr, signature, &seed);
-        let substitution =
-            self.infer_type_params(expr.span, &name, signature, &slots, seed, expected);
+        let substitution = self.infer_type_params(expr.span, &name, signature, &slots, seed, None);
         if !signature.type_params.is_empty()
             && !self.failed_open_template_calls.contains(&expr.span)
         {
@@ -34098,6 +36226,15 @@ impl<'a> Checker<'a> {
                     argument_types,
                 },
             );
+            if let Some(current_span) = self.current_function
+                && let Some((owner, owner_signature)) = self
+                    .functions
+                    .iter()
+                    .find(|(_, candidate)| candidate.span == current_span)
+                && !owner_signature.type_params.is_empty()
+            {
+                self.generic_call_owners.insert(expr.span, owner.clone());
+            }
         }
 
         // A call to a `throws` function/method propagates its declared
@@ -34992,6 +37129,139 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// A concrete payload can infer a generic enum variant's own arguments.
+    /// When its contextual enum type still contains a caller's unresolved
+    /// parameter, defer that hint so it does not prematurely bind the nested
+    /// enum parameter to the caller parameter (for example `OnlyBox.Wrap`
+    /// inferring `T` from `Box.Full(9)`). Payload-free variants still use a
+    /// symbolic expected instantiation because they have no arguments to
+    /// infer from.
+    fn type_contains_symbolic_param(&self, ty: Type, seen: &mut HashSet<Type>) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        match ty.base {
+            Base::Param(_) => true,
+            Base::Instance(id) => self
+                .generic_instances
+                .get(id as usize)
+                .is_some_and(|instance| {
+                    instance
+                        .args
+                        .iter()
+                        .any(|argument| self.type_contains_symbolic_param(*argument, seen))
+                }),
+            Base::ContractInstance(id) => {
+                self.contract_instances
+                    .get(id as usize)
+                    .is_some_and(|instance| {
+                        instance
+                            .args
+                            .iter()
+                            .any(|argument| self.type_contains_symbolic_param(*argument, seen))
+                    })
+            }
+            Base::EnumInstance(id) => {
+                self.enum_instances
+                    .get(id as usize)
+                    .is_some_and(|instance| {
+                        instance
+                            .args
+                            .iter()
+                            .any(|argument| self.type_contains_symbolic_param(*argument, seen))
+                    })
+            }
+            Base::Array(id) => self
+                .array_types
+                .get(id as usize)
+                .is_some_and(|element| self.type_contains_symbolic_param(*element, seen)),
+            Base::List(id)
+            | Base::Deque(id)
+            | Base::Queue(id)
+            | Base::Stack(id)
+            | Base::PriorityQueue(id) => self
+                .list_types
+                .get(id as usize)
+                .is_some_and(|element| self.type_contains_symbolic_param(*element, seen)),
+            Base::Set(id) => self
+                .set_types
+                .get(id as usize)
+                .is_some_and(|element| self.type_contains_symbolic_param(*element, seen)),
+            Base::Map(id) => self.map_types.get(id as usize).is_some_and(|map| {
+                self.type_contains_symbolic_param(map.key, seen)
+                    || self.type_contains_symbolic_param(map.value, seen)
+            }),
+            Base::Tuple(id) => self.tuple_types.get(id as usize).is_some_and(|tuple| {
+                tuple
+                    .elements
+                    .iter()
+                    .any(|element| self.type_contains_symbolic_param(*element, seen))
+            }),
+            Base::Union(id) => self.unions.get(id as usize).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| self.type_contains_symbolic_param(Type::of(*member), seen))
+            }),
+            Base::Intersection(id) => self.intersections.get(id as usize).is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| self.type_contains_symbolic_param(Type::of(*member), seen))
+            }),
+            Base::Shape(id) => self.structural_types.get(id as usize).is_some_and(|shape| {
+                shape
+                    .properties
+                    .iter()
+                    .any(|property| self.type_contains_symbolic_param(property.ty, seen))
+            }),
+            Base::Function(id) => self.fn_types.get(id as usize).is_some_and(|function| {
+                function
+                    .params
+                    .iter()
+                    .chain(std::iter::once(&function.returns))
+                    .any(|part| self.type_contains_symbolic_param(*part, seen))
+            }),
+            _ => false,
+        }
+    }
+
+    fn should_defer_symbolic_enum_hint(&mut self, expression: &Expr, hint: Type) -> bool {
+        let Expr::Call(call) = expression else {
+            return false;
+        };
+        let Expr::Field(field) = &*call.callee else {
+            return false;
+        };
+        let Expr::Path(enum_name) = &*field.object else {
+            return false;
+        };
+        let resolved = self.resolved_name(&enum_name.name, enum_name.span);
+        let Some((enum_id, enum_ty)) = self
+            .enums
+            .iter()
+            .enumerate()
+            .find(|(_, enum_ty)| enum_ty.name == resolved)
+        else {
+            return false;
+        };
+        let Some(variant) = enum_ty.variant(&field.name.name) else {
+            return false;
+        };
+        if variant.associated.is_empty() || enum_ty.type_params.is_empty() {
+            return false;
+        }
+        let Base::EnumInstance(instance) = hint.without_null().base else {
+            return false;
+        };
+        self.enum_instances
+            .get(instance as usize)
+            .is_some_and(|instance| {
+                instance.enum_id == enum_id as u32
+                    && instance.args.iter().any(|argument| {
+                        self.type_contains_symbolic_param(*argument, &mut HashSet::new())
+                    })
+            })
+    }
+
     fn match_arguments(
         &mut self,
         expr: &CallExpr,
@@ -35041,6 +37311,8 @@ impl<'a> Checker<'a> {
                     .get(index)
                     .map(|parameter| self.substitute(parameter.ty, context_substitution))
             });
+            let defer_symbolic_enum_hint =
+                hint.is_some_and(|hint| self.should_defer_symbolic_enum_hint(&arg.value, hint));
             // Only a bare numeric literal (or its negation) should be steered
             // by the parameter type — anything else keeps its own type and is
             // checked against the parameter afterward.
@@ -35052,42 +37324,51 @@ impl<'a> Checker<'a> {
                             && matches!(&*u.operand, Expr::Float(_) | Expr::Int(_))
                 );
             self.expected_type = hint.filter(|t| {
-                arg_is_numeric_literal
-                    && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
-                    || (matches!(t.base, Base::Union(_))
-                        && matches!(
-                            &arg.value,
-                            Expr::Int(_)
-                                | Expr::Float(_)
-                                | Expr::Duration(_)
-                                | Expr::Str(_)
-                                | Expr::Char(_)
-                                | Expr::Bool(_)
-                                | Expr::Call(_)
-                                | Expr::Variant(_)
-                                | Expr::Field(_)
-                        ))
-                    || (matches!(t.base, Base::Singleton(_))
-                        && matches!(
-                            &arg.value,
-                            Expr::Int(_)
-                                | Expr::Float(_)
-                                | Expr::Duration(_)
-                                | Expr::Str(_)
-                                | Expr::Char(_)
-                                | Expr::Bool(_)
-                                | Expr::Call(_)
-                                | Expr::Field(_)
-                        ))
-                    || (matches!(
-                        t.base,
-                        Base::Object
-                            | Base::Union(_)
-                            | Base::Shape(_)
-                            | Base::Contract(_)
-                            | Base::ContractInstance(_)
-                            | Base::Intersection(_)
-                    ) && matches!(&arg.value, Expr::Object(_)))
+                !defer_symbolic_enum_hint && {
+                    arg_is_numeric_literal
+                        && matches!(t.base, Base::Int(_) | Base::Float(_) | Base::Decimal)
+                        || (matches!(t.base, Base::Union(_))
+                            && matches!(
+                                &arg.value,
+                                Expr::Int(_)
+                                    | Expr::Float(_)
+                                    | Expr::Duration(_)
+                                    | Expr::Str(_)
+                                    | Expr::Char(_)
+                                    | Expr::Bool(_)
+                                    | Expr::Call(_)
+                                    | Expr::Variant(_)
+                                    | Expr::Field(_)
+                            ))
+                        || (matches!(t.base, Base::Singleton(_))
+                            && matches!(
+                                &arg.value,
+                                Expr::Int(_)
+                                    | Expr::Float(_)
+                                    | Expr::Duration(_)
+                                    | Expr::Str(_)
+                                    | Expr::Char(_)
+                                    | Expr::Bool(_)
+                                    | Expr::Call(_)
+                                    | Expr::Field(_)
+                            ))
+                        || (matches!(
+                            t.base,
+                            Base::Object
+                                | Base::Union(_)
+                                | Base::Shape(_)
+                                | Base::Contract(_)
+                                | Base::ContractInstance(_)
+                                | Base::Intersection(_)
+                        ) && matches!(&arg.value, Expr::Object(_)))
+                        || (matches!(
+                            t.base,
+                            Base::Enum(_)
+                                | Base::EnumInstance(_)
+                                | Base::Instance(_)
+                                | Base::ContractInstance(_)
+                        ) && matches!(&arg.value, Expr::Call(_) | Expr::Field(_)))
+                }
             });
             if parameter_index.is_some_and(|index| {
                 self.call_parameter_expects_result(expr, signature, index, context_substitution)
@@ -35398,7 +37679,7 @@ impl<'a> Checker<'a> {
         self.error(
             codes::TYPE_MISMATCH,
             span,
-            format!("the `{}` operator requires numbers", op.as_str()),
+            format!("the `{}` operator requires integer values", op.as_str()),
             format!("a value of type {found} was found"),
             None,
         );
@@ -35421,6 +37702,7 @@ impl<'a> Checker<'a> {
                     | Base::Date
                     | Base::Time
                     | Base::DateTime
+                    | Base::Instant
             )
         {
             return;
@@ -35430,7 +37712,7 @@ impl<'a> Checker<'a> {
         self.error(
             codes::TYPE_MISMATCH,
             span,
-            format!("the `{}` operator requires numbers", op.as_str()),
+            format!("the `{}` operator requires ordered values", op.as_str()),
             format!("a value of type {found} was found"),
             None,
         );
@@ -36103,8 +38385,8 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         (Base::Date, Base::Int(_), Add | Sub) => Some(Type::DATE),
         (Base::Int(_), Base::Date, Add) => Some(Type::DATE),
         (Base::Date, Base::Date, Sub) => Some(Type::of(Base::Int(IntWidth::I64))),
-        (Base::Time, Base::Duration, Add | Sub) => Some(Type::TIME),
-        (Base::Duration, Base::Time, Add) => Some(Type::TIME),
+        (Base::Time, Base::Duration, Add | Sub) => Some(Type::TIME_SHIFT),
+        (Base::Duration, Base::Time, Add) => Some(Type::TIME_SHIFT),
         (Base::Time, Base::Time, Sub) => Some(Type::DURATION),
         (Base::Date, Base::Time, Add) | (Base::Time, Base::Date, Add) => Some(Type::DATETIME),
         // Duration interop (`temporal-rich-api`): a `DateTime` shifts its
@@ -36113,6 +38395,10 @@ fn native_arithmetic(left: Type, right: Type, op: BinaryOp) -> Option<Type> {
         // same day, never a silently truncated `Date`.
         (Base::DateTime, Base::Duration, Add | Sub) => Some(Type::DATETIME),
         (Base::Duration, Base::DateTime, Add) => Some(Type::DATETIME),
+        // An Instant is already on the Unix nanosecond timeline.
+        (Base::Instant, Base::Duration, Add | Sub) => Some(Type::INSTANT),
+        (Base::Duration, Base::Instant, Add) => Some(Type::INSTANT),
+        (Base::Instant, Base::Instant, Sub) => Some(Type::DURATION),
         (Base::Date, Base::Duration, Add | Sub) => Some(Type::DATETIME),
         (Base::Duration, Base::Date, Add) => Some(Type::DATETIME),
         (Base::DateTime, Base::DateTime, Sub) => Some(Type::DURATION),

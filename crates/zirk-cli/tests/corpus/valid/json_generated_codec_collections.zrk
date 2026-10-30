@@ -1,0 +1,77 @@
+import { JSON, JSONCodec } from std.json;
+import { stdout } from std.io;
+
+enum Status { Ready, Failed }
+
+class Address implements JSONCodec<Address> {
+    city: String;
+    number: Int32;
+    construct(city: String, number: Int32) { this.city = city; this.number = number; }
+}
+
+class Batch implements JSONCodec<Batch> {
+    values: List<Int32>;
+    fixed: Array<Int32>;
+    addresses: List<Address>;
+    tags: Set<Int32>;
+    counts: Map<String, Int32>;
+    note: String?;
+    labels: List<String?>;
+    status: Status;
+    construct(values: List<Int32>, fixed: Array<Int32>, addresses: List<Address>, tags: Set<Int32>, counts: Map<String, Int32>, note: String?, labels: List<String?>, status: Status) {
+        this.values = values;
+        this.fixed = fixed;
+        this.addresses = addresses;
+        this.tags = tags;
+        this.counts = counts;
+        this.note = note;
+        this.labels = labels;
+        this.status = status;
+    }
+}
+
+fn main(): Void {
+    mut empty: List<Int32> = List();
+    mut empty_fixed: Array<Int32> = Array(0);
+    mut empty_addresses: List<Address> = List();
+    mut empty_tags: Set<Int32> = Set();
+    mut empty_counts: Map<String, Int32> = Map();
+    mut empty_labels: List<String?> = List();
+    inmut codec: Batch = Batch(empty, empty_fixed, empty_addresses, empty_tags, empty_counts, null, empty_labels, Status.Ready);
+    try {
+        inmut document: String = "\{\"values\":[4,9,16],\"fixed\":[2,3],\"addresses\":[\{\"city\":\"Santiago\",\"number\":37\}],\"tags\":[5,8],\"counts\":[[\"apples\",3],[\"pears\",7]],\"note\":null,\"labels\":[\"blue\",null],\"status\":\"Ready\"\}";
+        inmut batch: Batch = JSON.decode<Batch>(document, codec);
+        stdout.println(batch.values.length.to_string());
+        stdout.println(batch.values[0].to_string());
+        stdout.println(batch.values[2].to_string());
+        stdout.println(batch.fixed.length.to_string());
+        stdout.println(batch.fixed[1].to_string());
+        stdout.println(batch.addresses[0].city);
+        stdout.println(batch.addresses[0].number.to_string());
+        stdout.println(batch.tags.contains(8).to_string());
+        stdout.println((batch.counts.get("pears") ?? 0).to_string());
+        stdout.println((batch.note ?? "none"));
+        stdout.println(batch.labels.length.to_string());
+        stdout.println(batch.labels[0] ?? "missing");
+        stdout.println(batch.labels[1] ?? "none");
+        stdout.println(batch.status.name);
+        stdout.println(JSON.encode(batch, codec));
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+    try {
+        inmut invalid: String = "\{\"values\":[1],\"fixed\":[1],\"addresses\":[],\"tags\":[],\"counts\":[[\"orphan\",1]],\"note\":null,\"labels\":[],\"status\":\"Missing\"\}";
+        inmut ignored: Batch = JSON.decode<Batch>(invalid, codec);
+        stdout.println(ignored.values.length.to_string());
+    } catch JsonConversionError(_) {
+        stdout.println("unknown enum value rejected");
+    }
+    try {
+        inmut invalid_pair: String = "\{\"values\":[1],\"fixed\":[1],\"addresses\":[],\"tags\":[],\"counts\":[[\"orphan\"]],\"note\":null,\"labels\":[],\"status\":\"Ready\"\}";
+        inmut ignored: Batch = JSON.decode<Batch>(invalid_pair, codec);
+        stdout.println(ignored.values.length.to_string());
+    } catch JsonConversionError(_) {
+        stdout.println("invalid Map pair rejected");
+    }
+}
+main();

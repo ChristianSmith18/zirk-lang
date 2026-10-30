@@ -1,0 +1,12 @@
+Santiago:37
+2
+list-tick:2
+box:7
+box-text:generic
+{"event":{"$variant":"Login","$payload":{"user":{"city":"Santiago","number":37}}},"events":[{"$variant":"Idle"},{"$variant":"Tick","$payload":{"count":2}}],"box":{"$variant":"Full","$payload":{"value":7}},"box_text":{"$variant":"Full","$payload":{"value":"generic"}}}
+idle
+{"event":{"$variant":"Idle"},"events":[],"box":{"$variant":"Empty"},"box_text":{"$variant":"Empty"}}
+tick:5
+{"event":{"$variant":"Tick","$payload":{"count":5}},"events":[],"box":{"$variant":"Empty"},"box_text":{"$variant":"Empty"}}
+missing enum payload field rejected
+unknown enum variant rejected

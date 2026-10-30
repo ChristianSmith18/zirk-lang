@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use crate::ordered::OrderedMap;
+use crate::ordered::{CollectionTextField, CompositeKey, OrderedMap};
 
 const WORD: usize = std::mem::size_of::<usize>();
 const BODY_OFFSET: usize = crate::collector::HEADER_BYTES;
@@ -12,14 +12,25 @@ struct MapBody {
     entries: MapEntries,
     key_reference_offsets: Box<[usize]>,
     value_reference_offsets: Box<[usize]>,
+    key_union_roots: Box<[CollectionUnionRoot]>,
+    value_union_roots: Box<[CollectionUnionRoot]>,
+    key_text_fields: Box<[CollectionTextField]>,
     key_size: usize,
     value_size: usize,
     structural_version: u64,
 }
 
+struct CollectionUnionRoot {
+    offset: usize,
+    descriptor: *const usize,
+    present_offset: Option<usize>,
+    enum_guards: Box<[(usize, u32)]>,
+}
+
 enum MapEntries {
     Words(OrderedMap<Vec<u8>, Vec<u8>>),
     Text(OrderedMap<Option<Box<str>>, Vec<u8>>),
+    Composite(OrderedMap<CompositeKey, Vec<u8>>),
 }
 
 impl MapEntries {
@@ -27,6 +38,7 @@ impl MapEntries {
         match self {
             Self::Words(entries) => entries.len(),
             Self::Text(entries) => entries.len(),
+            Self::Composite(entries) => entries.len(),
         }
     }
 
@@ -34,6 +46,7 @@ impl MapEntries {
         match self {
             Self::Words(entries) => entries.is_empty(),
             Self::Text(entries) => entries.is_empty(),
+            Self::Composite(entries) => entries.is_empty(),
         }
     }
 }
@@ -126,7 +139,19 @@ unsafe fn reference_offsets(pointer: *const usize, count: usize, size: usize) ->
 #[unsafe(no_mangle)]
 pub extern "C" fn zirk_rt_map_new() -> *mut c_void {
     unsafe {
-        zirk_rt_map_new_with_layout(std::ptr::null(), 0, WORD, std::ptr::null(), 0, false, WORD)
+        zirk_rt_map_new_with_layout(
+            std::ptr::null(),
+            0,
+            WORD,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            false,
+            WORD,
+        )
     }
 }
 
@@ -142,8 +167,12 @@ pub unsafe extern "C" fn zirk_rt_map_new_with_layout(
     key_offsets: *const usize,
     key_offset_count: usize,
     key_size: usize,
+    key_union_roots: *const usize,
+    key_union_root_word_count: usize,
     value_offsets: *const usize,
     value_offset_count: usize,
+    value_union_roots: *const usize,
+    value_union_root_word_count: usize,
     string_content_keys: bool,
     value_size: usize,
 ) -> *mut c_void {
@@ -161,6 +190,11 @@ pub unsafe extern "C" fn zirk_rt_map_new_with_layout(
         unsafe { reference_offsets(key_offsets, key_offset_count, key_size) };
     let value_reference_offsets =
         unsafe { reference_offsets(value_offsets, value_offset_count, value_size) };
+    let key_union_roots =
+        unsafe { collection_union_roots(key_union_roots, key_union_root_word_count, key_size) };
+    let value_union_roots = unsafe {
+        collection_union_roots(value_union_roots, value_union_root_word_count, value_size)
+    };
     unsafe {
         *(object as *mut *mut c_void) = map_descriptor();
         body(object).write(MapBody {
@@ -171,12 +205,125 @@ pub unsafe extern "C" fn zirk_rt_map_new_with_layout(
             },
             key_reference_offsets,
             value_reference_offsets,
+            key_union_roots,
+            value_union_roots,
+            key_text_fields: Box::new([]),
             key_size,
             value_size,
             structural_version: 0,
         });
     }
     object
+}
+
+/// Creates a typed map whose key layout contains nested String/Char fields.
+/// The metadata records each text pointer offset and nullable-presence guards.
+///
+/// # Safety
+/// Each non-empty metadata list must point to readable `usize` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn zirk_rt_map_new_with_text_fields(
+    key_offsets: *const usize,
+    key_offset_count: usize,
+    key_size: usize,
+    key_union_roots: *const usize,
+    key_union_root_word_count: usize,
+    value_offsets: *const usize,
+    value_offset_count: usize,
+    value_union_roots: *const usize,
+    value_union_root_word_count: usize,
+    text_fields: *const usize,
+    text_field_word_count: usize,
+    value_size: usize,
+) -> *mut c_void {
+    let map = unsafe {
+        zirk_rt_map_new_with_layout(
+            key_offsets,
+            key_offset_count,
+            key_size,
+            key_union_roots,
+            key_union_root_word_count,
+            value_offsets,
+            value_offset_count,
+            value_union_roots,
+            value_union_root_word_count,
+            false,
+            value_size,
+        )
+    };
+    let map_body = unsafe { &mut *body(map) };
+    map_body.entries = MapEntries::Composite(OrderedMap::default());
+    map_body.key_text_fields = unsafe {
+        crate::ordered::collection_text_fields(text_fields, text_field_word_count, key_size)
+    };
+    map
+}
+
+/// Decodes records of `[value offset, descriptor, present offset, guard count,
+/// (enum tag offset, expected tag)*]` words generated for a collection layout.
+unsafe fn collection_union_roots(
+    pointer: *const usize,
+    word_count: usize,
+    value_size: usize,
+) -> Box<[CollectionUnionRoot]> {
+    if word_count == 0 {
+        return Box::new([]);
+    }
+    assert!(!pointer.is_null(), "map union-root metadata is null");
+    let words = unsafe { std::slice::from_raw_parts(pointer, word_count) };
+    let mut cursor = 0;
+    let mut roots = Vec::new();
+    while cursor < words.len() {
+        assert!(
+            words.len() - cursor >= 4,
+            "truncated map union-root metadata"
+        );
+        let offset = words[cursor];
+        let descriptor = words[cursor + 1] as *const usize;
+        let present = words[cursor + 2];
+        let guard_count = words[cursor + 3];
+        cursor += 4;
+        assert!(!descriptor.is_null(), "map union-root descriptor is null");
+        assert!(
+            offset.checked_add(4).is_some_and(|end| end <= value_size),
+            "map union tag is outside its entry"
+        );
+        let present_offset = (present != usize::MAX).then_some(present);
+        if let Some(present_offset) = present_offset {
+            assert!(
+                present_offset < value_size,
+                "map union presence is outside its entry"
+            );
+        }
+        assert!(guard_count <= 64, "map union-root has too many enum guards");
+        assert!(
+            guard_count
+                .checked_mul(2)
+                .is_some_and(|count| count <= words.len() - cursor),
+            "truncated map union-root enum guards"
+        );
+        let mut enum_guards = Vec::with_capacity(guard_count);
+        for _ in 0..guard_count {
+            let tag_offset = words[cursor];
+            let expected_tag =
+                u32::try_from(words[cursor + 1]).expect("map enum guard tag exceeds u32");
+            cursor += 2;
+            assert!(
+                tag_offset
+                    .checked_add(4)
+                    .is_some_and(|end| end <= value_size),
+                "map enum guard is outside its entry"
+            );
+            enum_guards.push((tag_offset, expected_tag));
+        }
+        roots.push(CollectionUnionRoot {
+            offset,
+            descriptor,
+            present_offset,
+            enum_guards: enum_guards.into_boxed_slice(),
+        });
+    }
+    roots.into_boxed_slice()
 }
 
 /// Called by the collector after validating the owner allocation.
@@ -199,6 +346,7 @@ pub(crate) unsafe fn mark_entries(
                     mark(candidate);
                 }
             }
+            mark_collection_union_roots(key, &body.key_union_roots, mark);
         }
         for &offset in &body.value_reference_offsets {
             let candidate =
@@ -207,12 +355,42 @@ pub(crate) unsafe fn mark_entries(
                 mark(candidate);
             }
         }
+        mark_collection_union_roots(value, &body.value_union_roots, mark);
     };
     match &body.entries {
         MapEntries::Words(entries) => entries
             .iter()
             .for_each(|(key, value)| visit(Some(key), value)),
         MapEntries::Text(entries) => entries.iter().for_each(|(_, value)| visit(None, value)),
+        MapEntries::Composite(entries) => entries
+            .iter()
+            .for_each(|(key, value)| visit(Some(&key.raw), value)),
+    }
+}
+
+fn mark_collection_union_roots(
+    bytes: &[u8],
+    roots: &[CollectionUnionRoot],
+    mark: &mut dyn FnMut(*mut c_void),
+) {
+    for root in roots {
+        let active = root.enum_guards.iter().all(|(offset, expected)| {
+            let actual = unsafe { bytes.as_ptr().add(*offset).cast::<u32>().read_unaligned() };
+            actual == *expected
+        });
+        if !active {
+            continue;
+        }
+        let union_root = crate::collector::UnionRoot {
+            base: unsafe { bytes.as_ptr().add(root.offset) },
+            descriptor: root.descriptor,
+            present: root
+                .present_offset
+                .map_or(std::ptr::null(), |offset| unsafe {
+                    bytes.as_ptr().add(offset)
+                }),
+        };
+        crate::collector::mark_union_root(&union_root, mark);
     }
 }
 
@@ -305,6 +483,14 @@ pub unsafe extern "C" fn zirk_rt_map_keys(
                 write_text_key(result, index, element_size, 0, element_size, key.as_deref());
             }
         }
+        MapEntries::Composite(entries) => {
+            for (index, (key, _)) in entries.iter().enumerate() {
+                let (bytes, _roots) = key
+                    .materialize(&map_body.key_text_fields)
+                    .expect("materialize composite map key");
+                unsafe { crate::array::write_bytes(result, index, element_size, &bytes) };
+            }
+        }
     }
     result
 }
@@ -347,6 +533,11 @@ pub unsafe extern "C" fn zirk_rt_map_values(
             }
         }
         MapEntries::Text(entries) => {
+            for (index, (_, value)) in entries.iter().enumerate() {
+                unsafe { crate::array::write_bytes(result, index, element_size, value) };
+            }
+        }
+        MapEntries::Composite(entries) => {
             for (index, (_, value)) in entries.iter().enumerate() {
                 unsafe { crate::array::write_bytes(result, index, element_size, value) };
             }
@@ -430,6 +621,23 @@ pub unsafe extern "C" fn zirk_rt_map_entries(
                 }
             }
         }
+        MapEntries::Composite(entries) => {
+            for (index, (key, value)) in entries.iter().enumerate() {
+                let (key_bytes, _roots) = key
+                    .materialize(&map_body.key_text_fields)
+                    .expect("materialize composite map entry key");
+                unsafe {
+                    crate::array::write_bytes_at(result, index, tuple_size, key_offset, &key_bytes);
+                    crate::array::write_bytes_at(
+                        result,
+                        index,
+                        tuple_size,
+                        value_offset,
+                        &value[..value_size],
+                    );
+                }
+            }
+        }
     }
     result
 }
@@ -484,6 +692,19 @@ unsafe fn map_set_bytes(map: *mut c_void, key: &[u8], value: &[u8]) -> i32 {
                 Ok(previous) => previous.is_none(),
                 Err(()) => return 2,
             },
+            MapEntries::Composite(entries) => {
+                let Ok(mut composite) = CompositeKey::from_bytes(&key, &body.key_text_fields)
+                else {
+                    return 2;
+                };
+                let Ok(_roots) = composite.snapshot_handles(&body.key_text_fields) else {
+                    return 2;
+                };
+                match entries.insert(composite, value) {
+                    Ok(previous) => previous.is_none(),
+                    Err(()) => return 2,
+                }
+            }
         };
         if inserted {
             body.structural_version = body.structural_version.wrapping_add(1);
@@ -524,6 +745,11 @@ pub unsafe extern "C" fn zirk_rt_map_contains_key_typed(
     match &unsafe { &*body(map) }.entries {
         MapEntries::Words(entries) => entries.get(&key.to_vec()).is_some() as i32,
         MapEntries::Text(entries) => entries.get(&text_key(key)).is_some() as i32,
+        MapEntries::Composite(entries) => {
+            CompositeKey::from_bytes(key, &unsafe { &*body(map) }.key_text_fields)
+                .ok()
+                .is_some_and(|key| entries.get(&key).is_some()) as i32
+        }
     }
 }
 #[unsafe(no_mangle)]
@@ -566,6 +792,12 @@ pub unsafe extern "C" fn zirk_rt_map_get_keyed(
         }
         MapEntries::Text(entries) => {
             copy_map_value(entries.get(&text_key(key)), output, value_size)
+        }
+        MapEntries::Composite(entries) => {
+            let Some(key) = CompositeKey::from_bytes(key, &map_body.key_text_fields).ok() else {
+                return 0;
+            };
+            copy_map_value(entries.get(&key), output, value_size)
         }
     }
 }
@@ -629,6 +861,10 @@ pub unsafe extern "C" fn zirk_rt_map_remove_typed(
     let removed = match &mut map_body.entries {
         MapEntries::Words(entries) => entries.remove(&key.to_vec()).is_some() as i32,
         MapEntries::Text(entries) => entries.remove(&text_key(key)).is_some() as i32,
+        MapEntries::Composite(entries) => CompositeKey::from_bytes(key, &map_body.key_text_fields)
+            .ok()
+            .is_some_and(|key| entries.remove(&key).is_some())
+            as i32,
     };
     if removed != 0 {
         map_body.structural_version = map_body.structural_version.wrapping_add(1);
@@ -644,6 +880,7 @@ pub extern "C" fn zirk_rt_map_clear(map: *mut c_void) {
         match &mut map_body.entries {
             MapEntries::Words(entries) => entries.clear(),
             MapEntries::Text(entries) => entries.clear(),
+            MapEntries::Composite(entries) => entries.clear(),
         }
         if was_nonempty {
             map_body.structural_version = map_body.structural_version.wrapping_add(1);
@@ -677,6 +914,7 @@ unsafe fn map_keys_snapshot(map: *mut c_void, string_keys: i64, sorted: bool) ->
             match &unsafe { &*body(map) }.entries {
                 MapEntries::Text(entries) => entries.iter().map(|(key, _)| key.clone()).collect(),
                 MapEntries::Words(entries) => entries.iter().map(|_| None).collect(),
+                MapEntries::Composite(entries) => entries.iter().map(|_| None).collect(),
             }
         };
         if sorted {
@@ -684,6 +922,7 @@ unsafe fn map_keys_snapshot(map: *mut c_void, string_keys: i64, sorted: bool) ->
         }
         return snapshots_array(&keys);
     }
+    let mut snapshot_roots = Vec::new();
     let (key_size, key_offsets, mut keys): (usize, Vec<usize>, Vec<Vec<u8>>) = if map.is_null() {
         (WORD, Vec::new(), Vec::new())
     } else {
@@ -700,6 +939,16 @@ unsafe fn map_keys_snapshot(map: *mut c_void, string_keys: i64, sorted: bool) ->
                     .map(|key| encode_text_key(map_body.key_size, key.as_deref()))
                     .collect()
             }
+            MapEntries::Composite(entries) => entries
+                .iter()
+                .map(|(key, _)| {
+                    let (bytes, roots) = key
+                        .materialize(&map_body.key_text_fields)
+                        .expect("materialize composite map snapshot key");
+                    snapshot_roots.push(roots);
+                    bytes
+                })
+                .collect(),
         };
         let key_offsets =
             if matches!(&map_body.entries, MapEntries::Text(_)) && map_body.key_size > WORD {
@@ -870,7 +1119,19 @@ mod tests {
         let _guard = crate::collector::test_support::test_guard();
         crate::collector::reset_state_for_tests();
         let map = unsafe {
-            zirk_rt_map_new_with_layout(std::ptr::null(), 0, WORD, std::ptr::null(), 0, true, WORD)
+            zirk_rt_map_new_with_layout(
+                std::ptr::null(),
+                0,
+                WORD,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                true,
+                WORD,
+            )
         };
         let first = crate::string::alloc_owned("same-key");
         let second = crate::string::alloc_owned("same-key");
@@ -885,11 +1146,109 @@ mod tests {
     }
 
     #[test]
+    fn composite_text_keys_compare_by_content_and_materialize_snapshots() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let reference_offsets = [0usize];
+        let text_fields = [0usize, 0usize, 0usize];
+        let map = unsafe {
+            zirk_rt_map_new_with_text_fields(
+                reference_offsets.as_ptr(),
+                reference_offsets.len(),
+                WORD * 2,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                text_fields.as_ptr(),
+                text_fields.len(),
+                WORD,
+            )
+        };
+        let first = crate::string::alloc_owned("e\u{301}");
+        let equivalent = crate::string::alloc_owned("é");
+        let first_key = [first as usize, 7usize];
+        let equal_key = [equivalent as usize, 7usize];
+        let first_bytes =
+            unsafe { std::slice::from_raw_parts(first_key.as_ptr().cast::<u8>(), WORD * 2) };
+        let equal_bytes =
+            unsafe { std::slice::from_raw_parts(equal_key.as_ptr().cast::<u8>(), WORD * 2) };
+        let value = 19_i64.to_ne_bytes();
+        assert_eq!(unsafe { map_set_bytes(map, first_bytes, &value) }, 0);
+        assert_eq!(
+            unsafe { zirk_rt_map_contains_key_typed(map, equal_bytes.as_ptr(), equal_bytes.len()) },
+            1
+        );
+        let mut output = [0_u8; WORD];
+        assert_eq!(
+            unsafe {
+                zirk_rt_map_get_keyed(
+                    map,
+                    equal_bytes.as_ptr(),
+                    equal_bytes.len(),
+                    output.as_mut_ptr(),
+                    WORD,
+                )
+            },
+            1
+        );
+        assert_eq!(i64::from_ne_bytes(output), 19);
+        assert_eq!(
+            unsafe { zirk_rt_map_keys(map, WORD * 2, WORD, reference_offsets.as_ptr(), 1) }
+                .is_null(),
+            false
+        );
+        crate::collector::reset_state_for_tests();
+    }
+
+    #[test]
+    fn canonically_equivalent_text_keys_share_one_hash_entry() {
+        let _guard = crate::collector::test_support::test_guard();
+        crate::collector::reset_state_for_tests();
+        let map = unsafe {
+            zirk_rt_map_new_with_layout(
+                std::ptr::null(),
+                0,
+                WORD,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                true,
+                WORD,
+            )
+        };
+        let composed = crate::string::alloc_owned("é");
+        let decomposed = crate::string::alloc_owned("e\u{301}");
+        assert_ne!(composed, decomposed);
+        zirk_rt_map_set(map, composed as i64, 17);
+        assert_eq!(zirk_rt_map_get(map, decomposed as i64), 17);
+        assert_eq!(zirk_rt_map_length(map), 1);
+        crate::collector::reset_state_for_tests();
+    }
+
+    #[test]
     fn mutable_string_key_keeps_its_inserted_value_and_survives_source_mutation() {
         let guard = crate::collector::test_support::test_guard();
         crate::collector::reset_state_for_tests();
         let map = unsafe {
-            zirk_rt_map_new_with_layout(std::ptr::null(), 0, WORD, std::ptr::null(), 0, true, WORD)
+            zirk_rt_map_new_with_layout(
+                std::ptr::null(),
+                0,
+                WORD,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                true,
+                WORD,
+            )
         };
         let original = crate::string::alloc_owned("before");
         let replacement = crate::string::alloc_owned("after");
@@ -957,7 +1316,19 @@ mod tests {
         crate::collector::reset_state_for_tests();
         let offsets = [0usize];
         let map = unsafe {
-            zirk_rt_map_new_with_layout(offsets.as_ptr(), 1, WORD, offsets.as_ptr(), 1, false, WORD)
+            zirk_rt_map_new_with_layout(
+                offsets.as_ptr(),
+                1,
+                WORD,
+                std::ptr::null(),
+                0,
+                offsets.as_ptr(),
+                1,
+                std::ptr::null(),
+                0,
+                false,
+                WORD,
+            )
         };
         let value = crate::string::alloc_owned("map-root");
         zirk_rt_map_set(map, value as i64, value as i64);

@@ -1,0 +1,28 @@
+import { JSON } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    try {
+        inmut value: Dynamic = JSON.parse5("\{ // relaxed syntax\n unquoted: 'text', hex: +0x10, fraction: .5, list: [1, 2,], duplicate: 1, duplicate: 2 \}");
+        stdout.println("JSON5 parsed");
+        stdout.println(JSON.stringify(value));
+    } catch JsonConversionError(_) {
+        stdout.println("JSON5 parse failed");
+    }
+
+    try {
+        inmut non_finite: Dynamic = JSON.parse5("[Infinity, NaN]");
+        stdout.println("JSON5 non-finite parsed");
+        stdout.println(JSON.stringify(non_finite));
+    } catch JsonConversionError(_) {
+        stdout.println("JSON5 non-finite stringify rejected");
+    }
+
+    try {
+        inmut invalid: Dynamic = JSON.parse5("\{ value: '\\u12' \}");
+        stdout.println(JSON.stringify(invalid));
+    } catch JsonConversionError(_) {
+        stdout.println("JSON5 syntax error caught");
+    }
+}
+main();

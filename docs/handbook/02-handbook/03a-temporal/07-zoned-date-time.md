@@ -1,87 +1,80 @@
 # ZonedDateTime
 
-`ZonedDateTime` combines one Instant, one TimeZone and the corresponding local
-calendar/clock representation.
+`ZonedDateTime` combines one absolute `Instant` with a `TimeZone` and the local
+civil representation derived from that pair. The language surface covers
+parsing, instant projection, zone changes, local-time resolution, instant
+comparison, and calendar shifts through `TimeShift`.
+
+## Parsing and instant projection
+
+`ZonedDateTime.parse` accepts RFC 3339 text followed by a bracketed zone ID. It
+checks that the textual UTC offset agrees with the bundled rule data and
+returns `Result<ZonedDateTime, ParseError>`.
 
 ```zirk
-inmut chile = ZonedDateTime.now("America/Santiago");
-inmut parsed = ZonedDateTime.parse(
-    "2026-08-15T14:30:00-04:00[America/Santiago]"
-);
+import { stdout } from std.io;
+import { ZonedDateTime } from std.time;
+
+fn main(): Void {
+    match ZonedDateTime.parse("2024-03-10T03:30:00-04:00[America/New_York]") {
+        Ok(value) => {
+            stdout.println(value.local_datetime.to_iso_string());
+            stdout.println(value.offset_seconds);
+        }
+        Error(_) => stdout.println("invalid zoned timestamp");
+    };
+}
+main();
 ```
 
-Properties include `instant`, `zone`, `offset`, `date`, `time`, local
-components through nanoseconds and `is_dst`.
+`ZonedDateTime.from_instant(instant, zone)` and `instant.in_zone(zone)`
+project an instant into a zone. `value.with_zone(zone)` changes the displayed
+zone while preserving the instant.
 
-## Zone conversion and equality
+## Resolving local civil time
 
-```zirk
-inmut tokyo = chile.in_zone("Asia/Tokyo");
-chile == tokyo; // true when the instant is identical
-chile.zone == tokyo.zone; // false
-```
+A local time can map to zero, one, or two instants. `DateTime.in_zone(zone,
+overlap, gap)` requires both policies and returns
+`Result<ZonedDateTime, LocaleError>`:
 
-`in_zone()` preserves the instant and changes its local display. Equality and
-ordering use the instant; compare zone/local properties explicitly when those
-are part of the domain.
+- overlap: `reject`, `earlier`, or `later`
+- gap: `reject`, `forward`, or `backward`
 
-## Two meanings of “one day”
+`forward` and `backward` shift by the size of the zone transition. The static
+error type remains `LocaleError`, with runtime subtypes
+`InvalidDstPolicyError`, `AmbiguousLocalTimeError`,
+`NonexistentLocalTimeError`, `UnknownTimeZoneError`,
+`InvalidTimeZoneError`, and `TemporalRangeError` for their corresponding
+failure cases. Callers can use `is` checks to distinguish these outcomes.
 
-`zoned + Duration.hours(24)` advances exactly 24 hours. `zoned +
-Period.days(1)` advances one calendar day while preserving the intended local
-time when possible. Across DST these can differ because the local day may be
-23 or 25 hours.
+`TimeShift.calendar(period, duration, overlap, gap)` keeps calendar movement
+separate from elapsed time. `apply_to` first adjusts local calendar fields,
+resolves DST with the stored policies, then adds the exact duration to the
+instant. Applying the clock form produced by `Time ± Duration` returns
+`TimeShiftError` because it has no calendar shift to apply to a zoned value.
 
-Parsing/constructing from local components requires an explicit policy when a
-time is ambiguous or nonexistent. Absolute input with a zone and inconsistent
-offset is rejected rather than silently corrected.
+## Delivered API
 
-## API
+| Member | Result | Status |
+| --- | --- | --- |
+| `ZonedDateTime.parse(text)` | `Result<ZonedDateTime, ParseError>` | Implemented; validates offset against zone rules |
+| `ZonedDateTime.from_instant(instant, zone)` | `ZonedDateTime` | Implemented |
+| `instant.in_zone(zone)` | `ZonedDateTime` | Implemented |
+| `value.with_zone(zone)` | `ZonedDateTime` | Implemented; preserves instant |
+| `value.instant` | `Instant` | Implemented |
+| `value.zone` | `TimeZone` | Implemented |
+| `value.local_datetime` | `DateTime` | Implemented |
+| `value.offset_seconds` | `Int32` | Implemented |
+| `value.is_dst` / `value.abbreviation` | `Boolean` / `String` | Implemented |
+| `value.is_before(other)`, `is_after(other)`, `is_same(other)` | `Boolean` | Implemented; compares instants |
+| `local.in_zone(zone, overlap, gap)` | `Result<ZonedDateTime, LocaleError>` | Implemented; concrete DST/zone/range error subtypes |
+| `shift.apply_to(zoned)` | `Result<ZonedDateTime, TimeShiftError>` | Applies calendar period, DST resolution, then exact duration |
 
-One `Instant`, one `TimeZone`, and the corresponding local representation.
-
-### Properties
-
-| Member | Type | Description | Status |
-| --- | --- | --- | --- |
-| `instant` | `Instant` | Absolute point | specified |
-| `zone` | `TimeZone` | Active zone | specified |
-| `offset` | `Duration` | Current UTC offset | specified |
-| `date` | `Date` | Local date part | specified |
-| `time` | `Time` | Local time part | specified |
-| `is_dst` | `Boolean` | DST active at this instant | specified |
-| `year` … `nanosecond` | `Int32` | Local components | specified |
-
-### Methods
-
-| Signature | Returns | Description | Status |
-| --- | --- | --- | --- |
-| `ZonedDateTime.now(zone?)` | `ZonedDateTime` | Current instant displayed in `zone` | specified |
-| `ZonedDateTime.parse(text)` | `Result<ZonedDateTime, ParseError>` | Zoned ISO input; inconsistent offset is rejected | specified |
-| `ZonedDateTime(datetime, zone, policy)` | `Result<ZonedDateTime, TemporalError>` | Local construction requiring an explicit DST policy | specified |
-| `z.in_zone(zone)` | `ZonedDateTime` | Instant-preserving zone conversion | specified |
-| `z.with_zone_local(zone, policy)` | `Result<ZonedDateTime, TemporalError>` | Re-localizes components; needs a policy again | specified |
-| `z.with_*(component)` | `Result<ZonedDateTime, TemporalError>` | Local component replacement re-resolves DST | specified |
-| `z ± Duration` | `ZonedDateTime` | Exact timeline shift | specified |
-| `z ± Period` | `ZonedDateTime` | Calendar shift under the zone's rules | specified |
-| `z - other` | `Duration` | Instant difference | specified |
-| `z.format(pattern, locale?)` | `String` | Presentation; zone tokens allowed | specified |
-| `z.to_iso_string()` / `z.to_string()` | `String` | Machine/default rendering including offset and zone ID | specified |
-
-Equality and ordering use the instant; compare `zone` or local properties
-explicitly when they are part of the domain. Ambiguous local input requires
-`earlier`/`later`; nonexistent input requires `previous_valid`/`next_valid`.
-
-### Examples
-
-```zirk
-inmut chile = ZonedDateTime.now("America/Santiago");
-inmut tokyo = chile.in_zone("Asia/Tokyo");
-chile == tokyo; // true when the instant is identical
-chile.zone == tokyo.zone; // false
-
-inmut parsed = ZonedDateTime.parse("2026-08-15T14:30:00-04:00[America/Santiago]");
-```
+`now`, local component replacement, period-aware DST outcome types, and direct
+zoned formatting remain pending.
+Native/interpreter local parity covers parsing, offset validation, projection,
+zone changes, overlap selection, gap shifting, and rejection behavior. The
+supported native-host matrix remains open.
 
 ---
 

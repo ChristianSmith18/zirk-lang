@@ -1,0 +1,28 @@
+import { JSON, JSONCodec } from std.json;
+import { stdout } from std.io;
+
+class Person implements JSONCodec<Person> {
+    name: String;
+    inmut nickname: String = "anonymous";
+
+    construct(name: String) {
+        this.name = name;
+    }
+}
+
+fn main(): Void {
+    inmut codec: Person = Person("");
+    try {
+        inmut missing: Person = JSON.decode<Person>("\{\"name\":\"Ada\"\}", codec);
+        stdout.println(missing.nickname);
+        stdout.println(JSON.encode(missing, codec));
+        inmut supplied: Person = JSON.decode<Person>("\{\"name\":\"Grace\",\"nickname\":\"Hopper\"\}", codec);
+        stdout.println(supplied.nickname);
+        stdout.println(JSON.encode(supplied, codec));
+        inmut direct: Person = Person.decode_json(JSON.parse("\{\"name\":\"Lin\",\"nickname\":\"Murray\"}"));
+        stdout.println(direct.nickname);
+    } catch JsonConversionError(error) {
+        stdout.println(error.message());
+    }
+}
+main();

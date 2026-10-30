@@ -1,0 +1,18 @@
+{
+  "parse": [
+    { "id": "parse-document-boundary", "input": "[1]", "limits": [3, 8, 16, 2, 32], "outcome": "ok" },
+    { "id": "parse-document-exceeded", "input": "[1]", "limits": [2, 8, 16, 2, 32], "outcome": "DocumentTooLarge" },
+    { "id": "parse-depth-exceeded", "input": "[[0]]", "limits": [32, 1, 16, 2, 32], "outcome": "NestingTooDeep" },
+    { "id": "parse-string-exceeded", "input": "\"abc\"", "limits": [32, 8, 2, 2, 32], "outcome": "StringTooLarge" },
+    { "id": "parse-items-exceeded", "input": "[1,2]", "limits": [32, 8, 16, 1, 32], "outcome": "TooManyContainerItems" },
+    { "id": "parse-number-exceeded", "input": "123", "limits": [32, 8, 16, 2, 2], "outcome": "NumberTooLarge" }
+  ],
+  "serialize": [
+    { "id": "serialize-document-boundary", "value": "[1]", "limits": [3, 8, 16, 2, 32], "outcome": "[1]" },
+    { "id": "serialize-document-exceeded", "value": "[1]", "limits": [2, 8, 16, 2, 32], "outcome": "DocumentTooLarge" },
+    { "id": "serialize-depth-exceeded", "value": "[[0]]", "limits": [32, 1, 16, 2, 32], "outcome": "NestingTooDeep" },
+    { "id": "serialize-string-exceeded", "value": "\"abc\"", "limits": [32, 8, 2, 2, 32], "outcome": "StringTooLarge" },
+    { "id": "serialize-items-exceeded", "value": "[1,2]", "limits": [32, 8, 16, 1, 32], "outcome": "TooManyContainerItems" },
+    { "id": "serialize-number-exceeded", "value": "123", "limits": [32, 8, 16, 2, 2], "outcome": "NumberTooLarge" }
+  ]
+}

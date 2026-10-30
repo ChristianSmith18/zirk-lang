@@ -73,7 +73,7 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | Parallelize CPU work (**delivered**) | [Parallel CPU operations](10a-std-parallel.md) | worker-pool operations and collections |
 | Resolve DNS or use TCP, UDP, TLS, or local sockets | [`std.net`](11-std-net.md) | permissions, structured branches |
 | Build an HTTP client/server, SSE, or WebSocket endpoint | [`std.http`](12-std-http.md) | `std.net`, `std.json`, `std.crypto` |
-| Parse, produce, stream, or bind JSON | [`std.json`](13-std-json.md) | generated codecs, `std.text` |
+| Parse, produce, query, validate, or bind JSON | [`std.json`](13-std-json.md) | generated codecs; target-matrix evidence |
 | Hash, encrypt, sign, derive keys, or generate secure randomness | [`std.crypto`](14-std-crypto.md) | secret handling, TLS |
 | Write assertions, suites, fixtures, snapshots, or benchmarks | [`std.testing`](15-std-testing.md) | testing handbook and CLI |
 | Compare safe runtime type identities | [`std.reflect`](16-std-reflect.md) | metaprogramming and generated descriptors |
@@ -91,15 +91,15 @@ boundary](../../development/STDLIB_SOURCE_AND_HOST_BOUNDARY.md).
 | `std.path` | Partial delivery: immutable `Path`, lexical operations, absolute and canonical queries | `filesystem.read` for absolute paths; `filesystem.metadata` for canonicalization |
 | `std.process` | **Specified, not implemented:** `Process`, `ChildProcess`, `ProcessResult`, pipelines | process; shell separately |
 | `std.text` | **Partial language surface; no importable package:** regex and selected `String`/`Char` operations are delivered; builder, formatting, and Unicode helpers remain specified | none |
-| `std.collections` | **Compiler-known language surface; no importable package:** `Array`, `List`, `Range`, `Deque`, `Queue`, `Stack`, `PriorityQueue`, and partial `Map`/`Set` operations are delivered; aggregate `Hash`/`Equal` combinations remain incomplete | none |
-| `std.time` | **Partial language surface; no importable package:** `Duration`, timers, and civil date/time operations are delivered; zone-aware time and clocks remain specified | clock/time-zone access where scoped |
+| `std.collections` | Importable bundled source facade for canonical built-in identities: `Array`, `List`, `Map`, `Set`, `Range`, `Deque`, `Queue`, `Stack`, and `PriorityQueue`; recursive aggregate `Hash`/`Equal` combinations and cross-target evidence remain incomplete | none |
+| `std.time` | Importable aliases for the compiler-owned `Date`, `Time`, `DateTime`, `Duration`, `Instant`, `Period`, `TimeShift`, `TimeZone`, and `ZonedDateTime` types; zone-host evidence and localized parsing remain in progress | clock/time-zone access where scoped |
 | `std.task` | No delivered public module API; concurrent scopes, `Job<T>`, timers and channels use the current compiler/runtime surface | inherited from work |
 | `std.thread` | **Partial compiler-known surface; no importable package:** `Thread.run` is delivered; general `Thread<T>` creation, join and transfer remain specified | thread/system capability |
 | `std.sync` | **Partial compiler-known language surface; no importable package:** `Mutex<T>.with` and scalar `Atomic<T>` are delivered; read/write lock, semaphore, barrier, once, and condition variable remain specified only | shared-state coordination; see synchronization limitations |
 | CPU parallelism (language surface; no importable `std.parallel` module) | `parallel {}`, `.parallel` collection adapter, `Parallel.each` | inherited from work |
 | `std.net` | **Native preview:** addresses, DNS, TCP/UDP, local sockets, interface snapshots, and authenticated TLS streams/listeners; consult the module chapter for target evidence and remaining gaps. | network connect/listen |
 | `std.http` | **Native preview:** bounded clients/servers, HTTP/1.1, HTTP/2 and optional HTTP/3, URLs, headers, streaming bodies, cookies, SSE, multipart, middleware, and WebSocket paths; consult the module chapter for target evidence and remaining gaps. | network connect/listen |
-| `std.json` | **Delivered basic package:** strict parse/stringify and manual `JSONCodec<T>`; generated codecs, configurable limits, JSONPath/JSONPointer, streaming, pretty/canonical output, schemas, and JSON5 remain undelivered | none by itself |
+| `std.json` | **Partial package:** strict JSON and JSON5 parsing, bounded parse/stringify, manual `JSONCodec<T>`, JSON Pointer/JSONPath, pretty and canonical output, Draft 2020-12 validation, incremental text reader, and pull writer backed by bounded output streaming; generated-codec target evidence and a generic bounded sink API remain undelivered | none by itself |
 | `std.crypto` | **Specified, not implemented:** CSPRNG, hashes, passwords/KDF, MAC, AEAD, signatures and KEM | providers/storage/network only |
 | `std.testing` | **Specified, not implemented:** assertions, suites, fixtures, snapshots and benchmarks | only effects used by test |
 | `std.reflect` | **Specified, not implemented:** safe `Type` identity and `TypeKind` | none |
@@ -119,7 +119,7 @@ This index lists prominent entry types rather than every helper or enum.
 | `StringBuilder`, `Regex` | [`std.text`](05a-std-text.md) | efficient construction and safe matching |
 | collection families | [`std.collections`](06-std-collections.md) | owned/reference collections and iterators |
 | `Date`, `Time`, `DateTime`, `Duration` | [`std.time`](07-std-time.md) | delivered civil values and elapsed durations |
-| `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift` | [`std.time`](07-std-time.md) | specified temporal contracts, not yet delivered |
+| `Instant`, `ZonedDateTime`, `TimeZone`, `Period`, `TimeShift` | [`std.time`](07-std-time.md) | `Instant` has checked Unix timestamp factories, RFC 3339 parsing/rendering, ordering, exact `Duration` arithmetic, and native `now()`. Partial `TimeZone`/`ZonedDateTime` APIs support pinned zone parsing, offset and local-time queries, zoned parsing, instant-preserving projection, and explicit DST resolution; locale formatting uses ICU4X 2.4.0 / CLDR 49. `Period` provides component construction, ISO parsing, and formatting. `TimeShift` preserves clock day carry, applies calendar periods before exact durations under explicit DST policies, and has native/interpreter local parity. Localized parsing and the five-host runtime matrix remain open. `std.time` re-exports all nine temporal types as canonical aliases. |
 | `Channel<T>`, `concurrent`, `Job<T>`, `Timer` | structured-concurrency handbook | delivered structured concurrent work |
 | `Thread<T>` | [`std.thread`](09-std-thread.md) | **Specified, not implemented:** explicit dedicated OS thread |
 | `Mutex<T>` | [`std.sync`](10-std-sync.md) | Delivered compiler-known scoped `with` API; no importable `std.sync` package |
@@ -136,7 +136,7 @@ This index lists prominent entry types rather than every helper or enum.
 | `HTTP.get_cached`, `HTTP.request_cached` | [`std.http`](12-std-http.md) | opt-in bounded response cache with freshness and conditional revalidation |
 | `HTTPRouter`, `HTTPRouteHandler`, `HTTPRouteParameters`, `HTTPMiddleware`, `HTTPNext`, `HTTPFormData`, `HTTPMultipartData`, `HTTPMultipartPart`, `HTTPMultipartBuilder` | [`std.http`](12-std-http.md) | bounded routing, route callbacks, middleware, URL-encoded forms, parsed multipart parts, and in-memory multipart bodies |
 | `CookieJar`, `HTTPEventStream`, `HTTPEvent`, `HTTPServerEvent`, `SSEResponse`, `HTTPWebSocket`, `HTTPWebSocketMessage` | [`std.http`](12-std-http.md) | client events, bounded server event framing, state, and typed WebSocket messages |
-| `JSON`, `JSONCodec<T>`, `JsonConversionError` | [`std.json`](13-std-json.md) | ordinary `Object`/`Dynamic` JSON values and explicit typed codecs |
+| `JSON`, `JSONCodec<T>`, `JSONLimits`, `JsonConversionError` | [`std.json`](13-std-json.md) | ordinary `Object`/`Dynamic` values, RFC 6901/9535 lookup, bounded conversions, schema validation, and JSON5 |
 | `SecretBytes`, key types and `SealedMessage<A>` | [`std.crypto`](14-std-crypto.md) | secret-safe cryptographic material |
 | `Type`, `TypeKind` | [`std.reflect`](16-std-reflect.md) | representation-independent runtime identity |
 | `System`, `Platform`, `Signal` | [`std.system`](17-std-system.md) | portable system boundary |
@@ -233,7 +233,7 @@ API choice.
 | Parallel map | preserves input order and uses one managed bounded worker pool |
 | DNS | cache lookup is bounded; network resolution and record count obey limits |
 | TCP/HTTP streaming | bounded buffering with backpressure; full-body helpers allocate up to configured limit |
-| JSON tree parsing | proportional to input and produced tree within depth/member/byte limits; streaming avoids full-tree allocation |
+| JSON parsing and streaming | input parsing retains the produced JSON tree but not a second full source-document buffer; the pull writer retains bounded chunks rather than a second full serialized document; both enforce configured depth/member/byte limits |
 | Cryptography | algorithm/profile-defined work; password hashing deliberately consumes calibrated resources |
 | Reflection identity | does not scan members or retain general structural metadata |
 | Test reports/diffs | output and captured values are bounded; truncation is explicit |

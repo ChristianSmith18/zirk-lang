@@ -33,7 +33,7 @@ pub fn round_to_float16(value: f64) -> f64 {
 /// ties-to-even. The result can be decoded with [`float16_to_f64`].
 pub fn float16_bits(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = (bits >> 63) as u16 & 0x8000;
+    let sign = ((bits >> 63) as u16) << 15;
     let exponent = ((bits >> 52) & 0x7ff) as i32;
     let fraction = bits & ((1_u64 << 52) - 1);
     if exponent == 0x7ff {
@@ -550,6 +550,8 @@ mod tests {
         assert_eq!(parse_float("NaN"), None);
         assert_eq!(round_to_float16(0.1 + 0.2), 0.300048828125);
         assert_eq!(round_to_float16(65520.0), f64::INFINITY);
+        assert_eq!(round_to_float16(-1.5), -1.5);
+        assert_eq!(round_to_float16(f64::NEG_INFINITY), f64::NEG_INFINITY);
         assert_eq!(float16_to_f64(float16_bits(0.1)), 0.0999755859375);
         assert_eq!(float16_bits(1.00048828125), float16_bits(1.0));
         assert_eq!(format_integer_radix(-255, 16), "-ff");

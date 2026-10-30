@@ -12,7 +12,8 @@ but each type answers a different question.
 | An instant displayed under zone rules | `ZonedDateTime` | scheduled meeting |
 | IANA zone rules | `TimeZone` | `America/Santiago` |
 | Exact oriented elapsed time | `Duration` | timeout, latency, difference |
-| Calendar movement | `Period` | one month, next year |
+| Calendar movement value | `Period` | ISO calendar components |
+| Zoned calendar shift | `TimeShift` | period plus exact duration and DST policy |
 
 ```text
 Temporal
@@ -30,11 +31,24 @@ Values have nanosecond maximum precision where a clock component exists.
 Transformations return new values:
 
 ```zirk
-inmut today = Date.today();
-inmut tomorrow = today.add(Period.days(1));
+import { stdout } from std.io;
+import { Duration, Period, TimeShift } from std.time;
+
+fn main(): Void {
+    inmut today = Date.today();
+    stdout.println(today);
+    match TimeShift.calendar(Period.days(1), 0ns, "reject", "forward") {
+        Ok(shift) => stdout.println(shift.kind);
+        Error(_) => stdout.println("invalid calendar shift");
+    };
+}
+main();
 ```
 
-No operation mutates `today`, even if its binding is `mut`; `mut` only permits
+`Period` currently represents and parses calendar components; direct
+`Date.add(Period)` is not available. Apply a calendar `TimeShift` to a
+`ZonedDateTime` when zone rules and explicit DST behavior are required. No
+operation mutates `today`, even if its binding is `mut`; `mut` only permits
 assigning a new temporal value to the name.
 
 ---

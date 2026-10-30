@@ -36,6 +36,7 @@ on:
           - linux-x86_64
           - linux-aarch64
           - windows-x86_64
+          - macos-x86_64
           - macos-aarch64
 
 # Una PR con varios pushes seguidos cancela sus ejecuciones anteriores: la
@@ -91,9 +92,6 @@ jobs:
       # es gratis e ilimitado ahi, y el argumento de costo que lo habia
       # dejado fuera desaparecio. Ver ADR-004.
       #
-      # macos-13 (Intel) sigue fuera: sus runners son escasos y quedaba
-      # encolado indefinidamente mientras el resto de la matriz completaba.
-      #
       # aarch64-windows tambien sigue fuera: apila un riesgo nuevo sobre la
       # plataforma que todavia no esta estable.
       matrix: >-
@@ -103,13 +101,15 @@ jobs:
             || (inputs.platform_filter == 'auto'
               && inputs.test_filter == ''
               && inputs.runtime_test_filter == ''))
-          && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-aarch64","runner":"macos-14"}]}'
+          && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"},{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"name":"windows-x86_64","runner":"windows-latest"},{"name":"macos-x86_64","runner":"macos-15-intel"},{"name":"macos-aarch64","runner":"macos-14"}]}'
           || (inputs.platform_filter == 'linux-x86_64'
             && '{"include":[{"name":"linux-x86_64","runner":"ubuntu-latest"}]}')
           || (inputs.platform_filter == 'linux-aarch64'
             && '{"include":[{"name":"linux-aarch64","runner":"ubuntu-24.04-arm"}]}')
           || (inputs.platform_filter == 'macos-aarch64'
             && '{"include":[{"name":"macos-aarch64","runner":"macos-14"}]}')
+          || (inputs.platform_filter == 'macos-x86_64'
+            && '{"include":[{"name":"macos-x86_64","runner":"macos-15-intel"}]}')
           || '{"include":[{"name":"windows-x86_64","runner":"windows-latest"}]}'
         ) }}
 
@@ -396,6 +396,22 @@ jobs:
           cargo test -p zirk-codegen-llvm --test emission union -- --test-threads=1
           cargo test -p zirk-cli --test end_to_end heterogeneous_union_ -- --test-threads=1
           cargo test -p zirk-cli --test object_engine_parity union -- --test-threads=1
+
+      # Advanced type support needs explicit per-host signals. The complete
+      # workspace suite below remains authoritative; these named groups make
+      # generic dispatch, collections, intersections, Float128, and enum Clone
+      # failures attributable to a family on every native runner.
+      - name: Advanced data types native and interpreter parity
+        if: inputs.test_filter == '' && inputs.runtime_test_filter == ''
+        shell: bash
+        run: |
+          cargo test -p zirk-cli --test object_engine_parity generic -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end generic_ -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity collection -- --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity structural_intersection_view_keeps_identity_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity class_contract_intersection_view_keeps_identity_across_engines -- --exact --test-threads=1
+          cargo test -p zirk-cli --test object_engine_parity float128 -- --test-threads=1
+          cargo test -p zirk-cli --test end_to_end clone_ -- --test-threads=1
 
       - name: Tests
         if: inputs.test_filter == '' && inputs.runtime_test_filter == ''

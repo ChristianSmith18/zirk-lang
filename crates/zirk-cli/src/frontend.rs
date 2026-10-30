@@ -33,13 +33,13 @@ pub fn run_frontend(path: &Path, sink: &mut DiagnosticSink) -> Option<FrontendRe
 
     let program = merge(&mut loaded, sink);
     let globals = project_global_specs(loaded.project.as_ref());
-    let checked = zirk_sema::check_with_globals(&loaded.sources, &program, &globals, sink);
+    let checked = zirk_sema::check_with_globals(&mut loaded.sources, &program, &globals, sink);
     if sink.has_errors() {
         return None;
     }
 
     Some(FrontendResult {
-        program,
+        program: checked.expanded_program.clone().unwrap_or(program),
         checked,
         sources: loaded.sources,
         module_roots: loaded.module_roots,
@@ -76,9 +76,9 @@ pub fn run_frontend_lenient_with_overlay(
 
     let program = merge(&mut loaded, sink);
     let globals = project_global_specs(loaded.project.as_ref());
-    let checked = zirk_sema::check_with_globals(&loaded.sources, &program, &globals, sink);
+    let checked = zirk_sema::check_with_globals(&mut loaded.sources, &program, &globals, sink);
     Some(FrontendResult {
-        program,
+        program: checked.expanded_program.clone().unwrap_or(program),
         checked,
         sources: loaded.sources,
         module_roots: loaded.module_roots,
@@ -138,13 +138,13 @@ pub fn run_frontend_ide_with_overlay_cancellable(
     let globals = project_global_specs(loaded.project.as_ref());
     let checked = match &cancellation {
         Some(token) => zirk_sema::check_with_globals_cancellable(
-            &loaded.sources,
+            &mut loaded.sources,
             &program,
             &globals,
             token.clone(),
             sink,
         )?,
-        None => zirk_sema::check_with_globals(&loaded.sources, &program, &globals, sink),
+        None => zirk_sema::check_with_globals(&mut loaded.sources, &program, &globals, sink),
     };
     if cancellation
         .as_ref()

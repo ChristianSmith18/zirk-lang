@@ -579,30 +579,37 @@ Two families in this phase are **not** ordinary library objects, and the
 distinction changes who implements them:
 
 - The **temporal family** — `Date`, `Time`, `DateTime`, `Instant`,
-  `ZonedDateTime`, `TimeZone`, `Duration` and `Period` — are compiler-known
+  `ZonedDateTime`, `TimeZone`, `Duration`, `Period` and `TimeShift` — are compiler-known
   native immutable values with their own literals, operators and type rules.
   `Duration` (literals, arithmetic and printing) is already implemented in
   `array-list-tuple-duration-regex`, and the civil subset — `Date`, `Time`
   and `DateTime`, with validated constructors, component properties, ISO
   8601 `to_string()`, civil arithmetic and the host-clock `today`/`now_*`
-  statics — is implemented in `date-and-time-types`. This phase completes
-  the remaining zone-aware types (`Instant`, `ZonedDateTime`, `TimeZone`,
-  `Period`), their IANA data, and the specified `std.time` surface (which is
-  not currently an importable package).
+  statics — is implemented in `date-and-time-types`. `Instant` has a partial
+  language surface for RFC 3339 parsing, checked Unix-unit factories/properties,
+  UTC rendering, ordering and exact `Duration` arithmetic. Explicit-locale
+  formatting is available for civil values; `DateTime.format_locale_in_zone`
+  supports pinned IANA/fixed-offset output with explicit DST policies and
+  ICU4X 2.4.0 / CLDR 49. Partial `TimeZone`/`ZonedDateTime` language APIs now
+  cover parsing, instant projection/reprojection, local projection, instant
+  comparison, and explicit local-time resolution. `Period` construction/ISO parsing and tagged `TimeShift` clock/calendar
+  application now have local native/interpreter evidence. Localized parsing
+  and cross-host evidence remain pending. `std.time`
+  re-exports all nine compiler-owned temporal type aliases.
 - The **collection family** — `Array<T>`, `List<T>`, `Map<K,V>`, `Set<T>`,
   `Deque<T>`, `Queue<T>`, `Stack<T>`, and `PriorityQueue<T>` — are native
   reference types. Array/List, ordered Map/Set, and Deque/FIFO/LIFO/priority
   families have constructors, typed runtime storage, GC tracing, native and
   interpreter behavior, and focused parity tests. Deque end operations and
   Queue/Stack operations are amortized O(1); PriorityQueue uses a stable min-heap
-  with O(log n) enqueue/dequeue and O(n log n) ordered iteration. Map/Set support
-  scalar and reference keys/elements, nullable layouts, byte-canonical tuple
-  keys, and eligible payload enums. Structural aggregate keys, union keys,
-  and tuple fields requiring content-based
-  String/Char equality, and nullable Decimal
-  remain rejected until canonical derived Hash/Equal descriptors are available.
-  These collection families are compiler-known language surfaces; there is no
-  importable `std.collections` package.
+  with O(log n) enqueue/dequeue and O(n log n) ordered iteration. Map/Set
+  support scalar and reference keys/elements, nullable layouts, tuples, eligible
+  payload enums, nullable Decimal, selected union compositions, and recursive
+  String/Char content snapshots. Mutable/dynamic structural shapes and some
+  nested generic compositions remain rejected; the verified admission matrix
+  is in `openspec/changes/complete-data-types-and-standard-library-coverage/collection-support-matrix.md`.
+  The compiler-owned collection types are re-exported by the importable
+  `std.collections` facade.
 
 `String` grapheme indexing, `s[i] = c` writes, `[start:end:step]` slicing and
 the search/trim/`substring` methods are delivered in
@@ -616,8 +623,8 @@ constructors; `.reverse()` is intentionally not a range-builder API.
 `Regex.matches(text): Boolean`, `Regex.find(text): Regex.Match?` and
 `Regex.replace(text, replacement): String` operations are delivered in
 `array-list-tuple-duration-regex`, including capture-group access on
-`Regex.Match`. Still pending: `split` (needs `List<T>`), iteration over
-`matches(text): Iterable<Regex.Match>`, and `re'...'` patterns in `match`.
+`Regex.Match`, splitting, and iteration over `Regex.Match` results. The
+`re'...'` literal still cannot be used directly as a `match` pattern.
 
 **Output:** real non-trivial applications (a CLI, a simple backend) writable in
 Zirk using only the stdlib.
