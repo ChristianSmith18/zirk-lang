@@ -851,7 +851,7 @@ fn checked_ir_with_entry(source_text: &str, synthesize_entry: bool) -> zirk_ir::
             span,
         });
     }
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
 
     assert!(
         !sink.has_errors(),
@@ -929,7 +929,7 @@ fn native_debug_emission_maps_source_lines_parameters_and_locals() {
     let mut sink = DiagnosticSink::new();
     let tokens = tokenize(source, &mut sink);
     let program = parse(source, &tokens, &mut sink);
-    let checked = check(&sources, &program, &mut sink);
+    let checked = check(&mut sources, &program, &mut sink);
     assert!(
         !sink.has_errors(),
         "debug fixture must be valid:\n{}",

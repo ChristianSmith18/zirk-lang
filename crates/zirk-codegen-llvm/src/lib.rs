@@ -318,6 +318,43 @@ pub fn compile_to_object(
     compile_to_object_with_optimization(module, name, output, CodegenOptimizationLevel::None)
 }
 
+/// Compiles an IR module into an object file for an explicit target triple.
+///
+/// This keeps LLVM values private to the codegen crate while allowing callers
+/// to validate cross-target object emission without invoking the system linker.
+pub fn compile_to_object_for_triple(
+    module: &zirk_ir::Module,
+    name: &str,
+    triple: &str,
+    output: &Path,
+) -> DiagnosticResult<()> {
+    if module
+        .functions
+        .iter()
+        .flat_map(|function| &function.blocks)
+        .flat_map(|block| &block.instructions)
+        .any(|instruction| {
+            matches!(
+                instruction.kind,
+                zirk_ir::InstKind::MutexAcquire { .. }
+                    | zirk_ir::InstKind::MutexRelease { .. }
+                    | zirk_ir::InstKind::BorrowViewStart { .. }
+                    | zirk_ir::InstKind::BorrowViewEnd { .. }
+            )
+        })
+    {
+        return Err(Diagnostic::error(
+            codes::MUTEX_IR_NOT_LOWERED,
+            "mutex and borrowed-view IR markers are not executable yet",
+        )
+        .with_help("use the source mutex API after payload access, runtime, and cleanup lowering are implemented")
+        .boxed());
+    }
+    let context = inkwell::context::Context::create();
+    let llvm = emit(&context, module, name);
+    emit_object_for_triple(&llvm, triple, output)
+}
+
 /// Compiles an IR module into a host object with full source-level debug data.
 ///
 /// The source map supplies the per-file paths and line tables used for native
