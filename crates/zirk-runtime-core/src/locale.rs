@@ -13,6 +13,9 @@ use icu_locale_core::Locale;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+/// Components returned by successful localized date-time parsing.
+pub type ParsedDateTimeParts = (i32, u8, u8, u8, u8, u8, u32);
+
 mod exact_locale_data {
     mod icu {
         pub use icu_datetime as datetime;
@@ -309,7 +312,6 @@ pub fn parse_time_named(text: &str, locale_tag: &str, style: &str) -> Result<i64
             ) else {
                 continue;
             };
-            let nanosecond = nanosecond as u32;
             if format_time_named(
                 hour,
                 minute,
@@ -343,7 +345,7 @@ pub fn parse_datetime_named(
     text: &str,
     locale_tag: &str,
     style: &str,
-) -> Result<(i32, u8, u8, u8, u8, u8, u32), LocaleError> {
+) -> Result<ParsedDateTimeParts, LocaleError> {
     let style = parse_style(style)?;
     let pattern = datetime_pattern(locale_tag, style)?;
     let parsed = parse_pattern_numbers(&pattern, text)?;
@@ -394,24 +396,14 @@ pub fn parse_datetime_named(
         };
         for month in &months {
             for hour in &hours {
-                let (
-                    Ok(year),
-                    Ok(month),
-                    Ok(day),
-                    Ok(hour),
-                    Ok(minute),
-                    Ok(second),
-                    Ok(nanosecond),
-                ) = (
+                let (Ok(year), Ok(month), Ok(day), Ok(hour), Ok(minute), Ok(second)) = (
                     i32::try_from(year),
                     u8::try_from(*month),
                     u8::try_from(day),
                     u8::try_from(*hour),
                     u8::try_from(minute),
                     u8::try_from(second),
-                    u32::try_from(nanosecond),
-                )
-                else {
+                ) else {
                     continue;
                 };
                 if format_datetime_named(
@@ -864,6 +856,7 @@ pub fn format_time_named(
 }
 
 /// Formats a civil date-time under an explicit locale and CLDR style.
+#[allow(clippy::too_many_arguments)] // Keeps the runtime's scalar ABI boundary explicit.
 pub fn format_datetime(
     year: i32,
     month: u8,
@@ -904,6 +897,7 @@ pub fn format_datetime(
 }
 
 /// Formats a civil date-time with a stable named style suitable for language APIs.
+#[allow(clippy::too_many_arguments)] // Keeps the runtime's scalar ABI boundary explicit.
 pub fn format_datetime_named(
     year: i32,
     month: u8,
@@ -965,6 +959,7 @@ pub fn format_zoned_datetime(
 
 /// Resolves local civil fields with explicit DST policies, then formats the
 /// resulting instant with the selected zone's localized name or offset.
+#[allow(clippy::too_many_arguments)] // Mirrors the language API's explicit temporal fields.
 pub fn format_local_datetime_in_zone(
     year: i32,
     month: u8,

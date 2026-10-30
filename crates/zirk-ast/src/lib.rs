@@ -812,6 +812,9 @@ pub enum Mutability {
 }
 
 /// A statement.
+// Keep recursive AST payloads inline; boxing every large arm would add heap
+// allocations to traversal and alter the public AST representation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `mut x: Int32 = 0;`
@@ -1369,6 +1372,8 @@ impl Expr {
 }
 
 /// One piece of an interpolated string literal, in the order it was written.
+// Expressions are the primary payload; retain the existing inline visitor shape.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InterpolatedPart {
     /// Text between `{...}` sections, with escapes already resolved.
@@ -1459,6 +1464,8 @@ pub struct SpreadElement {
 }
 
 /// One element of a record/object literal.
+// These AST variants intentionally keep their current inline representation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectLiteralElement {
     Field(ObjectLiteralField),
@@ -1643,6 +1650,8 @@ pub struct MatchArm {
 }
 
 /// The body of a `match` arm.
+// These AST variants intentionally keep their current inline representation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArmBody {
     Expr(Expr),
@@ -1821,6 +1830,8 @@ pub struct LambdaExpr {
     pub span: Span,
 }
 
+// Lambda bodies intentionally preserve the same inline shape as match arms.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum LambdaBody {
     Expr(Expr),

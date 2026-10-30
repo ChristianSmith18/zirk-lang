@@ -914,17 +914,13 @@ fn write_value_with_limits_and_format<W: std::io::Write>(
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if (self.cancelled)() {
                 self.error = Some(JsonStreamError::Cancelled);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "JSON stream cancelled",
-                ));
+                return Err(std::io::Error::other("JSON stream cancelled"));
             }
             if self.written.saturating_add(bytes.len()) > self.limits.max_document_bytes {
                 self.error = Some(JsonStreamError::Validation(
                     JsonValidationError::DocumentTooLarge,
                 ));
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     "JSON output exceeds configured limit",
                 ));
             }
@@ -940,14 +936,10 @@ fn write_value_with_limits_and_format<W: std::io::Write>(
         fn flush(&mut self) -> std::io::Result<()> {
             if (self.cancelled)() {
                 self.error = Some(JsonStreamError::Cancelled);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "JSON stream cancelled",
-                ));
+                return Err(std::io::Error::other("JSON stream cancelled"));
             }
-            self.inner.flush().map_err(|error| {
+            self.inner.flush().inspect_err(|_| {
                 self.error = Some(JsonStreamError::Io);
-                error
             })
         }
     }
@@ -1150,10 +1142,10 @@ fn collect_schema_resource_uris(
                 .and_then(serde_json::Value::as_str)
                 .and_then(|id| resolve_schema_uri(id, inherited_base))
                 .or_else(|| inherited_base.map(str::to_owned));
-            if properties.contains_key("$id") {
-                if let Some(base) = &base {
-                    uris.push(base.clone());
-                }
+            if properties.contains_key("$id")
+                && let Some(base) = &base
+            {
+                uris.push(base.clone());
             }
             for value in properties.values() {
                 collect_schema_resource_uris(value, base.as_deref(), uris);
@@ -1206,17 +1198,17 @@ fn reject_external_schema_references(
                 .and_then(|id| resolve_schema_uri(id, inherited_base))
                 .or_else(|| inherited_base.map(str::to_owned));
             for (name, value) in properties {
-                if name == "$schema" {
-                    if let Some(uri) = value.as_str() {
-                        let resource_uri = resolve_schema_uri(uri, base.as_deref());
-                        if let Some(resource_uri) = resource_uri.as_deref()
-                            && !is_bundled_json_schema_resource(resource_uri)
-                            && !resolver_uris.contains(&resource_uri)
-                        {
-                            return Err(JsonSchemaError::ExternalReferenceRequiresResolver(
-                                uri.to_owned(),
-                            ));
-                        }
+                if name == "$schema"
+                    && let Some(uri) = value.as_str()
+                {
+                    let resource_uri = resolve_schema_uri(uri, base.as_deref());
+                    if let Some(resource_uri) = resource_uri.as_deref()
+                        && !is_bundled_json_schema_resource(resource_uri)
+                        && !resolver_uris.contains(&resource_uri)
+                    {
+                        return Err(JsonSchemaError::ExternalReferenceRequiresResolver(
+                            uri.to_owned(),
+                        ));
                     }
                 }
                 if matches!(name.as_str(), "$ref" | "$dynamicRef") {
@@ -1260,7 +1252,7 @@ fn resolve_schema_uri(reference: &str, base: Option<&str>) -> Option<String> {
     let base = url::Url::parse(base).ok()?;
     base.join(reference).ok().map(|resolved| {
         resolved
-            .to_string()
+            .as_ref()
             .split('#')
             .next()
             .unwrap_or_default()
@@ -1707,14 +1699,13 @@ fn serialize_value_with_limits_and_format(
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.bytes.len().saturating_add(bytes.len()) > self.max_bytes {
                 self.exceeded = true;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     "JSON output exceeds its configured byte limit",
                 ));
             }
             self.bytes
                 .try_reserve_exact(bytes.len())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+                .map_err(std::io::Error::other)?;
             self.bytes.extend_from_slice(bytes);
             Ok(bytes.len())
         }
@@ -3177,7 +3168,7 @@ mod tests {
     fn canonical_serializer_matches_rfc8785_primitives_and_sorting() {
         let value = serde_json::json!({
             "numbers": [
-                333333333.33333329_f64,
+                333_333_333.333_333_3_f64,
                 1e30_f64,
                 4.50_f64,
                 2e-3_f64,

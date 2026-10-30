@@ -2932,17 +2932,18 @@ impl<'a> Parser<'a> {
                 ty,
                 span: property_span,
             });
-            if !self.eat(&TokenKind::Comma) && !self.eat(&TokenKind::Semicolon) {
-                if !matches!(self.peek(), TokenKind::RBrace) {
-                    self.error(
-                        codes::UNEXPECTED_TOKEN,
-                        self.peek_span(),
-                        "expected `,`, `;`, or `}` after a structural property",
-                        format!("found {}", self.peek().description()),
-                        None,
-                    );
-                    return None;
-                }
+            if !self.eat(&TokenKind::Comma)
+                && !self.eat(&TokenKind::Semicolon)
+                && !matches!(self.peek(), TokenKind::RBrace)
+            {
+                self.error(
+                    codes::UNEXPECTED_TOKEN,
+                    self.peek_span(),
+                    "expected `,`, `;`, or `}` after a structural property",
+                    format!("found {}", self.peek().description()),
+                    None,
+                );
+                return None;
             }
         }
         let end = self.peek_span();

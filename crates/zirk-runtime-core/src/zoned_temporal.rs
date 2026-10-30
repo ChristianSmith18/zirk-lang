@@ -246,7 +246,7 @@ impl TimeZone {
         }
     }
 
-    fn from_instant(self, instant: Instant) -> Result<NaiveDateTime, TemporalError> {
+    fn local_datetime_from_instant(self, instant: Instant) -> Result<NaiveDateTime, TemporalError> {
         let utc = instant.to_utc()?;
         Ok(match self.0 {
             ZoneKind::Iana(zone) => zone.from_utc_datetime(&utc.naive_utc()).naive_local(),
@@ -458,7 +458,7 @@ impl ZonedDateTime {
     }
 
     pub fn from_instant(instant: Instant, zone: TimeZone) -> Result<Self, TemporalError> {
-        zone.from_instant(instant)?;
+        zone.local_datetime_from_instant(instant)?;
         Ok(Self { instant, zone })
     }
 
@@ -517,7 +517,7 @@ impl ZonedDateTime {
     }
 
     pub fn local_datetime(self) -> Result<NaiveDateTime, TemporalError> {
-        self.zone.from_instant(self.instant)
+        self.zone.local_datetime_from_instant(self.instant)
     }
 
     /// Projects the local civil value into the language's packed DateTime

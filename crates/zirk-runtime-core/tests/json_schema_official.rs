@@ -68,10 +68,10 @@ fn collect_internal_ids(value: &Value, inherited_base: Option<&str>, ids: &mut B
                 .and_then(Value::as_str)
                 .and_then(|id| resolve_uri(id, inherited_base))
                 .or_else(|| inherited_base.map(str::to_owned));
-            if properties.contains_key("$id") {
-                if let Some(base) = &base {
-                    ids.insert(base.clone());
-                }
+            if properties.contains_key("$id")
+                && let Some(base) = &base
+            {
+                ids.insert(base.clone());
             }
             for child in properties.values() {
                 collect_internal_ids(child, base.as_deref(), ids);
