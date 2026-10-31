@@ -1,0 +1,72 @@
+import { stdout } from std.io;
+import { ZonedDateTime } from std.time;
+
+fn main(): Void {
+    match TimeZone.parse("America/New_York") {
+        Ok(new_york) => {
+            inmut overlap: DateTime = DateTime(Date(2024, 11, 3), Time(1, 30));
+            match overlap.in_zone(new_york, "earlier", "reject") {
+                Ok(value) => stdout.println(value.offset_seconds);
+                Error(_) => stdout.println("earlier overlap rejected");
+            };
+            match overlap.in_zone(new_york, "later", "reject") {
+                Ok(value) => stdout.println(value.offset_seconds);
+                Error(_) => stdout.println("later overlap rejected");
+            };
+            match overlap.in_zone(new_york, "reject", "reject") {
+                Ok(_) => stdout.println("unexpected overlap accepted");
+                Error(_) => stdout.println("ambiguous local time rejected");
+            };
+            inmut gap: DateTime = DateTime(Date(2024, 3, 10), Time(2, 30));
+            match gap.in_zone(new_york, "reject", "forward") {
+                Ok(value) => stdout.println(value.local_datetime.to_iso_string());
+                Error(_) => stdout.println("gap shift rejected");
+            };
+            match gap.in_zone(new_york, "reject", "reject") {
+                Ok(_) => stdout.println("unexpected gap accepted");
+                Error(_) => stdout.println("nonexistent local time rejected");
+            };
+        }
+        Error(_) => stdout.println("IANA zone parse failed");
+    };
+
+    stdout.println(
+        match ZonedDateTime.parse("2024-03-10T03:30:00-04:00[America/New_York]") {
+        Ok(parsed) => parsed.local_datetime.to_iso_string();
+        Error(_) => "zoned parse failed";
+    },
+    );
+    stdout.println(
+        match ZonedDateTime.parse("2024-03-10T03:30:00-05:00[America/New_York]") {
+        Ok(_) => "accepted offset mismatch";
+        Error(_) => "rejected offset mismatch";
+    },
+    );
+
+    match TimeZone.parse("America/New_York") {
+        Ok(new_york) => match Instant.parse("2024-03-10T07:30:00Z") {
+            Ok(instant) => {
+                inmut local = ZonedDateTime.from_instant(instant, new_york);
+                stdout.println(local.local_datetime.to_iso_string());
+                stdout.println(local.offset_seconds);
+                stdout.println(local.is_dst);
+                stdout.println(local.abbreviation);
+
+                match TimeZone.parse("+09:00") {
+                    Ok(tokyo) => {
+                        inmut converted = local.with_zone(tokyo);
+                        stdout.println(converted.local_datetime.to_iso_string());
+                        stdout.println(converted.instant == local.instant);
+                        stdout.println(local.is_before(converted));
+                        stdout.println(local.is_same(converted));
+                    }
+                    Error(_) => stdout.println("fixed zone parse failed");
+                };
+            }
+            Error(_) => stdout.println("instant parse failed");
+        };
+        Error(_) => stdout.println("IANA zone parse failed");
+    };
+}
+
+main();

@@ -1,0 +1,36 @@
+import { stdout } from std.io;
+
+fn main(): Void {
+    mut map: Map<Tuple<String, Int32>, Int32> = Map();
+    mut source: String = "key";
+    map.set((source, 7), 41);
+    source[0] = "x";
+    stdout.println((map.get(("key" + "", 7)) ?? 0).to_string());
+    stdout.println(map.contains_key(("xey", 7)).to_string());
+    mut returned_key: Tuple<String, Int32> = map.keys()[0];
+    mut returned_text: String = returned_key[0];
+    returned_text[0] = "r";
+    stdout.println(map.contains_key(("key", 7)).to_string());
+
+    mut set: Set<Tuple<Char, Int32 >> = Set();
+    set.add(('a', 3));
+    stdout.println(set.contains(('a', 3)).to_string());
+    stdout.println(set.add(('a', 3)).to_string());
+    stdout.println(set.length.to_string());
+    mut other: Set<Tuple<Char, Int32 >> = Set();
+    other.add(('b', 3));
+    mut combined: Set<Tuple<Char, Int32 >> = set.union(other);
+    stdout.println(combined.length.to_string());
+    stdout.println(combined.contains(('b', 3)).to_string());
+
+    mut optional: Set<Tuple<String?, Int32 >> = Set();
+    inmut absent: String? = null;
+    inmut present: String? = "nullable";
+    inmut equivalent: String? = "nullable" + "";
+    stdout.println(optional.add((absent, 1)).to_string());
+    stdout.println(optional.add((present, 1)).to_string());
+    stdout.println(optional.contains((absent, 1)).to_string());
+    stdout.println(optional.add((equivalent, 1)).to_string());
+    stdout.println(optional.length.to_string());
+}
+main();

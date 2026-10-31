@@ -22,6 +22,14 @@ Desde la raíz del repositorio, con el compilador ya construido:
 ./target/debug/zirk run demo/39-singletons-de-valores.zrk
 ./target/debug/zirk check demo/40-singletons-estructurales.zrk
 ./target/debug/zirk check demo/41-operadores-de-tipos.zrk
+./target/debug/zirk run demo/42-uniones-estructurales-y-plantillas-abiertas.zrk
+./target/debug/zirk run demo/43-claves-compuestas-map-set.zrk
+./target/debug/zirk run demo/44-enums-genericos.zrk
+./target/debug/zirk run demo/45-clone-enums.zrk
+./target/debug/zirk run demo/46-json-codecs-generados.zrk
+./target/debug/zirk run demo/47-json-streaming-sincrono.zrk
+./target/debug/zirk run demo/48-tiempo-con-zonas.zrk
+./target/debug/zirk run demo/49-timeshift-reloj-y-calendario.zrk
 ```
 
 `check` valida el frontend; `run` compila y ejecuta en el host actual. Algunas muestras usan concurrencia nativa y dependen de las capacidades de la plataforma descritas en el catálogo.
@@ -52,7 +60,16 @@ discriminante, intersecciones y tipos singleton con valores primitivos,
 temporales y enums. El demo 40 es deliberadamente de solo tipos: el checker
 acepta singletons de tuplas y objetos, pero el backend nativo aún no los puede
 materializar. El demo 41 reúne operadores genéricos de tipos; sus aliases se
-resuelven en compilación y se verifican con `check`.
+resuelven en compilación y se verifican con `check`. El demo 42 cubre uniones
+estructurales y plantillas abiertas.
+
+Los demos 43–49 muestran casos avanzados con ejecución comprobada en el host
+actual: snapshots de texto en claves y elementos compuestos de `Map`/`Set`,
+construcción de enums genéricos, clonación de enums, codecs JSON derivados,
+lectura/escritura JSON incremental síncrona, resolución de zonas y la forma
+unificada de `TimeShift`. Estos ejemplos demuestran las composiciones
+nombradas; no sustituyen la matriz de admisión completa ni la evidencia por
+target del catálogo de estado.
 
 ## Convenciones de los ejemplos
 
@@ -116,9 +133,27 @@ resuelven en compilación y se verifican con `check`.
 | [`39-singletons-de-valores.zrk`](39-singletons-de-valores.zrk) | Literales numéricos, texto, caracteres, booleanos, duración, fechas, horas, DateTime y enums. |
 | [`40-singletons-estructurales.zrk`](40-singletons-estructurales.zrk) | Identidad exacta de valores singleton compuestos: tuplas y objetos estructurales; solo check. |
 | [`41-operadores-de-tipos.zrk`](41-operadores-de-tipos.zrk) | `keyof`, acceso indexado, condicionales con `infer`, mapped types, templates y utilidades estándar; solo check. |
+| [`42-uniones-estructurales-y-plantillas-abiertas.zrk`](42-uniones-estructurales-y-plantillas-abiertas.zrk) | Uniones e intersecciones estructurales, narrowing y eventos de plantillas abiertas. |
+| [`43-claves-compuestas-map-set.zrk`](43-claves-compuestas-map-set.zrk) | Claves y elementos compuestos con snapshots de `String`/`Char`, mutación de origen, `null` y operaciones de conjunto. |
+| [`44-enums-genericos.zrk`](44-enums-genericos.zrk) | Enum algebraico genérico con dos parámetros, construcción de variantes y `match` exhaustivo. |
+| [`45-clone-enums.zrk`](45-clone-enums.zrk) | Uso de `clone()` sobre un enum con variantes y payloads. |
+| [`46-json-codecs-generados.zrk`](46-json-codecs-generados.zrk) | Codec `JSONCodec<T>` generado para campos anidados, listas, arrays, mapas, sets, nullable y enums. |
+| [`47-json-streaming-sincrono.zrk`](47-json-streaming-sincrono.zrk) | API pública síncrona push/pull para lectura incremental, chunks UTF-8, límites y cancelación. |
+| [`48-tiempo-con-zonas.zrk`](48-tiempo-con-zonas.zrk) | Resolución de zonas IANA, solapamientos/huecos DST y conversión preservando el instante. |
+| [`49-timeshift-reloj-y-calendario.zrk`](49-timeshift-reloj-y-calendario.zrk) | `TimeShift` como tipo único con formas de reloj y calendario, políticas DST y aplicación. |
 
 ## Cobertura y límites actuales
 
-Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo, rangos, funciones y closures, colecciones, clases/records/enums/tuplas, genéricos y contratos, uniones/intersecciones y narrowing, operadores de tipos, `Result`, excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil, canales y concurrencia/parallel nativos, además de las vistas actuales de `std.environment`, `std.net` y `std.http`. Que `zirk check` acepte un ejemplo confirma la aceptación en este checkout; no demuestra por sí solo que cada operación tenga implementación runtime o disponibilidad en todos los targets. Los ejemplos de red requieren permiso aprobado, una conexión accesible y, para el cliente HTTP, el servidor local del demo 33. El catálogo de estado es la fuente para las restricciones por backend.
+Los ejemplos cubren bindings y tipos escalares, nulabilidad, control de flujo,
+rangos, funciones y closures, colecciones, clases/enums/tuplas, genéricos y
+contratos, uniones/intersecciones y narrowing, operadores de tipos, `Result`,
+excepciones, recursos, clone, punteros `unsafe`, regex, tiempo civil y con
+zonas, canales y concurrencia/parallel nativos, además de las vistas actuales
+de `std.environment`, `std.net` y `std.http`. Que `zirk check` acepte un ejemplo
+confirma la aceptación en este checkout; no demuestra por sí solo que cada
+operación tenga implementación runtime o disponibilidad en todos los targets.
+Los ejemplos de red requieren permiso aprobado, una conexión accesible y, para
+el cliente HTTP, el servidor local del demo 33. El catálogo de estado es la
+fuente para las restricciones por backend.
 
 No presento como implementadas las construcciones que el catálogo marca como pendientes o excluidas: entre ellas `async fn` y `await`, `task`/`select`, generadores `fn gen`, `|>`, `map`/`filter`/`reduce` funcionales, decoradores `fn dec`, `Thread<T>`, `RwLock`, `Semaphore`, `Barrier`, `Once<T>`, atomics de punteros y adquisición/publicación de paquetes externos.

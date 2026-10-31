@@ -1,0 +1,105 @@
+import { JSON, JSONLimits, JSONStreamChunk, JSONStreamError, JSONStreamReader, JSONStreamWriter } from std.json;
+import { stdout } from std.io;
+
+fn main(): Void {
+    inmut reader = JSONStreamReader.create(JSONLimits.defaults());
+    match reader.push_chunk("\{\"name\":") {
+        Ok(_) => { }
+        Error(_) => { stdout.println("reader push failed"); return; }
+    };
+    match reader.push_chunk("\"Ada\",\"active\":true\}") {
+        Ok(_) => { }
+        Error(_) => { stdout.println("reader push failed"); return; }
+    };
+    match reader.finish() {
+        Ok(_) => stdout.println("reader finished");
+        Error(_) => { stdout.println("reader finish failed"); return; }
+    };
+
+    inmut byte_reader = JSONStreamReader.create(JSONLimits.defaults());
+    match byte_reader.push_bytes([
+        123 as Byte, 34 as Byte, 120 as Byte, 34 as Byte,
+        58 as Byte, 34 as Byte, 195 as Byte
+    ]) {
+        Ok(_) => { }
+        Error(_) => { stdout.println("byte reader push failed"); return; }
+    };
+    match byte_reader.push_bytes([169 as Byte, 34 as Byte, 125 as Byte]) {
+        Ok(_) => { }
+        Error(_) => { stdout.println("byte reader push failed"); return; }
+    };
+    match byte_reader.finish() {
+        Ok(_) => stdout.println("byte reader handled split UTF-8");
+        Error(_) => { stdout.println("byte reader finish failed"); return; }
+    };
+
+    inmut parsed: Object = { ok: true };
+    match JSONStreamWriter.create(parsed, 4, JSONLimits.defaults()) {
+        Error(_) => stdout.println("writer create failed");
+        Ok(writer) => {
+            mut done = false;
+            while ! done {
+                match writer.next_chunk() {
+                    JSONStreamChunk.Data(text) => stdout.println(text);
+                    JSONStreamChunk.End => { done = true; }
+                    JSONStreamChunk.Error(_) => {
+                        stdout.println("writer chunk failed");
+                        done = true;
+                    }
+                };
+            }
+        }
+    };
+
+    inmut tiny_limits = JSONLimits(5, 128, 32, 32, 32);
+    inmut limited_reader = JSONStreamReader.create(tiny_limits);
+    match limited_reader.push_chunk("123456") {
+        Error(_) => stdout.println("document limit enforced");
+        _ => stdout.println("document limit failed");
+    };
+
+    match JSONStreamWriter.create(parsed, 4, tiny_limits) {
+        Error(_) => stdout.println("writer creation limit failed");
+        Ok(limited_writer) => {
+            match limited_writer.next_chunk() {
+                JSONStreamChunk.Error(error) => {
+                    match error {
+                        JSONStreamError.OutputTooLarge =>
+                        stdout.println("writer output limit enforced");
+                        _ => stdout.println("writer output limit failed");
+                    }
+                }
+                _ => stdout.println("writer output limit failed");
+            };
+        }
+    };
+
+    match JSONStreamWriter.create(parsed, 4, JSONLimits.defaults()) {
+        Error(_) => stdout.println("writer cancellation setup failed");
+        Ok(cancelled_writer) => {
+            cancelled_writer.cancel();
+            match cancelled_writer.next_chunk() {
+                JSONStreamChunk.End => stdout.println("writer cancellation enforced");
+                _ => stdout.println("cancelled writer produced output");
+            };
+        }
+    };
+
+    inmut cancelled_reader = JSONStreamReader.create(JSONLimits.defaults());
+    match cancelled_reader.push_chunk("[1]") {
+        Ok(_) => { }
+        Error(_) => stdout.println("cancelled reader setup failed");
+    };
+    cancelled_reader.cancel();
+    match cancelled_reader.finish() {
+        Error(_) => stdout.println("reader cancellation enforced");
+        _ => stdout.println("cancelled reader published a value");
+    };
+
+    reader.cancel();
+    match reader.finish() {
+        Error(_) => stdout.println("finished reader remains closed");
+        _ => stdout.println("finished reader reopened");
+    };
+}
+main();
